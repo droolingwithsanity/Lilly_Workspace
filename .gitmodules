@@ -1,0 +1,9 @@
+[submodule "PrivateCode"]
+	path = PrivateCode
+	url = https://github.com/Legorobotdude/PrivateCode.git
+[submodule "open-connector"]
+	path = open-connector
+	url = https://github.com/oomol-lab/open-connector.git
+[submodule "hitomi-android"]
+	path = hitomi-android
+	url = https://github.com/Decentricity/hitomi-android.git

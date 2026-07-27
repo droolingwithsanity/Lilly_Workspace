@@ -1,0 +1,88 @@
+# Environment files (contain secrets, tokens, API keys)
+.env
+.env.*
+!.env.example
+!.env.email.example
+
+# Auth files (contain authentication logic and potential secrets)
+auth0_auth.py
+auth.py
+sso_auth.py
+clerk_auth.py
+setup_oauth.sh
+
+# Open Connector sensitive files
+.openconnector/
+open-connector/docs/credentials.md
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Audio files (media files, not source code)
+*.wav
+*.m4a
+
+# APK files (compiled Android binaries)
+*.apk
+*.aab
+
+# Build directories
+build/
+dist/
+*.egg-info/
+
+# Trained models (contain sensitive training data)
+trained_persona_model/
+
+# ONNX voice models (proprietary voice data)
+*.onnx
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Node modules (if any Node.js projects)
+node_modules/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Recovery/backup directory (contains sensitive backup data)
+recover/
+
+# Personal/sensitive data files
+conversation_memory*.json
+user_profile.json
+visited_places.json
+bluetooth_devices.json
+contacts.json
+taught_contexts.json
+ambient_learned.json
+scheduled_tasks.json
+sensor_skills.json
+archetype_inference.json
+learned_keywords.json
+lilly_skills.json
+synapse_matrix.json
+
+# Voice model data
+lillyos/voices/*.json
+
+# Hitomi build artifacts
+hitomi-lilly-integration/android/app/build/
+
+# Termux SSH credentials
+*termux*
