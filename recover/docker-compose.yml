@@ -1,0 +1,45 @@
+services:
+  lilly:
+    build: .
+    container_name: lilly-aiREC
+    ports:
+      - "8098:8098"
+      - "3007:3002"
+    volumes:
+      - .:/app
+      - ~/.ssh:/root/.ssh:ro
+      - lilly-data:/app/data
+      - connector-data:/app/data/connect
+    env_file:
+      - .env.openconnector
+    environment:
+      - PORT=8098
+      - OLLAMA_URL=${OLLAMA_URL:-http://100.93.131.114:11434}
+      - PREFER_BACKEND=ollama
+      - SENSOR_SERVER_URL=${SENSOR_SERVER_URL:-http://100.115.234.87:8099}
+      - TERMUX_SSH_HOST=${TERMUX_SSH_HOST}
+      - TERMUX_SSH_PORT=${TERMUX_SSH_PORT:-8022}
+      - TERMUX_SSH_USER=${TERMUX_SSH_USER}
+      # Open Connector settings (runs inside same container on :3001)
+      - OC_BASE_URL=http://localhost:3002
+      # Clerk authentication
+      - CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
+      - CLERK_SECRET_KEY=${CLERK_SECRET_KEY}
+      - OWNER_EMAIL=${OWNER_EMAIL:-laurencekidney@gmail.com}
+      # TTS voice
+      - PIPER_VOICE=/app/lillyos/voices/lilly_voice.onnx
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - whisper-net
+    restart: unless-stopped
+
+networks:
+  whisper-net:
+    name: supernova_default
+    external: true
+
+volumes:
+  lilly-data:
+  connector-data:

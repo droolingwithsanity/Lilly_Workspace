@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lily Demo — Workflow</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#f8f9fa;font-family:'Segoe UI',system-ui,sans-serif;color:#4a5568;padding:30px 20px;display:flex;flex-direction:column;align-items:center}
+  h1{font-size:2rem;color:#2d3748;margin-bottom:4px}
+  h1 span{background:linear-gradient(135deg,#f472b6,#a78bfa,#60a5fa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .sub{color:#718096;font-size:1rem;margin-bottom:28px;text-align:center}
+  .step-bar{display:flex;gap:6px;margin-bottom:28px;flex-wrap:wrap;justify-content:center}
+  .step-dot{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:0.75rem;font-weight:700;background:#e2e8f0;color:#a0aec0;cursor:default;transition:all .2s}
+  .step-dot.active{background:#a78bfa;color:#fff;box-shadow:0 0 12px rgba(167,139,250,.35)}
+  .step-dot.done{background:#34d399;color:#fff}
+  .container{max-width:1000px;width:100%}
+  .step{display:none;background:#fff;border-radius:16px;padding:30px;border:1px solid #e2e8f0;box-shadow:0 4px 24px rgba(0,0,0,.06)}
+  .step.active{display:block}
+  .step-header{display:flex;align-items:center;gap:14px;margin-bottom:20px}
+  .step-num{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#f472b6,#a78bfa);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:1.1rem;flex-shrink:0;color:#fff}
+  .step-title{font-size:1.3rem;font-weight:600;color:#2d3748}
+  .step-sub{color:#718096;font-size:.85rem;margin-top:2px}
+  .phone-frame{width:100%;max-width:320px;margin:0 auto 20px;border-radius:24px;overflow:hidden;border:3px solid #e2e8f0;background:#f1f5f9;aspect-ratio:9/19;position:relative;box-shadow:0 4px 20px rgba(0,0,0,.08)}
+  .phone-frame img{width:100%;height:100%;object-fit:cover;display:block}
+  .desc{background:#f1f5f9;border-radius:12px;padding:16px 20px;margin:16px 0;line-height:1.7;font-size:.9rem;border-left:3px solid #a78bfa}
+  .desc strong{color:#7c3aed}
+  .voice-cmd{display:inline-block;background:#ede9fe;padding:3px 10px;border-radius:6px;color:#7c3aed;font-size:.8rem;font-family:ui-monospace,monospace;margin:2px 0}
+  .nav-btns{display:flex;gap:12px;justify-content:center;margin-top:20px}
+  .nav-btns button{padding:10px 28px;border:none;border-radius:10px;font-size:.9rem;font-weight:600;cursor:pointer;transition:all .2s}
+  .btn-prev{background:#e2e8f0;color:#4a5568}
+  .btn-prev:hover{background:#cbd5e1}
+  .btn-next{background:linear-gradient(135deg,#f472b6,#a78bfa);color:#fff}
+  .btn-next:hover{box-shadow:0 4px 16px rgba(167,139,250,.35)}
+  .badge-progress{text-align:center;color:#a0aec0;font-size:.8rem;margin-bottom:18px}
+  .actions{display:flex;gap:12px;flex-wrap:wrap;justify-content:center;margin-top:16px}
+  .actions a{display:inline-flex;align-items:center;gap:6px;padding:8px 18px;border-radius:8px;font-size:.85rem;text-decoration:none;border:1px solid #e2e8f0;color:#718096;transition:all .2s}
+  .actions a:hover{border-color:#a78bfa;color:#7c3aed}
+  .info-box{background:#fff;border-radius:12px;padding:20px;border:1px solid #e2e8f0;margin-top:30px;max-width:800px;width:100%}
+  .info-box h3{color:#7c3aed;font-size:1rem;margin-bottom:10px}
+  .info-box p,.info-box pre{color:#4a5568;font-size:.85rem;line-height:1.6}
+  .info-box pre{background:#f8f9fa;padding:12px 16px;border-radius:8px;margin:10px 0;font-size:.8rem;overflow-x:auto}
+  @media(max-width:600px){.phone-frame{max-width:260px}.step{padding:20px 16px}h1{font-size:1.5rem}}
+</style>
+</head>
+<body>
+
+<h1>Lily — Interactive Workflow Demo</h1>
+<div class="sub">A guided walkthrough of the avatar + overlay + PiP experience</div>
+
+<div class="container">
+
+<div class="step-bar" id="stepBar"></div>
+<div class="badge-progress" id="progressText">Step 1 of 9</div>
+
+<!-- STEP 1 -->
+<div class="step active" data-step="1">
+  <div class="step-header">
+    <div class="step-num">1</div>
+    <div>
+      <div class="step-title">Open Lily in Browser</div>
+      <div class="step-sub">Landing page — pick your companion</div>
+    </div>
+  </div>
+  <div class="phone-frame">
+    <img src="screenshots/step1-home.png" style="width:100%;height:100%;object-fit:cover">
+  </div>
+  <div class="desc">
+    Open <strong>http://your-server:8098</strong> on your phone browser. The 9-character hive mind wheel appears — drag any avatar into the center sphere to select them. Lily (puppy) is the default.
+  </div>
+  <div class="actions">
+    <a href="javascript:gotoStep(2)">Next: Chat →</a>
+  </div>
+</div>
+
+<!-- STEP 2 -->
+<div class="step" data-step="2">
+  <div class="step-header">
+    <div class="step-num">2</div>
+    <div>
+      <div class="step-title">Chat with the Avatar</div>
+      <div class="step-sub">Voice or text — the avatar senses the world</div>
+    </div>
+  </div>
+  <div class="phone-frame">
+    <img src="screenshots/step2-chat.png" style="width:100%;height:100%;object-fit:cover">
+  </div>
+  <div class="desc">
+    Type <span class="voice-cmd">"what do you sense?"</span> or speak <span class="voice-cmd">"Hey Lilly, what's happening around us?"</span>. The avatar replies with real sensor data — light level, motion, nearby Bluetooth devices, weather pressure trend, and pending notifications — all gathered from your phone via the sensor server.
+  </div>
+  <div class="actions">
+    <a href="javascript:gotoStep(1)">← Back</a>
+    <a href="javascript:gotoStep(3)">Next: Camera PiP →</a>
+  </div>
+</div>
+
+<!-- STEP 3 -->
+<div class="step" data-step="3">
+  <div class="step-header">
+    <div class="step-num">3</div>
+    <div>
+      <div class="step-title">Camera in Picture-in-Picture</div>
+      <div class="step-sub">Camera opens in a floating PiP window</div>
+    </div>
+  </div>
+  <div class="phone-frame">
+    <img src="screenshots/step3-camera-pip.png" style="width:100%;height:100%;object-fit:cover">
+  </div>
+  <div class="desc">
+    Say <span class="voice-cmd">"open camera"</span>. The camera app opens in <strong>Picture-in-Picture</strong> mode — a small floating viewfinder stays on screen while the avatar chat remains fully visible and interactive behind it. You can reposition the PiP window by dragging.
+  </div>
+  <div class="actions">
+    <a href="javascript:gotoStep(2)">← Back</a>
+    <a href="javascript:gotoStep(4)">Next: Object Detection →</a>
+  </div>
+</div>
+
+<!-- STEP 4 -->
+<div class="step" data-step="4">
+  <div class="step-header">
+    <div class="step-num">4</div>
+    <div>
+      <div class="step-title">Object Detection — "What do you see?"</div>
+      <div class="step-sub">YOLOv8 identifies objects in real-time</div>
+    </div>
+  </div>
+  <div class="phone-frame">
+    <img src="screenshots/step4-detection.png" style="width:100%;height:100%;object-fit:cover">
+  </div>
+  <div class="desc">
+    While the camera is open in PiP, say <span class="voice-cmd">"what do you see?"</span>. The browser sends a camera frame to <code>POST /api/vision/browser</code>, YOLOv8 detects objects (person, laptop, phone, cup, chair, etc.), and the avatar describes the scene: <em>"I see you at your desk with your laptop and a coffee mug — looks like you're working!"</em>
+  </div>
+  <div class="actions">
+    <a href="javascript:gotoStep(3)">← Back</a>
+    <a href="javascript:gotoStep(5)">Next: Maps Overlay →</a>
+  </div>
+</div>
+
+<!-- STEP 5 -->
+<div class="step" data-step="5">
+  <div class="step-header">
+    <div class="step-num">5</div>
+    <div>
+      <div class="step-title">Maps in Half-Screen Overlay</div>
+      <div class="step-sub">"Where can I find a good Pho?"</div>
+    </div>
+  </div>
+  <div class="phone-frame">
+    <img src="screenshots/step5-maps-overlay.png" style="width:100%;height:100%;object-fit:cover">
+  </div>
+  <div class="desc">
+    Say <span class="voice-cmd">"where can I find a good Pho?"</span>. The avatar launches Google Maps in <strong>half-screen overlay</strong> mode with <code>geo:0,0?q=pho</code>. Maps fills the right side while the avatar chat stays visible on the left. You can see search results and keep talking to the avatar about them — <em>"What's the rating on that first one?"</em>, <em>"Navigate there"</em>, <em>"Any other pho places nearby?"</em>
+  </div>
+  <div class="actions">
+    <a href="javascript:gotoStep(4)">← Back</a>
+    <a href="javascript:gotoStep(6)">Next: Navigate →</a>
+  </div>
+</div>
+
+<!-- STEP 6 -->
+<div class="step" data-step="6">
+  <div class="step-header">
+    <div class="step-num">6</div>
+    <div>
+      <div class="step-title">Navigate the Overlaid App</div>
+      <div class="step-sub">Dpad, scroll, tap — control with your voice</div>
+    </div>
+  </div>
+  <div class="phone-frame">
+    <img src="screenshots/step6-navigate.png" style="width:100%;height:100%;object-fit:cover">
+  </div>
+  <div class="desc">
+    While Maps is in the overlay, control it with your voice:
+    <br><br>
+    <span class="voice-cmd">"scroll down"</span> — fires DPAD_DOWN 6× rapidly<br>
+    <span class="voice-cmd">"scroll down 3 times"</span> — multiplies the scroll<br>
+    <span class="voice-cmd">"tap"</span> or <span class="voice-cmd">"select"</span> — taps at cursor position<br>
+    <span class="voice-cmd">"cursor right"</span> — moves cursor 50px right<br>
+    <span class="voice-cmd">"swipe up"</span> — full-screen swipe gesture<br>
+    <span class="voice-cmd">"go back"</span> — Android back button
+    <br><br>
+    All commands send <code>input tap/swipe/keyevent</code> via the sensor server's <code>/shell</code> endpoint — no ADB, no SSH.
+  </div>
+  <div class="actions">
+    <a href="javascript:gotoStep(5)">← Back</a>
+    <a href="javascript:gotoStep(7)">Next: Notifications →</a>
+  </div>
+</div>
+
+<!-- STEP 7 -->
+<div class="step" data-step="7">
+  <div class="step-header">
+    <div class="step-num">7</div>
+    <div>
+      <div class="step-title">Proactive Notification Alerts</div>
+      <div class="step-sub">OS first, then app priority — with next-step suggestions</div>
+    </div>
+  </div>
+  <div class="phone-frame">
+    <img src="screenshots/step7-notification.png" style="width:100%;height:100%;object-fit:cover">
+  </div>
+  <div class="desc">
+    The avatar monitors notifications every 3 seconds and alerts you by <strong>priority</strong>:
+    <br><br>
+    <strong>Tier 1 — OS:</strong> Phone calls, SMS, system alerts<br>
+    <strong>Tier 2 — Apps:</strong> max > high > default > low > min
+    <br><br>
+    Each alert includes a contextual <strong>next-step suggestion</strong>:<br>
+    <span class="voice-cmd">"Missed call from Mom — want me to call them back?"</span><br>
+    <span class="voice-cmd">"New email from John about Project — want me to read it?"</span><br>
+    <span class="voice-cmd">"SMS from Sarah — want me to reply?"</span>
+    <br><br>
+    Say <span class="voice-cmd">"what notifications"</span> or <span class="voice-cmd">"what did I miss"</span> to see all active notifications sorted by priority.
+  </div>
+  <div class="actions">
+    <a href="javascript:gotoStep(6)">← Back</a>
+    <a href="javascript:gotoStep(8)">Next: Full Screen →</a>
+  </div>
+</div>
+
+<!-- STEP 8 -->
+<div class="step" data-step="8">
+  <div class="step-header">
+    <div class="step-num">8</div>
+    <div>
+      <div class="step-title">Go Full Screen</div>
+      <div class="step-sub">Maximize the overlay app with one command</div>
+    </div>
+  </div>
+  <div class="phone-frame">
+    <img src="screenshots/step8-fullscreen.png" style="width:100%;height:100%;object-fit:cover">
+  </div>
+  <div class="desc">
+    When you want the overlaid app to take the whole screen, say <span class="voice-cmd">"go full screen"</span> or <span class="voice-cmd">"maximize"</span>. The app is re-launched without freeform bounds, expanding to fill the display. To return to the avatar, say <span class="voice-cmd">"go home"</span> — the avatar is still there, ready to chat.
+  </div>
+  <div class="actions">
+    <a href="javascript:gotoStep(7)">← Back</a>
+    <a href="javascript:gotoStep(9)">Next: Skills →</a>
+  </div>
+</div>
+
+<!-- STEP 9 -->
+<div class="step" data-step="9">
+  <div class="step-header">
+    <div class="step-num">9</div>
+    <div>
+      <div class="step-title">Sensor-Triggered Skills &amp; YouTube PiP</div>
+      <div class="step-sub">Reactive behaviors + floating video</div>
+    </div>
+  </div>
+  <div class="phone-frame">
+    <img src="screenshots/step9-youtube-pip.png" style="width:100%;height:100%;object-fit:cover">
+  </div>
+  <div class="desc">
+    Say <span class="voice-cmd">"open youtube"</span> to play videos in <strong>Picture-in-Picture</strong> — the video floats while you chat. Meanwhile, <strong>sensor-triggered skills</strong> fire automatically:
+    <br><br>
+    <span class="voice-cmd">"It's gotten really dark in here. Should I turn on a light?"</span> — fires when light &lt; 10 lux<br>
+    <span class="voice-cmd">"I felt you pick up the phone! What's up?"</span> — fires on pickup sensor<br>
+    <span class="voice-cmd">"Feels like we're moving fast! Are we in a car?"</span> — fires on significant motion
+    <br><br>
+    All skills are configurable in <code>sensor_skills.json</code> or via <code>GET/POST/DELETE /api/sensor_skills</code>.
+  </div>
+  <div class="actions">
+    <a href="javascript:gotoStep(8)">← Back</a>
+    <a href="javascript:gotoStep(1)">↻ Start Over</a>
+  </div>
+</div>
+
+<div class="nav-btns">
+  <button class="btn-prev" onclick="prevStep()" id="prevBtn">← Previous</button>
+  <button class="btn-next" onclick="nextStep()" id="nextBtn">Next →</button>
+</div>
+
+</div>
+
+<div style="margin-top:30px;max-width:800px;width:100%;background:#fff;border-radius:12px;padding:20px;border:1px solid #e2e8f0;">
+  <h3 style="color:#7c3aed;font-size:1rem;margin-bottom:10px">⚙️ Automated Workflow Script</h3>
+  <p style="color:#4a5568;font-size:.85rem;line-height:1.6">
+    These screenshots were generated by <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px;color:#7c3aed">automate_demo.sh</code>
+    — it orchestrates the phone via the sensor server's <code>/shell</code> endpoint, launches each app,
+    waits for the UI, and captures frames with <code>screencap</code>. To run it on your phone:
+  </p>
+  <pre style="background:#f8f9fa;padding:12px 16px;border-radius:8px;margin:10px 0;font-size:.8rem;color:#4a5568;overflow-x:auto">
+# Make sure sensor server is running on your phone
+# Then from the avatar server:
+bash automate_demo.sh</pre>
+  <p style="color:#718096;font-size:.8rem;line-height:1.5">
+    Replace the generated screenshots with higher-quality captures from your phone's screen recorder
+    by overwriting the PNGs in the <code>screenshots/</code> directory.
+  </p>
+</div>
+
+<div style="margin-top:20px;text-align:center;color:#a0aec0;font-size:.8rem">
+  <p>ARCHITECTURE &bull; <a href="ARCHITECTURE.html" style="color:#7c3aed;text-decoration:none">Architecture Diagram</a> &bull; <a href="PLAYBOOK.md" style="color:#7c3aed;text-decoration:none">Full Playbook</a></p>
+</div>
+
+<script>
+let currentStep = 1;
+const totalSteps = 9;
+
+function buildBar() {
+  const bar = document.getElementById('stepBar');
+  bar.innerHTML = '';
+  for (let i = 1; i <= totalSteps; i++) {
+    const dot = document.createElement('div');
+    dot.className = 'step-dot';
+    dot.textContent = i;
+    dot.onclick = () => gotoStep(i);
+    bar.appendChild(dot);
+  }
+}
+
+function updateUI() {
+  document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+  document.querySelector(`[data-step="${currentStep}"]`).classList.add('active');
+  document.getElementById('progressText').textContent = `Step ${currentStep} of ${totalSteps}`;
+  document.getElementById('prevBtn').style.visibility = currentStep === 1 ? 'hidden' : 'visible';
+  document.getElementById('nextBtn').textContent = currentStep === totalSteps ? 'Finish' : 'Next →';
+  document.querySelectorAll('.step-dot').forEach((d, i) => {
+    const n = i + 1;
+    d.className = 'step-dot';
+    if (n === currentStep) d.classList.add('active');
+    else if (n < currentStep) d.classList.add('done');
+  });
+}
+
+function nextStep() {
+  if (currentStep < totalSteps) { currentStep++; updateUI(); }
+}
+function prevStep() {
+  if (currentStep > 1) { currentStep--; updateUI(); }
+}
+function gotoStep(n) {
+  if (n >= 1 && n <= totalSteps) { currentStep = n; updateUI(); }
+}
+
+buildBar();
+updateUI();
+
+// keyboard nav
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight') nextStep();
+  if (e.key === 'ArrowLeft') prevStep();
+});
+</script>
+
+</body>
+</html>

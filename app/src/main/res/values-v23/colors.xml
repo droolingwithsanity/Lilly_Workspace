@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Status bar color for v23+ (light status bar) -->
+    <color name="status_bar_color">#00000000</color>
+</resources>

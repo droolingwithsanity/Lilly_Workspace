@@ -1,0 +1,84 @@
+{
+    "chrome": {
+        "package": "com.android.chrome",
+        "activity": "com.google.android.apps.chrome.Main",
+        "aliases": ["browser", "google", "web"]
+    },
+    "settings": {
+        "package": "com.android.settings",
+        "activity": "com.android.settings.Settings",
+        "aliases": ["system settings", "preferences"]
+    },
+    "htop": {
+        "termux_package": "htop",
+        "aliases": ["process viewer", "task manager"]
+    },
+    "neovim": {
+        "termux_package": "neovim",
+        "aliases": ["nvim", "vim", "editor"]
+    },
+    "git": {
+        "termux_package": "git",
+        "aliases": ["version control", "vcs"]
+    },
+    "python": {
+        "termux_package": "python",
+        "aliases": ["python3", "py"]
+    },
+    "nodejs": {
+        "termux_package": "nodejs",
+        "aliases": ["node", "npm"]
+    },
+    "gcc": {
+        "termux_package": "gcc",
+        "aliases": ["c compiler", "c++", "g++"]
+    },
+    "rust": {
+        "termux_package": "rust",
+        "aliases": ["cargo", "rustc"]
+    },
+    "curl": {
+        "termux_package": "curl",
+        "aliases": ["http", "download"]
+    },
+    "wget": {
+        "termux_package": "wget",
+        "aliases": ["downloader"]
+    },
+    "ffmpeg": {
+        "termux_package": "ffmpeg",
+        "aliases": ["video converter", "media converter"]
+    },
+    "openssh": {
+        "termux_package": "openssh",
+        "aliases": ["ssh", "sshd", "remote"]
+    },
+    "tmux": {
+        "termux_package": "tmux",
+        "aliases": ["terminal multiplexer"]
+    },
+    "zsh": {
+        "termux_package": "zsh",
+        "aliases": ["z shell", "oh my zsh"]
+    },
+    "nano": {
+        "termux_package": "nano",
+        "aliases": ["text editor"]
+    },
+    "make": {
+        "termux_package": "make",
+        "aliases": ["build", "cmake"]
+    },
+    "lua": {
+        "termux_package": "lua",
+        "aliases": ["luajit"]
+    },
+    "sqlite": {
+        "termux_package": "sqlite",
+        "aliases": ["database", "db"]
+    },
+    "redis": {
+        "termux_package": "redis",
+        "aliases": ["cache"]
+    }
+}

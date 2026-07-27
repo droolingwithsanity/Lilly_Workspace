@@ -1,0 +1,4 @@
+#Thu Jul 23 13:59:06 EDT 2026
+base.0=/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/build/intermediates/dex/release/minifyReleaseWithR8/classes.dex
+renamed.0=classes.dex
+path.0=classes.dex

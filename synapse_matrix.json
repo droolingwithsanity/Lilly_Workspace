@@ -1,0 +1,507 @@
+{
+  "patterns": [
+    {
+      "id": "pat_1783902736_394",
+      "label": "pattern_0",
+      "timestamp": 1783902736.434839,
+      "strength": 1.0,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "We noticed that you've been tracking patterns in your surroundings! Let's see what we can do together to make your experience more fun and informative.",
+      "sensor_fingerprint": {
+        "mag": 4.440799713134766,
+        "pressure": 993.4197387695312,
+        "light": 56.38999938964844,
+        "color": 4210.1767578125,
+        "prox": 5.0,
+        "steps": 22371.0,
+        "orientation": 200.00021362304688,
+        "lin_accel": 0.030238717794418335,
+        "imu_temp": 33.875,
+        "baro_temp": 33.59934997558594
+      }
+    },
+    {
+      "id": "pat_1783906626_174",
+      "label": "pattern_1",
+      "timestamp": 1783906626.6772645,
+      "strength": 0.3,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "",
+      "sensor_fingerprint": {
+        "accel": 6.462548732757568,
+        "gyro": -0.4737536311149597,
+        "mag": -43.517398834228516,
+        "pressure": 993.931640625,
+        "light": 6.053750038146973,
+        "color": 4573.37060546875,
+        "prox": 0.0,
+        "aad_prox": 0.0,
+        "steps": 22739.0,
+        "step_detect": 1.0,
+        "orientation": 35.47624969482422,
+        "device_orient": 2.0,
+        "gravity": 4.343388557434082,
+        "lin_accel": 1.940950870513916,
+        "imu_temp": 41.4375,
+        "baro_temp": 40.890625,
+        "binned_bright": 2.0,
+        "tilt": 1.0
+      }
+    },
+    {
+      "id": "pat_1783908221_467",
+      "label": "pattern_2",
+      "timestamp": 1783908221.2733548,
+      "strength": 0.7999999999999999,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "\"Hey there! I can analyze your sensor data and tell you what's happening. Just share yours with me, and I'll give you insights!\"",
+      "sensor_fingerprint": {
+        "accel": -3.233668565750122,
+        "gyro": 0.1800120621919632,
+        "mag": 5.807199954986572,
+        "pressure": 993.6729736328125,
+        "light": 0.0,
+        "color": 4639.93212890625,
+        "prox": 0.0,
+        "aad_prox": 0.0,
+        "steps": 22992.0,
+        "orientation": 55.09113311767578,
+        "gravity": -3.1801226139068604,
+        "lin_accel": -0.10875797271728516,
+        "imu_temp": 41.1875,
+        "baro_temp": 40.566009521484375,
+        "binned_bright": 1.0
+      }
+    },
+    {
+      "id": "pat_1783908281_717",
+      "label": "pattern_3",
+      "timestamp": 1783908281.2740552,
+      "strength": 1.0,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "\"Hey there! Have you noticed how your device is constantly detecting a unique pattern in the world around it? Maybe we can use that information to find something interesting or engage with it. Would you like me to help you analyze this pattern and provide some insights?\"",
+      "sensor_fingerprint": {
+        "accel": -0.021024083718657494,
+        "gyro": -0.0003164241788908839,
+        "mag": -16.762800216674805,
+        "pressure": 993.6592407226562,
+        "light": 1207.2862548828125,
+        "color": 2531.7666015625,
+        "prox": 5.0,
+        "aad_prox": 5.0,
+        "steps": 23006.0,
+        "orientation": 37.897918701171875,
+        "device_orient": 0.0,
+        "gravity": -0.013461167924106121,
+        "lin_accel": -0.09073759615421295,
+        "imu_temp": 40.6875,
+        "baro_temp": 40.22279357910156,
+        "binned_bright": 3.0
+      }
+    },
+    {
+      "id": "pat_1783908371_897",
+      "label": "pattern_4",
+      "timestamp": 1783908371.300736,
+      "strength": 0.3,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "",
+      "sensor_fingerprint": {
+        "accel": 2.0922329425811768,
+        "gyro": 0.5252808332443237,
+        "mag": -10.736000061035156,
+        "pressure": 993.6438598632812,
+        "light": 0.4387499988079071,
+        "color": -1.0,
+        "prox": 0.0,
+        "aad_prox": 0.0,
+        "steps": 23017.0,
+        "orientation": 180.59864807128906,
+        "device_orient": 2.0,
+        "gravity": 2.3420443534851074,
+        "lin_accel": -0.11897897720336914,
+        "imu_temp": 40.375,
+        "baro_temp": 39.68626403808594,
+        "binned_bright": 1.0,
+        "tilt": 1.0
+      }
+    },
+    {
+      "id": "pat_1783956814_500",
+      "label": "pattern_5",
+      "timestamp": 1783956814.0720417,
+      "strength": 0.8999999999999999,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "Here's some information on your pressure sensor. Your current reading of 992.3 is within normal range, so you're in good health. However, if you notice any changes or concerns, feel free to let me know!",
+      "sensor_fingerprint": {
+        "accel": -4.064755916595459,
+        "gyro": -0.10232159495353699,
+        "mag": 28.377199172973633,
+        "pressure": 992.3363037109375,
+        "light": 0.00624999962747097,
+        "color": 2930.50146484375,
+        "prox": 0.0,
+        "aad_prox": 0.0,
+        "steps": 1331.0,
+        "orientation": 262.576171875,
+        "device_orient": 0.0,
+        "gravity": -3.099365711212158,
+        "lin_accel": -0.9544692039489746,
+        "imu_temp": 36.0,
+        "baro_temp": 35.58214569091797,
+        "binned_bright": 1.0
+      }
+    },
+    {
+      "id": "pat_1784162569_742",
+      "label": "pattern_6",
+      "timestamp": 1784162569.832839,
+      "strength": 0.3,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "",
+      "sensor_fingerprint": {
+        "accel": -1.3950713872909546,
+        "gyro": 0.5695801973342896,
+        "mag": 22.11859893798828,
+        "pressure": 986.9778442382812,
+        "light": 0.3725000023841858,
+        "color": 2649.358642578125,
+        "prox": 0.0,
+        "aad_prox": 0.0,
+        "steps": 1916.0,
+        "orientation": 266.6055908203125,
+        "device_orient": 2.0,
+        "gravity": -0.3568868041038513,
+        "lin_accel": -1.475371241569519,
+        "imu_temp": 41.875,
+        "baro_temp": 42.320343017578125,
+        "binned_bright": 1.0
+      }
+    },
+    {
+      "id": "pat_1784162629_586",
+      "label": "pattern_7",
+      "timestamp": 1784162629.8713825,
+      "strength": 0.3,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "",
+      "sensor_fingerprint": {
+        "accel": 1.8253543376922607,
+        "gyro": 0.08655034005641937,
+        "mag": -8.393599510192871,
+        "pressure": 986.554931640625,
+        "light": 0.3725000023841858,
+        "color": 2649.358642578125,
+        "prox": 0.0,
+        "aad_prox": 0.0,
+        "steps": 1921.0,
+        "orientation": 18.913375854492188,
+        "device_orient": 2.0,
+        "gravity": 0.8419623374938965,
+        "lin_accel": 0.9852176904678345,
+        "imu_temp": 42.5,
+        "baro_temp": 42.6439208984375,
+        "binned_bright": 1.0
+      }
+    },
+    {
+      "id": "pat_1784248583_705",
+      "label": "pattern_8",
+      "timestamp": 1784248583.0313857,
+      "strength": 1.0,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "\"Hey there! Based on your current sensor readings, it seems like something's off. Would you like me to provide some advice or perhaps suggest ways to address the issue?\"",
+      "sensor_fingerprint": {
+        "accel": -0.1,
+        "gyro": 0.0,
+        "orientation": 357.90000000000003
+      }
+    },
+    {
+      "id": "pat_1784248863_871",
+      "label": "pattern_9",
+      "timestamp": 1784248863.1329045,
+      "strength": 0.5,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "I'm here to help you analyze your sensor patterns and see how they can be useful to you! Let me know what kind of information you'd like about pattern 9.",
+      "sensor_fingerprint": {
+        "accel": 6.4,
+        "gyro": 0.0,
+        "orientation": 91.60000000000001
+      }
+    },
+    {
+      "id": "pat_1784248927_633",
+      "label": "pattern_10",
+      "timestamp": 1784248927.3418899,
+      "strength": 0.3,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "",
+      "sensor_fingerprint": {
+        "accel": -1.6,
+        "gyro": 0.0,
+        "orientation": 7.800000000000001
+      }
+    },
+    {
+      "id": "pat_1784249290_277",
+      "label": "pattern_11",
+      "timestamp": 1784249290.16046,
+      "strength": 0.4,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "",
+      "sensor_fingerprint": {
+        "accel": 0.4,
+        "gyro": 0.0,
+        "orientation": 129.3
+      }
+    },
+    {
+      "id": "pat_1784581635_210",
+      "label": "pattern_12",
+      "timestamp": 1784581635.5894613,
+      "strength": 0.5,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "Stay alert! Our sensors are detecting unusual patterns, and we want to monitor your surroundings for any irregularities. Please provide us with the sensor readings at regular intervals to help us identify potential issues early.",
+      "sensor_fingerprint": {
+        "accel": 1.6,
+        "gyro": 0.0,
+        "orientation": 292.2
+      }
+    },
+    {
+      "id": "pat_1784581726_830",
+      "label": "pattern_13",
+      "timestamp": 1784581726.6749494,
+      "strength": 0.5,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "Explore how your surroundings react to the detected pattern by monitoring and analyzing it!",
+      "sensor_fingerprint": {
+        "accel": -0.5,
+        "gyro": 0.0,
+        "orientation": 89.10000000000001
+      }
+    },
+    {
+      "id": "pat_1784594775_814",
+      "label": "pattern_14",
+      "timestamp": 1784594775.496056,
+      "strength": 0.3,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "",
+      "sensor_fingerprint": {
+        "accel": -1.795426845550537,
+        "gyro": -0.18387576937675476,
+        "mag": 4.379799842834473,
+        "pressure": 980.1808471679688,
+        "light": 11.806249618530273,
+        "color": 2553.8017578125,
+        "prox": 0.0,
+        "aad_prox": 0.0,
+        "steps": 14491.0,
+        "orientation": 354.63226318359375,
+        "device_orient": 2.0,
+        "gravity": -0.8253383040428162,
+        "lin_accel": -1.0417344570159912,
+        "imu_temp": 34.3125,
+        "baro_temp": 32.66377258300781,
+        "binned_bright": 1.0,
+        "tilt": 1.0
+      }
+    },
+    {
+      "id": "pat_1784602699_694",
+      "label": "pattern_15",
+      "timestamp": 1784602699.0877087,
+      "strength": 0.3,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "",
+      "sensor_fingerprint": {
+        "accel": 0.6813000440597534,
+        "gyro": -0.023598583415150642,
+        "mag": -8.552199363708496,
+        "pressure": 980.2740478515625,
+        "light": 0.0,
+        "color": -1.0,
+        "prox": 5.0,
+        "aad_prox": 5.0,
+        "steps": 121.0,
+        "orientation": 43.99599075317383,
+        "device_orient": 0.0,
+        "gravity": 0.7406850457191467,
+        "lin_accel": 0.049151718616485596,
+        "imu_temp": 35.125,
+        "baro_temp": 33.26336669921875,
+        "binned_bright": 1.0
+      }
+    },
+    {
+      "id": "pat_1784863546_357",
+      "label": "pattern_16",
+      "timestamp": 1784863546.7010627,
+      "strength": 0.5,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "Have you noticed any unexpected movements while using this device? Let me analyze your accelerometer data to help you understand if there are any underlying issues or trends.",
+      "sensor_fingerprint": {
+        "accel": -0.7000000000000001,
+        "gyro": 0.0,
+        "orientation": 17.400000000000002
+      }
+    },
+    {
+      "id": "pat_1784925617_145",
+      "label": "pattern_17",
+      "timestamp": 1784925617.127533,
+      "strength": 0.3,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "",
+      "sensor_fingerprint": {
+        "accel": 0.6000000000000001,
+        "gyro": 0.0,
+        "orientation": 0.0
+      }
+    },
+    {
+      "id": "pat_1785113036_645",
+      "label": "pattern_18",
+      "timestamp": 1785113036.283436,
+      "strength": 0.5,
+      "engagement_count": 0,
+      "last_triggered": 0.0,
+      "skill_description": "",
+      "sensor_fingerprint": {
+        "accel": -0.30000000000000004,
+        "gyro": 0.0,
+        "orientation": 0.1
+      }
+    }
+  ],
+  "skills": [
+    {
+      "name": "sensor_patterns_help",
+      "description": "Auto-generated from sensor pattern: pattern_0",
+      "sensor": "mag",
+      "archetype_weights": {
+        "observer": 0.6,
+        "explorer": 0.5,
+        "creator": 0.4,
+        "caregiver": 0.5
+      },
+      "reactive_response": "We noticed that you've been tracking patterns in your surroundings! Let's see what we can do together to make your experience more fun and informative."
+    },
+    {
+      "name": "sensor_analysis_expert",
+      "description": "Auto-generated from sensor pattern: pattern_2",
+      "sensor": "accel",
+      "archetype_weights": {
+        "observer": 0.6,
+        "explorer": 0.5,
+        "creator": 0.4,
+        "caregiver": 0.5
+      },
+      "reactive_response": "\"Hey there! I can analyze your sensor data and tell you what's happening. Just share yours with me, and I'll give you insights!\""
+    },
+    {
+      "name": "sensor_pattern_reader",
+      "description": "Auto-generated from sensor pattern: pattern_3",
+      "sensor": "accel",
+      "archetype_weights": {
+        "observer": 0.6,
+        "explorer": 0.5,
+        "creator": 0.4,
+        "caregiver": 0.5
+      },
+      "reactive_response": "\"Hey there! Have you noticed how your device is constantly detecting a unique pattern in the world around it? Maybe we can use that information to find something interesting or engage with it. Would you like me to help you analyze this pattern and provide some insights?\""
+    },
+    {
+      "name": "pressure_sensor_health",
+      "description": "Auto-generated from sensor pattern: pattern_5",
+      "sensor": "accel",
+      "archetype_weights": {
+        "observer": 0.6,
+        "explorer": 0.5,
+        "creator": 0.4,
+        "caregiver": 0.5
+      },
+      "reactive_response": "Here's some information on your pressure sensor. Your current reading of 992.3 is within normal range, so you're in good health. However, if you notice any changes or concerns, feel free to let me know!"
+    },
+    {
+      "name": "sensor_alert_bot",
+      "description": "Auto-generated from sensor pattern: pattern_8",
+      "sensor": "accel",
+      "archetype_weights": {
+        "observer": 0.6,
+        "explorer": 0.5,
+        "creator": 0.4,
+        "caregiver": 0.5
+      },
+      "reactive_response": "\"Hey there! Based on your current sensor readings, it seems like something's off. Would you like me to provide some advice or perhaps suggest ways to address the issue?\""
+    },
+    {
+      "name": "sensor_awareness",
+      "description": "Auto-generated from sensor pattern: pattern_13",
+      "sensor": "accel",
+      "archetype_weights": {
+        "observer": 0.6,
+        "explorer": 0.5,
+        "creator": 0.4,
+        "caregiver": 0.5
+      },
+      "reactive_response": "Explore how your surroundings react to the detected pattern by monitoring and analyzing it!"
+    },
+    {
+      "name": "sensor_patrol",
+      "description": "Auto-generated from sensor pattern: pattern_12",
+      "sensor": "accel",
+      "archetype_weights": {
+        "observer": 0.6,
+        "explorer": 0.5,
+        "creator": 0.4,
+        "caregiver": 0.5
+      },
+      "reactive_response": "Stay alert! Our sensors are detecting unusual patterns, and we want to monitor your surroundings for any irregularities. Please provide us with the sensor readings at regular intervals to help us identify potential issues early."
+    },
+    {
+      "name": "accelerometer_analysis",
+      "description": "Auto-generated from sensor pattern: pattern_16",
+      "sensor": "accel",
+      "archetype_weights": {
+        "observer": 0.6,
+        "explorer": 0.5,
+        "creator": 0.4,
+        "caregiver": 0.5
+      },
+      "reactive_response": "Have you noticed any unexpected movements while using this device? Let me analyze your accelerometer data to help you understand if there are any underlying issues or trends."
+    },
+    {
+      "name": "pattern_analysis_assistant",
+      "description": "Auto-generated from sensor pattern: pattern_9",
+      "sensor": "accel",
+      "archetype_weights": {
+        "observer": 0.6,
+        "explorer": 0.5,
+        "creator": 0.4,
+        "caregiver": 0.5
+      },
+      "reactive_response": "I'm here to help you analyze your sensor patterns and see how they can be useful to you! Let me know what kind of information you'd like about pattern 9."
+    }
+  ]
+}

@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lily Architecture</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0a0e1a;font-family:'Segoe UI',system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;padding:30px 20px;color:#c8d6e5}
+  h1{font-size:2.2rem;background:linear-gradient(135deg,#ff9ff3,#feca57,#48dbfb,#54a0ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px;letter-spacing:-0.5px}
+  .subtitle{color:#8395a7;font-size:0.95rem;margin-bottom:24px;text-align:center;max-width:700px;line-height:1.5}
+  .subtitle code{background:#1e2a3a;padding:2px 8px;border-radius:4px;color:#feca57;font-size:0.85rem;-webkit-text-fill-color:#feca57}
+  .infographic{max-width:1200px;width:100%;background:#111827;border-radius:20px;padding:30px 25px;box-shadow:0 20px 60px rgba(0,0,0,0.5);border:1px solid #1e2a3a}
+  svg{width:100%;height:auto;display:block}
+  .legend{display:flex;flex-wrap:wrap;gap:12px 28px;margin-top:20px;padding:16px 20px;background:#0d1525;border-radius:12px;border:1px solid #1e2a3a}
+  .legend-item{display:flex;align-items:center;gap:8px;font-size:0.82rem;color:#8395a7}
+  .legend-dot{width:12px;height:12px;border-radius:4px;flex-shrink:0}
+  .footer{margin-top:20px;color:#576574;font-size:0.8rem;text-align:center;max-width:700px;line-height:1.6}
+  .footer a{color:#54a0ff;text-decoration:none}
+  @media(max-width:768px){.infographic{padding:15px 10px}h1{font-size:1.5rem}}
+</style>
+</head>
+<body>
+
+<h1>LILY &mdash; Digital Companion Architecture</h1>
+<div class="subtitle">
+  9 avatars &middot; 23 sensors &middot; HTTP-native &middot; Zero-SSH &middot; PiP &middot; Notification priority engine
+  &mdash; <code>SENSOR_SERVER_URL=http://phone:8099</code>
+</div>
+
+<div class="infographic">
+
+<svg viewBox="0 0 1150 1250" xmlns="http://www.w3.org/2000/svg" style="background:#111827;border-radius:12px">
+  <defs>
+    <linearGradient id="phone" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#6c5ce7"/><stop offset="100%" stop-color="#a29bfe"/></linearGradient>
+    <linearGradient id="server" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#0984e3"/><stop offset="100%" stop-color="#74b9ff"/></linearGradient>
+    <linearGradient id="docker" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00b894"/><stop offset="100%" stop-color="#55efc4"/></linearGradient>
+    <linearGradient id="llm" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#e17055"/><stop offset="100%" stop-color="#fab1a0"/></linearGradient>
+    <linearGradient id="tts" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#fd79a8"/><stop offset="100%" stop-color="#e84393"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.3"/></filter>
+    <filter id="glow"><feGaussianBlur stdDeviation="4" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+
+  <!-- background grid -->
+  <pattern id="dots" x="0" y="0" width="20" height="20" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="0.8" fill="#1e2a3a"/></pattern>
+  <rect width="1150" height="1250" fill="url(#dots)" rx="12"/>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- SECTION LABELS -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <text x="575" y="35" text-anchor="middle" fill="#576574" font-size="11" font-weight="600" letter-spacing="2">ANDROID PHONE  ─  termux</text>
+  <line x1="15" y1="46" x2="1135" y2="46" stroke="#1e2a3a" stroke-width="1"/>
+
+  <text x="575" y="320" text-anchor="middle" fill="#576574" font-size="11" font-weight="600" letter-spacing="2">DOCKER / AVATAR SERVER  ─  lilly_ai.py</text>
+  <line x1="15" y1="331" x2="1135" y2="331" stroke="#1e2a3a" stroke-width="1"/>
+
+  <text x="575" y="590" text-anchor="middle" fill="#576574" font-size="11" font-weight="600" letter-spacing="2">USER INTERFACE  ─  browser · android · voice</text>
+  <line x1="15" y1="601" x2="1135" y2="601" stroke="#1e2a3a" stroke-width="1"/>
+
+  <text x="575" y="710" text-anchor="middle" fill="#576574" font-size="11" font-weight="600" letter-spacing="2">SCREENSHOT GALLERY</text>
+  <line x1="15" y1="721" x2="1135" y2="721" stroke="#1e2a3a" stroke-width="1"/>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- PHONE SECTION -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="40" y="55" width="1070" height="250" rx="14" fill="#0d1525" stroke="#1e2a3a" stroke-width="1.5" filter="url(#shadow)"/>
+
+  <!-- Termux Sensor Server box -->
+  <rect x="60" y="65" width="280" height="140" rx="10" fill="#0d1929" stroke="#0984e3" stroke-width="1.5"/>
+  <rect x="60" y="65" width="280" height="30" rx="10" fill="#0984e3" opacity="0.15"/>
+  <text x="200" y="84" text-anchor="middle" fill="#74b9ff" font-size="12" font-weight="700">termux_sensor_server.py</text>
+  <text x="200" y="100" text-anchor="middle" fill="#576574" font-size="9">FastAPI  &middot;  Port 8099  &middot;  HTTP</text>
+
+  <rect x="78" y="112" width="116" height="22" rx="6" fill="#1e2a3a"/>
+  <text x="136" y="127" text-anchor="middle" fill="#48dbfb" font-size="8.5">GET /sensors/all</text>
+  <rect x="206" y="112" width="116" height="22" rx="6" fill="#1e2a3a"/>
+  <text x="264" y="127" text-anchor="middle" fill="#48dbfb" font-size="8.5">GET /notification/list</text>
+  <rect x="78" y="140" width="116" height="22" rx="6" fill="#1e2a3a"/>
+  <text x="136" y="155" text-anchor="middle" fill="#48dbfb" font-size="8.5">POST /shell</text>
+  <rect x="206" y="140" width="116" height="22" rx="6" fill="#1e2a3a"/>
+  <text x="264" y="155" text-anchor="middle" fill="#48dbfb" font-size="8.5">GET /battery</text>
+  <rect x="78" y="168" width="116" height="22" rx="6" fill="#1e2a3a"/>
+  <text x="136" y="183" text-anchor="middle" fill="#48dbfb" font-size="8.5">GET /location</text>
+  <rect x="206" y="168" width="116" height="22" rx="6" fill="#1e2a3a"/>
+  <text x="264" y="183" text-anchor="middle" fill="#48dbfb" font-size="8.5">GET /bluetooth/scan</text>
+
+  <text x="200" y="218" text-anchor="middle" fill="#576574" font-size="8">Background loop: every 2s  &middot;  Zero-SSH: all HTTP</text>
+
+  <!-- Android Sensors box -->
+  <rect x="380" y="65" width="300" height="90" rx="10" fill="#0d1929" stroke="#6c5ce7" stroke-width="1.5"/>
+  <rect x="380" y="65" width="300" height="28" rx="10" fill="#6c5ce7" opacity="0.12"/>
+  <text x="530" y="82" text-anchor="middle" fill="#a29bfe" font-size="11" font-weight="700">23 Android Sensors</text>
+  <text x="395" y="105" fill="#576574" font-size="8.5">Light · Proximity · Accelerometer · Gyroscope</text>
+  <text x="395" y="118" fill="#576574" font-size="8.5">Magnetometer · Barometer · Step Counter · Detector</text>
+  <text x="395" y="131" fill="#576574" font-size="8.5">Gravity · Orientation · Tilt · Lift · Twist · Pickup</text>
+  <text x="395" y="144" fill="#576574" font-size="8.5">Significant Motion · Temperature · Color · Humidity</text>
+
+  <line x1="340" y1="120" x2="375" y2="120" stroke="#6c5ce7" stroke-width="1.5"/>
+
+  <!-- Notification box -->
+  <rect x="720" y="65" width="220" height="90" rx="10" fill="#0d1929" stroke="#e17055" stroke-width="1.5"/>
+  <rect x="720" y="65" width="220" height="28" rx="10" fill="#e17055" opacity="0.12"/>
+  <text x="830" y="82" text-anchor="middle" fill="#fab1a0" font-size="11" font-weight="700">Notification Engine</text>
+  <text x="735" y="105" fill="#576574" font-size="8.5">Priority scorer: OS tier 1st, app 2nd</text>
+  <text x="735" y="118" fill="#576574" font-size="8.5">OS: phone &middot; SMS &middot; system</text>
+  <text x="735" y="131" fill="#576574" font-size="8.5">App: max &gt; high &gt; default &gt; low &gt; min</text>
+  <text x="735" y="144" fill="#576574" font-size="8.5">Contextual next-step suggestions</text>
+
+  <line x1="635" y1="120" x2="715" y2="120" stroke="#e17055" stroke-width="1.5"/>
+
+  <!-- Sensor Skills box -->
+  <rect x="720" y="170" width="220" height="85" rx="10" fill="#0d1929" stroke="#feca57" stroke-width="1.5"/>
+  <rect x="720" y="170" width="220" height="26" rx="10" fill="#feca57" opacity="0.12"/>
+  <text x="830" y="187" text-anchor="middle" fill="#feca57" font-size="10" font-weight="700">Sensor-Triggered Skills</text>
+  <text x="735" y="207" fill="#576574" font-size="8">light &lt; 10 &rarr; "It's dark"</text>
+  <text x="735" y="220" fill="#576574" font-size="8">pickup &gt; 0 &rarr; "I felt you"</text>
+  <text x="735" y="233" fill="#576574" font-size="8">sig_motion &gt; 0 &rarr; "Moving?"</text>
+  <text x="735" y="246" fill="#576574" font-size="8">Cooldown per skill &middot; eval every 8s</text>
+
+  <!-- Termux API badges -->
+  <rect x="380" y="170" width="300" height="55" rx="8" fill="#0d1525" stroke="#1e2a3a" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="530" y="189" text-anchor="middle" fill="#8395a7" font-size="9">Termux:API bridge</text>
+  <text x="400" y="207" fill="#576574" font-size="8">termux-sensor &middot; termux-notification-list</text>
+  <text x="400" y="220" fill="#576574" font-size="8">termux-open-url &middot; termux-bluetooth &middot; termux-battery-status</text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- CONNECTION ARROW -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <line x1="575" y1="270" x2="575" y2="340" stroke="#0984e3" stroke-width="2.5" stroke-dasharray="8,4"/>
+  <polygon points="568,335 575,350 582,335" fill="#0984e3"/>
+  <rect x="490" y="290" width="170" height="22" rx="11" fill="#1e2a3a" stroke="#0984e3" stroke-width="0.8"/>
+  <text x="575" y="305" text-anchor="middle" fill="#48dbfb" font-size="9" font-weight="600">HTTP  &middot;  no SSH needed</text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- DOCKER / SERVER SECTION -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="40" y="340" width="1070" height="235" rx="14" fill="#0d1525" stroke="#1e2a3a" stroke-width="1.5" filter="url(#shadow)"/>
+
+  <!-- lilly_ai.py main box -->
+  <rect x="60" y="355" width="340" height="200" rx="10" fill="#0d1929" stroke="#0984e3" stroke-width="1.5"/>
+  <rect x="60" y="355" width="340" height="30" rx="10" fill="#0984e3" opacity="0.12"/>
+  <text x="230" y="374" text-anchor="middle" fill="#74b9ff" font-size="13" font-weight="700">lilly_ai.py  :8098</text>
+  <text x="230" y="390" text-anchor="middle" fill="#576574" font-size="8.5">FastAPI  &middot;  12,500+ lines  &middot;  13 background tasks</text>
+
+  <rect x="75" y="400" width="100" height="24" rx="6" fill="#1e2a3a"/>
+  <text x="125" y="416" text-anchor="middle" fill="#48dbfb" font-size="8.5">Intent Router</text>
+  <rect x="185" y="400" width="100" height="24" rx="6" fill="#1e2a3a"/>
+  <text x="235" y="416" text-anchor="middle" fill="#48dbfb" font-size="8.5">Memory Layer</text>
+  <rect x="295" y="400" width="90" height="24" rx="6" fill="#1e2a3a"/>
+  <text x="340" y="416" text-anchor="middle" fill="#48dbfb" font-size="8.5">Skill Engine</text>
+
+  <rect x="75" y="432" width="100" height="24" rx="6" fill="#1e2a3a"/>
+  <text x="125" y="448" text-anchor="middle" fill="#48dbfb" font-size="8.5">Notif Monitor</text>
+  <rect x="185" y="432" width="100" height="24" rx="6" fill="#1e2a3a"/>
+  <text x="235" y="448" text-anchor="middle" fill="#48dbfb" font-size="8.5">Sensor Engine</text>
+  <rect x="295" y="432" width="90" height="24" rx="6" fill="#1e2a3a"/>
+  <text x="340" y="448" text-anchor="middle" fill="#48dbfb" font-size="8.5">Activity Tracker</text>
+
+  <rect x="75" y="464" width="100" height="24" rx="6" fill="#1e2a3a"/>
+  <text x="125" y="480" text-anchor="middle" fill="#48dbfb" font-size="8.5">Proximity Monitor</text>
+  <rect x="185" y="464" width="100" height="24" rx="6" fill="#1e2a3a"/>
+  <text x="235" y="480" text-anchor="middle" fill="#48dbfb" font-size="8.5">Synaptic Learning</text>
+  <rect x="295" y="464" width="90" height="24" rx="6" fill="#1e2a3a"/>
+  <text x="340" y="480" text-anchor="middle" fill="#48dbfb" font-size="8.5">Vision Commentary</text>
+
+  <text x="230" y="525" text-anchor="middle" fill="#576574" font-size="8">13 background async tasks: mic, sensors, notifications, skills, proximity, geo, vision, scheduler, watchdog, proactive</text>
+
+  <!-- LLM Backend box -->
+  <rect x="440" y="355" width="220" height="100" rx="10" fill="#0d1929" stroke="#e17055" stroke-width="1.5"/>
+  <rect x="440" y="355" width="220" height="26" rx="10" fill="#e17055" opacity="0.12"/>
+  <text x="550" y="371" text-anchor="middle" fill="#fab1a0" font-size="11" font-weight="700">LLM Backend</text>
+  <text x="455" y="394" fill="#576574" font-size="8.5">Ollama (primary) / llama.cpp (fallback)</text>
+  <text x="455" y="410" fill="#576574" font-size="8.5">Whisper speech-to-text</text>
+  <text x="455" y="426" fill="#576574" font-size="8.5">LoRA persona adapters (trainer/)</text>
+  <text x="455" y="442" fill="#576574" font-size="8.5">Synaptic memory matrix</text>
+  <line x1="400" y1="405" x2="435" y2="405" stroke="#e17055" stroke-width="1.5"/>
+
+  <!-- TTS box -->
+  <rect x="700" y="355" width="220" height="100" rx="10" fill="#0d1929" stroke="#fd79a8" stroke-width="1.5"/>
+  <rect x="700" y="355" width="220" height="26" rx="10" fill="#fd79a8" opacity="0.12"/>
+  <text x="810" y="371" text-anchor="middle" fill="#e84393" font-size="11" font-weight="700">Piper TTS (12 Voices)</text>
+  <text x="715" y="394" fill="#576574" font-size="8.5">Per-avatar voice profiles</text>
+  <text x="715" y="410" fill="#576574" font-size="8.5">pitch_shift / length_scale / noise_scale</text>
+  <text x="715" y="426" fill="#576574" font-size="8.5">7 Piper ONNX models + espeak-ng</text>
+  <text x="715" y="442" fill="#576574" font-size="8.5">Lip-sync animation per character</text>
+  <line x1="400" y1="425" x2="695" y2="405" stroke="#fd79a8" stroke-width="1.5"/>
+
+  <!-- 9 Avatar Personas -->
+  <rect x="440" y="465" width="480" height="95" rx="10" fill="#0d1929" stroke="#feca57" stroke-width="1.5"/>
+  <rect x="440" y="465" width="480" height="26" rx="10" fill="#feca57" opacity="0.12"/>
+  <text x="680" y="481" text-anchor="middle" fill="#feca57" font-size="11" font-weight="700">9 Avatars — Hive Mind</text>
+  <text x="458" y="503" fill="#576574" font-size="9">🐶 Puppy  &middot; 🦊 Fox  &middot; 🐱 Cat  &middot; 🐻 Bear  &middot; 🐰 Bunny</text>
+  <text x="458" y="520" fill="#576574" font-size="9">🦉 Owl  &middot; 🦌 Deer  &middot; 🐺 Wolf  &middot; 🦝 Raccoon</text>
+  <text x="458" y="540" fill="#8395a7" font-size="8">Each has unique voice prompt, TTS profile, role, strengths, and personality</text>
+
+  <!-- Open Connector -->
+  <rect x="960" y="355" width="135" height="100" rx="10" fill="#0d1929" stroke="#00b894" stroke-width="1" stroke-dasharray="4,3"/>
+  <rect x="960" y="355" width="135" height="26" rx="10" fill="#00b894" opacity="0.08"/>
+  <text x="1027" y="371" text-anchor="middle" fill="#55efc4" font-size="9" font-weight="700">Open Connector</text>
+  <text x="972" y="394" fill="#576574" font-size="7.5">Gmail API</text>
+  <text x="972" y="408" fill="#576574" font-size="7.5">Outlook API</text>
+  <text x="972" y="422" fill="#576574" font-size="7.5">Calendar</text>
+  <text x="972" y="436" fill="#576574" font-size="7.5">MCP runtime</text>
+  <text x="972" y="450" fill="#576574" font-size="7.5">OAuth2</text>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- UI SECTION -->
+  <!-- ═══════════════════════════════════════════════════ -->
+  <rect x="40" y="610" width="1070" height="80" rx="14" fill="#0d1525" stroke="#1e2a3a" stroke-width="1.5" filter="url(#shadow)"/>
+
+  <rect x="60" y="622" width="220" height="56" rx="8" fill="#0d1929" stroke="#48dbfb" stroke-width="1.2"/>
+  <text x="170" y="643" text-anchor="middle" fill="#48dbfb" font-size="10" font-weight="600">Browser UI</text>
+  <text x="170" y="660" text-anchor="middle" fill="#576574" font-size="8">Chat box &middot; Avatar picker &middot; Mic button</text>
+  <text x="170" y="672" text-anchor="middle" fill="#576574" font-size="8">WebRTC mic &middot; Settings</text>
+
+  <rect x="310" y="622" width="220" height="56" rx="8" fill="#0d1929" stroke="#6c5ce7" stroke-width="1.2"/>
+  <text x="420" y="643" text-anchor="middle" fill="#a29bfe" font-size="10" font-weight="600">Android App (Kotlin)</text>
+  <text x="420" y="660" text-anchor="middle" fill="#576574" font-size="8">Accessibility Service</text>
+  <text x="420" y="672" text-anchor="middle" fill="#576574" font-size="8">Foreground Service &middot; Room DB</text>
+
+  <rect x="560" y="622" width="220" height="56" rx="8" fill="#0d1929" stroke="#00b894" stroke-width="1.2"/>
+  <text x="670" y="643" text-anchor="middle" fill="#55efc4" font-size="10" font-weight="600">REST API / Webhooks</text>
+  <text x="670" y="660" text-anchor="middle" fill="#576574" font-size="8">/api/chat &middot; /api/sensors</text>
+  <text x="670" y="672" text-anchor="middle" fill="#576574" font-size="8">/api/notifications &middot; /api/health</text>
+
+  <rect x="810" y="622" width="220" height="56" rx="8" fill="#0d1929" stroke="#fd79a8" stroke-width="1.2"/>
+  <text x="920" y="643" text-anchor="middle" fill="#e84393" font-size="10" font-weight="600">Voice</text>
+  <text x="920" y="660" text-anchor="middle" fill="#576574" font-size="8">Browser WebRTC mic</text>
+  <text x="920" y="672" text-anchor="middle" fill="#576574" font-size="8">SSH mic (optional)</text>
+
+  <!-- Arrow: Docker → UI -->
+  <line x1="575" y1="575" x2="575" y2="605" stroke="#0984e3" stroke-width="2"/>
+  <polygon points="568,600 575,615 582,600" fill="#0984e3"/>
+
+  <!-- ═══════════════════════════════════════════════════ -->
+  <!-- SCREENSHOT GALLERY -->
+  <!-- ═══════════════════════════════════════════════════ -->
+
+  <!-- Screenshot 1: Chat UI -->
+  <rect x="60" y="735" width="320" height="230" rx="10" fill="#0d1929" stroke="#0984e3" stroke-width="1.5"/>
+  <rect x="60" y="735" width="320" height="230" rx="10" fill="url(#server)" opacity="0.04"/>
+  <rect x="60" y="735" width="320" height="28" rx="10" fill="#0984e3" opacity="0.12"/>
+  <text x="220" y="753" text-anchor="middle" fill="#74b9ff" font-size="10" font-weight="600">Avatar Chat Interface</text>
+
+  <!-- screenshot placeholder frame -->
+  <rect x="85" y="775" width="270" height="150" rx="6" fill="#0a0e1a" stroke="#1e2a3a" stroke-width="1" stroke-dasharray="6,4"/>
+  <text x="220" y="835" text-anchor="middle" fill="#576574" font-size="22">📷</text>
+  <text x="220" y="858" text-anchor="middle" fill="#576574" font-size="9">Chat bubble UI with avatar</text>
+  <text x="220" y="873" text-anchor="middle" fill="#576574" font-size="9">and PiP YouTube overlay</text>
+  <text x="220" y="895" text-anchor="middle" fill="#3a4a5a" font-size="8">Replace me with screenshot.png</text>
+
+  <!-- Screenshot 2: Sensor server -->
+  <rect x="415" y="735" width="320" height="230" rx="10" fill="#0d1929" stroke="#e17055" stroke-width="1.5"/>
+  <rect x="415" y="735" width="320" height="230" rx="10" fill="url(#llm)" opacity="0.03"/>
+  <rect x="415" y="735" width="320" height="28" rx="10" fill="#e17055" opacity="0.12"/>
+  <text x="575" y="753" text-anchor="middle" fill="#fab1a0" font-size="10" font-weight="600">Termux Sensor Server</text>
+
+  <rect x="440" y="775" width="270" height="150" rx="6" fill="#0a0e1a" stroke="#1e2a3a" stroke-width="1" stroke-dasharray="6,4"/>
+  <text x="575" y="835" text-anchor="middle" fill="#576574" font-size="22">📷</text>
+  <text x="575" y="858" text-anchor="middle" fill="#576574" font-size="9">termux_sensor_server.py</text>
+  <text x="575" y="873" text-anchor="middle" fill="#576574" font-size="9">running in Termux on phone</text>
+  <text x="575" y="895" text-anchor="middle" fill="#3a4a5a" font-size="8">Replace me with screenshot.png</text>
+
+  <!-- Screenshot 3: Notifications -->
+  <rect x="770" y="735" width="320" height="230" rx="10" fill="#0d1929" stroke="#feca57" stroke-width="1.5"/>
+  <rect x="770" y="735" width="320" height="230" rx="10" fill="url(#tts)" opacity="0.03"/>
+  <rect x="770" y="735" width="320" height="28" rx="10" fill="#feca57" opacity="0.12"/>
+  <text x="930" y="753" text-anchor="middle" fill="#feca57" font-size="10" font-weight="600">Notification Priority Alerts</text>
+
+  <rect x="795" y="775" width="270" height="150" rx="6" fill="#0a0e1a" stroke="#1e2a3a" stroke-width="1" stroke-dasharray="6,4"/>
+  <text x="930" y="835" text-anchor="middle" fill="#576574" font-size="22">📷</text>
+  <text x="930" y="858" text-anchor="middle" fill="#576574" font-size="9">OS-tier and app-tier</text>
+  <text x="930" y="873" text-anchor="middle" fill="#576574" font-size="9">notification alerts</text>
+  <text x="930" y="895" text-anchor="middle" fill="#3a4a5a" font-size="8">Replace me with screenshot.png</text>
+
+  <!-- Screenshot 4: Skills -->
+  <rect x="60" y="985" width="320" height="230" rx="10" fill="#0d1929" stroke="#6c5ce7" stroke-width="1.5"/>
+  <rect x="60" y="985" width="320" height="230" rx="10" fill="url(#phone)" opacity="0.03"/>
+  <rect x="60" y="985" width="320" height="28" rx="10" fill="#6c5ce7" opacity="0.12"/>
+  <text x="220" y="1003" text-anchor="middle" fill="#a29bfe" font-size="10" font-weight="600">App Launch (PiP Mode)</text>
+
+  <rect x="85" y="1025" width="270" height="150" rx="6" fill="#0a0e1a" stroke="#1e2a3a" stroke-width="1" stroke-dasharray="6,4"/>
+  <text x="220" y="1085" text-anchor="middle" fill="#576574" font-size="22">📷</text>
+  <text x="220" y="1108" text-anchor="middle" fill="#576574" font-size="9">YouTube opening in PiP</text>
+  <text x="220" y="1123" text-anchor="middle" fill="#576574" font-size="9">over avatar chat</text>
+  <text x="220" y="1145" text-anchor="middle" fill="#3a4a5a" font-size="8">Replace me with screenshot.png</text>
+
+  <!-- Screenshot 5: Sensors -->
+  <rect x="415" y="985" width="320" height="230" rx="10" fill="#0d1929" stroke="#00b894" stroke-width="1.5"/>
+  <rect x="415" y="985" width="320" height="230" rx="10" fill="url(#docker)" opacity="0.03"/>
+  <rect x="415" y="985" width="320" height="28" rx="10" fill="#00b894" opacity="0.12"/>
+  <text x="575" y="1003" text-anchor="middle" fill="#55efc4" font-size="10" font-weight="600">Sensor Data View</text>
+
+  <rect x="440" y="1025" width="270" height="150" rx="6" fill="#0a0e1a" stroke="#1e2a3a" stroke-width="1" stroke-dasharray="6,4"/>
+  <text x="575" y="1085" text-anchor="middle" fill="#576574" font-size="22">📷</text>
+  <text x="575" y="1108" text-anchor="middle" fill="#576574" font-size="9">Live 23-sensor readings</text>
+  <text x="575" y="1123" text-anchor="middle" fill="#576574" font-size="9">light / motion / steps / battery</text>
+  <text x="575" y="1145" text-anchor="middle" fill="#3a4a5a" font-size="8">Replace me with screenshot.png</text>
+
+  <!-- Screenshot 6: Avatars -->
+  <rect x="770" y="985" width="320" height="230" rx="10" fill="#0d1929" stroke="#fd79a8" stroke-width="1.5"/>
+  <rect x="770" y="985" width="320" height="230" rx="10" fill="url(#tts)" opacity="0.03"/>
+  <rect x="770" y="985" width="320" height="28" rx="10" fill="#fd79a8" opacity="0.12"/>
+  <text x="930" y="1003" text-anchor="middle" fill="#e84393" font-size="10" font-weight="600">Avatar Picker</text>
+
+  <rect x="795" y="1025" width="270" height="150" rx="6" fill="#0a0e1a" stroke="#1e2a3a" stroke-width="1" stroke-dasharray="6,4"/>
+  <text x="930" y="1085" text-anchor="middle" fill="#576574" font-size="22">📷</text>
+  <text x="930" y="1108" text-anchor="middle" fill="#576574" font-size="9">9-character hive mind</text>
+  <text x="930" y="1123" text-anchor="middle" fill="#576574" font-size="9">avatar selection wheel</text>
+  <text x="930" y="1145" text-anchor="middle" fill="#3a4a5a" font-size="8">Replace me with screenshot.png</text>
+
+  <!-- Feature badges -->
+  <rect x="975" y="65" width="120" height="26" rx="13" fill="#ee5a24" opacity="0.15" stroke="#ee5a24" stroke-width="1"/>
+  <text x="1035" y="82" text-anchor="middle" fill="#ee5a24" font-size="8" font-weight="600">Zero-SSH</text>
+  <rect x="975" y="100" width="120" height="26" rx="13" fill="#feca57" opacity="0.15" stroke="#feca57" stroke-width="1"/>
+  <text x="1035" y="117" text-anchor="middle" fill="#feca57" font-size="8" font-weight="600">PiP mode</text>
+  <rect x="975" y="135" width="120" height="26" rx="13" fill="#55efc4" opacity="0.15" stroke="#55efc4" stroke-width="1"/>
+  <text x="1035" y="152" text-anchor="middle" fill="#55efc4" font-size="8" font-weight="600">Kid mode</text>
+  <rect x="975" y="170" width="120" height="26" rx="13" fill="#a29bfe" opacity="0.15" stroke="#a29bfe" stroke-width="1"/>
+  <text x="1035" y="187" text-anchor="middle" fill="#a29bfe" font-size="8" font-weight="600">9 personas</text>
+  <rect x="975" y="205" width="120" height="26" rx="13" fill="#e84393" opacity="0.15" stroke="#e84393" stroke-width="1"/>
+  <text x="1035" y="222" text-anchor="middle" fill="#e84393" font-size="8" font-weight="600">TTS + lip sync</text>
+  <rect x="975" y="240" width="120" height="26" rx="13" fill="#48dbfb" opacity="0.15" stroke="#48dbfb" stroke-width="1"/>
+  <text x="1035" y="257" text-anchor="middle" fill="#48dbfb" font-size="8" font-weight="600">23 sensors</text>
+</svg>
+
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#0984e3"></div> Core server (HTTP)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#6c5ce7"></div> Android / sensors</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#e17055"></div> Notification engine</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#00b894"></div> Shell &amp; app launch</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#feca57"></div> Avatars &amp; skills</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#fd79a8"></div> TTS / voice</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#1e2a3a;border:1px solid #576574"></div> Optional (SSH / OAuth)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#3a4a5a;border:1px dashed #576574"></div> Screenshot placeholder</div>
+</div>
+
+<div class="footer">
+  <p><strong>Data flow:</strong> Phone sensors &rarr; termux_sensor_server.py (HTTP) &rarr; lilly_ai.py &rarr; LLM &rarr; TTS &rarr; User</p>
+  <p><strong>To add screenshots:</strong> Open <code>ARCHITECTURE.html</code>, replace each camera placeholder
+  with <code>&lt;image href=&quot;your-screenshot.png&quot; x=&quot;...&quot; y=&quot;...&quot; width=&quot;270&quot; height=&quot;150&quot;/&gt;</code></p>
+  <p>PLAYBOOK &bull; <a href="PLAYBOOK.md">Full Playbook</a></p>
+</div>
+
+</body>
+</html>

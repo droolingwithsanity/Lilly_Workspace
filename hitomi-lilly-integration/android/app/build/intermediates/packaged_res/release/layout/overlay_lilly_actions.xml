@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="48dp"
+    android:background="@drawable/overlay_action_button_bg"
+    android:backgroundTint="#DD2A2A3E"
+    android:elevation="12dp"
+    android:gravity="center"
+    android:orientation="horizontal"
+    android:padding="6dp">
+
+    <ImageButton
+        android:id="@+id/lillyQuickSettings"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="@drawable/overlay_action_button_bg"
+        android:backgroundTint="#FFE27A"
+        android:contentDescription="Settings"
+        android:padding="8dp"
+        android:src="@android:drawable/ic_menu_manage"
+        android:layout_marginEnd="4dp" />
+
+    <ImageButton
+        android:id="@+id/lillyQuickScript"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="@drawable/overlay_action_button_bg"
+        android:backgroundTint="#60A5FA"
+        android:contentDescription="Run script"
+        android:padding="8dp"
+        android:src="@android:drawable/ic_menu_edit"
+        android:layout_marginEnd="4dp" />
+
+    <ImageButton
+        android:id="@+id/lillyQuickMic"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="@drawable/overlay_action_button_bg"
+        android:backgroundTint="#BFE9FF"
+        android:contentDescription="Toggle microphone"
+        android:padding="8dp"
+        android:src="@android:drawable/ic_btn_speak_now"
+        android:layout_marginEnd="4dp" />
+
+    <ImageButton
+        android:id="@+id/lillyQuickClose"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="@drawable/overlay_action_button_bg"
+        android:backgroundTint="#FF9AA5"
+        android:contentDescription="Close overlay"
+        android:padding="8dp"
+        android:src="@android:drawable/ic_menu_close_clear_cancel" />
+
+</LinearLayout>

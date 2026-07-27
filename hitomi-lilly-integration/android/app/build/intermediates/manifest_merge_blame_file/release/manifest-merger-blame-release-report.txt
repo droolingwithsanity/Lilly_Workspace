@@ -1,0 +1,120 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="ai.agent1c.hitomi"
+4    android:versionCode="23"
+5    android:versionName="2.3" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="21"
+9        android:targetSdkVersion="34" />
+10
+11    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+11-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:4:5-78
+11-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:4:22-75
+12    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+12-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:5:5-77
+12-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:5:22-74
+13    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+13-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:6:5-89
+13-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:6:22-86
+14    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+14-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:7:5-71
+14-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:7:22-68
+15    <uses-permission android:name="android.permission.INTERNET" />
+15-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:8:5-67
+15-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:8:22-64
+16    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+16-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:9:5-77
+16-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:9:22-74
+17
+18    <permission
+18-->[androidx.core:core:1.12.0] /home/labhrasd/.gradle/caches/transforms-3/8984a2818abe479d4cf4f9379cd1f64e/transformed/core-1.12.0/AndroidManifest.xml:22:5-24:47
+19        android:name="ai.agent1c.hitomi.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+19-->[androidx.core:core:1.12.0] /home/labhrasd/.gradle/caches/transforms-3/8984a2818abe479d4cf4f9379cd1f64e/transformed/core-1.12.0/AndroidManifest.xml:23:9-81
+20        android:protectionLevel="signature" />
+20-->[androidx.core:core:1.12.0] /home/labhrasd/.gradle/caches/transforms-3/8984a2818abe479d4cf4f9379cd1f64e/transformed/core-1.12.0/AndroidManifest.xml:24:9-44
+21
+22    <uses-permission android:name="ai.agent1c.hitomi.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+22-->[androidx.core:core:1.12.0] /home/labhrasd/.gradle/caches/transforms-3/8984a2818abe479d4cf4f9379cd1f64e/transformed/core-1.12.0/AndroidManifest.xml:26:5-97
+22-->[androidx.core:core:1.12.0] /home/labhrasd/.gradle/caches/transforms-3/8984a2818abe479d4cf4f9379cd1f64e/transformed/core-1.12.0/AndroidManifest.xml:26:22-94
+23
+24    <application
+24-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:11:5-40:19
+25        android:allowBackup="true"
+25-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:12:9-35
+26        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+26-->[androidx.core:core:1.12.0] /home/labhrasd/.gradle/caches/transforms-3/8984a2818abe479d4cf4f9379cd1f64e/transformed/core-1.12.0/AndroidManifest.xml:28:18-86
+27        android:extractNativeLibs="true"
+28        android:icon="@drawable/ic_launcher_foreground"
+28-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:13:9-56
+29        android:label="Lilly"
+29-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:14:9-30
+30        android:supportsRtl="true"
+30-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:15:9-35
+31        android:theme="@style/Theme.LillyOverlay"
+31-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:16:9-50
+32        android:usesCleartextTraffic="true" >
+32-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:17:9-44
+33        <activity
+33-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:19:9-27:20
+34            android:name="ai.agent1c.hitomi.MainActivity"
+34-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:20:13-41
+35            android:exported="true"
+35-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:21:13-36
+36            android:theme="@style/Theme.LillyOverlay" >
+36-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:22:13-54
+37            <intent-filter>
+37-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:23:13-26:29
+38                <action android:name="android.intent.action.MAIN" />
+38-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:24:17-69
+38-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:24:25-66
+39
+40                <category android:name="android.intent.category.LAUNCHER" />
+40-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:25:17-77
+40-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:25:27-74
+41            </intent-filter>
+42        </activity>
+43        <activity
+43-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:29:9-33:58
+44            android:name="ai.agent1c.hitomi.WebViewActivity"
+44-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:30:13-44
+45            android:exported="false"
+45-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:31:13-37
+46            android:theme="@style/Theme.LillyOverlay"
+46-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:32:13-54
+47            android:windowSoftInputMode="adjustResize" />
+47-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:33:13-55
+48
+49        <service
+49-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:35:9-38:58
+50            android:name="ai.agent1c.hitomi.LillyOverlayService"
+50-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:36:13-48
+51            android:exported="false"
+51-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:37:13-37
+52            android:foregroundServiceType="specialUse" />
+52-->/home/labhrasd/Lilly_Workspace/hitomi-lilly-integration/android/app/src/main/AndroidManifest.xml:38:13-55
+53
+54        <provider
+54-->[androidx.emoji2:emoji2:1.2.0] /home/labhrasd/.gradle/caches/transforms-3/d4a275950a283a7600ce2f27c4b6fc88/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:24:9-32:20
+55            android:name="androidx.startup.InitializationProvider"
+55-->[androidx.emoji2:emoji2:1.2.0] /home/labhrasd/.gradle/caches/transforms-3/d4a275950a283a7600ce2f27c4b6fc88/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:25:13-67
+56            android:authorities="ai.agent1c.hitomi.androidx-startup"
+56-->[androidx.emoji2:emoji2:1.2.0] /home/labhrasd/.gradle/caches/transforms-3/d4a275950a283a7600ce2f27c4b6fc88/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:26:13-68
+57            android:exported="false" >
+57-->[androidx.emoji2:emoji2:1.2.0] /home/labhrasd/.gradle/caches/transforms-3/d4a275950a283a7600ce2f27c4b6fc88/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:27:13-37
+58            <meta-data
+58-->[androidx.emoji2:emoji2:1.2.0] /home/labhrasd/.gradle/caches/transforms-3/d4a275950a283a7600ce2f27c4b6fc88/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:29:13-31:52
+59                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+59-->[androidx.emoji2:emoji2:1.2.0] /home/labhrasd/.gradle/caches/transforms-3/d4a275950a283a7600ce2f27c4b6fc88/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:30:17-75
+60                android:value="androidx.startup" />
+60-->[androidx.emoji2:emoji2:1.2.0] /home/labhrasd/.gradle/caches/transforms-3/d4a275950a283a7600ce2f27c4b6fc88/transformed/jetified-emoji2-1.2.0/AndroidManifest.xml:31:17-49
+61            <meta-data
+61-->[androidx.lifecycle:lifecycle-process:2.4.1] /home/labhrasd/.gradle/caches/transforms-3/5e979aba499023793fa8123209d1c30d/transformed/jetified-lifecycle-process-2.4.1/AndroidManifest.xml:31:13-33:52
+62                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+62-->[androidx.lifecycle:lifecycle-process:2.4.1] /home/labhrasd/.gradle/caches/transforms-3/5e979aba499023793fa8123209d1c30d/transformed/jetified-lifecycle-process-2.4.1/AndroidManifest.xml:32:17-78
+63                android:value="androidx.startup" />
+63-->[androidx.lifecycle:lifecycle-process:2.4.1] /home/labhrasd/.gradle/caches/transforms-3/5e979aba499023793fa8123209d1c30d/transformed/jetified-lifecycle-process-2.4.1/AndroidManifest.xml:33:17-49
+64        </provider>
+65    </application>
+66
+67</manifest>

@@ -1,0 +1,58 @@
+services:
+  lilly:
+    build: .
+    container_name: lilly-ai
+    ports:
+      - "8098:8098"
+      - "3007:3002"
+    volumes:
+      - .:/app
+      - /home/labhrasd/.ssh:/root/.ssh:ro
+      - /root/llama.cpp:/root/llama.cpp:ro
+      - lilly-data:/app/data
+      - connector-data:/app/data/connect
+    env_file:
+      - .env
+      - .env.openconnector
+    environment:
+      - PORT=8098
+      - OLLAMA_URL=${OLLAMA_URL:-http://100.93.131.114:11434}
+      - PREFER_BACKEND=${PREFER_BACKEND:-ollama}
+      - SENSOR_SERVER_URL=${SENSOR_SERVER_URL:-http://100.115.234.87:8099}
+      - TERMUX_SSH_HOST=${TERMUX_SSH_HOST}
+      - TERMUX_SSH_PORT=${TERMUX_SSH_PORT:-8022}
+      - TERMUX_SSH_USER=${TERMUX_SSH_USER}
+      # Auth0 OIDC — port 8098 only
+      - AUTH0_DOMAIN=${AUTH0_DOMAIN}
+      - AUTH0_CLIENT_ID=${AUTH0_CLIENT_ID}
+      - AUTH0_CLIENT_SECRET=${AUTH0_CLIENT_SECRET}
+      - AUTH0_SECRET=${AUTH0_SECRET}
+      - APP_BASE_URL=https://droolingwithsanity.ca
+      - OWNER_EMAIL=${OWNER_EMAIL:-laurencekidney@gmail.com}
+      - AUTH0_ADMIN_EMAILS=${AUTH0_ADMIN_EMAILS:-}
+      # Whisper STT server
+      - WHISPER_SERVER_URL=${WHISPER_SERVER_URL:-http://lilly-whisper-stt:8000}
+      # Open Connector settings (runs inside same container on :3001)
+      - OC_BASE_URL=http://localhost:3002
+      # TTS voice
+      - LILLY_WORKSPACE=/app
+      - PIPER_VOICE=/voices/lilly_voice.onnx
+      # Cascade model tiers
+      - SMALL_MODEL=${SMALL_MODEL:-qwen2.5:1.5b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-Ternary-Bonsai-27B-Q2_g64}
+      - FAST_MODEL=${FAST_MODEL:-Ternary-Bonsai-27B-Q2_g64}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - whisper-net
+    restart: unless-stopped
+
+networks:
+  whisper-net:
+    name: supernova_default
+    external: true
+
+volumes:
+  lilly-data:
+  connector-data:

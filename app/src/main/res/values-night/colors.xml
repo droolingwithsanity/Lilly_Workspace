@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Lilly Brand Primary -->
+    <color name="primary">#7C3AED</color>
+    <color name="primary_dark">#5B21B6</color>
+    <color name="primary_light">#A78BFA</color>
+    <color name="primary_variant">#6D28D9</color>
+    
+    <!-- Lilly Brand Secondary -->
+    <color name="secondary">#EC4899</color>
+    <color name="secondary_dark">#DB2777</color>
+    <color name="secondary_light">#F9A8D4</color>
+    
+    <!-- Background Colors -->
+    <color name="background_dark">#0F0A1A</color>
+    <color name="surface_dark">#1A1128</color>
+    <color name="error">#EF4444</color>
+    
+    <!-- Text Colors -->
+    <color name="text_primary_dark">#FFFFFF</color>
+    <color name="text_secondary_dark">#A78BFA</color>
+    <color name="text_hint_dark">#6B7280</color>
+    
+    <!-- Specific Colors -->
+    <color name="typing_indicator_background_dark">#2D1F4E</color>
+    <color name="message_user_dark">#A78BFA</color>
+    <color name="message_lilly_dark">#1A1128</color>
+    <color name="user_message_bg_dark">#A78BFA</color>
+    <color name="lilly_message_bg_dark">#2D1F4E</color>
+    
+    <!-- Launcher Colors -->
+    <color name="ic_launcher_background_dark">#7C3AED</color>
+    
+    <!-- Status Colors -->
+    <color name="online_dark">#10B981</color>
+    <color name="offline_dark">#6B7280</color>
+    <color name="busy_dark">#F59E0B</color>
+</resources>

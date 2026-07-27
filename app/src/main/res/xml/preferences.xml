@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+    
+    <!-- Voice Settings -->
+    <PreferenceCategory app:title="Voice Settings">
+        
+        <SwitchPreferenceCompat
+            app:key="voice_enabled"
+            app:title="Enable Voice Input"
+            app:summary="Allow voice commands to interact with Lilly"
+            app:defaultValue="true" />
+        
+        <ListPreference
+            app:key="voice_language"
+            app:title="Voice Language"
+            app:summary="Select language for voice recognition"
+            app:entries="@array/voice_language_entries"
+            app:entryValues="@array/voice_language_values"
+            app:defaultValue="en-US"
+            app:useSimpleSummaryProvider="true" />
+        
+        <SeekBarPreference
+            app:key="voice_sensitivity"
+            app:title="Voice Sensitivity"
+            app:summary="Adjust voice recognition sensitivity"
+            app:defaultValue="50"
+            app:max="100" />
+        
+    </PreferenceCategory>
+    
+    <!-- Cursor Settings -->
+    <PreferenceCategory app:title="Cursor Control">
+        
+        <SwitchPreferenceCompat
+            app:key="cursor_control_enabled"
+            app:title="Enable Cursor Control"
+            app:summary="Allow Lilly to control cursor for automation"
+            app:defaultValue="false" />
+        
+        <SeekBarPreference
+            app:key="cursor_speed"
+            app:title="Cursor Speed"
+            app:summary="Adjust cursor movement speed"
+            app:defaultValue="50"
+            app:max="100" />
+        
+        <SeekBarPreference
+            app:key="cursor_sensitivity"
+            app:title="Click Sensitivity"
+            app:summary="Adjust click detection sensitivity"
+            app:defaultValue="50"
+            app:max="100" />
+        
+    </PreferenceCategory>
+    
+    <!-- Response Settings -->
+    <PreferenceCategory app:title="Response Settings">
+        
+        <ListPreference
+            app:key="response_length"
+            app:title="Response Length"
+            app:summary="Choose preferred response length"
+            app:entries="@array/response_length_entries"
+            app:entryValues="@array/response_length_values"
+            app:defaultValue="balanced"
+            app:useSimpleSummaryProvider="true" />
+        
+        <ListPreference
+            app:key="response_style"
+            app:title="Response Style"
+            app:summary="Choose preferred response style"
+            app:entries="@array/response_style_entries"
+            app:entryValues="@array/response_style_values"
+            app:defaultValue="professional"
+            app:useSimpleSummaryProvider="true" />
+        
+        <SwitchPreferenceCompat
+            app:key="code_highlighting"
+            app:title="Code Syntax Highlighting"
+            app:summary="Highlight code in responses"
+            app:defaultValue="true" />
+        
+    </PreferenceCategory>
+    
+    <!-- Memory Settings -->
+    <PreferenceCategory app:title="Memory Settings">
+        
+        <SwitchPreferenceCompat
+            app:key="memory_enabled"
+            app:title="Enable Memory"
+            app:summary="Allow Lilly to remember conversation context"
+            app:defaultValue="true" />
+        
+        <SeekBarPreference
+            app:key="memory_size"
+            app:title="Memory Size"
+            app:summary="Number of conversations to remember"
+            app:defaultValue="10"
+            app:max="50" />
+        
+        <SwitchPreferenceCompat
+            app:key="auto_memory"
+            app:title="Auto-Memory"
+            app:summary="Automatically store important information"
+            app:defaultValue="true" />
+        
+    </PreferenceCategory>
+    
+    <!-- Skill Settings -->
+    <PreferenceCategory app:title="Skill Settings">
+        
+        <SwitchPreferenceCompat
+            app:key="auto_install_skills"
+            app:title="Auto-Install Skills"
+            app:summary="Automatically install detected skills"
+            app:defaultValue="false" />
+        
+        <SwitchPreferenceCompat
+            app:key="skill_notifications"
+            app:title="Skill Notifications"
+            app:summary="Show notifications for skill events"
+            app:defaultValue="true" />
+        
+    </PreferenceCategory>
+    
+    <!-- Notification Settings -->
+    <PreferenceCategory app:title="Notifications">
+        
+        <SwitchPreferenceCompat
+            app:key="notifications_enabled"
+            app:title="Enable Notifications"
+            app:summary="Show notifications for Lilly events"
+            app:defaultValue="true" />
+        
+        <SwitchPreferenceCompat
+            app:key="background_notifications"
+            app:title="Background Notifications"
+            app:summary="Show notifications when Lilly is in background"
+            app:defaultValue="true" />
+        
+    </PreferenceCategory>
+    
+    <!-- Advanced Settings -->
+    <PreferenceCategory app:title="Advanced">
+        
+        <SwitchPreferenceCompat
+            app:key="debug_mode"
+            app:title="Debug Mode"
+            app:summary="Enable debug logging"
+            app:defaultValue="false" />
+        
+        <ListPreference
+            app:key="theme"
+            app:title="Theme"
+            app:summary="Choose app theme"
+            app:entries="@array/theme_entries"
+            app:entryValues="@array/theme_values"
+            app:defaultValue="system"
+            app:useSimpleSummaryProvider="true" />
+        
+        <Preference
+            app:key="clear_data"
+            app:title="Clear Data"
+            app:summary="Clear all stored data and memories"
+            app:icon="@drawable/ic_clear" />
+        
+    </PreferenceCategory>
+    
+</PreferenceScreen>

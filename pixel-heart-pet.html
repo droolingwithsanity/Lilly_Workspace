@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pixel Heart Pet Feeder</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+background: #1a1a2e;
+display: flex;
+flex-direction: column;
+align-items: center;
+justify-content: center;
+min-height: 100vh;
+font-family: 'Courier New', monospace;
+overflow: hidden;
+}
+canvas {
+image-rendering: pixelated;
+image-rendering: crisp-edges;
+border: 3px solid #e94560;
+border-radius: 8px;
+box-shadow: 0 0 30px rgba(233,69,96,0.3);
+}
+.info {
+color: #e94560;
+margin-top: 20px;
+text-align: center;
+font-size: 14px;
+opacity: 0.8;
+}
+.info span { color: #ff6b6b; font-weight: bold; }
+.controls {
+margin-top: 15px;
+display: flex;
+gap: 12px;
+}
+.controls button {
+background: #e94560;
+color: #fff;
+border: none;
+padding: 10px 20px;
+border-radius: 6px;
+cursor: pointer;
+font-family: 'Courier New', monospace;
+font-size: 13px;
+transition: all 0.2s;
+}
+.controls button:hover {
+background: #ff6b6b;
+transform: scale(1.05);
+}
+</style>
+</head>
+<body>
+<canvas id="canvas" width="400" height="500"></canvas>
+<div class="info">
+Activity: <span id="activityCount">0</span> steps &nbsp;|&nbsp;
+Bowl: <span id="bowlCount">0</span>/50 kibble &nbsp;|&nbsp;
+Heart HP: <span id="heartHP">100</span>%
+</div>
+<div class="controls">
+<button onclick="addActivity('walk')">Walk +10</button>
+<button onclick="addActivity('run')">Run +25</button>
+<button onclick="addActivity('workout')">Workout +50</button>
+</div>
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const TILE = 4;
+const COLS = canvas.width / TILE;
+const ROWS = canvas.height / TILE;
+
+// Heart pixel grid (13x12 pattern, scaled up)
+const HEART_PATTERN = [
+  [0,0,1,1,1,0,0,1,1,1,0,0,0],
+  [0,1,1,1,1,1,1,1,1,1,1,0,0],
+  [1,1,1,1,1,1,1,1,1,1,1,1,0],
+  [1,1,1,1,1,1,1,1,1,1,1,1,0],
+  [1,1,1,1,1,1,1,1,1,1,1,1,0],
+  [0,1,1,1,1,1,1,1,1,1,1,0,0],
+  [0,0,1,1,1,1,1,1,1,1,0,0,0],
+  [0,0,0,1,1,1,1,1,1,0,0,0,0],
+  [0,0,0,0,1,1,1,1,0,0,0,0,0],
+  [0,0,0,0,0,1,1,0,0,0,0,0,0],
+];
+
+const HEART_W = HEART_PATTERN[0].length;
+const HEART_H = HEART_PATTERN.length;
+const HEART_X = Math.floor((COLS - HEART_W) / 2);
+const HEART_Y = 8;
+
+// Heart pixel state
+let heartPixels = [];
+let fallingPixels = [];
+let bowlPixels = [];
+let bowlCount = 0;
+let activityTotal = 0;
+let heartHP = 100;
+let heartBob = 0;
+let heartBobDir = 1;
+let lastFallTime = 0;
+
+// Bowl geometry
+const BOWL_Y = ROWS - 18;
+const BOWL_LEFT = Math.floor(COLS/2) - 12;
+const BOWL_RIGHT = Math.floor(COLS/2) + 12;
+const BOWL_DEPTH = 10;
+
+// Initialize heart pixels
+function initHeart() {
+  heartPixels = [];
+  for (let r = 0; r < HEART_H; r++) {
+    for (let c = 0; c < HEART_W; c++) {
+      if (HEART_PATTERN[r][c]) {
+        heartPixels.push({
+          gx: HEART_X + c,
+          gy: HEART_Y + r,
+          alive: true,
+          pulsePhase: Math.random() * Math.PI * 2
+        });
+      }
+    }
+  }
+}
+initHeart();
+
+// Colors
+const HEART_COLORS = ['#e94560', '#ff6b6b', '#ff4757', '#c0392b', '#e74c3c'];
+const BOWL_COLOR = '#8B7355';
+const BOWL_DARK = '#6B5335';
+const BOWL_RIM = '#A0926B';
+
+function addActivity(type) {
+  const amounts = { walk: 10, run: 25, workout: 50 };
+  const amount = amounts[type] || 10;
+  activityTotal += amount;
+  document.getElementById('activityCount').textContent = activityTotal;
+
+  // Release pixels from heart
+  for (let i = 0; i < amount; i++) {
+    releasePixel();
+  }
+
+  // Replenish heart HP slightly
+  heartHP = Math.min(100, heartHP + amount * 0.3);
+  document.getElementById('heartHP').textContent = Math.floor(heartHP);
+}
+
+function releasePixel() {
+  // Find alive pixel from edge
+  const alive = heartPixels.filter(p => p.alive);
+  if (alive.length === 0) return;
+
+  // Prefer bottom/edge pixels
+  alive.sort((a, b) => b.gy - a.gy + (Math.random() - 0.5) * 2);
+  const target = alive[0];
+  target.alive = false;
+
+  const px = target.gx * TILE + TILE/2;
+  const py = (target.gy + heartBob) * TILE + TILE/2;
+
+  fallingPixels.push({
+    x: px,
+    y: py,
+    vy: 0,
+    vx: (Math.random() - 0.5) * 0.8,
+    color: HEART_COLORS[Math.floor(Math.random() * HEART_COLORS.length)],
+    targetY: BOWL_Y * TILE + Math.floor(Math.random() * BOWL_DEPTH) * TILE,
+    landed: false,
+    wobble: Math.random() * Math.PI * 2,
+    size: TILE
+  });
+}
+
+// Auto-regenerate heart pixels slowly
+setInterval(() => {
+  const dead = heartPixels.filter(p => !p.alive);
+  if (dead.length > 0 && heartHP > 20) {
+    // Revive 1-2 random dead pixels
+    const count = Math.min(2, dead.length);
+    for (let i = 0; i < count; i++) {
+      const idx = Math.floor(Math.random() * dead.length);
+      dead[idx].alive = true;
+      heartHP = Math.max(0, heartHP - 0.5);
+      document.getElementById('heartHP').textContent = Math.floor(heartHP);
+    }
+  }
+}, 1500);
+
+// Draw functions
+function drawHeart() {
+  const bobY = Math.sin(heartBob) * 1.5;
+  for (const p of heartPixels) {
+    if (!p.alive) continue;
+    const px = p.gx * TILE;
+    const py = p.gy * TILE + bobY * TILE;
+    const pulse = Math.sin(Date.now() / 300 + p.pulsePhase) * 0.15 + 0.85;
+    const baseColor = p.color || HEART_COLORS[0];
+    ctx.globalAlpha = pulse;
+    ctx.fillStyle = '#e94560';
+    ctx.fillRect(px, py, TILE, TILE);
+    // Highlight
+    ctx.fillStyle = '#ff8a9e';
+    ctx.fillRect(px, py, TILE, TILE * 0.3);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawBowl() {
+  // Bowl body (trapezoid-ish using rects)
+  const bowlCenter = COLS / 2 * TILE;
+  const bowlTop = BOWL_Y * TILE;
+  const bowlH = BOWL_DEPTH * TILE;
+  const rimW = (BOWL_RIGHT - BOWL_LEFT) * TILE;
+  const baseW = rimW * 0.7;
+
+  // Bowl shadow
+  ctx.fillStyle = '#2a1a1a';
+  ctx.fillRect(bowlCenter - rimW/2 + 4, bowlTop + bowlH - 4, rimW, 6);
+
+  // Bowl body
+  ctx.fillStyle = BOWL_DARK;
+  const steps = bowlH / 2;
+  for (let i = 0; i < steps; i++) {
+    const t = i / steps;
+    const w = rimW * (1 - t * 0.3);
+    const y = bowlTop + i * 2;
+    ctx.fillRect(bowlCenter - w/2, y, w, 3);
+  }
+
+  // Bowl rim
+  ctx.fillStyle = BOWL_RIM;
+  ctx.fillRect(bowlCenter - rimW/2 - 4, bowlTop - 4, rimW + 8, 6);
+
+  // Bowl inner
+  ctx.fillStyle = BOWL_DARK;
+  ctx.fillRect(bowlCenter - rimW/2 + 6, bowlTop + 2, rimW - 12, bowlH - 4);
+
+  // "DOG" text on bowl
+  ctx.fillStyle = BOWL_RIM;
+  ctx.font = `${TILE * 2.5}px Courier New`;
+  ctx.textAlign = 'center';
+  ctx.fillText('DOG', bowlCenter, bowlTop + bowlH * 0.6);
+}
+
+function drawBowlPixels() {
+  for (const bp of bowlPixels) {
+    ctx.fillStyle = bp.color;
+    ctx.fillRect(bp.x, bp.y, TILE, TILE);
+    ctx.fillStyle = '#ffb3b3';
+    ctx.fillRect(bp.x, bp.y, TILE, TILE * 0.3);
+  }
+}
+
+function drawFallingPixels() {
+  for (const fp of fallingPixels) {
+    const wobble = Math.sin(fp.wobble) * 2;
+    ctx.fillStyle = fp.color;
+    ctx.fillRect(fp.x + wobble, fp.y, fp.size, fp.size);
+    ctx.fillStyle = '#ffcccc';
+    ctx.fillRect(fp.x + wobble, fp.y, fp.size, fp.size * 0.3);
+    // Trail
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = fp.color;
+    ctx.fillRect(fp.x + wobble, fp.y - fp.size * 1.5, fp.size * 0.6, fp.size);
+    ctx.globalAlpha = 0.15;
+    ctx.fillRect(fp.x + wobble, fp.y - fp.size * 3, fp.size * 0.3, fp.size);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawBackground() {
+  // Gradient background
+  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  grad.addColorStop(0, '#16213e');
+  grad.addColorStop(1, '#1a1a2e');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Floor
+  ctx.fillStyle = '#2d2d44';
+  ctx.fillRect(0, ROWS * TILE - 30, canvas.width, 30);
+  ctx.fillStyle = '#3d3d55';
+  for (let x = 0; x < canvas.width; x += 20) {
+    ctx.fillRect(x, ROWS * TILE - 30, 10, 30);
+  }
+}
+
+// Animation loop
+function update() {
+  heartBob += 0.02 * heartBobDir;
+
+  // Update falling pixels
+  for (let i = fallingPixels.length - 1; i >= 0; i--) {
+    const fp = fallingPixels[i];
+    fp.vy += 0.15; // gravity
+    fp.y += fp.vy;
+    fp.x += fp.vx;
+    fp.wobble += 0.1;
+
+    // Check if landed in bowl
+    if (fp.y >= fp.targetY) {
+      fp.y = fp.targetY;
+      // Settle into bowl
+      bowlPixels.push({
+        x: fp.x,
+        y: BOWL_Y * TILE + Math.floor(Math.random() * 4) * TILE,
+        color: fp.color
+      });
+      bowlCount++;
+      document.getElementById('bowlCount').textContent = Math.min(bowlCount, 50);
+      fallingPixels.splice(i, 1);
+    }
+  }
+}
+
+function render() {
+  drawBackground();
+  drawBowl();
+  drawBowlPixels();
+  drawHeart();
+  drawFallingPixels();
+
+  // Sparkle effect on heart
+  if (Math.random() < 0.05) {
+    const alive = heartPixels.filter(p => p.alive);
+    if (alive.length > 0) {
+      const sp = alive[Math.floor(Math.random() * alive.length)];
+      const px = sp.gx * TILE;
+      const py = sp.gy * TILE + Math.sin(heartBob) * TILE * 1.5;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(px + 1, py - 2, 2, 2);
+    }
+  }
+}
+
+function gameLoop() {
+  update();
+  render();
+  requestAnimationFrame(gameLoop);
+}
+
+gameLoop();
+</script>
+</body>
+</html>

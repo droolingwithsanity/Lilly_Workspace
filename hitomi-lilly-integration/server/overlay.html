@@ -1,0 +1,970 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>Lilly</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:transparent;
+  overflow:visible;
+  font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+  width:96px;height:96px;
+  user-select:none;-webkit-user-select:none;
+  touch-action:manipulation;
+}
+#container{
+  width:96px;height:96px;
+  position:relative;
+  background:transparent;
+  transition:all 0.3s;
+  overflow:visible;
+}
+#container.expanded{
+  width:96px;height:320px;
+}
+body.expanded{
+  width:96px;height:320px;
+}
+#pupCanvas{
+  position:absolute;
+  top:-16px;left:-16px;
+  width:128px;height:128px;
+  image-rendering:auto;
+  touch-action:none;
+  z-index:2;
+  cursor:pointer;
+}
+#dragHandle{
+  touch-action:none;
+  position:absolute;
+  top:-16px;left:-16px;
+  width:128px;height:128px;
+  z-index:5;
+  touch-action:none;
+}
+#avatarName{
+  position:absolute;
+  top:98px;left:48px;
+  transform:translateX(-50%);
+  font-size:8px;
+  color:rgba(255,255,255,0.3);
+  letter-spacing:0.5px;
+  text-transform:uppercase;
+  z-index:6;
+  pointer-events:none;
+  white-space:nowrap;
+  display:none;
+}
+#closeHint{
+  position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+  width:44px;height:44px;border-radius:50%;
+  background:rgba(239,68,68,0.85);
+  color:#fff;font-size:22px;
+  display:flex;align-items:center;justify-content:center;
+  z-index:100;pointer-events:none;
+  opacity:0;transition:opacity 0.2s;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border:2px solid rgba(255,255,255,0.3);
+  box-shadow:0 4px 20px rgba(239,68,68,0.3);
+}
+
+/* ─── Compact vertical chat panel (expanded) ─── */
+#chatBubble{
+  position:absolute;
+  top:112px;left:0;
+  width:96px;
+  background:rgba(15,15,40,0.78);
+  backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
+  border-radius:0 0 12px 12px;
+  border:1px solid rgba(255,255,255,0.08);
+  border-top:none;
+  box-shadow:0 4px 16px rgba(0,0,0,0.5);
+  padding:4px 6px 6px;
+  display:none;
+  z-index:10;
+  transition:opacity 0.25s;
+}
+#chatBubble.show{
+  display:block;
+  opacity:1;
+}
+#bubbleTail{display:none}
+#bubbleText{
+  font-size:10px;
+  line-height:1.3;
+  color:rgba(255,255,255,0.85);
+  max-height:72px;
+  min-height:20px;
+  overflow-y:auto;
+  scrollbar-width:thin;
+  word-wrap:break-word;
+  margin-bottom:2px;
+  pointer-events:none;
+}
+#bubbleText::-webkit-scrollbar{width:2px}
+#bubbleText::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:2px}
+#bubbleStatus{
+  display:flex;
+  align-items:center;
+  gap:3px;
+  font-size:8px;
+  color:rgba(255,255,255,0.35);
+  margin-bottom:3px;
+  pointer-events:none;
+}
+#statusDot{
+  width:4px;height:4px;
+  border-radius:50%;
+  background:#4ade80;
+  transition:all 0.3s;
+  flex-shrink:0;
+}
+#statusDot.listening{background:#4ade80;box-shadow:0 0 4px #4ade80}
+#statusDot.thinking{background:#fbbf24;box-shadow:0 0 4px #fbbf24;animation:pulse 0.8s infinite}
+#statusDot.speaking{background:#f472b6;box-shadow:0 0 4px #f472b6;animation:pulse 0.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+#bubbleInput{
+  display:flex;
+  gap:3px;
+  align-items:center;
+  pointer-events:auto;
+}
+#chatInput{
+  flex:1;
+  background:rgba(255,255,255,0.08);
+  border:1px solid rgba(255,255,255,0.12);
+  border-radius:10px;
+  padding:4px 6px;
+  font-size:10px;
+  color:rgba(255,255,255,0.85);
+  outline:none;
+  min-width:0;
+  width:38px;
+}
+#chatInput::placeholder{color:rgba(255,255,255,0.25)}
+#chatInput:focus{border-color:rgba(255,255,255,0.2)}
+.iconBtn{
+  width:22px;height:22px;
+  border-radius:50%;
+  border:none;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+  transition:all 0.2s;
+  font-size:11px;
+  flex-shrink:0;
+}
+#micBtn{
+  background:rgba(74,222,128,0.2);
+  color:#4ade80;
+}
+#micBtn.active{background:rgba(74,222,128,0.35);box-shadow:0 0 6px rgba(74,222,128,0.25)}
+#micBtn.muted{background:rgba(239,68,68,0.2);color:#ef4444}
+#sendBtn{
+  background:rgba(168,85,247,0.2);
+  color:#c084fc;
+}
+.iconBtn:active{transform:scale(0.85)}
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="pupCanvas" width="320" height="240"></canvas>
+  <div id="dragHandle"></div>
+  <div id="avatarName"></div>
+  <div id="closeHint">✕</div>
+  <div id="chatBubble">
+    <div id="bubbleTail"></div>
+    <div id="bubbleText">Say hi to start talking!</div>
+    <div id="bubbleStatus">
+      <span id="statusDot"></span>
+      <span id="statusLabel">idle</span>
+    </div>
+    <div id="bubbleInput">
+      <button class="iconBtn" id="micBtn">🎤</button>
+      <input id="chatInput" type="text" placeholder="Message..." autocomplete="off">
+      <button class="iconBtn" id="sendBtn">➤</button>
+    </div>
+  </div>
+  <div id="pairingSection" style="position:absolute;top:10px;right:10px;z-index:1000;">
+    <div style="background:rgba(255,255,255,0.95);border-radius:8px;padding:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1);max-width:280px">
+      <h3 style="margin:0 0 8px 0;font-size:14px;color:#333;">Pair Device</h3>
+      <div style="margin-bottom:8px;font-size:12px;color:#666;">Enter the 8-character pairing code:</div>
+      <input type="text" id="pairingInput" maxlength="8" placeholder="XXXX XXXX" style="width:100%;padding:8px;font-size:14px;border:1px solid #ddd;border-radius:4px;margin-bottom:8px;">
+      <button id="pairingVerifyBtn" style="width:100%;padding:8px;background:#4CAF50;color:white;border:none;border-radius:4px;cursor:pointer;font-size:14px;">Pair</button>
+      <div id="pairingStatus" style="margin-top:8px;font-size:12px;color:#666;text-align:center;"></div>
+    </div>
+  </div>
+</div>
+<script>
+const canvas=document.getElementById('pupCanvas');
+const ctx=canvas.getContext('2d');
+if(!ctx){document.body.innerHTML='<div style="padding:20px;color:#fff">Canvas unavailable</div>';throw new Error('no ctx')}
+
+// Auth: load device token from storage (optional — overlay works without it)
+const DEVICE_TOKEN=localStorage.getItem('lilly_device_token')||'';
+function authFetch(url,opts){
+  opts=opts||{};
+  opts.headers=opts.headers||{};
+  if(DEVICE_TOKEN)opts.headers['X-Device-Token']=DEVICE_TOKEN;
+  return fetch(url,opts);
+}
+const W=320,H=240;
+
+let avatar=new URLSearchParams(location.search).get('avatar')||'puppy', mouthOpen=0, mood='calm', speaking=false, thinking=false, listening=false;
+let micActive=false, userName='', heard='', spoken='', lastAudioId=0;
+const OVERLAY_CHAR_NAMES={puppy:'Lilly',fox:'Fox',cat:'Cat',bear:'Bear',bunny:'Bunny',owl:'Owl',deer:'Deer',wolf:'Wolf',raccoon:'Raccoon'};
+const OVERLAY_CHAR_EMOJI={puppy:'🐶',fox:'🦊',cat:'🐱',bear:'🐻',bunny:'🐰',owl:'🦉',deer:'🦌',wolf:'🐺',raccoon:'🦝'};
+function overlayCharName(){const k=avatar||'puppy';return OVERLAY_CHAR_NAMES[k]||'Lilly';}
+function overlayCharEmoji(){const k=avatar||'puppy';return OVERLAY_CHAR_EMOJI[k]||'🐶';}
+let frame=0, isBlinking=false, blinkFrame=200;
+let lookAt='user';
+let isPaired = !!DEVICE_TOKEN && localStorage.getItem('lilly_device_token');
+
+// ── Clay-style drawing helpers (shared by all avatars) ──
+function clayFill(c,h){const g=c.createRadialGradient(0,0,0,0,0,1);g.addColorStop(0,lighten(h,16));g.addColorStop(0.6,h);g.addColorStop(1,darken(h,12));return g}
+function lighten(h,a){let r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);a>0?(r=Math.min(255,r+a),g=Math.min(255,g+a),b=Math.min(255,b+a)):(r=Math.max(0,r+a),g=Math.max(0,g+a),b=Math.max(0,b+a));return'rgb('+r+','+g+','+b+')'}
+function darken(h,a){return lighten(h,-a)}
+function breathe(){return Math.sin(frame*0.04)*3}
+
+// ── Transparent sphere background ──
+function drawClayBg(ctx2, W, H, color) {
+  ctx2.clearRect(0, 0, W, H);
+  ctx2.save();
+  const r = W * 0.47;
+  ctx2.shadowColor = color;
+  ctx2.shadowBlur = W * 0.45;
+  ctx2.fillStyle = color;
+  ctx2.beginPath();
+  ctx2.arc(W/2, H/2, r, 0, Math.PI * 2);
+  ctx2.fill();
+  ctx2.restore();
+}
+
+function drawClayEyes(ctx2, cx, cy, r, frame2) {
+  const blinkCycle = Math.sin(frame2 * 0.04);
+  const isBlinking2 = blinkCycle > 0.65 && blinkCycle < 0.7;
+  const isSpeaking2 = (typeof speaking !== 'undefined' && speaking) || (typeof mouthOpen !== 'undefined' && mouthOpen > 0.05);
+  ctx2.save();
+  for (const side of [-1, 1]) {
+    const ex = cx + side * r * 0.30, ey = cy - r * 0.02;
+    ctx2.fillStyle = '#ffffff';
+    const eyeR = r * 0.15, eyeRY = r * 0.17;
+    if (isBlinking2) {
+      ctx2.strokeStyle = '#8b7a9e'; ctx2.lineWidth = r * 0.022; ctx2.lineCap = 'round';
+      ctx2.beginPath(); ctx2.moveTo(ex - eyeR, ey); ctx2.lineTo(ex + eyeR, ey); ctx2.stroke();
+    } else {
+      ctx2.beginPath();
+      ctx2.ellipse(ex, ey, eyeR, eyeRY, 0, 0, Math.PI * 2);
+      ctx2.fill();
+      ctx2.fillStyle = '#8b7a9e';
+      let px=0,py=0;
+      if(typeof lookAt!=='undefined'&&lookAt==='heart'){px=-3;py=4;}
+      else if(typeof lookAt!=='undefined'&&(lookAt==='dashboard'||lookAt==='name')){px=0;py=-4;}
+      else if(typeof lookAt!=='undefined'&&lookAt==='input'){py=3;}
+      else if(typeof lookAt!=='undefined'&&lookAt==='app'){px=2;py=6;}
+      else if(typeof lookAt!=='undefined'&&lookAt==='user'){px=0;py=0;}
+      else if(typeof mood!=='undefined'&&(mood==='curious'||mood==='excited'))py=-3;
+      const pupilR = r * 0.055;
+      ctx2.beginPath(); ctx2.arc(ex + px * r * 0.01, ey + py * r * 0.01, pupilR, 0, Math.PI * 2); ctx2.fill();
+      ctx2.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx2.beginPath(); ctx2.arc(ex - pupilR * 0.3, ey - pupilR * 0.3, pupilR * 0.35, 0, Math.PI * 2); ctx2.fill();
+    }
+  }
+  ctx2.restore();
+}
+
+function drawRaccoonEyes(ctx2, cx, cy, r, frame2) {
+  drawClayEyes(ctx2, cx, cy, r, frame2);
+  ctx2.save();
+  ctx2.fillStyle = 'rgba(40,40,40,0.5)';
+  for (const side of [-1, 1]) {
+    ctx2.beginPath();
+    ctx2.ellipse(cx + side * r * 0.30, cy + r * 0.02, r * 0.20, r * 0.16, 0, 0, Math.PI * 2);
+    ctx2.fill();
+  }
+  ctx2.restore();
+  drawClayEyes(ctx2, cx, cy, r, frame2);
+}
+
+function drawClaySmile(ctx2, cx, cy, r) {
+  ctx2.strokeStyle = '#8b7a9e'; ctx2.lineWidth = r * 0.025; ctx2.lineCap = 'round';
+  ctx2.beginPath(); ctx2.arc(cx, cy + r * 0.12, r * 0.14, 0.15, Math.PI - 0.15); ctx2.stroke();
+}
+
+function drawAnimalFace(ctx2, animal, cx, cy, r, frame2, noBg) {
+  const W2 = ctx2.canvas.width, H2 = ctx2.canvas.height;
+  const breathe2 = Math.sin(frame2 * 0.04) * (r * 0.018);
+  const PAL = {
+    puppy:{ bg:'#e8e4f0', head:'#d4d0de', muzzle:'#c8c4d2', ear:'#c4c0cc', earInner:'#f0d8e8', nose:'#d4a0b8' },
+    fox:  { bg:'#f5e4d0', head:'#e8905a', muzzle:'#f8e0c0', ear:'#e07840', earInner:'#f8c080', nose:'#c05030' },
+    cat:  { bg:'#ece8f4', head:'#c8c0d4', muzzle:'#f0dce8', ear:'#b8b0c4', earInner:'#f0c8dc', nose:'#d898b0' },
+    bear: { bg:'#ede0d8', head:'#b09080', muzzle:'#cdb8a8', ear:'#a08070', earInner:'#c8a890', nose:'#7a5a4a' },
+    bunny:{ bg:'#eeeaf6', head:'#d4cce0', muzzle:'#c8c0d4', ear:'#ccc4d8', earInner:'#f0cce0', nose:'#e8a8c0' },
+    owl:  { bg:'#e8e0d0', head:'#8a7a60', muzzle:'#c8b898', ear:'#7a6a50', earInner:'#c0a878', nose:'#5a4a38' },
+    deer: { bg:'#f0e8d8', head:'#c8a888', muzzle:'#e8d8c0', ear:'#b89870', earInner:'#e0c8a8', nose:'#5a4838' },
+    wolf: { bg:'#e0dde4', head:'#706878', muzzle:'#a898a8', ear:'#605868', earInner:'#a090a8', nose:'#383040' },
+    raccoon:{ bg:'#e0e0e4', head:'#808080', muzzle:'#c0c0c0', ear:'#686868', earInner:'#a8a8a8', nose:'#404040' },
+  };
+  const p = PAL[animal] || PAL.puppy;
+  if(!noBg) drawClayBg(ctx2, W2, H2, p.bg);
+  ctx2.save();
+  ctx2.translate(cx, cy + breathe2);
+  if (animal === 'puppy') {
+    const earWig = Math.sin(frame2 * 0.18) * 0.08, earBob = Math.sin(frame2 * 0.14) * r*0.03;
+    ctx2.save(); ctx2.translate(-r*0.60, -r*0.38 + earBob); ctx2.rotate(-0.26 + earWig);
+    ctx2.shadowColor='rgba(80,60,100,0.22)'; ctx2.shadowBlur=r*0.14; ctx2.shadowOffsetY=r*0.06;
+    ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,30));
+    ctx2.beginPath(); ctx2.ellipse(0,0,r*0.26,r*0.52,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = p.earInner; ctx2.beginPath(); ctx2.ellipse(0,r*0.06,r*0.14,r*0.36,0,0,Math.PI*2); ctx2.fill();
+    ctx2.restore();
+    ctx2.save(); ctx2.translate(r*0.60, -r*0.38 + earBob); ctx2.rotate(0.26 - earWig);
+    ctx2.shadowColor='rgba(80,60,100,0.22)'; ctx2.shadowBlur=r*0.14; ctx2.shadowOffsetY=r*0.06;
+    ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,30));
+    ctx2.beginPath(); ctx2.ellipse(0,0,r*0.26,r*0.52,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = p.earInner; ctx2.beginPath(); ctx2.ellipse(0,r*0.06,r*0.14,r*0.36,0,0,Math.PI*2); ctx2.fill();
+    ctx2.restore();
+    ctx2.shadowColor='rgba(80,60,100,0.20)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,30));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.70,-r*0.46,r*1.40,r*1.08,[r*0.38,r*0.38,r*0.28,r*0.28]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,22));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.30,r*0.40,r*0.24,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowColor='rgba(80,40,60,0.25)'; ctx2.shadowBlur=r*0.08;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,28));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.14,r*0.11,r*0.08,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0;
+  } else if (animal === 'fox') {
+    const foxTwitch = Math.sin(frame2 * 0.12) * 0.12, foxTwitch2 = Math.sin(frame2 * 0.12 + Math.PI) * 0.12;
+    for (const [side, twitch] of [[-1, foxTwitch], [1, foxTwitch2]]) {
+      ctx2.save(); ctx2.scale(side,1); ctx2.translate(r*0.38, -r*0.52); ctx2.rotate(twitch); ctx2.translate(-r*0.38, r*0.52);
+      ctx2.shadowColor='rgba(100,50,20,0.22)'; ctx2.shadowBlur=r*0.12; ctx2.shadowOffsetY=r*0.04;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,28));
+      ctx2.beginPath(); ctx2.moveTo(r*0.14,-r*0.40); ctx2.lineTo(r*0.38,-r*0.92); ctx2.lineTo(r*0.64,-r*0.38); ctx2.closePath(); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = p.earInner;
+      ctx2.beginPath(); ctx2.moveTo(r*0.20,-r*0.42); ctx2.lineTo(r*0.37,-r*0.76); ctx2.lineTo(r*0.54,-r*0.40); ctx2.closePath(); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(100,50,20,0.20)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,28));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.70,-r*0.42,r*1.40,r*1.02,[r*0.34,r*0.34,r*0.26,r*0.26]); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,30));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.18,r*0.44,r*0.38,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowColor='rgba(80,30,10,0.25)'; ctx2.shadowBlur=r*0.08;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,24));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.10,r*0.13,r*0.09,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.fillStyle='rgba(100,60,30,0.35)';
+    for(const [wx,wy] of [[-r*0.28,r*0.16],[-r*0.38,r*0.22],[-r*0.42,r*0.30],[r*0.28,r*0.16],[r*0.38,r*0.22],[r*0.42,r*0.30]]) {
+      ctx2.beginPath(); ctx2.arc(wx,wy,r*0.018,0,Math.PI*2); ctx2.fill();
+    }
+  } else if (animal === 'cat') {
+    const catListen = Math.sin(frame2 * 0.035) * 0.18, catListen2 = Math.sin(frame2 * 0.035 + 0.6) * 0.18;
+    for (const [side, listenAngle] of [[-1, catListen], [1, catListen2]]) {
+      ctx2.save(); ctx2.scale(side,1); ctx2.translate(r*0.40, -r*0.50); ctx2.rotate(listenAngle); ctx2.translate(-r*0.40, r*0.50);
+      ctx2.shadowColor='rgba(60,40,80,0.20)'; ctx2.shadowBlur=r*0.10;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,28));
+      ctx2.beginPath(); ctx2.moveTo(r*0.20,-r*0.38); ctx2.lineTo(r*0.46,-r*0.90); ctx2.lineTo(r*0.62,-r*0.36); ctx2.closePath(); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = p.earInner;
+      ctx2.beginPath(); ctx2.moveTo(r*0.26,-r*0.40); ctx2.lineTo(r*0.45,-r*0.74); ctx2.lineTo(r*0.56,-r*0.38); ctx2.closePath(); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(60,40,80,0.18)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,28));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.68,-r*0.42,r*1.36,r*1.04,[r*0.32,r*0.32,r*0.28,r*0.28]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,22));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.28,r*0.34,r*0.22,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowColor='rgba(80,30,60,0.22)'; ctx2.shadowBlur=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,26));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.13,r*0.10,r*0.07,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.strokeStyle='rgba(80,60,100,0.28)'; ctx2.lineWidth=r*0.025; ctx2.lineCap='round';
+    for(const s of [-1,1]) {
+      ctx2.beginPath(); ctx2.moveTo(s*r*0.08,r*0.20); ctx2.lineTo(s*r*0.52,r*0.13); ctx2.stroke();
+      ctx2.beginPath(); ctx2.moveTo(s*r*0.08,r*0.26); ctx2.lineTo(s*r*0.52,r*0.26); ctx2.stroke();
+    }
+  } else if (animal === 'bear') {
+    const bearRotate = Math.sin(frame2 * 0.04) * 0.06;
+    for(const [ex, rot] of [[-r*0.58, -bearRotate], [r*0.58, bearRotate]]) {
+      ctx2.save(); ctx2.translate(ex, -r*0.50); ctx2.rotate(rot);
+      ctx2.shadowColor='rgba(60,40,20,0.22)'; ctx2.shadowBlur=r*0.12;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,24));
+      ctx2.beginPath(); ctx2.arc(0, 0, r*0.28, 0, Math.PI*2); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = clayFill(ctx2, p.earInner, lighten(p.earInner,20));
+      ctx2.beginPath(); ctx2.arc(0, 0, r*0.17, 0, Math.PI*2); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(60,40,20,0.20)'; ctx2.shadowBlur=r*0.20; ctx2.shadowOffsetY=r*0.08;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,26));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.70,-r*0.44,r*1.40,r*1.10,[r*0.42,r*0.42,r*0.32,r*0.32]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,24));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.28,r*0.40,r*0.26,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowColor='rgba(40,20,10,0.28)'; ctx2.shadowBlur=r*0.08;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,20));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.12,r*0.15,r*0.10,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0;
+  } else if (animal === 'bunny') {
+    const earSway = Math.sin(frame2 * 0.06) * 0.08, earDroop = Math.sin(frame2 * 0.03) * 0.04;
+    ctx2.save(); ctx2.translate(-r*0.30,-r*0.44); ctx2.rotate(-0.14 + earSway + earDroop);
+    ctx2.shadowColor='rgba(80,60,100,0.20)'; ctx2.shadowBlur=r*0.12; ctx2.shadowOffsetY=r*0.04;
+    ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,28));
+    ctx2.beginPath(); ctx2.ellipse(0,-r*0.38,r*0.15,r*0.38,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.fillStyle = p.earInner; ctx2.beginPath(); ctx2.ellipse(0,-r*0.38,r*0.07,r*0.28,0,0,Math.PI*2); ctx2.fill();
+    ctx2.restore();
+    ctx2.save(); ctx2.translate(r*0.30,-r*0.44); ctx2.rotate(0.14 - earSway - earDroop);
+    ctx2.shadowColor='rgba(80,60,100,0.20)'; ctx2.shadowBlur=r*0.12; ctx2.shadowOffsetY=r*0.04;
+    ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,28));
+    ctx2.beginPath(); ctx2.ellipse(0,-r*0.38,r*0.15,r*0.38,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.fillStyle = p.earInner; ctx2.beginPath(); ctx2.ellipse(0,-r*0.38,r*0.07,r*0.28,0,0,Math.PI*2); ctx2.fill();
+    ctx2.restore();
+    ctx2.shadowColor='rgba(80,60,100,0.18)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,28));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.68,-r*0.44,r*1.36,r*1.08,[r*0.40,r*0.40,r*0.32,r*0.32]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,22));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.30,r*0.36,r*0.22,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowColor='rgba(80,40,70,0.22)'; ctx2.shadowBlur=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,26));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.14,r*0.10,r*0.07,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0;
+  } else if (animal === 'owl') {
+    const owlTwitch = Math.sin(frame2 * 0.09) * 0.10, owlTwitch2 = Math.sin(frame2 * 0.09 + 1.2) * 0.10;
+    for (const [side, twitch] of [[-1, owlTwitch], [1, owlTwitch2]]) {
+      ctx2.save(); ctx2.scale(side,1); ctx2.translate(r*0.32, -r*0.40); ctx2.rotate(twitch); ctx2.translate(-r*0.32, r*0.40);
+      ctx2.shadowColor='rgba(60,50,30,0.20)'; ctx2.shadowBlur=r*0.10;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,24));
+      ctx2.beginPath(); ctx2.moveTo(r*0.18,-r*0.38); ctx2.lineTo(r*0.30,-r*0.82); ctx2.lineTo(r*0.50,-r*0.36); ctx2.closePath(); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = p.earInner;
+      ctx2.beginPath(); ctx2.moveTo(r*0.24,-r*0.40); ctx2.lineTo(r*0.32,-r*0.68); ctx2.lineTo(r*0.44,-r*0.38); ctx2.closePath(); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(60,50,30,0.20)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,26));
+    ctx2.beginPath(); ctx2.arc(0, -r*0.06, r*0.68, 0, Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,22));
+    ctx2.beginPath(); ctx2.ellipse(0, -r*0.08, r*0.50, r*0.46, 0, 0, Math.PI*2); ctx2.fill();
+    ctx2.shadowColor='rgba(60,40,20,0.22)'; ctx2.shadowBlur=r*0.06;
+    ctx2.fillStyle = clayFill(ctx2, '#c8a050', lighten('#c8a050',30));
+    ctx2.beginPath(); ctx2.moveTo(-r*0.06, r*0.12); ctx2.lineTo(0, r*0.24); ctx2.lineTo(r*0.06, r*0.12); ctx2.closePath(); ctx2.fill();
+    ctx2.shadowBlur=0;
+  } else if (animal === 'deer') {
+    const deerFlick = Math.sin(frame2 * 0.05) * 0.08, deerFlick2 = Math.sin(frame2 * 0.05 + 0.8) * 0.08;
+    for (const [side, flick] of [[-1, deerFlick], [1, deerFlick2]]) {
+      ctx2.save(); ctx2.scale(side,1); ctx2.translate(r*0.32, -r*0.42); ctx2.rotate(flick); ctx2.translate(-r*0.32, r*0.42);
+      ctx2.shadowColor='rgba(80,60,40,0.20)'; ctx2.shadowBlur=r*0.10;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,26));
+      ctx2.beginPath(); ctx2.moveTo(r*0.16,-r*0.36); ctx2.lineTo(r*0.32,-r*0.88); ctx2.lineTo(r*0.54,-r*0.34); ctx2.closePath(); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = p.earInner;
+      ctx2.beginPath(); ctx2.moveTo(r*0.22,-r*0.38); ctx2.lineTo(r*0.34,-r*0.72); ctx2.lineTo(r*0.48,-r*0.36); ctx2.closePath(); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(80,60,40,0.18)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,26));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.58,-r*0.42,r*1.16,r*1.08,[r*0.38,r*0.38,r*0.32,r*0.32]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,24));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.22,r*0.30,r*0.24,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowColor='rgba(40,30,20,0.25)'; ctx2.shadowBlur=r*0.06;
+    ctx2.fillStyle = clayFill(ctx2, '#3a2a18', lighten('#3a2a18',20));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.10,r*0.08,r*0.06,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0;
+    for (const side of [-1,1]) {
+      ctx2.fillStyle = clayFill(ctx2, '#a08860', lighten('#a08860',20));
+      ctx2.beginPath(); ctx2.arc(side*r*0.30, -r*0.56, r*0.08, 0, Math.PI*2); ctx2.fill();
+    }
+  } else if (animal === 'wolf') {
+    const wolfPerk = Math.sin(frame2 * 0.045) * 0.07, wolfPerk2 = Math.sin(frame2 * 0.045 + 0.5) * 0.07;
+    for (const [side, perk] of [[-1, wolfPerk], [1, wolfPerk2]]) {
+      ctx2.save(); ctx2.scale(side,1); ctx2.translate(r*0.36, -r*0.42); ctx2.rotate(perk); ctx2.translate(-r*0.36, r*0.42);
+      ctx2.shadowColor='rgba(50,40,60,0.22)'; ctx2.shadowBlur=r*0.12; ctx2.shadowOffsetY=r*0.04;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,24));
+      ctx2.beginPath(); ctx2.moveTo(r*0.12,-r*0.38); ctx2.lineTo(r*0.36,-r*0.90); ctx2.lineTo(r*0.60,-r*0.36); ctx2.closePath(); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = p.earInner;
+      ctx2.beginPath(); ctx2.moveTo(r*0.20,-r*0.40); ctx2.lineTo(r*0.36,-r*0.74); ctx2.lineTo(r*0.52,-r*0.38); ctx2.closePath(); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(50,40,60,0.20)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,26));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.68,-r*0.42,r*1.36,r*1.06,[r*0.34,r*0.34,r*0.28,r*0.28]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,22));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.22,r*0.36,r*0.22,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowColor='rgba(30,20,30,0.28)'; ctx2.shadowBlur=r*0.08;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,18));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.10,r*0.12,r*0.09,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.fillStyle = '#f8f6fa'; ctx2.shadowColor='rgba(40,30,50,0.18)'; ctx2.shadowBlur=r*0.04;
+    ctx2.beginPath(); ctx2.moveTo(-r*0.16, r*0.28); ctx2.lineTo(-r*0.11, r*0.28); ctx2.lineTo(-r*0.13, r*0.40); ctx2.closePath(); ctx2.fill();
+    ctx2.beginPath(); ctx2.moveTo(r*0.11, r*0.28); ctx2.lineTo(r*0.16, r*0.28); ctx2.lineTo(r*0.13, r*0.40); ctx2.closePath(); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.fillStyle = 'rgba(80,70,90,0.12)';
+    ctx2.beginPath(); ctx2.moveTo(-r*0.18,-r*0.32); ctx2.lineTo(0,-r*0.18); ctx2.lineTo(r*0.18,-r*0.32); ctx2.closePath(); ctx2.fill();
+  } else if (animal === 'raccoon') {
+    const raccoonTwitch = Math.sin(frame2 * 0.07) * 0.09, raccoonTwitch2 = Math.sin(frame2 * 0.07 + 1.5) * 0.09;
+    for (const [[ex], twitch] of [[[-r*0.52], -raccoonTwitch], [[r*0.52], raccoonTwitch2]]) {
+      ctx2.save(); ctx2.translate(ex, -r*0.46); ctx2.rotate(twitch);
+      ctx2.shadowColor='rgba(40,40,40,0.20)'; ctx2.shadowBlur=r*0.10;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,22));
+      ctx2.beginPath(); ctx2.arc(0, 0, r*0.22, 0, Math.PI*2); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = clayFill(ctx2, p.earInner, lighten(p.earInner,18));
+      ctx2.beginPath(); ctx2.arc(0, 0, r*0.13, 0, Math.PI*2); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(40,40,40,0.18)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,24));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.68,-r*0.42,r*1.36,r*1.04,[r*0.36,r*0.36,r*0.30,r*0.30]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = 'rgba(40,40,40,0.35)';
+    ctx2.beginPath(); ctx2.ellipse(0,-r*0.02,r*0.52,r*0.18,0,0,Math.PI*2); ctx2.fill();
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,26));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.22,r*0.32,r*0.20,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowColor='rgba(30,30,30,0.25)'; ctx2.shadowBlur=r*0.06;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,18));
+    ctx2.beginPath(); ctx2.ellipse(0,r*0.12,r*0.10,r*0.07,0,0,Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0;
+  }
+  if (animal === 'raccoon') drawRaccoonEyes(ctx2, 0, 0, r, frame2);
+  else drawClayEyes(ctx2, 0, 0, r, frame2);
+  const mouthIsOpen = (typeof speaking !== 'undefined' && speaking) || (typeof mouthOpen !== 'undefined' && mouthOpen > 0.05);
+  if (mouthIsOpen) {
+    const open = Math.min(1, (typeof mouthOpen !== 'undefined' ? mouthOpen : 0)) * (r * 0.10) + Math.abs(Math.sin(frame2 * 0.25)) * (r * 0.025);
+    ctx2.save();
+    ctx2.fillStyle = '#3d2b1e';
+    ctx2.beginPath(); ctx2.ellipse(0, r * 0.20, r * 0.10, open * 0.5, 0, 0, Math.PI * 2); ctx2.fill();
+    ctx2.fillStyle = '#b45353';
+    ctx2.beginPath(); ctx2.ellipse(0, r * 0.19, r * 0.08, open * 0.4, 0, 0, Math.PI * 2); ctx2.fill();
+    ctx2.restore();
+  } else {
+    drawClaySmile(ctx2, 0, 0, r);
+  }
+  const BLUSH = {
+    puppy:'rgba(220,160,180,0.30)', fox:'rgba(230,150,100,0.28)',
+    cat:'rgba(210,170,190,0.28)', bear:'rgba(200,160,140,0.26)',
+    bunny:'rgba(220,180,200,0.30)', owl:'rgba(210,190,160,0.26)',
+    deer:'rgba(220,170,150,0.28)', wolf:'rgba(180,170,190,0.26)',
+    raccoon:'rgba(190,185,200,0.26)'
+  };
+  const blushCol = BLUSH[animal] || BLUSH.puppy;
+  ctx2.save();
+  for (const side of [-1, 1]) {
+    ctx2.fillStyle = blushCol;
+    ctx2.beginPath(); ctx2.ellipse(side * r * 0.38, r * 0.18, r * 0.12, r * 0.08, 0, 0, Math.PI * 2); ctx2.fill();
+  }
+  ctx2.restore();
+  ctx2.restore();
+}
+
+function drawPup(){
+  ctx.clearRect(0,0,W,H);frame++;
+  if(avatar!=='puppy'){
+    drawAnimalFace(ctx, avatar, W/2, H/2, Math.min(W,H)*0.55, frame, true);
+    return;
+  }
+  if(frame>=blinkFrame){isBlinking=true;if(frame>=blinkFrame+8){isBlinking=false;blinkFrame=frame+140+Math.random()*200}}
+  const isSpeaking=speaking||mouthOpen>0.1;
+  const isExcited=mood==='excited'||mood==='cheerful';
+  const earActive=isSpeaking||isExcited||thinking;
+  ctx.save();ctx.translate(W/2,H/2+breathe());
+  const s=Math.min(W,H)*0.60/150;
+  ctx.scale(s,s);
+  ctx.translate(0,0);
+  if(thinking){const g=0.06+Math.sin(frame*0.06)*0.03;ctx.shadowColor='rgba(200,180,220,'+g+')';ctx.shadowBlur=20}
+  const ew=earActive?Math.sin(frame*0.18)*0.1:0,eb=earActive?Math.sin(frame*0.14)*2:0;
+  ctx.save();ctx.translate(-62,-44+eb);ctx.rotate(-0.22+ew);
+  ctx.fillStyle='#c8c8d0';ctx.beginPath();ctx.ellipse(0,0,26,50,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#f0d8e4';ctx.beginPath();ctx.ellipse(0,6,14,36,0,0,Math.PI*2);ctx.fill();ctx.restore();
+  ctx.save();ctx.translate(62,-44+eb);ctx.rotate(0.22-ew);
+  ctx.fillStyle='#c8c8d0';ctx.beginPath();ctx.ellipse(0,0,26,50,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#f0d8e4';ctx.beginPath();ctx.ellipse(0,6,14,36,0,0,Math.PI*2);ctx.fill();ctx.restore();
+  ctx.fillStyle='#d0d0d8';ctx.beginPath();ctx.roundRect(-72,-48,144,112,[38,38,28,28]);ctx.fill();
+  ctx.fillStyle='#c0c0c8';ctx.beginPath();ctx.ellipse(0,32,42,22,0,0,Math.PI*2);ctx.fill();
+  ctx.shadowBlur=0;ctx.shadowColor='transparent';
+  ctx.fillStyle='#ffffff';
+  if(isBlinking){
+    ctx.strokeStyle='#8b7a9e';ctx.lineWidth=2.5;ctx.lineCap='round';
+    ctx.beginPath();ctx.moveTo(-38,0);ctx.lineTo(-18,0);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(18,0);ctx.lineTo(38,0);ctx.stroke();
+  }else{
+    ctx.beginPath();ctx.arc(-28,2,11,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(28,2,11,0,Math.PI*2);ctx.fill();
+    let px=0,py=0;
+    if(lookAt==='heart'){px=-3;py=4;}
+    else if(lookAt==='dashboard'||lookAt==='name'){px=0;py=-4;}
+    else if(lookAt==='input'){py=3;}
+    else if(lookAt==='app'){px=2;py=6;}
+    else if(lookAt==='user'){px=0;py=0;}
+    else{if(mood==='curious'||mood==='excited')py=-3;if(thinking)px=-1;}
+    ctx.fillStyle='#8b7a9e';ctx.beginPath();ctx.arc(-28+px,2+py,4,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(28+px,2+py,4,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.6)';ctx.beginPath();ctx.arc(-26,0+py,1.5,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(30,0+py,1.5,0,Math.PI*2);ctx.fill();
+  }
+  ctx.fillStyle='#d4a0b0';ctx.beginPath();ctx.ellipse(0,18,10,7,0,0,Math.PI*2);ctx.fill();
+  ctx.strokeStyle='rgba(80,60,100,0.4)';ctx.lineWidth=2.5;ctx.lineCap='round';
+  ctx.beginPath();ctx.moveTo(-38,-10);ctx.lineTo(-18,-10);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(18,-10);ctx.lineTo(38,-10);ctx.stroke();
+  ctx.shadowBlur=0;
+  if(isSpeaking&&!isBlinking){
+    const open=Math.min(1,mouthOpen)*10+Math.abs(Math.sin(frame*0.25))*3;
+    ctx.fillStyle='#3d2b1e';ctx.beginPath();ctx.ellipse(0,24,9,open*0.5,0,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#b45353';ctx.beginPath();ctx.ellipse(0,23,7,open*0.4,0,0,Math.PI*2);ctx.fill();
+  }else{
+    ctx.strokeStyle='#8b7a9e';ctx.lineWidth=2;ctx.lineCap='round';
+    ctx.beginPath();ctx.arc(0,20,8,0.15,Math.PI-0.15);ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawFrame(){
+  try{drawPup();}catch(e){try{console.warn('draw',e)}catch(ex){}}
+  requestAnimationFrame(drawFrame);
+}
+
+// State polling
+const bubbleText=document.getElementById('bubbleText');
+const chatBubble=document.getElementById('chatBubble');
+const statusDot=document.getElementById('statusDot');
+const statusLabel=document.getElementById('statusLabel');
+const micBtn=document.getElementById('micBtn');
+const chatInput=document.getElementById('chatInput');
+const sendBtn=document.getElementById('sendBtn');
+const avatarName=document.getElementById('avatarName');
+let pollInterval=null;
+
+async function pollState(){
+  try{
+    const r=await authFetch('/api/ui_state');
+    if(!r.ok)return;
+    const s=await r.json();
+    if(s.avatar&&s.avatar!==avatar){
+      avatar=s.avatar;
+      avatarName.textContent=overlayCharEmoji()+' '+overlayCharName();
+      avatarName.style.display='block';
+    }
+    if(typeof s.mood==='string')mood=s.mood;
+    if(typeof s.listening==='boolean')listening=s.listening;
+    if(typeof s.micActive==='boolean')micActive=s.micActive;
+    if(typeof s.speaking==='boolean')speaking=s.speaking;
+    if(typeof s.thinking==='boolean')thinking=s.thinking;
+    if(typeof s.lookAt==='string')lookAt=s.lookAt;
+    if(typeof s.mouthOpen==='number')mouthOpen=s.mouthOpen;
+    if(typeof s.heard==='string'&&s.heard!==heard){heard=s.heard;}
+    if(typeof s.spoken==='string'&&s.spoken!==spoken){
+      spoken=s.spoken;bubbleText.textContent=overlayCharName()+': '+spoken;chatBubble.classList.add('show');
+      setTimeout(function(){if(!overlayExpanded)chatBubble.classList.remove('show')},6000);
+    }
+    if(s.chat&&s.chat.length>0&&s.chat[s.chat.length-1]){
+      const last=s.chat[s.chat.length-1];
+      if(last.role==='user'&&last.content){
+        const txt=last.content.length>60?last.content.slice(0,60)+'...':last.content;
+        bubbleText.textContent='You: '+txt;
+        chatBubble.classList.add('show');
+      }else if(last.role==='assistant'&&last.content){
+        bubbleText.textContent=overlayCharName()+': '+last.content;
+        chatBubble.classList.add('show');
+      }
+    }
+    if(s.audio_id&&s.audio_id!==lastAudioId){
+      lastAudioId=s.audio_id;
+      playAudio(s.audio_id);
+    }
+    statusDot.className='';
+    if(speaking)statusDot.classList.add('speaking');
+    else if(thinking)statusDot.classList.add('thinking');
+    else if(listening)statusDot.classList.add('listening');
+    const t=document.getElementById('statusLabel');
+    if(t)t.textContent=speaking?'speaking':thinking?'thinking':listening?'listening':'idle';
+  }catch(e){}
+}
+
+async function playAudio(audioId){
+  if(!audioId)return;
+  const url='/api/tts?id='+audioId+'&t='+Date.now();
+  if(window.LillyBridge&&window.LillyBridge.playTTS){
+    window.LillyBridge.playTTS(window.location.origin+url);
+  }else{
+    const audio=new Audio(url);
+    try{await audio.play()}catch(e){}
+  }
+}
+
+async function sendMessage(){
+  const text=chatInput.value.trim();
+  if(!text)return;
+  chatInput.value='';
+  bubbleText.textContent='You: '+text;
+  chatBubble.classList.add('show');
+  try{
+    const r=await authFetch('/api/cmd',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text,avatar:avatar||'puppy'})
+    });
+    const res=await r.json();
+    bubbleText.textContent='<b>'+overlayCharName()+':</b> '+(res.reply||'');
+    if(res.audio_id)playAudio(res.audio_id);
+    if(res.open_url)handleOpenUrl(res.open_url);
+  }catch(e){}
+}
+
+async function toggleOverlayMic(){
+  authFetch('/api/toggle_mic',{method:'POST'}).catch(()=>{});
+}
+
+// ─── Overlay expansion / input ───
+let overlayExpanded=false;
+function expandOverlay(){
+  overlayExpanded=true;
+  document.body.classList.add('expanded');
+  document.getElementById('container').classList.add('expanded');
+  chatBubble.classList.add('show');
+  setTimeout(function(){chatInput.focus()},300);
+}
+function collapseOverlay(){
+  overlayExpanded=false;
+  document.body.classList.remove('expanded');
+  document.getElementById('container').classList.remove('expanded');
+  chatBubble.classList.remove('show');
+  chatInput.blur();
+  if(typeof stopOverlayMic==='function'&&window.overlayMicActive)stopOverlayMic();
+}
+
+// ─── Browser vs. Android bridge detection ───
+const isAndroidBridge = !!(window.LillyBridge && window.LillyBridge.onDrag);
+if (!isAndroidBridge) {
+  document.body.style.background='rgba(240,230,239,0.6)';
+  document.body.style.width='320px';
+  document.body.style.height='500px';
+  chatBubble.style.display='none';
+  document.getElementById('avatarName').style.display='none';
+  document.getElementById('closeHint').style.display='none';
+  document.getElementById('container').style.background='transparent';
+  document.getElementById('container').style.backdropFilter='none';
+  document.getElementById('container').style.border='none';
+  document.getElementById('container').style.boxShadow='none';
+  document.getElementById('container').style.width='320px';
+  document.getElementById('container').style.height='500px';
+  document.getElementById('pupCanvas').style.width='180px';
+  document.getElementById('pupCanvas').style.height='180px';
+  document.getElementById('pupCanvas').style.left='70px';
+  document.getElementById('pupCanvas').style.top='10px';
+  document.getElementById('dragHandle').style.width='320px';
+  document.getElementById('dragHandle').style.height='500px';
+  document.getElementById('dragHandle').style.top='0';
+  document.getElementById('dragHandle').style.left='0';
+  // Browser drag support
+  let bDrag=false,bSX=0,bSY=0,bOX=0,bOY=0,bRX=0,bRY=0;
+  let bRaf=null;
+  function flushBrowserDrag(){
+    bRaf=null;
+    if(!bDrag)return;
+    document.body.style.left=(bOX+bRX)+'px';
+    document.body.style.top=(bOY+bRY)+'px';
+    document.body.style.position='fixed';
+  }
+  document.getElementById('dragHandle').addEventListener('mousedown',function(e){
+    bDrag=true;bSX=e.clientX;bSY=e.clientY;
+    bOX=parseInt(document.body.style.left)||0;
+    bOY=parseInt(document.body.style.top)||0;
+    bRX=0;bRY=0;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove',function(e){
+    if(!bDrag)return;
+    bRX=e.clientX-bSX;bRY=e.clientY-bSY;
+    if(!bRaf)bRaf=requestAnimationFrame(flushBrowserDrag);
+  });
+  document.addEventListener('mouseup',function(){bDrag=false;if(bRaf){cancelAnimationFrame(bRaf);bRaf=null;}flushBrowserDrag();});
+  document.getElementById('dragHandle').style.cursor='grab';
+} else {
+  // Android bridge: native onTouchListener handles drag. JS only handles long-press.
+  let aDrag=false,aSX=0,aSY=0,aRX=0,aRY=0;
+  let longPressTimer=null;
+  let dragRaf=null;
+  function flushDrag(){
+    dragRaf=null;
+    if(aDrag&&(aRX!==0||aRY!==0)){
+      window.LillyBridge.onDrag(aRX,aRY);
+      aRX=0;aRY=0;
+    }
+  }
+  const dh=document.getElementById('dragHandle');
+  dh.addEventListener('touchstart',function(e){
+    const t=e.touches[0];aDrag=true;aSX=t.clientX;aSY=t.clientY;
+    aRX=0;aRY=0;
+    longPressTimer=setTimeout(function(){
+      aDrag=false;
+      if(!overlayExpanded){
+        window.LillyBridge.toggleExpand();
+      }else{
+        window.LillyBridge.toggleMic();
+      }
+    },500);
+  },{passive:true});
+  dh.addEventListener('touchmove',function(e){
+    if(!aDrag)return;
+    const t=e.touches[0];
+    const dx=Math.round(t.clientX-aSX),dy=Math.round(t.clientY-aSY);
+    if(dx!==0||dy!==0){
+      if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
+      aSX=t.clientX;aSY=t.clientY;
+      aRX+=dx;aRY+=dy;
+      if(!dragRaf)dragRaf=requestAnimationFrame(flushDrag);
+    }
+    e.preventDefault();
+  },{passive:false});
+  dh.addEventListener('touchend',function(){
+    aDrag=false;
+    if(dragRaf){cancelAnimationFrame(dragRaf);dragRaf=null;}
+    if(aRX!==0||aRY!==0){window.LillyBridge.onDrag(aRX,aRY);aRX=0;aRY=0;}
+    if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
+  },{passive:true});
+}
+
+function handleOpenUrl(url){
+  if(!url)return;
+  if(window.LillyBridge&&window.LillyBridge.launchApp){
+    window.LillyBridge.launchApp(url);
+  }else{
+    localOpen(url);
+  }
+}
+
+// Called by Android bridge when avatar changes
+function setAvatar(newAvatar){
+  if(newAvatar&&newAvatar!==avatar){
+    avatar=newAvatar;
+    avatarName.textContent=overlayCharEmoji()+' '+overlayCharName();
+    avatarName.style.display='block';
+  }
+}
+
+// Init
+drawFrame();
+pollInterval=setInterval(pollState,300);
+pollState();
+
+// Also show avatar name on init if not puppy
+if(avatar!=='puppy'&&avatarName){
+  avatarName.textContent=overlayCharEmoji()+' '+overlayCharName();
+  avatarName.style.display='block';
+}
+
+// In Android mode, drag is handled by the native overlayView touch listener exclusively.
+// JS only handles long-press (expand/mic) in that case — see the isAndroidBridge block above.
+// In browser mode below, detect taps for expand/collapse since there is no native handler.
+if (!isAndroidBridge) {
+  let tapStartX=0,tapStartY=0,tapMoved=false;
+  document.getElementById('dragHandle').addEventListener('touchstart',function(e){
+    const t=e.touches[0];
+    tapStartX=t.clientX;tapStartY=t.clientY;tapMoved=false;
+  },{passive:true});
+  document.getElementById('dragHandle').addEventListener('touchmove',function(e){
+    const t=e.touches[0];
+    if(Math.abs(t.clientX-tapStartX)>15||Math.abs(t.clientY-tapStartY)>15)tapMoved=true;
+  },{passive:true});
+  document.getElementById('dragHandle').addEventListener('touchend',function(e){
+    if(!tapMoved&&window.LillyBridge&&window.LillyBridge.toggleExpand){
+      window.LillyBridge.toggleExpand();
+    }
+  },{passive:true});
+  // Mouse tap for desktop testing
+  document.getElementById('dragHandle').addEventListener('click',function(e){
+    if(window.LillyBridge&&window.LillyBridge.toggleExpand){
+      window.LillyBridge.toggleExpand();
+    }
+  });
+}
+
+// Use local bridge for Termux commands (bypasses SSH, avoids throttling)
+function localToast(text){
+  if(window.LillyBridge&&window.LillyBridge.runTermux){
+    window.LillyBridge.runTermux(JSON.stringify({type:'toast',text}));
+    return true;
+  }
+  return false;
+}
+function localNotif(title,text){
+  if(window.LillyBridge&&window.LillyBridge.runTermux){
+    window.LillyBridge.runTermux(JSON.stringify({type:'notification',title,text}));
+    return true;
+  }
+  return false;
+}
+function localOpen(url){
+  if(window.LillyBridge&&window.LillyBridge.runTermux){
+    window.LillyBridge.runTermux(JSON.stringify({type:'open',text:url}));
+    return true;
+  }
+  return false;
+}
+function localAM(pkg,activity){
+  if(window.LillyBridge&&window.LillyBridge.runTermux){
+    window.LillyBridge.runTermux(JSON.stringify({type:'am',package:pkg,activity:activity||''}));
+    return true;
+  }
+  return false;
+}
+
+// ─── Client-side throttle for local bridge calls ───
+const _cmdQueue=[];
+let _cmdProcessing=false;
+let _lastCmdTime=0;
+const CMD_MIN_GAP=350;
+function _throttledBridgeCall(fn){
+  const now=Date.now();
+  const wait=Math.max(0,CMD_MIN_GAP-(now-_lastCmdTime));
+  _cmdQueue.push({fn,at:now+wait});
+  if(!_cmdProcessing)_processQueue();
+}
+function _processQueue(){
+  if(!_cmdQueue.length){_cmdProcessing=false;return}
+  _cmdProcessing=true;
+  const item=_cmdQueue.shift();
+  const delay=Math.max(0,item.at-Date.now());
+  setTimeout(()=>{
+    try{item.fn();}catch(e){}
+    _lastCmdTime=Date.now();
+    _processQueue();
+  },delay);
+}
+
+const _origLocalToast=localToast;
+const _origLocalNotif=localNotif;
+const _origLocalOpen=localOpen;
+const _origLocalAM=localAM;
+localToast=function(t){_throttledBridgeCall(()=>_origLocalToast(t));};
+localNotif=function(ti,t){_throttledBridgeCall(()=>_origLocalNotif(ti,t));};
+localOpen=function(u){_throttledBridgeCall(()=>_origLocalOpen(u));};
+localAM=function(p,a){_throttledBridgeCall(()=>_origLocalAM(p,a));};
+
+// ─── Input handlers ───
+if (!isAndroidBridge) {
+  micBtn.addEventListener('click',toggleOverlayMic);
+}
+sendBtn.addEventListener('click',sendMessage);
+chatInput.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();sendMessage();}});
+
+window.LillyOverlay={sendMessage,toggleOverlayMic,pollState,localToast,localNotif,localOpen,localAM};
+</script>
+</body>
+</html>

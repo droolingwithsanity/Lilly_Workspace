@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Lilly Brand Primary -->
+    <color name="primary">#7C3AED</color>
+    <color name="primary_dark">#5B21B6</color>
+    <color name="primary_light">#A78BFA</color>
+    <color name="primary_variant">#6D28D9</color>
+    
+    <!-- Lilly Brand Secondary -->
+    <color name="secondary">#EC4899</color>
+    <color name="secondary_dark">#DB2777</color>
+    <color name="secondary_light">#F9A8D4</color>
+    
+    <!-- Background Colors -->
+    <color name="background">#FAFAFA</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="error">#EF4444</color>
+    
+    <!-- Text Colors -->
+    <color name="text_primary">#1F1F1F</color>
+    <color name="text_secondary">#6B7280</color>
+    <color name="text_hint">#9CA3AF</color>
+    
+    <!-- Specific Colors -->
+    <color name="typing_indicator_background">#EDE9FE</color>
+    <color name="message_user">#7C3AED</color>
+    <color name="message_lilly">#FFFFFF</color>
+    <color name="user_message_bg">#7C3AED</color>
+    <color name="lilly_message_bg">#F3F0FF</color>
+    
+    <!-- Launcher Colors -->
+    <color name="ic_launcher_background">#7C3AED</color>
+    
+    <!-- Status Colors -->
+    <color name="online">#10B981</color>
+    <color name="offline">#9CA3AF</color>
+    <color name="busy">#F59E0B</color>
+    
+    <!-- Accent Colors -->
+    <color name="accent_blue">#3B82F6</color>
+    <color name="accent_green">#10B981</color>
+    <color name="accent_yellow">#F59E0B</color>
+    <color name="accent_red">#EF4444</color>
+    
+    <!-- Gradient Colors -->
+    <color name="gradient_start">#7C3AED</color>
+    <color name="gradient_end">#EC4899</color>
+    
+    <!-- Dark Theme Colors (default) -->
+    <color name="dark_background">#0F0A1A</color>
+    <color name="dark_surface">#1A1128</color>
+    <color name="dark_text_primary">#FFFFFF</color>
+    <color name="dark_text_secondary">#A78BFA</color>
+</resources>

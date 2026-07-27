@@ -1,0 +1,52 @@
+services:
+  lilly:
+    build: .
+    container_name: lilly-ai
+    ports:
+      - "8098:8098"
+      - "3002:3002"
+    volumes:
+      - .:/app
+      - ~/.ssh:/root/.ssh:ro
+      - sso-data:/app/data/sso
+      - connector-data:/app/data/connect
+    environment:
+      - PORT=8098
+      - OLLAMA_URL=${OLLAMA_URL:-http://100.93.131.114:11434}
+      - PREFER_BACKEND=ollama
+      - SENSOR_SERVER_URL=${SENSOR_SERVER_URL:-http://100.115.234.87:8099}
+      - TERMUX_SSH_HOST=${TERMUX_SSH_HOST}
+      - TERMUX_SSH_PORT=${TERMUX_SSH_PORT:-8022}
+      - TERMUX_SSH_USER=${TERMUX_SSH_USER}
+      # Open Connector (runs inside same container on :3001)
+      - OC_BASE_URL=http://localhost:3002
+      - OOMOL_CONNECT_ADMIN_TOKEN=${OPENCONNECTOR_ADMIN_TOKEN}
+      - OOMOL_CONNECT_RUNTIME_TOKEN=${OPENCONNECTOR_RUNTIME_TOKEN}
+      - OOMOL_CONNECT_ENCRYPTION_KEY=${OPENCONNECTOR_ENCRYPTION_KEY}
+      - OOMOL_CONNECT_ALLOWED_ACTIONS=${OPENCONNECTOR_ALLOWED_ACTIONS:-gmail.*}
+      # Per-user auth
+      - JWT_SECRET=${JWT_SECRET}
+      - JWT_EXPIRY_HOURS=${JWT_EXPIRY_HOURS:-24}
+      - REFRESH_TOKEN_EXPIRY_DAYS=${REFRESH_TOKEN_EXPIRY_DAYS:-30}
+      # Google OAuth
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:8098/api/auth/google/callback}
+      # Email integration
+      - OPENCONNECTOR_URL=http://localhost:3002
+      - OPENCONNECTOR_RUNTIME_TOKEN=${OPENCONNECTOR_RUNTIME_TOKEN}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - whisper-net
+    restart: unless-stopped
+
+networks:
+  whisper-net:
+    name: supernova_default
+    external: true
+
+volumes:
+  sso-data:
+  connector-data:

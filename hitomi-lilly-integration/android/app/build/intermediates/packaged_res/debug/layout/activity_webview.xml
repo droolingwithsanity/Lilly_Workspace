@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#FF0F0F28">
+
+    <WebView
+        android:id="@+id/fullWebView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_above="@+id/bottomBar" />
+
+    <LinearLayout
+        android:id="@+id/bottomBar"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:layout_alignParentBottom="true"
+        android:background="#DD1A1A2E"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:padding="8dp">
+
+        <ImageButton
+            android:id="@+id/webviewMicBtn"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@drawable/overlay_action_button_bg"
+            android:backgroundTint="#4ADE80"
+            android:contentDescription="Microphone"
+            android:padding="10dp"
+            android:src="@android:drawable/ic_btn_speak_now"
+            android:layout_marginEnd="12dp" />
+
+        <ImageButton
+            android:id="@+id/webviewSettingsBtn"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@drawable/overlay_action_button_bg"
+            android:backgroundTint="#FFE27A"
+            android:contentDescription="Settings"
+            android:padding="10dp"
+            android:src="@android:drawable/ic_menu_manage"
+            android:layout_marginEnd="12dp" />
+
+        <ImageButton
+            android:id="@+id/webviewCloseBtn"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@drawable/overlay_action_button_bg"
+            android:backgroundTint="#FF9AA5"
+            android:contentDescription="Close"
+            android:padding="10dp"
+            android:src="@android:drawable/ic_menu_close_clear_cancel" />
+
+    </LinearLayout>
+
+</RelativeLayout>

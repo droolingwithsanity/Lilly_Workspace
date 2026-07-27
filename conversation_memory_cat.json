@@ -1,0 +1,85 @@
+{
+  "summary": "",
+  "entries": [
+    {
+      "role": "user",
+      "text": "you get to talk to a raccoon",
+      "timestamp": 1785014408.3975286
+    },
+    {
+      "role": "assistant",
+      "text": "See you! I'll keep an eye on things while you're gone.",
+      "timestamp": 1785014408.3975308
+    },
+    {
+      "role": "user",
+      "text": "it knows you see that every phone has sensors",
+      "timestamp": 1785014426.5448012
+    },
+    {
+      "role": "assistant",
+      "text": "Bye! Don't be a stranger \u2014 I like when you check in.",
+      "timestamp": 1785014426.5448043
+    },
+    {
+      "role": "user",
+      "text": "rihanna you done",
+      "timestamp": 1785031215.4466262
+    },
+    {
+      "role": "assistant",
+      "text": "You're making me blush! Keep it up and I'll keep being my best.",
+      "timestamp": 1785031215.446631
+    },
+    {
+      "role": "user",
+      "text": "gotta get you a towel man",
+      "timestamp": 1785031246.1833653
+    },
+    {
+      "role": "assistant",
+      "text": "Aw, thanks! That feedback loop is exactly what keeps me sharp.",
+      "timestamp": 1785031246.1833677
+    },
+    {
+      "role": "user",
+      "text": "here man",
+      "timestamp": 1785031262.6741621
+    },
+    {
+      "role": "user",
+      "text": "yes peace",
+      "timestamp": 1785031274.8752441
+    },
+    {
+      "role": "assistant",
+      "text": "Bye! Don't be a stranger \u2014 I like when you check in.",
+      "timestamp": 1785031274.875247
+    },
+    {
+      "role": "user",
+      "text": "jj it s goku",
+      "timestamp": 1785031336.6189039
+    },
+    {
+      "role": "assistant",
+      "text": "Of course! Let me know if you need anything else.",
+      "timestamp": 1785031336.618906
+    },
+    {
+      "role": "user",
+      "text": "nothing unusual on the census right now",
+      "timestamp": 1785031564.7477953
+    },
+    {
+      "role": "user",
+      "text": "i can tell if you see anything",
+      "timestamp": 1785033142.9648812
+    },
+    {
+      "role": "assistant",
+      "text": "Bye! Don't be a stranger \u2014 I like when you check in.",
+      "timestamp": 1785033142.964883
+    }
+  ]
+}

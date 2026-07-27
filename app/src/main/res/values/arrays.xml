@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Voice Language Options -->
+    <string-array name="voice_language_entries">
+        <item>English (US)</item>
+        <item>English (UK)</item>
+        <item>Spanish</item>
+        <item>French</item>
+        <item>German</item>
+        <item>Japanese</item>
+        <item>Korean</item>
+        <item>Chinese (Simplified)</item>
+        <item>Portuguese</item>
+        <item>Italian</item>
+    </string-array>
+    
+    <string-array name="voice_language_values">
+        <item>en-US</item>
+        <item>en-GB</item>
+        <item>es-ES</item>
+        <item>fr-FR</item>
+        <item>de-DE</item>
+        <item>ja-JP</item>
+        <item>ko-KR</item>
+        <item>zh-CN</item>
+        <item>pt-BR</item>
+        <item>it-IT</item>
+    </string-array>
+    
+    <!-- Response Length Options -->
+    <string-array name="response_length_entries">
+        <item>Concise</item>
+        <item>Balanced</item>
+        <item>Detailed</item>
+        <item>Comprehensive</item>
+    </string-array>
+    
+    <string-array name="response_length_values">
+        <item>concise</item>
+        <item>balanced</item>
+        <item>detailed</item>
+        <item>comprehensive</item>
+    </string-array>
+    
+    <!-- Response Style Options -->
+    <string-array name="response_style_entries">
+        <item>Professional</item>
+        <item>Casual</item>
+        <item>Technical</item>
+        <item>Creative</item>
+        <item>Educational</item>
+    </string-array>
+    
+    <string-array name="response_style_values">
+        <item>professional</item>
+        <item>casual</item>
+        <item>technical</item>
+        <item>creative</item>
+        <item>educational</item>
+    </string-array>
+    
+    <!-- Theme Options -->
+    <string-array name="theme_entries">
+        <item>System Default</item>
+        <item>Light</item>
+        <item>Dark</item>
+        <item>Auto (Day/Night)</item>
+    </string-array>
+    
+    <string-array name="theme_values">
+        <item>system</item>
+        <item>light</item>
+        <item>dark</item>
+        <item>auto</item>
+    </string-array>
+</resources>
