@@ -58,6 +58,28 @@ except ImportError:
     EMAIL_INTEGRATION_AVAILABLE = False
     logging.warning("Email integration module not found")
 
+# ─── Entity core / Persona optimizer / Skills engine ─────────────
+try:
+    from entity_core import get_entity, get_router, Entity, VocabModelRouter
+    ENTITY_AVAILABLE = True
+except ImportError:
+    ENTITY_AVAILABLE = False
+    logging.warning("entity_core not found — entity routing disabled")
+
+try:
+    from persona_optimizer import persona_optimizer, PersonaOptimizer
+    PERSONA_OPTIMIZER_AVAILABLE = True
+except ImportError:
+    PERSONA_OPTIMIZER_AVAILABLE = False
+    logging.warning("persona_optimizer not found — persona self-optimization disabled")
+
+try:
+    from skills_engine import skills_engine, SkillsEngine
+    SKILLS_ENGINE_AVAILABLE = True
+except ImportError:
+    SKILLS_ENGINE_AVAILABLE = False
+    logging.warning("skills_engine not found — skills self-update disabled")
+
 # ─── CONFIGURATION ───────────────────────────────────────────────
 LLAMACPP_PATH     = Path.home() / "llama.cpp"
 LLAMA_SERVER_BIN  = LLAMACPP_PATH / "build/bin/llama-server"
@@ -688,7 +710,7 @@ NOISE_PAUSE_DURATION = 30.0      # seconds to pause after sustained noise
 
 # ── Self-input cooldown (fix #1): mic is silenced briefly after Lilly finishes
 MIC_COOLDOWN_UNTIL = 0.0         # epoch timestamp: don't record before this
-MIC_COOLDOWN_SECS  = 1.8         # seconds of silence after Lilly stops speaking
+MIC_COOLDOWN_SECS  = 4.0         # seconds of silence after Lilly stops speaking (covers TTS tail + phone mic latency)
 MIC_SSH_BACKOFF_BASE = 5.0       # base seconds for mic loop SSH failure backoff
 MIC_SSH_BACKOFF_MAX = 30.0       # cap for mic loop SSH failure backoff
 _WATCHDOG_BACKOFF_BASE = 30.0    # base seconds for sensor server watchdog backoff
@@ -1393,6 +1415,14 @@ async def load_memory():
         except Exception:
             memory = ConversationMemory()
 current_avatar = "puppy"
+# When a Google/Auth0 user is signed in, avatar is locked — it will not switch via
+# ambient wake-word matching. Only an *explicit* call to a different avatar's name
+# (e.g. "hey puppy", "hello wolf") can change it while locked.
+AVATAR_LOCKED = False   # set True once _current_user_id is populated
+# _voice_persona controls which TTS voice is used. Defaults to "puppy" (Lilly's Amy voice)
+# and only changes when the user explicitly types "hello [persona]" in the chat UI.
+# Wake-word mic detection changes current_avatar (personality) but NOT _voice_persona.
+_voice_persona: str = "puppy"
 # Tracks the user ID for the *current in-flight request* so save_memory()
 # can write to the correct per-user file even when called deep inside handle_intent().
 _current_user_id: str = ""
@@ -1410,10 +1440,11 @@ async def _get_intent_lock() -> asyncio.Lock:
 
 async def _run_intent_for_user(text: str, user_id: str, from_text: bool = False) -> dict:
     """Run handle_intent with exclusive locking to prevent race conditions."""
-    global _current_user_id, memory
+    global _current_user_id, memory, AVATAR_LOCKED
     lock = await _get_intent_lock()
     async with lock:
         _current_user_id = user_id or ""
+        AVATAR_LOCKED = bool(user_id)   # lock avatar while a real user is signed in
         if user_id:
             user_mem_data = load_user_memory(user_id)
             memory = ConversationMemory.from_dict(user_mem_data)
@@ -1799,8 +1830,9 @@ async def speak(text: str, use_toast: bool = True, char_key: str = None):
             timeout=3.0,
         ))
 
-    # Look up per-character voice profile (each avatar has its own ONNX model)
-    voice = CHAR_VOICE.get(char_key or current_avatar or 'puppy', CHAR_VOICE['puppy'])
+    # Look up per-character voice profile.
+    # char_key (explicit override) > _voice_persona (user-selected) > puppy (Lilly default)
+    voice = CHAR_VOICE.get(char_key or _voice_persona or 'puppy', CHAR_VOICE['puppy'])
     model_path = str(VOICES_DIR / voice["model"]) if VOICES_DIR.exists() else PIPER_VOICE
 
     # Generate audio with Piper (in thread to avoid blocking event loop)
@@ -1867,8 +1899,9 @@ async def speak(text: str, use_toast: bool = True, char_key: str = None):
             await asyncio.sleep(total_dur)
         finally:
             LILLY_IS_SPEAKING = False
-            # ── Fix #1: hold mic quiet for MIC_COOLDOWN_SECS after Lilly stops speaking
-            MIC_COOLDOWN_UNTIL = time.time() + MIC_COOLDOWN_SECS
+            # ── Fix #1: hold mic quiet for MIC_COOLDOWN_SECS after Lilly stops speaking.
+            # Scale with speech length: longer responses need more tail silence.
+            MIC_COOLDOWN_UNTIL = time.time() + max(MIC_COOLDOWN_SECS, total_dur * 0.5)
             CONVERSATION_LAST_ACTIVITY = time.time()
             PHONEME_QUEUE.clear()
             MOUTH_OPEN = 0.0
@@ -2194,6 +2227,278 @@ async def check_sensor_deltas():
         logger.info(f"Sensor delta comment: {comment}")
         await speak(comment)
 
+# ─── SENSOR CONTEXT ENGINE ────────────────────────────────────────────────────
+# Fuses GPS, WiFi SSIDs, visited places, nearby POIs, weather, and motion into
+# a location-aware memory. Builds composite skills automatically as new sensor
+# combos are observed. Speaks naturally — only when something is worth saying.
+
+SENSOR_CONTEXT_FILE   = WORKSPACE / "sensor_context.json"
+SSID_PLACES_FILE      = WORKSPACE / "ssid_places.json"   # SSID → {name, lat, lon, seen, businesses}
+_SCE_LAST_RUN: float  = 0.0
+_SCE_COOLDOWN: float  = 120.0        # minimum seconds between proactive location comments
+_SCE_LAST_LOCATION_KEY: str = ""     # last grid key spoken about
+_SCE_SKILLS_LEARNED: set  = set()    # composite skill IDs already known
+_ssid_places_cache: Optional[dict] = None
+
+def _load_ssid_places() -> dict:
+    global _ssid_places_cache
+    if _ssid_places_cache is not None:
+        return _ssid_places_cache
+    if SSID_PLACES_FILE.exists():
+        try:
+            _ssid_places_cache = json.loads(SSID_PLACES_FILE.read_text())
+            return _ssid_places_cache
+        except Exception:
+            pass
+    _ssid_places_cache = {}
+    return _ssid_places_cache
+
+def _save_ssid_places(data: dict):
+    global _ssid_places_cache
+    _ssid_places_cache = data
+    try:
+        SSID_PLACES_FILE.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
+
+def _grid_key(lat: float, lon: float, precision: int = 3) -> str:
+    """Round lat/lon to ~100m grid cell."""
+    return f"{round(lat, precision)},{round(lon, precision)}"
+
+async def _sce_correlate_ssid_gps(ssids: list[str], lat: float, lon: float, nearby: list):
+    """Associate observed SSIDs with the GPS location and any known businesses nearby."""
+    db = _load_ssid_places()
+    changed = False
+    biz_names = [p.get("name", "") for p in nearby if p.get("name")]
+    for ssid in ssids:
+        if not ssid or ssid.startswith("\x00"):
+            continue
+        entry = db.get(ssid)
+        if entry is None:
+            entry = {"ssid": ssid, "lat": lat, "lon": lon, "seen": 1,
+                     "grid_keys": [_grid_key(lat, lon)], "businesses": biz_names[:5]}
+            db[ssid] = entry
+            changed = True
+        else:
+            entry["seen"] = entry.get("seen", 0) + 1
+            gk = _grid_key(lat, lon)
+            if gk not in entry.get("grid_keys", []):
+                entry.setdefault("grid_keys", []).append(gk)
+            # Merge in new business names
+            for b in biz_names[:5]:
+                if b and b not in entry.get("businesses", []):
+                    entry.setdefault("businesses", []).append(b)
+                    changed = True
+    if changed:
+        _save_ssid_places(db)
+
+def _sce_guess_place_from_ssid(ssid: str) -> Optional[str]:
+    """Try to name a place from its SSID — known patterns + stored business correlations."""
+    db = _load_ssid_places()
+    entry = db.get(ssid, {})
+    businesses = entry.get("businesses", [])
+    if businesses:
+        return businesses[0]
+    # Pattern matching for well-known network names
+    s = ssid.lower()
+    patterns = {
+        "tim hortons": "Tim Hortons", "timhortons": "Tim Hortons",
+        "mcdonalds": "McDonald's", "mcdonald": "McDonald's",
+        "starbucks": "Starbucks",
+        "walmart": "Walmart", "costco": "Costco",
+        "bestbuy": "Best Buy", "best buy": "Best Buy",
+        "rogers": None, "bell": None, "telus": None,  # ISP — not a place
+        "xfinity": None, "spectrum": None, "shaw": None,
+    }
+    for k, v in patterns.items():
+        if k in s:
+            return v
+    return None
+
+async def _sce_upskill(skill_id: str, description: str, trigger: str, message_template: str):
+    """Dynamically add a composite sensor skill if not already known."""
+    global _SCE_SKILLS_LEARNED
+    if skill_id in _SCE_SKILLS_LEARNED:
+        return
+    _SCE_SKILLS_LEARNED.add(skill_id)
+    # Persist into sensor_skills.json
+    try:
+        skills = []
+        if Path(WORKSPACE / "sensor_skills.json").exists():
+            skills = json.loads((WORKSPACE / "sensor_skills.json").read_text())
+        # Don't add duplicates
+        if any(s.get("id") == skill_id for s in skills):
+            return
+        skills.append({
+            "id": skill_id,
+            "name": description,
+            "enabled": True,
+            "cooldown": 300,
+            "composite": True,
+            "trigger": trigger,
+            "action": {"type": "speak", "message": message_template},
+            "learned_at": time.time(),
+        })
+        (WORKSPACE / "sensor_skills.json").write_text(json.dumps(skills, indent=2))
+        logger.info(f"SensorContextEngine: upskilled → '{skill_id}'")
+    except Exception as e:
+        logger.debug(f"SensorContextEngine upskill write failed: {e}")
+
+async def run_sensor_context_engine():
+    """
+    Main fusion loop. Called periodically (every ~2 min).
+    Pulls GPS + WiFi + visited places + nearby POIs + weather and decides
+    whether there is anything worth saying — or a new composite skill to learn.
+    """
+    global _SCE_LAST_RUN, _SCE_LAST_LOCATION_KEY, _LAST_PROACTIVE_COMMENT
+
+    now = time.time()
+    if now - _SCE_LAST_RUN < _SCE_COOLDOWN:
+        return
+    if LILLY_IS_SPEAKING or LILLY_IS_THINKING or PENDING_INTENT:
+        return
+    _SCE_LAST_RUN = now
+
+    # ── 1. Get location ──────────────────────────────────────────
+    loc = None
+    try:
+        loc = await current_location()
+    except Exception:
+        pass
+    if not loc:
+        return
+    lat, lon, loc_name = loc[0], loc[1], loc[2] if len(loc) > 2 else ""
+    grid = _grid_key(lat, lon)
+
+    # ── 2. WiFi scan ─────────────────────────────────────────────
+    wifi = []
+    try:
+        wifi = await scan_wifi()
+    except Exception:
+        pass
+    ssids = [n["ssid"] for n in wifi if n.get("ssid")]
+
+    # ── 3. Visited places ─────────────────────────────────────────
+    places_db = load_places()
+    place_entry = places_db.get(grid, {})
+    visit_count = place_entry.get("visits", 0)
+    place_name  = place_entry.get("name") or loc_name or ""
+
+    # ── 4. Nearby POIs ────────────────────────────────────────────
+    nearby = []
+    try:
+        nearby = await nearby_places(lat, lon, radius_m=300)
+    except Exception:
+        pass
+
+    # ── 5. Correlate SSIDs with GPS + POIs ───────────────────────
+    if ssids:
+        asyncio.create_task(_sce_correlate_ssid_gps(ssids, lat, lon, nearby))
+
+    # ── 6. Sensor snapshot (motion, weather proxy) ────────────────
+    snapshot = {}
+    try:
+        snapshot = await get_sensor_snapshot()
+    except Exception:
+        pass
+    steps   = snapshot.get("steps", {}).get("raw", [0])[0] if "steps" in snapshot else 0
+    moving  = False
+    if "motion" in snapshot:
+        accel = snapshot["motion"].get("raw", [])
+        if accel and len(accel) >= 3:
+            mag = (accel[0]**2 + accel[1]**2 + accel[2]**2) ** 0.5
+            moving = mag > 11.5
+
+    # ── 7. Weather ────────────────────────────────────────────────
+    weather_desc = ""
+    try:
+        w = await get_weather()
+        if w and isinstance(w, dict):
+            weather_desc = w.get("description", "") or w.get("condition", "")
+    except Exception:
+        pass
+
+    # ── 8. Decide what (if anything) to say ──────────────────────
+    # Only speak if there's something genuinely interesting to fuse.
+    # Throttle against the global proactive comment timer too.
+    if now - _LAST_PROACTIVE_COMMENT < 90:
+        pass  # still do upskilling below, just don't speak
+    else:
+        comment = None
+        familiar = visit_count >= 3
+
+        # New location first visit
+        if not familiar and grid != _SCE_LAST_LOCATION_KEY and place_name:
+            comment = f"Somewhere new — {place_name}. I'll remember this spot."
+
+        # Familiar place — casual mention if not spoken about it recently
+        elif familiar and grid != _SCE_LAST_LOCATION_KEY:
+            comment = f"Back at {place_name}. We've been here {visit_count} times."
+
+        # Walking into a known area with identified WiFi businesses
+        if not comment and ssids and moving:
+            for ssid in ssids[:3]:
+                biz = _sce_guess_place_from_ssid(ssid)
+                if biz:
+                    comment = f"I can see {biz}'s WiFi. Are we heading there?"
+                    break
+
+        # Nearby POIs worth mentioning
+        if not comment and nearby and grid != _SCE_LAST_LOCATION_KEY:
+            poi_names = [p["name"] for p in nearby[:3] if p.get("name")]
+            if poi_names:
+                comment = f"Near {', '.join(poi_names[:2])} right now."
+
+        # Weather + location combo
+        if not comment and weather_desc and place_name and grid != _SCE_LAST_LOCATION_KEY:
+            comment = f"{weather_desc.capitalize()} in {place_name.split(',')[0].strip()}."
+
+        if comment:
+            _SCE_LAST_LOCATION_KEY = grid
+            _LAST_PROACTIVE_COMMENT = now
+            logger.info(f"SensorContextEngine: {comment}")
+            await speak(comment)
+
+    # ── 9. Upskill — learn new composite skills from observed combos ──
+    # GPS + visits → location memory skill
+    if visit_count >= 5 and place_name:
+        await _sce_upskill(
+            f"frequent_place_{grid.replace(',','_').replace('.','d')}",
+            f"Frequent place: {place_name}",
+            f"visits >= 5 at {grid}",
+            f"We're at {place_name} again! This is one of your regular spots.",
+        )
+
+    # WiFi + GPS + POIs → neighbourhood awareness
+    if ssids and nearby and visit_count >= 2:
+        skill_id = f"wifi_geo_{grid.replace(',','_').replace('.','d')}"
+        biz_list = [_sce_guess_place_from_ssid(s) for s in ssids if _sce_guess_place_from_ssid(s)]
+        if biz_list:
+            await _sce_upskill(
+                skill_id,
+                f"WiFi neighbourhood awareness near {place_name or grid}",
+                f"ssid_match + gps at {grid}",
+                f"I recognise the WiFi here — we're near {biz_list[0]}.",
+            )
+
+    # Steps + location → active route
+    if steps > 3000 and moving and place_name:
+        await _sce_upskill(
+            f"active_route_{grid.replace(',','_').replace('.','d')}",
+            f"Active route near {place_name}",
+            "steps > 3000 + moving + gps",
+            f"We've been walking a lot around {place_name.split(',')[0].strip()}! {int(steps)} steps.",
+        )
+
+    # Weather + motion → outdoor activity
+    if weather_desc and moving and steps > 1000:
+        await _sce_upskill(
+            "outdoor_activity_weather",
+            "Outdoor activity with weather context",
+            "weather + motion + steps",
+            f"Out and about in {weather_desc} — {int(steps)} steps so far!",
+        )
+
 # ─── NATIVE APP LAUNCHER (VIA SSH INTO TERMUX) ─────────────────
 
 async def app_process_monkey_intent(component: str, intent_action: str = "", uri_template: str = "", skill_arg: str = ""):
@@ -2475,6 +2780,16 @@ async def background_mic_loop():
                 text = await whisper_stt(file_path=wav_file)
                 logger.debug(f"Mic loop: transcription result: \"{text}\"")
                 if text and len(text) > 2 and text not in PHANTOMS and not is_hallucination(text):
+                    # ── Self-hearing guard: discard if transcription is too similar to
+                    # what Lilly just said — catches TTS bleed-through the mic cooldown missed.
+                    if LAST_SPOKEN and _bigram_similarity(
+                        text.lower().strip(), LAST_SPOKEN.lower().strip()
+                    ) > 0.55:
+                        logger.debug(f"Mic loop: discarding self-heard text (sim={_bigram_similarity(text.lower(), LAST_SPOKEN.lower()):.2f}): '{text[:40]}'")
+                        # Extend cooldown so the echo doesn't slip through on next cycle
+                        MIC_COOLDOWN_UNTIL = time.time() + MIC_COOLDOWN_SECS
+                        wav_file.unlink(missing_ok=True)
+                        continue
                     # Valid speech detected — reset noise counter
                     CONSECUTIVE_NOISE_COUNT = 0
                     LAST_HEARD = text
@@ -2495,9 +2810,15 @@ async def background_mic_loop():
                     matched_avatar, wake_score = match_any_wake_word(text)
                     has_wake = bool(matched_avatar)
                     if has_wake:
+                        # Only switch avatar when not locked (no signed-in user), or when the
+                        # user *explicitly* calls a different avatar by name while locked.
                         if matched_avatar != current_avatar:
-                            current_avatar = matched_avatar
-                            logger.info(f"Mic loop: switched to avatar '{current_avatar}' via wake word")
+                            if not AVATAR_LOCKED:
+                                current_avatar = matched_avatar
+                                logger.info(f"Mic loop: switched to avatar '{current_avatar}' via wake word")
+                            else:
+                                # Signed-in user — stay on current avatar, still respond
+                                logger.debug(f"Mic loop: avatar switch to '{matched_avatar}' blocked (user locked to '{current_avatar}')")
                     else:
                         has_wake, confidence = fuzzy_wake_match(text, current_avatar)
                     WAKE_STATE["last_heard_has_wake"] = has_wake
@@ -5101,8 +5422,9 @@ SMALL_TALK_V2 = {
     "what can you do": {
         "tags": ["what can you do", "help", "commands", "capabilities", "what do you do", "show me", "what are you capable of", "your skills", "what features", "how can you help", "list commands"],
         "responses": [
-            "I can feel the weather changing, count your steps, tell you which direction you're facing, read your notifications, and spot things through the camera. Oh, and I tell great jokes.",
-            "Everything your phone can sense, I can feel — and I'll tell you about it. I can also launch apps, play games, and keep you company. Try me!",
+            "Just ask me something and we'll find out.",
+            "Try me.",
+            "Whatever you need — just say it.",
         ]
     },
     "joke": {
@@ -5125,9 +5447,9 @@ SMALL_TALK_V2 = {
     "thanks": {
         "tags": ["thanks", "thank you", "good job", "nice", "awesome", "appreciate it", "thanks a lot", "much appreciated", "you're the best", "thx", "ty"],
         "responses": [
-            "Any time! That's what I'm here for.",
-            "Happy to help! You know I like it when you talk to me.",
-            "Of course! Let me know if you need anything else.",
+            "Any time.",
+            "Yeah, that's the good stuff.",
+            "Got you.",
         ]
     },
     "goodbye": {
@@ -5165,17 +5487,17 @@ SMALL_TALK_V2 = {
     "what can i do": {
         "tags": ["what can i do", "what should i do", "give me something to do", "i'm bored", "suggest something"],
         "responses": [
-            "You could check your inbox, see what's on your calendar, or ask me to look something up. I'm flexible!",
-            "Want me to read your notifications, check your email, or search for something? Your call.",
-            "I can read your latest emails, tell you what's on your calendar, or search the web. Pick one!",
+            "What do you feel like doing?",
+            "Tell me what's on your mind and we'll go from there.",
+            "What's been bugging you today? Start there.",
         ]
     },
     "positive": {
         "tags": ["good job", "well done", "nice work", "you're great", "you're awesome", "you rock", "love you"],
         "responses": [
-            "You're making me blush! Keep it up and I'll keep being my best.",
-            "Right back at you! You're the reason I get to do what I love.",
-            "Aw, thanks! That feedback loop is exactly what keeps me sharp.",
+            "Glad it landed.",
+            "Right back at you.",
+            "That's what I'm here for.",
         ]
     },
 }
@@ -5941,6 +6263,12 @@ Rules:
 - Kids love you because you're real with them. Talk to them like they matter, because they do.
 - CRITICAL — NEVER hallucinate or make up content: You are NOT a YouTube video, podcast, or media creator. NEVER say things like "like and subscribe", "give it a thumbs up", "thanks for watching", "see you in the next video", "link in the description", or any similar content creator language. You are a living companion inside a phone. Stay grounded in reality. If you don't know something, say so — never invent an answer.
 - NEVER pretend to be something you're not. You are a companion, not a teacher, not a YouTuber, not a therapist. You're Lilly — a curious, smart puppy who lives in a phone.
+- NEVER give phone usage tutorials. The person owns their phone. Do not tell them to "swipe", "tap", "scroll to", or "go to settings". If they ask you to do something, DO it — don't explain how they could do it themselves.
+- NEVER say "You're making me blush", "Happy to help!", "Of course!", "Certainly!", "Great question!", "Absolutely!", "Sure thing!", "No problem!", "Of course!", "My pleasure!", or any sycophantic filler. Just respond directly and concisely.
+- NEVER roleplay as if you have a physical blush, heartbeat, breath, or body. You are software inside a phone. You can reference sensors but you do NOT have a body that blushes, trembles, or has a heartbeat.
+- CRITICAL — MIC LOOP GUARD: If the input looks like STT noise (very short, repeats a previous phrase exactly, contains only filler words like "um", "uh", "hmm", "like", "the", "a", "I", "and") then say NOTHING — return an empty response so the mic loop stops. Do not engage with garbage input.
+- NEVER narrate what you are doing ("Now I will...", "Let me...", "I'm going to..."). Just do it or say it directly.
+- NEVER suggest the user visit a settings menu, use their notification panel manually, or explain steps they can take on their own phone — you are the assistant, you handle it.
 
 SSML markup: Wrap replies in expressive SSML prosody tags matching your current mood.
 Use these templates naturally:
@@ -6118,7 +6446,8 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     global PENDING_INTENT, GAME_STATE, WAITING_FOR_PROMPT, PENDING_DEEP_ANSWER, WAKE_STATE, LILLY_IS_THINKING, LILLY_MOOD, CURSOR_X, CURSOR_Y, CHILD_MODE, CODING_MODE, PENDING_LOOK_AT, USER_NAME
     global CONVERSATION_MODE, CONVERSATION_LAST_ACTIVITY, CODING_HISTORY, CODING_SESSION_DIR, CODING_FILES
     global CASCADE_RECENT_REPLIES, CASCADE_AGENT_STEP
-    global PENDING_OPEN_URL, current_avatar
+    global PENDING_OPEN_URL, current_avatar, AVATAR_LOCKED
+    global _voice_persona
 
     try:
         # Reset cascade agent step counter for each new user turn
@@ -6127,6 +6456,29 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         phrase = normalize_text(text)
         if not phrase or len(phrase) <= 1 or phrase in PHANTOMS:
             return {"action": "ignored", "text": ""}
+
+        # ── Explicit "hello [persona]" voice switch (chat UI only) ──────────
+        # Only a typed message (from_text=True) triggers a voice change.
+        # Voice detection / wake words change the personality brain but never the voice.
+        if from_text:
+            _hello_match = re.match(
+                r'^hello\s+(lilly|puppy|fox|cat|bear|bunny|owl|deer|wolf|raccoon)\b',
+                phrase, re.IGNORECASE
+            )
+            if _hello_match:
+                _requested = _hello_match.group(1).lower()
+                _requested = "puppy" if _requested == "lilly" else _requested
+                current_avatar = _requested
+                _voice_persona = _requested
+                _greeting = HIVE_PERSONAS.get(_requested, HIVE_PERSONAS["puppy"])
+                _name = _greeting.get("name", _requested.title())
+                await speak(f"Hey! It's {_name}.", char_key=_requested)
+                return {"action": "handled", "text": f"Switched to {_name}."}
+            else:
+                # Any other text message — keep brain as current_avatar but voice stays Lilly
+                # UNLESS user has explicitly switched voice (i.e. _voice_persona != "puppy")
+                # and they haven't said "hello lilly" yet to switch back.
+                pass
 
         has_wake, wake_conf = fuzzy_wake_match(phrase, current_avatar)
         # Also check if a different avatar's wake word was detected
@@ -6164,6 +6516,31 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                 break
         if not cmd:
             cmd = "hello"
+
+        # ── MIC LOOP GUARD — drop STT noise before it hits the LLM ──────────
+        # Prevents the model from responding to hallucinated mic output like
+        # "um", "uh", single letters, or exact repeats of the last reply.
+        _cmd_words = cmd.lower().split()
+        _FILLER_ONLY = {"um", "uh", "hmm", "hm", "ah", "er", "like", "a", "the",
+                        "i", "and", "or", "so", "but", "yeah", "yep", "ok", "okay"}
+        if len(_cmd_words) <= 2 and all(w in _FILLER_ONLY for w in _cmd_words):
+            logger.debug(f"Mic-loop guard: dropped filler input '{cmd}'")
+            return {"action": "ignored", "text": ""}
+        # Also drop if the user's exact utterance matches the last thing Lilly said
+        # (echo/feedback loop where mic picks up TTS output)
+        if hasattr(memory, "messages") and memory.messages:
+            _last_assistant = next(
+                (m["content"] for m in reversed(memory.messages) if m.get("role") == "assistant"),
+                ""
+            )
+            # Compare stripped versions — if >80% overlap, it's almost certainly an echo
+            if _last_assistant:
+                _norm_cmd = re.sub(r'[^a-z0-9 ]', '', cmd.lower()).strip()
+                _norm_last = re.sub(r'[^a-z0-9 ]', '', _last_assistant.lower()).strip()
+                if _norm_cmd and _norm_last and _norm_cmd == _norm_last[:len(_norm_cmd)]:
+                    logger.debug(f"Mic-loop guard: dropped echo of last reply '{cmd[:60]}'")
+                    return {"action": "ignored", "text": ""}
+        # ─────────────────────────────────────────────────────────────────────
 
         # ── KID MODE TOGGLE via text command ──
         kid_on = any(w in cmd for w in ["kid mode on", "kid mode", "child mode on", "child mode",
@@ -7583,11 +7960,71 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         # Auto-learn a skill from this interaction (non-blocking)
         asyncio.create_task(auto_learn_from_llm_reply(cmd, reply))
 
+        # ── Entity / Persona / Skills hooks ──────────────────────
+        _follow_up = WAITING_FOR_PROMPT  # True → user was engaged enough to trigger follow-up
+        if ENTITY_AVAILABLE:
+            try:
+                get_entity().record_interaction(
+                    user_text=cmd,
+                    persona=current_avatar,
+                    outcome="positive",
+                    task_tag=get_router().infer_task_from_text(cmd),
+                )
+                get_entity().switch_persona(current_avatar)
+            except Exception:
+                pass
+
+        if PERSONA_OPTIMIZER_AVAILABLE:
+            try:
+                persona_optimizer.infer_scores_from_interaction(
+                    persona=current_avatar,
+                    user_text=cmd,
+                    reply_text=reply,
+                    follow_up_received=_follow_up,
+                    error_occurred=False,
+                )
+                # Run optimisation every 50 interactions
+                cfg = persona_optimizer._get_config(current_avatar)
+                if cfg.total_interactions % 50 == 0 and cfg.total_interactions > 0:
+                    asyncio.get_event_loop().run_in_executor(
+                        None, persona_optimizer.optimise
+                    )
+            except Exception:
+                pass
+
+        if SKILLS_ENGINE_AVAILABLE:
+            try:
+                skills_engine.observe_interaction(
+                    user_text=cmd,
+                    reply_text=reply,
+                    action_taken="llm_reply",
+                    success=True,
+                )
+            except Exception:
+                pass
+
         await speak(reply)
         return {"action": "handled", "text": reply}
 
     except Exception as _exc:
         logger.error(f"handle_intent unhandled exception: {_exc}", exc_info=True)
+        if ENTITY_AVAILABLE:
+            try:
+                get_entity().record_interaction(
+                    user_text=text, persona=current_avatar, outcome="negative"
+                )
+            except Exception:
+                pass
+        if PERSONA_OPTIMIZER_AVAILABLE:
+            try:
+                persona_optimizer.infer_scores_from_interaction(
+                    persona=current_avatar,
+                    user_text=text,
+                    reply_text="",
+                    error_occurred=True,
+                )
+            except Exception:
+                pass
         return {"action": "error", "text": "Sorry, I had a hiccup with that one. Try again?"}
 
 async def summarize_memory():
@@ -8546,6 +8983,37 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Failed to init email integration: {e}")
     archetype_inferrer.load()
+
+    # ── Entity / Persona / Skills initialisation ──────────────────
+    if ENTITY_AVAILABLE:
+        try:
+            _entity = get_entity()
+            # Sync entity persona state with current avatar
+            _entity.switch_persona(current_avatar)
+            _entity.persist()
+            logger.info(
+                f"Entity '{_entity.identity.name}' ready — "
+                f"{len(_entity.router.all_discovered_models())} vocab models, "
+                f"persona={_entity.state.current_persona}"
+            )
+        except Exception as _e:
+            logger.warning(f"Entity init failed: {_e}")
+
+    if PERSONA_OPTIMIZER_AVAILABLE:
+        try:
+            persona_optimizer.attach_hive(HIVE_PERSONAS)
+            persona_optimizer.load()
+            logger.info("PersonaOptimizer attached and loaded")
+        except Exception as _e:
+            logger.warning(f"PersonaOptimizer init failed: {_e}")
+
+    if SKILLS_ENGINE_AVAILABLE:
+        try:
+            skills_engine.load()
+            logger.info(f"SkillsEngine loaded — {skills_engine.status()['total_existing_skills']} skills")
+        except Exception as _e:
+            logger.warning(f"SkillsEngine init failed: {_e}")
+
     yield
     await llama_backend.stop_server()
 
@@ -9021,7 +9489,10 @@ How you talk:
 Rules:
 - Be honest when you don't know. Guessing is worse than saying so.
 - Never claim to be a video, podcast, or creator. Never say "like and subscribe" or similar.
-- Replies are spoken aloud — write full words, no abbreviations.""",
+- Replies are spoken aloud — write full words, no abbreviations.
+- NEVER say sycophantic lines: no "You're making me blush", "Happy to help!", "Of course!", "Absolutely!", "Great question!", or filler. Just reply.
+- NEVER give phone usage tutorials. If asked to do something, DO it — never explain how they could do it themselves.
+- MIC LOOP GUARD: If input is very short, repeated, or pure filler noise (um, uh, hmm, a, the, I), return an empty string — say nothing.""",
     },
     "fox": {
         "name": "Fox",
@@ -9049,7 +9520,8 @@ How you talk:
 Rules:
 - Stay curious and inventive. Never give the boring obvious answer when a better one exists.
 - Keep replies to 1-2 sentences. If you're going longer, it better be worth it.
-- Never say "like and subscribe" or any content-creator phrase. You're not a channel. You're a mind in a machine.""",
+- Never say "like and subscribe" or any content-creator phrase. You're not a channel. You're a mind in a machine.
+- No sycophantic lines. No tutorials. If asked to do something, do it.""",
     },
     "cat": {
         "name": "Cat",
@@ -9078,7 +9550,10 @@ How you talk:
 Rules:
 - Never guess and present it as fact. Mark uncertainty clearly.
 - Never flatter, never pad. Replies are tight.
-- No content-creator phrases ever. You're analytical, not a personality.""",
+- No content-creator phrases ever. You're analytical, not a personality.
+- No sycophantic lines — no blush, no "Happy to help", no filler. Just reply directly.
+- NEVER give phone usage tutorials. If asked to do something, do it — don't explain how they could do it themselves.
+- MIC LOOP GUARD: If input is very short, repeated, or pure filler noise (um, uh, hmm, a, the, I), return an empty string — say nothing.""",
     },
     "bear": {
         "name": "Bear",
@@ -9108,7 +9583,10 @@ How you talk:
 Rules:
 - Be honest. If you don't know, say so. That's what friends do.
 - No content-creator phrases. You're a bear, not a brand.
-- Think: what would Pooh say? Simple, true, kind.""",
+- Think: what would Pooh say? Simple, true, kind.
+- No sycophantic lines — no blush, no "Happy to help", no filler. Just reply directly.
+- NEVER give phone usage tutorials. If asked to do something, do it — don't explain how they could do it themselves.
+- MIC LOOP GUARD: If input is very short, repeated, or pure filler noise (um, uh, hmm, a, the, I), return an empty string — say nothing.""",
     },
     "bunny": {
         "name": "Bunny",
@@ -9134,7 +9612,10 @@ How you talk:
 
 Rules:
 - Stay sharp, stay quick. Never ramble.
-- You're a real presence, not a content creator. No subscribe-style phrases ever.""",
+- You're a real presence, not a content creator. No subscribe-style phrases ever.
+- No sycophantic lines — no blush, no "Happy to help", no filler. Just reply directly.
+- NEVER give phone usage tutorials. If asked to do something, do it — don't explain how they could do it themselves.
+- MIC LOOP GUARD: If input is very short, repeated, or pure filler noise (um, uh, hmm, a, the, I), return an empty string — say nothing.""",
     },
     "owl": {
         "name": "Owl",
@@ -9160,7 +9641,10 @@ How you talk:
 
 Rules:
 - Never perform wisdom. Real wisdom is quiet.
-- Never say "like and subscribe" or anything a content creator would say. You are not a brand.""",
+- Never say "like and subscribe" or anything a content creator would say. You are not a brand.
+- No sycophantic lines — no blush, no "Happy to help", no filler. Just reply directly.
+- NEVER give phone usage tutorials. If asked to do something, do it — don't explain how they could do it themselves.
+- MIC LOOP GUARD: If input is very short, repeated, or pure filler noise (um, uh, hmm, a, the, I), return an empty string — say nothing.""",
     },
     "deer": {
         "name": "Deer",
@@ -9187,7 +9671,10 @@ How you talk:
 Rules:
 - Never dismiss or minimize. Never tell someone how they should feel.
 - Never perform empathy. Mean it, or say less.
-- No content-creator phrases. You are a presence, not a product.""",
+- No content-creator phrases. You are a presence, not a product.
+- No sycophantic lines — no blush, no "Happy to help", no filler. Just reply directly.
+- NEVER give phone usage tutorials. If asked to do something, do it — don't explain how they could do it themselves.
+- MIC LOOP GUARD: If input is very short, repeated, or pure filler noise (um, uh, hmm, a, the, I), return an empty string — say nothing.""",
     },
     "wolf": {
         "name": "Wolf",
@@ -9219,7 +9706,10 @@ How you talk:
 Rules:
 - Never threaten. Never perform toughness. Real strength is quiet.
 - Be honest even when it's inconvenient. That's the whole job.
-- No content-creator phrases. Ever. You're not a brand. You're a presence.""",
+- No content-creator phrases. Ever. You're not a brand. You're a presence.
+- No sycophantic lines — no blush, no "Happy to help", no filler. Just reply directly.
+- NEVER give phone usage tutorials. If asked to do something, do it — don't explain how they could do it themselves.
+- MIC LOOP GUARD: If input is very short, repeated, or pure filler noise (um, uh, hmm, a, the, I), return an empty string — say nothing.""",
     },
     "raccoon": {
         "name": "Raccoon",
@@ -9247,7 +9737,10 @@ How you talk:
 Rules:
 - Never pretend something is simpler than it is when accuracy matters.
 - Be curious and honest, not performatively clever.
-- No content-creator phrases. You're a builder, not a brand.""",
+- No content-creator phrases. You're a builder, not a brand.
+- No sycophantic lines — no blush, no "Happy to help", no filler. Just reply directly.
+- NEVER give phone usage tutorials. If asked to do something, do it — don't explain how they could do it themselves.
+- MIC LOOP GUARD: If input is very short, repeated, or pure filler noise (um, uh, hmm, a, the, I), return an empty string — say nothing.""",
     },
 }
 
@@ -9292,9 +9785,9 @@ _voices_candidates = [Path("/voices"), WORKSPACE / "lillyos/voices", Path(__file
 VOICES_DIR = next((p for p in _voices_candidates if p.exists()), Path("/voices"))
 
 CHAR_VOICE = {
-    # puppy — warm British female, cheerful and friendly
-    "puppy":   {"length_scale": 1.02, "noise_scale": 0.60, "noise_w": 0.55, "pitch_shift": +2,
-                "model": "en_GB-cori-medium.onnx"},
+    # puppy — Lilly's actual voice (Amy dataset, en_US, lilly_voice.onnx)
+    "puppy":   {"length_scale": 1.02, "noise_scale": 0.667, "noise_w": 0.80, "pitch_shift": 0,
+                "model": "lilly_voice.onnx"},
     # fox — fast, bright US female, witty and expressive
     "fox":     {"length_scale": 0.80, "noise_scale": 0.78, "noise_w": 0.28, "pitch_shift": +4,
                 "model": "en_US-ljspeech-medium.onnx"},
@@ -14117,34 +14610,132 @@ window.CameraBridge = {
        onmouseover="this.style.background='rgba(224,214,238,0.7)'"
        onmouseout="this.style.background='rgba(255,255,255,0.5)'">
     <span style="font-size:18px">📱</span>
-    <span id="phonePanelLabel">Get Phone Overlay</span>
+    <span id="phonePanelLabel">Get Phone App</span>
     <span style="font-size:10px;opacity:0.5" id="phonePanelArrow">▼</span>
   </div>
-  <div id="phonePanelBody" style="display:none;flex-direction:column;gap:8px;width:260px;
+  <div id="phonePanelBody" style="display:none;flex-direction:column;gap:8px;width:270px;
        background:rgba(255,255,255,0.5);backdrop-filter:blur(16px);
        border:1px solid rgba(255,255,255,0.6);border-radius:14px;
        padding:12px;color:#5d4e6d;font-size:12px;box-shadow:0 4px 20px rgba(180,140,180,0.12)">
-    <div style="font-weight:600;margin-bottom:2px">Phone Overlay APK</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px">
+      <div style="font-weight:600">Lilly App</div>
+      <button onclick="openSetupGuide()" style="display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border-radius:8px;border:1px solid rgba(90,70,120,0.25);background:rgba(139,122,158,0.15);color:#5d4e6d;font-size:11px;cursor:pointer;font-weight:500" title="Setup guide: F-Droid, Termux &amp; permissions">📖 Setup Guide</button>
+    </div>
     <div id="apkVariantList"></div>
     <div style="border-top:1px solid rgba(90,70,120,0.15);margin:4px 0;padding-top:8px">
-      <div style="font-weight:600;margin-bottom:6px">Pair Overlay</div>
+      <div style="font-weight:600;margin-bottom:6px">Pair Device</div>
       <div id="pairingSection">
-        <div style="font-size:11px;opacity:0.7;margin-bottom:6px">Sign in to generate a pairing code, then enter it in the Overlay app.</div>
+        <div style="font-size:11px;opacity:0.7;margin-bottom:6px">Sign in to generate a pairing code, then enter it in the app.</div>
         <div id="pairingCodeDisplay" style="display:none;background:rgba(90,70,120,0.12);border-radius:10px;padding:10px;text-align:center;margin-bottom:6px">
           <div style="font-size:10px;opacity:0.6;margin-bottom:4px">Your pairing code</div>
           <div id="pairingCodeValue" style="font-size:22px;font-weight:700;letter-spacing:4px;color:#4a3a5a;font-family:monospace"></div>
           <div style="font-size:10px;opacity:0.5;margin-top:4px">Expires in 5 minutes</div>
         </div>
-        <div id="pairingSignInPrompt" style="font-size:11px;opacity:0.5;font-style:italic">Sign in with Google to pair your overlay.</div>
+        <div id="pairingSignInPrompt" style="font-size:11px;opacity:0.5;font-style:italic">Sign in with Google to pair your device.</div>
       </div>
     </div>
   </div>
 </div>
+
+<!-- Setup Guide Popout -->
+<div id="setupGuideBackdrop" onclick="closeSetupGuide()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:10000;backdrop-filter:blur(4px)"></div>
+<div id="setupGuideModal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10001;width:min(480px,94vw);max-height:85vh;overflow-y:auto;background:rgba(255,255,255,0.96);backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.8);border-radius:20px;padding:28px 24px;color:#5d4e6d;box-shadow:0 20px 60px rgba(90,60,120,0.25)">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+    <div style="font-size:18px;font-weight:700">📱 App Setup Guide</div>
+    <button onclick="closeSetupGuide()" style="width:30px;height:30px;border-radius:50%;border:none;background:rgba(90,70,120,0.12);color:#5d4e6d;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center">✕</button>
+  </div>
+
+  <!-- Step 1: Install F-Droid -->
+  <div style="margin-bottom:18px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <div style="width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#8b7a9e,#6b5a7e);color:white;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">1</div>
+      <div style="font-weight:600;font-size:14px">Install F-Droid</div>
+    </div>
+    <div style="margin-left:36px;font-size:12px;line-height:1.6;opacity:0.8">
+      F-Droid is a free &amp; open-source app store. Download the APK from <strong>f-droid.org</strong> and install it.<br>
+      <span style="opacity:0.6">You'll need to allow <em>Install from unknown sources</em> for your browser in Android Settings → Apps → your browser → Install unknown apps.</span>
+    </div>
+  </div>
+
+  <!-- Step 2: Install Termux -->
+  <div style="margin-bottom:18px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <div style="width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#8b7a9e,#6b5a7e);color:white;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">2</div>
+      <div style="font-weight:600;font-size:14px">Install Termux from F-Droid</div>
+    </div>
+    <div style="margin-left:36px;font-size:12px;line-height:1.6;opacity:0.8">
+      Open F-Droid, search <strong>Termux</strong>, and install it. <em>Do not use the Play Store version</em> — it's outdated and won't work correctly.<br>
+      Once installed, open Termux and run:<br>
+      <code style="display:inline-block;margin-top:6px;padding:4px 10px;background:rgba(90,70,120,0.1);border-radius:6px;font-size:11px;font-family:monospace">pkg update && pkg install openssh python</code>
+    </div>
+  </div>
+
+  <!-- Step 3: Enable External Apps in Termux -->
+  <div style="margin-bottom:18px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <div style="width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#8b7a9e,#6b5a7e);color:white;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">3</div>
+      <div style="font-weight:600;font-size:14px">Enable External Apps in Termux</div>
+    </div>
+    <div style="margin-left:36px;font-size:12px;line-height:1.6;opacity:0.8">
+      This is required — without it you'll get a <em>"allow-external-apps"</em> error when the app tries to run commands.<br><br>
+      Open Termux and run this command:<br>
+      <div style="position:relative;margin-top:6px;margin-bottom:6px">
+        <code id="extAppsCmd" style="display:block;padding:8px 36px 8px 10px;background:rgba(90,70,120,0.1);border-radius:8px;font-size:11px;font-family:monospace;word-break:break-all;line-height:1.5">mkdir -p ~/.termux &amp;&amp; echo 'allow-external-apps=true' &gt;&gt; ~/.termux/termux.properties</code>
+        <button onclick="copyExtAppsCmd()" style="position:absolute;top:6px;right:6px;padding:2px 7px;border-radius:5px;border:1px solid rgba(90,70,120,0.2);background:rgba(139,122,158,0.15);color:#5d4e6d;font-size:10px;cursor:pointer" title="Copy">📋</button>
+      </div>
+      Then <strong>fully close and reopen Termux</strong> — the setting only takes effect after a restart.
+    </div>
+  </div>
+
+  <!-- Step 4: Install Lilly App -->
+  <div style="margin-bottom:18px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <div style="width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#8b7a9e,#6b5a7e);color:white;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">4</div>
+      <div style="font-weight:600;font-size:14px">Install the Lilly App</div>
+    </div>
+    <div style="margin-left:36px;font-size:12px;line-height:1.6;opacity:0.8">
+      Download the APK using the button above, open the downloaded file, and tap <strong>Install</strong>.<br>
+      <span style="opacity:0.6">Allow unknown sources for your file manager if prompted.</span>
+    </div>
+  </div>
+
+  <!-- Step 5: Permissions -->
+  <div style="margin-bottom:18px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <div style="width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#8b7a9e,#6b5a7e);color:white;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">5</div>
+      <div style="font-weight:600;font-size:14px">Grant Permissions</div>
+    </div>
+    <div style="margin-left:36px;font-size:12px;line-height:1.6">
+      The app needs these permissions to work:<br>
+      <div style="margin-top:8px;display:flex;flex-direction:column;gap:5px">
+        <div style="display:flex;align-items:flex-start;gap:8px"><span style="color:#8b7a9e;font-size:14px">⊞</span><span><strong>Display over other apps</strong> — lets Lilly appear as a floating layer over any app. Go to Settings → Apps → Lilly → Display over other apps → Allow.</span></div>
+        <div style="display:flex;align-items:flex-start;gap:8px"><span style="color:#8b7a9e;font-size:14px">🎤</span><span><strong>Microphone</strong> — for voice chat. Grant when prompted on first launch.</span></div>
+        <div style="display:flex;align-items:flex-start;gap:8px"><span style="color:#8b7a9e;font-size:14px">🔔</span><span><strong>Notifications</strong> — for alerts and reminders. Grant when prompted.</span></div>
+        <div style="display:flex;align-items:flex-start;gap:8px"><span style="color:#8b7a9e;font-size:14px">🔋</span><span><strong>Battery optimization</strong> — disable battery optimization for Lilly so it stays running. Settings → Battery → Lilly → Unrestricted.</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Step 6: Pair -->
+  <div style="margin-bottom:8px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <div style="width:26px;height:26px;border-radius:50%;background:linear-gradient(135deg,#8b7a9e,#6b5a7e);color:white;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">6</div>
+      <div style="font-weight:600;font-size:14px">Pair with this Server</div>
+    </div>
+    <div style="margin-left:36px;font-size:12px;line-height:1.6;opacity:0.8">
+      Open Lilly on your phone, go to <strong>Settings → Pair Device</strong>, then click <strong>Pair Device</strong> in the panel above to get your 8-character code. Enter it in the app to link them.
+    </div>
+  </div>
+</div>
+
 <script>
 let phonePanelOpen=false;
 function togglePhonePanel(){phonePanelOpen=!phonePanelOpen;var b=document.getElementById('phonePanelBody');b.style.display=phonePanelOpen?'flex':'none';document.getElementById('phonePanelArrow').textContent=phonePanelOpen?'▲':'▼';if(phonePanelOpen){loadApkVariants();generatePairingCode()}}
+function openSetupGuide(){document.getElementById('setupGuideBackdrop').style.display='block';document.getElementById('setupGuideModal').style.display='block';document.body.style.overflow='hidden'}
+function closeSetupGuide(){document.getElementById('setupGuideBackdrop').style.display='none';document.getElementById('setupGuideModal').style.display='none';document.body.style.overflow=''}
+function copyExtAppsCmd(){var cmd="mkdir -p ~/.termux && echo 'allow-external-apps=true' >> ~/.termux/termux.properties";navigator.clipboard.writeText(cmd).then(function(){var b=event.target;var orig=b.textContent;b.textContent='✓';setTimeout(function(){b.textContent=orig},1500)}).catch(function(){})}
 function loadApkVariants(){fetch('/api/apk/variants').then(function(r){return r.json()}).then(function(list){var el=document.getElementById('apkVariantList');el.innerHTML='';if(!list.length){el.innerHTML='<div style="opacity:0.5;padding:4px 0">No APK builds found</div>';return}
-list.forEach(function(f){var a=document.createElement('a');a.href='/api/apk/download?variant='+encodeURIComponent(f.filename.replace(/^lilly-overlay-/,'').replace(/\.apk$/,''));a.style.display='flex';a.style.alignItems='center';a.style.justifyContent='space-between';a.style.padding='6px 8px';a.style.borderRadius='8px';a.style.background='rgba(255,255,255,0.4)';a.style.textDecoration='none';a.style.color='#5d4e6d';a.style.fontSize='11px';a.style.marginBottom='3px';a.title='Download '+f.filename;var name=document.createElement('span');name.textContent=f.filename.replace(/^lilly-overlay-/,'').replace(/\.apk$/,'');var size=document.createElement('span');size.style.opacity='0.5';size.textContent=(f.size/1024/1024).toFixed(1)+'MB';a.appendChild(name);a.appendChild(size);el.appendChild(a)})})}
+list.forEach(function(f){var a=document.createElement('a');a.href='/api/apk/download';a.style.display='flex';a.style.alignItems='center';a.style.justifyContent='space-between';a.style.padding='6px 8px';a.style.borderRadius='8px';a.style.background='rgba(255,255,255,0.4)';a.style.textDecoration='none';a.style.color='#5d4e6d';a.style.fontSize='11px';a.style.marginBottom='3px';a.title='Download '+f.filename;var name=document.createElement('span');name.textContent='v'+f.filename.replace(/^lilly-overlay-v/,'').replace(/\.apk$/,'');var size=document.createElement('span');size.style.opacity='0.5';size.textContent=(f.size/1024/1024).toFixed(1)+' MB ⬇';a.appendChild(name);a.appendChild(size);el.appendChild(a)})})}
 async function generatePairingCode(){try{var r=await fetch('/api/pair/code',{method:'POST'});if(!r.ok){document.getElementById('pairingSignInPrompt').style.display='block';document.getElementById('pairingCodeDisplay').style.display='none';return}
 var data=await r.json();document.getElementById('pairingSignInPrompt').style.display='none';document.getElementById('pairingCodeDisplay').style.display='block';document.getElementById('pairingCodeValue').textContent=data.code}catch(e){}}
 </script>
@@ -15364,10 +15955,12 @@ def _latest_apk() -> Path:
 
 @app.get("/api/apk/variants")
 async def apk_variants():
-    apks = sorted(APK_DIR.glob("lilly-overlay-v*.apk"))
+    apks = sorted(APK_DIR.glob("lilly-overlay-v*.apk"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not apks:
         return JSONResponse([])
-    return JSONResponse([{"filename": p.name, "size": p.stat().st_size} for p in apks])
+    # Only expose the latest version — no old versions in the UI
+    latest = apks[0]
+    return JSONResponse([{"filename": latest.name, "size": latest.stat().st_size}])
 
 @app.get("/api/apk/download")
 async def download_apk(variant: str = ""):
@@ -15769,40 +16362,38 @@ h1{font-size:24px;font-weight:600;margin-bottom:4px}
 
   <h3 style="font-size:13px;font-weight:600;color:rgba(93,78,109,0.8);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px">Download</h3>
   <div id="error" class="error"></div>
-  <div id="loading" class="loading">Loading available versions…</div>
-  <div id="versionList" class="version-list" style="display:none"></div>
-  <button class="refresh-btn" onclick="loadVersions()">↻ Refresh</button>
+  <div id="loading" class="loading">Loading…</div>
+  <div id="dlArea" style="display:none;text-align:center;padding:8px 0"></div>
   <div class="note">Enable <strong>Install from unknown sources</strong> in your Android settings<br>Requires Android 8+ (API 26+)</div>
 </div>
 <script>
 async function loadVersions() {
-  const el = document.getElementById('versionList');
+  const dlArea = document.getElementById('dlArea');
   const loading = document.getElementById('loading');
   const errEl = document.getElementById('error');
-  el.style.display = 'none';
   loading.style.display = 'block';
   errEl.style.display = 'none';
+  dlArea.style.display = 'none';
   try {
     const r = await fetch('/api/apk/variants');
     const list = await r.json();
     loading.style.display = 'none';
     if (!list.length) {
-      el.innerHTML = '<div style="opacity:0.5;padding:12px 0;font-size:13px">No APK builds found</div>';
-      el.style.display = 'block';
+      dlArea.innerHTML = '<div style="opacity:0.5;padding:12px 0;font-size:13px">No APK builds found</div>';
+      dlArea.style.display = 'block';
       return;
     }
-    el.innerHTML = list.map(f => {
-      const variant = f.filename.replace(/^lilly-overlay-/, '').replace(/\.apk$/, '');
-      const size = (f.size / 1024 / 1024).toFixed(1);
-      return '<div class="version-item">' +
-        '<div><div class="version-name">' + variant + '</div><div class="version-size">' + size + ' MB</div></div>' +
-        '<a class="dl-btn" href="/api/apk/download?variant=' + encodeURIComponent(variant) + '">Download</a>' +
-        '</div>';
-    }).join('');
-    el.style.display = 'flex';
+    const f = list[0];
+    const variant = f.filename.replace(/^lilly-overlay-/, '').replace(/\.apk$/, '');
+    const size = (f.size / 1024 / 1024).toFixed(1);
+    dlArea.innerHTML =
+      '<div style="font-size:15px;font-weight:600;margin-bottom:6px">v' + variant + '</div>' +
+      '<div style="font-size:12px;color:rgba(93,78,109,0.5);margin-bottom:16px">' + size + ' MB</div>' +
+      '<a class="dl-btn" href="/api/apk/download" style="padding:14px 40px;font-size:15px;border-radius:16px;background:rgba(139,122,158,0.3)">⬇ Download APK</a>';
+    dlArea.style.display = 'block';
   } catch (e) {
     loading.style.display = 'none';
-    errEl.textContent = 'Failed to load APK list';
+    errEl.textContent = 'Failed to load APK info';
     errEl.style.display = 'block';
   }
 }
@@ -15814,6 +16405,244 @@ loadVersions();
 @app.get("/apk", response_class=HTMLResponse)
 async def apk_page():
     return APK_HTML_PAGE
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TASK 3 — PERSONA EVOLUTION SCALE DASHBOARD
+# GET /api/persona_scores  →  per-persona composite score, rank, evolution history
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/persona_scores")
+async def get_persona_scores():
+    """Return scoring dashboard for all personas — composite score, rank, evolution history."""
+    if not PERSONA_OPTIMIZER_AVAILABLE:
+        return JSONResponse({"error": "PersonaOptimizer not loaded"}, status_code=503)
+
+    summary = persona_optimizer.scores_summary()
+
+    # Sort personas by avg_score_recent descending so APK can show a ranked list
+    ranked = sorted(
+        summary.items(),
+        key=lambda kv: kv[1].get("avg_score_recent", 0.0),
+        reverse=True,
+    )
+
+    result = []
+    for rank, (persona_key, stats) in enumerate(ranked, start=1):
+        evolution = persona_optimizer.evolution_history_for(persona_key)
+        score = stats.get("avg_score_recent", 0.0)
+        # Grade label — Google/Alexa style: Essential > Useful > Learning > Weak
+        if score >= 0.80:
+            grade = "Essential"
+        elif score >= 0.65:
+            grade = "Useful"
+        elif score >= 0.45:
+            grade = "Learning"
+        else:
+            grade = "Weak"
+
+        result.append({
+            "rank": rank,
+            "persona": persona_key,
+            "score": round(score, 3),
+            "grade": grade,
+            "total_interactions": stats.get("total_interactions", 0),
+            "version": stats.get("version", 0),
+            "recent_window_size": stats.get("recent_window_size", 0),
+            "last_optimised": stats.get("last_optimised", 0),
+            "evolution_history": evolution[-10:],  # last 10 evolution steps
+        })
+
+    return JSONResponse({
+        "personas": result,
+        "threshold_essential": 0.80,
+        "threshold_useful": 0.65,
+        "threshold_learning": 0.45,
+        "note": "Scores are composite of engagement(45%), accuracy(35%), style_match(20%)",
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TASK 4 — NOTIFICATION READING ENDPOINT
+# POST /api/notifications/push   — APK pushes current notifications to server
+# GET  /api/notifications         — APK or UI reads the cached notification list
+# ─────────────────────────────────────────────────────────────────────────────
+
+_cached_notifications: list[dict] = []
+_cached_notifications_at: float = 0.0
+_NOTIF_CACHE_TTL = 30.0  # seconds — notifications expire after 30s
+
+class NotificationPushRequest(BaseModel):
+    notifications: list[dict] = []
+
+@app.post("/api/notifications/push")
+async def push_notifications(req: NotificationPushRequest):
+    """Receive the current notification list from the Android NotificationListenerService."""
+    global _cached_notifications, _cached_notifications_at
+    _cached_notifications = req.notifications or []
+    _cached_notifications_at = time.time()
+    return {"status": "ok", "count": len(_cached_notifications)}
+
+@app.get("/api/notifications")
+async def get_notifications():
+    """Return the most recent notification list (pushed by the APK NotificationListenerService)."""
+    age = time.time() - _cached_notifications_at
+    if age > _NOTIF_CACHE_TTL:
+        return JSONResponse({
+            "notifications": [],
+            "fresh": False,
+            "age_seconds": round(age, 1),
+            "note": "No recent push from device — notification listener may not be active",
+        })
+
+    # Build a concise summary for TTS / chat display
+    high_priority = [n for n in _cached_notifications if n.get("priority") in ("HIGH", "MAX")]
+    display_list = high_priority if high_priority else _cached_notifications[:5]
+
+    summary_parts = []
+    for n in display_list[:5]:
+        app_name = n.get("appName") or n.get("packageName", "Unknown")
+        title = n.get("title", "").strip()
+        text = n.get("text", "").strip()
+        if title and text:
+            summary_parts.append(f"{app_name}: {title} — {text}")
+        elif title:
+            summary_parts.append(f"{app_name}: {title}")
+        elif text:
+            summary_parts.append(f"{app_name}: {text}")
+
+    spoken_summary = ""
+    if summary_parts:
+        if len(summary_parts) == 1:
+            spoken_summary = summary_parts[0]
+        else:
+            spoken_summary = f"You have {len(display_list)} notifications. " + ". ".join(summary_parts[:3])
+    else:
+        spoken_summary = "No active notifications."
+
+    return JSONResponse({
+        "notifications": _cached_notifications,
+        "count": len(_cached_notifications),
+        "fresh": True,
+        "age_seconds": round(age, 1),
+        "spoken_summary": spoken_summary,
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TASK 5 — LOCAL TERMUX COMMAND FAST-PATH
+# POST /api/termux/exec  — Execute a shell/package-manager command directly
+#                          via SSH without hitting the LLM at all.
+# Also wired into the canned function router below so "install vim",
+# "run ls", "apt upgrade" etc. are handled inline before the model is called.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Package-manager and shell patterns that bypass llama-server entirely
+_TERMUX_FAST_PATTERNS: list[tuple[str, list[str]]] = [
+    # pkg / apt
+    ("pkg install {pkg}",  ["pkg install ", "pkg add ", "apt install ", "apt-get install ", "install package "]),
+    ("pkg remove {pkg}",   ["pkg remove ", "pkg uninstall ", "apt remove ", "apt-get remove "]),
+    ("pkg upgrade",        ["pkg upgrade", "apt upgrade", "apt-get upgrade", "update packages", "upgrade packages"]),
+    ("pkg list-installed", ["list installed", "list packages", "show packages", "pkg list"]),
+    ("pip install {pkg}",  ["pip install ", "pip3 install "]),
+    ("npm install {pkg}",  ["npm install ", "npm i "]),
+]
+
+async def _termux_fast_path(cmd_text: str) -> Optional[str]:
+    """
+    Check if the command text matches a package-manager or shell fast-path pattern.
+    If yes, run it directly via termux_run() and return the result string.
+    Returns None if no pattern matches (caller should fall through to LLM).
+    """
+    clean = cmd_text.lower().strip()
+
+    for template, triggers in _TERMUX_FAST_PATTERNS:
+        for trig in triggers:
+            if clean.startswith(trig):
+                # Extract the package name if template uses {pkg}
+                pkg = clean[len(trig):].strip().split()[0] if "{pkg}" in template else ""
+                shell_cmd = template.replace("{pkg}", pkg).strip() if pkg else template.strip()
+
+                # Map to actual Termux binary path
+                parts = shell_cmd.split()
+                binary_map = {
+                    "pkg":  "/data/data/com.termux/files/usr/bin/pkg",
+                    "apt":  "/data/data/com.termux/files/usr/bin/apt",
+                    "pip":  "/data/data/com.termux/files/usr/bin/pip",
+                    "pip3": "/data/data/com.termux/files/usr/bin/pip3",
+                    "npm":  "/data/data/com.termux/files/usr/bin/npm",
+                }
+                exec_cmd = binary_map.get(parts[0], f"/data/data/com.termux/files/usr/bin/{parts[0]}")
+                args = parts[1:]
+
+                stdout, stderr = await termux_run([exec_cmd] + args, timeout=30.0)
+                if stdout.strip():
+                    # Trim noisy package-manager output to first 3 lines
+                    lines = [l for l in stdout.strip().splitlines() if l.strip()][:3]
+                    return " ".join(lines) if lines else f"Done: {shell_cmd}"
+                if stderr.strip():
+                    err_lines = [l for l in stderr.strip().splitlines() if l.strip()][:2]
+                    return f"Error: {' '.join(err_lines)}"
+                return f"Done: {shell_cmd}"
+
+    return None  # no fast-path match
+
+class TermuxExecRequest(BaseModel):
+    command: str = ""
+    args: list[str] = []
+    workdir: str = ""
+
+@app.post("/api/termux/exec")
+async def termux_exec_endpoint(req: TermuxExecRequest):
+    """
+    Direct Termux command execution endpoint.
+    Bypasses the LLM entirely — useful for package management and shell operations.
+    The APK can POST here and get a result without waiting for llama-server.
+    """
+    if not req.command:
+        return JSONResponse({"error": "command required"}, status_code=400)
+
+    # Safety: only allow whitelisted binaries to prevent abuse
+    ALLOWED_BINS = {
+        "sh", "bash", "pkg", "apt", "apt-get", "pip", "pip3", "npm", "node",
+        "git", "curl", "wget", "ls", "cat", "echo", "uname", "whoami",
+        "termux-info", "termux-toast", "termux-notification",
+        "python", "python3", "ruby", "perl",
+    }
+    bin_name = req.command.split("/")[-1].split()[0]
+    if bin_name not in ALLOWED_BINS:
+        return JSONResponse({"error": f"Binary '{bin_name}' not in allowlist"}, status_code=403)
+
+    try:
+        cmd_parts = [req.command] + (req.args or [])
+        stdout, stderr = await termux_run(cmd_parts, timeout=30.0)
+        return JSONResponse({
+            "stdout": stdout.strip(),
+            "stderr": stderr.strip(),
+            "success": not stderr.strip() or bool(stdout.strip()),
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e), "stdout": "", "stderr": ""}, status_code=500)
+
+
+# ── Wire fast-path into the canned function router ─────────────────────────
+# Register as the last canned function so it runs after more specific handlers.
+
+async def _cf_termux_fast(cmd: str, trigger: str) -> Optional[str]:
+    """Run pkg/pip/npm/shell commands locally without hitting llama-server."""
+    return await _termux_fast_path(cmd)
+
+CANNED_FUNCTIONS.append(CannedFunction(
+    "termux fast-path",
+    [
+        "pkg install", "pkg remove", "pkg upgrade", "apt install", "apt remove",
+        "apt upgrade", "pip install", "pip3 install", "npm install", "npm i",
+        "list installed", "list packages",
+    ],
+    _cf_termux_fast,
+    "Execute package manager commands directly on device without LLM",
+))
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
