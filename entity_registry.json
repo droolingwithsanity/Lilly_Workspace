@@ -1,0 +1,264 @@
+{
+  "meta": {
+    "format_version": 1,
+    "saved_at": 1785196577.5456054,
+    "saved_at_iso": "2026-07-27T23:56:17"
+  },
+  "identity": {
+    "name": "Lilly",
+    "version": "3.0.0",
+    "archetype": "companion_ai",
+    "created_at": 1785196577.5444849,
+    "home_workspace": "/app",
+    "personas": [
+      "puppy",
+      "fox",
+      "cat",
+      "bear",
+      "bunny",
+      "owl",
+      "deer",
+      "wolf",
+      "raccoon"
+    ],
+    "primary_persona": "puppy",
+    "capabilities": [
+      "conversation",
+      "code",
+      "analysis",
+      "creative",
+      "embedding",
+      "reasoning",
+      "sensor_interpretation",
+      "persona_switching",
+      "skill_learning"
+    ]
+  },
+  "state": {
+    "current_persona": "puppy",
+    "interaction_count": 4,
+    "last_interaction": 0.0,
+    "session_start": 1785196577.5444999,
+    "active_model_assignments": {
+      "conversation": "(none)"
+    },
+    "persona_scores": {},
+    "skill_evolution_count": 0,
+    "last_skill_update": 0.0,
+    "errors_this_session": 0,
+    "successful_interactions": 0
+  },
+  "routing_table": {
+    "conversation": {
+      "task_tag": "conversation",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446193,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "instruction": {
+      "task_tag": "instruction",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446262,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "creative": {
+      "task_tag": "creative",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.544628,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "reasoning": {
+      "task_tag": "reasoning",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446298,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "multilingual": {
+      "task_tag": "multilingual",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446312,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "chinese": {
+      "task_tag": "chinese",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446339,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "drafting": {
+      "task_tag": "drafting",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446353,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "code": {
+      "task_tag": "code",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446372,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "code_review": {
+      "task_tag": "code_review",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446384,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "debugging": {
+      "task_tag": "debugging",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446396,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "code_complete": {
+      "task_tag": "code_complete",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446405,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "analysis": {
+      "task_tag": "analysis",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446417,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "summarization": {
+      "task_tag": "summarization",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446463,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "document_qa": {
+      "task_tag": "document_qa",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446472,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "rag": {
+      "task_tag": "rag",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446482,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "embedding": {
+      "task_tag": "embedding",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446494,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "semantic_search": {
+      "task_tag": "semantic_search",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446503,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "similarity": {
+      "task_tag": "similarity",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446522,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "compact": {
+      "task_tag": "compact",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446534,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "fast": {
+      "task_tag": "fast",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446546,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    },
+    "default": {
+      "task_tag": "default",
+      "model_name": "(none)",
+      "model_path": "",
+      "model_tree": "",
+      "rationale": "No GGUF vocab models found on disk",
+      "assigned_at": 1785196577.5446556,
+      "use_count": 0,
+      "avg_latency_ms": 0.0
+    }
+  },
+  "discovered_models": []
+}

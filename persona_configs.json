@@ -1,0 +1,27 @@
+{
+  "meta": {
+    "saved_at": 1785184100.133077,
+    "format_version": 1
+  },
+  "personas": {
+    "puppy": {
+      "persona": "puppy",
+      "version": 1,
+      "total_interactions": 12,
+      "avg_score_recent": 0.315,
+      "current_voice_prompt": "You are Lilly. Be brief.\nAUTO-TUNE: 1 sentence preferred.",
+      "last_optimised": 1785184100.1314642,
+      "evolution_history": [
+        {
+          "persona": "puppy",
+          "version": 1,
+          "timestamp": 1785184100.1314645,
+          "avg_score_before": 0.315,
+          "change_type": "length",
+          "change_applied": "1 sentence preferred.",
+          "voice_prompt_hash": "98185e12"
+        }
+      ]
+    }
+  }
+}

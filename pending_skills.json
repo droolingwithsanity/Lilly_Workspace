@@ -1,0 +1,170 @@
+{
+  "netflix_pleas": {
+    "label": "Netflix Pleas",
+    "action_type": "intent_launch",
+    "aliases": [
+      "netflix pleas",
+      "open netflix pleas",
+      "launch netflix pleas",
+      "open netflix please"
+    ],
+    "package": "",
+    "intent_action": "android.intent.action.VIEW",
+    "uri_template": "",
+    "canned_reply": "Opening Netflix Pleas!",
+    "command": "",
+    "args": [],
+    "observations": 1,
+    "confidence": 0.47,
+    "first_seen": 1785182908.8435903,
+    "last_seen": 1785182908.8435922,
+    "use_count": 0
+  },
+  "iktok": {
+    "label": "Iktok",
+    "action_type": "intent_launch",
+    "aliases": [
+      "iktok",
+      "open iktok",
+      "launch iktok",
+      "start iktok",
+      "open tiktok"
+    ],
+    "package": "",
+    "intent_action": "android.intent.action.VIEW",
+    "uri_template": "",
+    "canned_reply": "Opening Iktok!",
+    "command": "",
+    "args": [],
+    "observations": 1,
+    "confidence": 0.47,
+    "first_seen": 1785182908.8439023,
+    "last_seen": 1785182908.8439038,
+    "use_count": 0
+  },
+  "iktok_now": {
+    "label": "Iktok Now",
+    "action_type": "intent_launch",
+    "aliases": [
+      "iktok now",
+      "open iktok now",
+      "launch iktok now",
+      "open tiktok now"
+    ],
+    "package": "",
+    "intent_action": "android.intent.action.VIEW",
+    "uri_template": "",
+    "canned_reply": "Opening Iktok Now!",
+    "command": "",
+    "args": [],
+    "observations": 1,
+    "confidence": 0.47,
+    "first_seen": 1785182908.84405,
+    "last_seen": 1785182908.8440511,
+    "use_count": 0
+  },
+  "iktok_pleas": {
+    "label": "Iktok Pleas",
+    "action_type": "intent_launch",
+    "aliases": [
+      "iktok pleas",
+      "open iktok pleas",
+      "launch iktok pleas",
+      "open tiktok please"
+    ],
+    "package": "",
+    "intent_action": "android.intent.action.VIEW",
+    "uri_template": "",
+    "canned_reply": "Opening Iktok Pleas!",
+    "command": "",
+    "args": [],
+    "observations": 1,
+    "confidence": 0.47,
+    "first_seen": 1785182908.844197,
+    "last_seen": 1785182908.8441982,
+    "use_count": 0
+  },
+  "clock_app": {
+    "label": "Clock App",
+    "action_type": "intent_launch",
+    "aliases": [
+      "clock app",
+      "open clock app",
+      "launch clock app"
+    ],
+    "package": "",
+    "intent_action": "android.intent.action.VIEW",
+    "uri_template": "",
+    "canned_reply": "Opening Clock App!",
+    "command": "",
+    "args": [],
+    "observations": 1,
+    "confidence": 0.47,
+    "first_seen": 1785182908.8443468,
+    "last_seen": 1785182908.8443482,
+    "use_count": 0
+  },
+  "discord": {
+    "label": "Discord",
+    "action_type": "intent_launch",
+    "aliases": [
+      "discord",
+      "open discord",
+      "launch discord",
+      "start discord",
+      "show me discord"
+    ],
+    "package": "com.discord",
+    "intent_action": "android.intent.action.VIEW",
+    "uri_template": "",
+    "canned_reply": "Opening Discord!",
+    "command": "",
+    "args": [],
+    "observations": 1,
+    "confidence": 0.72,
+    "first_seen": 1785182908.8446264,
+    "last_seen": 1785182908.8446283,
+    "use_count": 0
+  },
+  "disk_cleanup": {
+    "label": "Disk Cleanup",
+    "action_type": "intent_launch",
+    "aliases": [
+      "disk cleanup",
+      "open disk cleanup",
+      "launch disk cleanup",
+      "run disk cleanup"
+    ],
+    "package": "",
+    "intent_action": "android.intent.action.VIEW",
+    "uri_template": "",
+    "canned_reply": "Opening Disk Cleanup!",
+    "command": "",
+    "args": [],
+    "observations": 1,
+    "confidence": 0.47,
+    "first_seen": 1785182908.8447802,
+    "last_seen": 1785182908.8447816,
+    "use_count": 0
+  },
+  "system_uptime": {
+    "label": "System Uptime",
+    "action_type": "shell_command",
+    "aliases": [
+      "system uptime",
+      "open system uptime",
+      "launch system uptime"
+    ],
+    "package": "",
+    "intent_action": "",
+    "uri_template": "",
+    "canned_reply": "",
+    "command": "system",
+    "args": [],
+    "observations": 1,
+    "confidence": 0.44,
+    "first_seen": 1785182908.844934,
+    "last_seen": 1785182908.8449347,
+    "use_count": 0
+  }
+}

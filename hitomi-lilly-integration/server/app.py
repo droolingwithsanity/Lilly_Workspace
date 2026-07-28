@@ -9,8 +9,8 @@ import httpx
 
 REMOTE = os.environ.get("REMOTE_AI_URL", "")
 PORT = int(os.environ.get("LILLY_PORT", "8098"))
-APK_VERSION = os.environ.get("APK_VERSION", "3.3")
-APK_FILENAME = f"LillyOverlay-v{APK_VERSION}.apk"
+APK_VERSION = os.environ.get("APK_VERSION", "5.5")
+APK_FILENAME = f"lilly-overlay-v{APK_VERSION}.apk"
 _SCRIPT_DIR = Path(__file__).parent.resolve()
 APK_DIR = _SCRIPT_DIR if (_SCRIPT_DIR / APK_FILENAME).parent == _SCRIPT_DIR else Path("/app/apk")
 APK_DIR.mkdir(exist_ok=True)
@@ -544,7 +544,15 @@ async def serve_apk(apk_name: str):
 
 @app.get("/download")
 async def download_redirect():
-    return RedirectResponse(url=f"/apk/{APK_FILENAME}")
+    return RedirectResponse(url=f"/api/apk/download")
+
+@app.get("/api/apk/download")
+async def api_apk_download():
+    apk_path = APK_DIR / APK_FILENAME
+    if apk_path.exists():
+        return FileResponse(str(apk_path), media_type="application/vnd.android.package-archive",
+            filename=APK_FILENAME)
+    raise HTTPException(404, f"APK v{APK_VERSION} not found")
 
 @app.get("/api/status")
 async def api_status():
@@ -603,7 +611,7 @@ h1{{font-size:28px;color:#6b9ce3}}
   <h1>Lilly Local</h1>
   <div class="tag">offline assistant with voice control</div>
   <div class="version">v{APK_VERSION}{f' ({size_mb:.1f} MB)' if size_mb else ''}</div>
-  <a class="btn-dl" href="/apk/{APK_FILENAME}">⬇ Download APK v{APK_VERSION}</a>
+  <a class="btn-dl" href="/api/apk/download">⬇ Download APK v{APK_VERSION}</a>
   <div class="info">
     <strong>Try saying:</strong><br>
     "hello" · "tell me a joke" · "what time is it"<br>
