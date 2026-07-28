@@ -1,8 +1,8 @@
 {
   "meta": {
     "format_version": 1,
-    "saved_at": 1785196577.5456054,
-    "saved_at_iso": "2026-07-27T23:56:17"
+    "saved_at": 1785197927.4270303,
+    "saved_at_iso": "2026-07-28T00:18:47"
   },
   "identity": {
     "name": "Lilly",
@@ -36,8 +36,8 @@
   },
   "state": {
     "current_persona": "puppy",
-    "interaction_count": 4,
-    "last_interaction": 0.0,
+    "interaction_count": 5,
+    "last_interaction": 1785197927.4269896,
     "session_start": 1785196577.5444999,
     "active_model_assignments": {
       "conversation": "(none)"
@@ -45,7 +45,7 @@
     "persona_scores": {},
     "skill_evolution_count": 0,
     "last_skill_update": 0.0,
-    "errors_this_session": 0,
+    "errors_this_session": 1,
     "successful_interactions": 0
   },
   "routing_table": {
