@@ -1,0 +1,155 @@
+package ai.agent1c.hitomi;
+
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.widget.Button;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.appcompat.app.AppCompatActivity;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+
+/**
+ * TranscriptActivity — shows the full conversation history from the Lilly overlay.
+ *
+ * It reads the static transcript buffer in {@link LillyOverlayService} directly (same process),
+ * or falls back to fetching /api/transcript from the local phone server on 127.0.0.1:8099.
+ */
+public class TranscriptActivity extends AppCompatActivity {
+
+    private TextView transcriptText;
+    private ScrollView scrollView;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private static final SimpleDateFormat TIME_FMT =
+        new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_transcript);
+
+        transcriptText = findViewById(R.id.transcriptText);
+        scrollView     = findViewById(R.id.transcriptScroll);
+
+        Button copyBtn    = findViewById(R.id.transcriptCopyBtn);
+        Button clearBtn   = findViewById(R.id.transcriptClearBtn);
+        Button refreshBtn = findViewById(R.id.transcriptRefreshBtn);
+        Button backBtn    = findViewById(R.id.transcriptBackBtn);
+
+        if (backBtn    != null) backBtn.setOnClickListener(v -> finish());
+        if (copyBtn    != null) copyBtn.setOnClickListener(v -> copyTranscript());
+        if (clearBtn   != null) clearBtn.setOnClickListener(v -> clearTranscript());
+        if (refreshBtn != null) refreshBtn.setOnClickListener(v -> loadTranscript());
+
+        loadTranscript();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        loadTranscript();
+    }
+
+    private void loadTranscript() {
+        // First try the in-process static buffer
+        java.util.List<LillyOverlayService.TranscriptEntry> entries =
+            LillyOverlayService.getTranscript();
+
+        if (!entries.isEmpty()) {
+            displayEntries(entries);
+            return;
+        }
+
+        // Fall back to the local phone server
+        new Thread(() -> {
+            try {
+                URL url = new URL("http://127.0.0.1:8099/api/transcript");
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(5000);
+                conn.setRequestMethod("GET");
+
+                if (conn.getResponseCode() == 200) {
+                    BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(conn.getInputStream()));
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) sb.append(line);
+                    reader.close();
+                    conn.disconnect();
+
+                    // Parse JSON array [{role,text,time}, ...]
+                    org.json.JSONObject root = new org.json.JSONObject(sb.toString());
+                    org.json.JSONArray arr = root.optJSONArray("transcript");
+                    if (arr != null && arr.length() > 0) {
+                        StringBuilder display = new StringBuilder();
+                        for (int i = 0; i < arr.length(); i++) {
+                            org.json.JSONObject item = arr.getJSONObject(i);
+                            String role   = item.optString("role", "?");
+                            String text   = item.optString("text", "");
+                            String timeStr = item.optString("time", "");
+                            display.append("[").append(timeStr.isEmpty() ? "?" : timeStr).append("] ");
+                            display.append(role.equals("user") ? "You" : "Lilly");
+                            display.append(": ").append(text).append("\n\n");
+                        }
+                        final String result = display.toString();
+                        mainHandler.post(() -> {
+                            if (transcriptText != null) {
+                                transcriptText.setText(result);
+                                if (scrollView != null)
+                                    scrollView.post(() -> scrollView.fullScroll(ScrollView.FOCUS_DOWN));
+                            }
+                        });
+                        return;
+                    }
+                }
+                conn.disconnect();
+            } catch (Exception ignored) {}
+            mainHandler.post(() -> {
+                if (transcriptText != null)
+                    transcriptText.setText("No conversation history yet.\nStart talking to Lilly!");
+            });
+        }).start();
+    }
+
+    private void displayEntries(java.util.List<LillyOverlayService.TranscriptEntry> entries) {
+        StringBuilder sb = new StringBuilder();
+        for (LillyOverlayService.TranscriptEntry e : entries) {
+            sb.append("[").append(TIME_FMT.format(new Date(e.timestampMs))).append("] ");
+            sb.append(e.isUser ? "You" : "Lilly");
+            sb.append(": ").append(e.text).append("\n\n");
+        }
+        String result = sb.length() > 0 ? sb.toString() : "No conversation yet.";
+        if (transcriptText != null) {
+            transcriptText.setText(result);
+            if (scrollView != null)
+                scrollView.post(() -> scrollView.fullScroll(ScrollView.FOCUS_DOWN));
+        }
+    }
+
+    private void copyTranscript() {
+        if (transcriptText == null) return;
+        String text = transcriptText.getText().toString();
+        if (text.isEmpty()) { Toast.makeText(this, "Nothing to copy", Toast.LENGTH_SHORT).show(); return; }
+        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("Lilly Transcript", text));
+        Toast.makeText(this, "Transcript copied", Toast.LENGTH_SHORT).show();
+    }
+
+    private void clearTranscript() {
+        LillyOverlayService.clearTranscript();
+        if (transcriptText != null) transcriptText.setText("Transcript cleared.");
+        Toast.makeText(this, "Transcript cleared", Toast.LENGTH_SHORT).show();
+    }
+}

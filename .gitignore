@@ -86,3 +86,4 @@ hitomi-lilly-integration/android/app/build/
 
 # Termux SSH credentials
 *termux*
+.aider*

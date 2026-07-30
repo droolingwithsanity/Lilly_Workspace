@@ -1,14 +1,14 @@
 {
   "meta": {
     "format_version": 1,
-    "saved_at": 1785197927.4270303,
-    "saved_at_iso": "2026-07-28T00:18:47"
+    "saved_at": 1785450953.0502427,
+    "saved_at_iso": "2026-07-30T22:35:53"
   },
   "identity": {
     "name": "Lilly",
     "version": "3.0.0",
     "archetype": "companion_ai",
-    "created_at": 1785196577.5444849,
+    "created_at": 1785450953.0491145,
     "home_workspace": "/app",
     "personas": [
       "puppy",
@@ -36,17 +36,18 @@
   },
   "state": {
     "current_persona": "puppy",
-    "interaction_count": 5,
-    "last_interaction": 1785197927.4269896,
-    "session_start": 1785196577.5444999,
+    "interaction_count": 33,
+    "last_interaction": 0.0,
+    "session_start": 1785450953.049131,
     "active_model_assignments": {
-      "conversation": "(none)"
+      "conversation": "(none)",
+      "reasoning": "(none)"
     },
     "persona_scores": {},
     "skill_evolution_count": 0,
     "last_skill_update": 0.0,
-    "errors_this_session": 1,
-    "successful_interactions": 0
+    "errors_this_session": 0,
+    "successful_interactions": 3
   },
   "routing_table": {
     "conversation": {
@@ -55,7 +56,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446193,
+      "assigned_at": 1785450953.049313,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -65,7 +66,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446262,
+      "assigned_at": 1785450953.0493205,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -75,7 +76,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.544628,
+      "assigned_at": 1785450953.0493221,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -85,7 +86,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446298,
+      "assigned_at": 1785450953.0493236,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -95,7 +96,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446312,
+      "assigned_at": 1785450953.0493248,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -105,7 +106,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446339,
+      "assigned_at": 1785450953.049327,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -115,7 +116,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446353,
+      "assigned_at": 1785450953.049328,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -125,7 +126,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446372,
+      "assigned_at": 1785450953.0493298,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -135,7 +136,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446384,
+      "assigned_at": 1785450953.049331,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -145,7 +146,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446396,
+      "assigned_at": 1785450953.0493317,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -155,7 +156,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446405,
+      "assigned_at": 1785450953.0493326,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -165,7 +166,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446417,
+      "assigned_at": 1785450953.0493348,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -175,7 +176,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446463,
+      "assigned_at": 1785450953.0493367,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -185,7 +186,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446472,
+      "assigned_at": 1785450953.049338,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -195,7 +196,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446482,
+      "assigned_at": 1785450953.049339,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -205,7 +206,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446494,
+      "assigned_at": 1785450953.0493407,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -215,7 +216,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446503,
+      "assigned_at": 1785450953.0493417,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -225,7 +226,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446522,
+      "assigned_at": 1785450953.0493426,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -235,7 +236,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446534,
+      "assigned_at": 1785450953.0493445,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -245,7 +246,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446546,
+      "assigned_at": 1785450953.0493453,
       "use_count": 0,
       "avg_latency_ms": 0.0
     },
@@ -255,7 +256,7 @@
       "model_path": "",
       "model_tree": "",
       "rationale": "No GGUF vocab models found on disk",
-      "assigned_at": 1785196577.5446556,
+      "assigned_at": 1785450953.0493462,
       "use_count": 0,
       "avg_latency_ms": 0.0
     }

@@ -99,6 +99,34 @@ _COMMAND_PATTERNS = [
     re.compile(r'\b(?:check|show|list|get)\s+(?P<cmd>[a-z][a-z0-9_\-\s]{2,30}?)\s*$', re.IGNORECASE),
 ]
 
+# Natural language intent patterns for OSINT and utility skills
+_NL_INTENT_PATTERNS = [
+    # News lookup: "what's in the news", "news in another country", "latest news about X"
+    (re.compile(r'\b(?:what(?:\'s| is| are) (?:in |the )?news|latest news|news (?:in|about|from)|show (?:me )?news|see (?:the )?news|headlines|current events)\b', re.IGNORECASE),
+     "osint_news_search", "news"),
+    # Account creation: "create an account", "make an account", "sign up for X"
+    (re.compile(r'\b(?:create|make|sign up|register|open) (?:a |an |the )?(?:new )?(?:account|profile|membership)\b', re.IGNORECASE),
+     "osint_account_create", "account"),
+    # Anonymous SMS: "send anonymous sms", "anonymous text"
+    (re.compile(r'\b(?:send|text|message) (?:an? )?(?:anonymous|anon|hidden|untraceable) (?:sms|text|message)\b', re.IGNORECASE),
+     "osint_anonymous_sms", "sms"),
+    # Anonymous email: "send anonymous email", "anonymous email"
+    (re.compile(r'\b(?:send|email|mail) (?:an? )?(?:anonymous|anon|hidden|untraceable|disposable) (?:email|mail|message)\b', re.IGNORECASE),
+     "osint_anonymous_email", "email"),
+    # Temp email: "temp email", "disposable email", "burner email"
+    (re.compile(r'\b(?:temp|temporary|disposable|burner|throwaway|fake) email\b', re.IGNORECASE),
+     "osint_temp_email", "temp_email"),
+    # Fake identity: "fake identity", "fake name", "generate identity"
+    (re.compile(r'\b(?:fake|generate|create|make) (?:a )?(?:identity|name|persona|profile|person)\b', re.IGNORECASE),
+     "osint_fake_identity", "identity"),
+    # People search natural language: "who is X", "find person"
+    (re.compile(r'\b(?:who is|find person|look up person|search for person|locate)\s+(?P<target>[\w\s]+)', re.IGNORECASE),
+     "osint_people_search", "people"),
+    # Username check natural language: "check if username exists"
+    (re.compile(r'\b(?:check|verify|see if|look up)\s+(?:username|user|handle|account)\s+(?P<target>[\w\s]+)', re.IGNORECASE),
+     "osint_username_check", "username"),
+]
+
 # Well-known Android app packages to attempt auto-resolution
 _KNOWN_PACKAGES = {
     "netflix":       "com.netflix.mediaclient",
@@ -330,6 +358,13 @@ class SkillsEngine:
                 self._register_candidate_command(cmd_name, user_text, success)
                 return
 
+        # Try natural language OSINT/utility intent patterns
+        for pattern, skill_key, category in _NL_INTENT_PATTERNS:
+            m = pattern.search(user_text)
+            if m:
+                self._register_nl_intent(skill_key, category, user_text, success)
+                return
+
     def _matches_existing(self, norm_text: str) -> bool:
         """Return True if normalised text matches any existing skill or alias."""
         for existing_alias in self._existing_aliases:
@@ -403,6 +438,27 @@ class SkillsEngine:
         base = 0.30
         obs_factor = min(1.0, cs.observations / 5.0)
         cs.confidence = base + 0.45 * obs_factor
+        if success:
+            cs.confidence = min(1.0, cs.confidence + 0.05)
+
+    def _register_nl_intent(self, skill_key: str, category: str, original_text: str, success: bool):
+        """Register a natural language intent (OSINT/utility) as a candidate."""
+        if skill_key in self._existing_keys:
+            return
+        if skill_key not in self._candidates:
+            cs = CandidateSkill(
+                key=skill_key,
+                label=skill_key.replace("osint_", "").replace("_", " ").title(),
+                action_type="prompt_argument",
+                aliases=[category, original_text.strip().lower()[:40]],
+                confidence=0.6,
+            )
+            self._candidates[skill_key] = cs
+        cs = self._candidates[skill_key]
+        cs.observations += 1
+        cs.last_seen = time.time()
+        obs_factor = min(1.0, cs.observations / 5.0)
+        cs.confidence = 0.6 + 0.3 * obs_factor
         if success:
             cs.confidence = min(1.0, cs.confidence + 0.05)
 

@@ -1,0 +1,24 @@
+{
+  "last_response": "I am Lilly, your puppy companion! I have sensors and can control your phone!",
+  "dialog_state": "ready",
+  "last_interaction_time": 1785197918.812477,
+  "phone_server_connected": false,
+  "last_command_response": null,
+  "dialog_history": [
+    {
+      "timestamp": 1785197918.812477,
+      "role": "lilly",
+      "message": "I am Lilly, your puppy companion! I have sensors and can control your phone!"
+    }
+  ],
+  "available_commands": [
+    "sensors",
+    "commands",
+    "mic",
+    "notifications",
+    "volume",
+    "brightness",
+    "apps"
+  ],
+  "interaction_count": 1
+}

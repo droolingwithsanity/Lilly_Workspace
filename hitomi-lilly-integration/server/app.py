@@ -9,7 +9,7 @@ import httpx
 
 REMOTE = os.environ.get("REMOTE_AI_URL", "")
 PORT = int(os.environ.get("LILLY_PORT", "8098"))
-APK_VERSION = os.environ.get("APK_VERSION", "5.5")
+APK_VERSION = os.environ.get("APK_VERSION", "3.2")
 APK_FILENAME = f"lilly-overlay-v{APK_VERSION}.apk"
 _SCRIPT_DIR = Path(__file__).parent.resolve()
 APK_DIR = _SCRIPT_DIR if (_SCRIPT_DIR / APK_FILENAME).parent == _SCRIPT_DIR else Path("/app/apk")
@@ -553,6 +553,18 @@ async def api_apk_download():
         return FileResponse(str(apk_path), media_type="application/vnd.android.package-archive",
             filename=APK_FILENAME)
     raise HTTPException(404, f"APK v{APK_VERSION} not found")
+
+@app.get("/lilly_ai.py")
+async def serve_lilly_ai_py():
+    lilly_ai_path = _SCRIPT_DIR / "lilly_ai.py"
+    if not lilly_ai_path.exists():
+        lilly_ai_path = WORKSPACE / "lilly_ai.py"
+    if not lilly_ai_path.exists():
+        lilly_ai_path = Path("/app/lilly_ai.py")
+    if lilly_ai_path.exists():
+        return FileResponse(str(lilly_ai_path), media_type="text/x-python",
+            filename="lilly_ai.py")
+    raise HTTPException(404, "lilly_ai.py not found")
 
 @app.get("/api/status")
 async def api_status():

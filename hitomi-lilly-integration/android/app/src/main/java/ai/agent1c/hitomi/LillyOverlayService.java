@@ -919,18 +919,14 @@ public class LillyOverlayService extends Service {
 
     private void showLocalFallback() {
         if (lillyWebView != null) {
-            String last = escapeJs(lastAvatar.isEmpty() ? "puppy" : lastAvatar);
             lillyWebView.evaluateJavascript(
                 "(function(){" +
+                "var o=document.getElementById('lilly-offline');if(o)o.remove();" +
                 "var e=document.createElement('div');" +
                 "e.id='lilly-offline';" +
-                "e.style.cssText='position:absolute;bottom:0;left:0;right:0;" +
-                "background:rgba(200,50,50,0.85);color:#fff;font-size:10px;" +
-                "text-align:center;padding:2px 4px;border-radius:4px;" +
+                "e.style.cssText='position:absolute;top:6px;right:6px;width:8px;height:8px;" +
+                "background:#e53935;border-radius:50%;box-shadow:0 0 4px rgba(229,57,53,0.6);" +
                 "z-index:999;pointer-events:none';" +
-                "e.textContent='offline';" +
-                "var o=document.getElementById('lilly-offline');" +
-                "if(o)o.remove();" +
                 "document.body.appendChild(e);" +
                 "})()", null);
         }

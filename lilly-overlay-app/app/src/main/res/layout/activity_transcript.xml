@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#FF1A1A2E">
+
+    <!-- Header bar -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="8dp"
+        android:background="#FF222240">
+
+        <Button
+            android:id="@+id/transcriptBackBtn"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:text="←"
+            android:textSize="18sp"
+            android:textColor="#FFFFFFFF"
+            android:backgroundTint="#00000000"
+            android:padding="0dp" />
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="📋 Conversation Transcript"
+            android:textSize="16sp"
+            android:textColor="#FF6B9CE3"
+            android:textStyle="bold"
+            android:gravity="center" />
+
+        <Button
+            android:id="@+id/transcriptRefreshBtn"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:text="↻"
+            android:textSize="18sp"
+            android:textColor="#FF4ADE80"
+            android:backgroundTint="#00000000"
+            android:padding="0dp" />
+    </LinearLayout>
+
+    <!-- Transcript content -->
+    <ScrollView
+        android:id="@+id/transcriptScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:padding="16dp"
+        android:scrollbarThumbVertical="@android:color/darker_gray">
+
+        <TextView
+            android:id="@+id/transcriptText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Loading transcript..."
+            android:textSize="13sp"
+            android:textColor="#FFDDDDDD"
+            android:fontFamily="monospace"
+            android:lineSpacingMultiplier="1.4"
+            android:textIsSelectable="true" />
+    </ScrollView>
+
+    <!-- Bottom action bar -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="12dp"
+        android:gravity="center"
+        android:background="#FF222240">
+
+        <Button
+            android:id="@+id/transcriptCopyBtn"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1"
+            android:text="Copy All"
+            android:textSize="13sp"
+            android:backgroundTint="#FF60A5FA"
+            android:textColor="#FFFFFFFF"
+            android:layout_marginEnd="8dp" />
+
+        <Button
+            android:id="@+id/transcriptClearBtn"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1"
+            android:text="Clear"
+            android:textSize="13sp"
+            android:backgroundTint="#FFFF9AA5"
+            android:textColor="#FF000000" />
+
+    </LinearLayout>
+</LinearLayout>

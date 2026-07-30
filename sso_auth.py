@@ -6,6 +6,7 @@ import os
 import jwt
 import hashlib
 import secrets
+import aiohttp
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from dataclasses import dataclass, asdict
@@ -291,11 +292,52 @@ class OAuthTokenRefresher:
             if datetime.utcnow() < expires_dt - timedelta(minutes=5):
                 return True  # Token still valid
         
-        # TODO: Implement actual Gmail OAuth token refresh
-        # This would call Google's OAuth endpoint with the refresh_token
-        # For now, return False to indicate refresh needed
-        logger.warning(f"Gmail token refresh not implemented for user {user_id}")
-        return False
+        # Implement actual Gmail OAuth token refresh using Google's OAuth endpoint
+        refresh_token = gmail_tokens.get("refresh_token")
+        client_id = os.environ.get("GOOGLE_CLIENT_ID")
+        client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+        
+        if not refresh_token or not client_id or not client_secret:
+            logger.error(f"Missing Gmail OAuth credentials for user {user_id}")
+            return False
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                data = {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token"
+                }
+                
+                async with session.post(
+                    "https://oauth2.googleapis.com/token",
+                    data=data
+                ) as response:
+                    if response.status != 200:
+                        error_data = await response.text()
+                        logger.error(f"Gmail token refresh failed: {error_data}")
+                        return False
+                    
+                    token_data = await response.json()
+                    
+                    # Update tokens
+                    new_tokens = {
+                        "access_token": token_data["access_token"],
+                        "refresh_token": token_data.get("refresh_token", refresh_token),
+                        "expires_at": (datetime.utcnow() + timedelta(seconds=token_data.get("expires_in", 3600))).isoformat(),
+                        "token_type": token_data.get("token_type", "Bearer")
+                    }
+                    
+                    tokens["gmail"] = new_tokens
+                    self.sso.update_oauth_tokens(user_id, tokens)
+                    
+                    logger.info(f"Gmail token refreshed successfully for user {user_id}")
+                    return True
+                    
+        except Exception as e:
+            logger.error(f"Gmail token refresh error for user {user_id}: {e}")
+            return False
     
     async def refresh_outlook_token(self, user_id: str) -> bool:
         """Refresh Outlook OAuth token for a user."""
@@ -313,9 +355,54 @@ class OAuthTokenRefresher:
             if datetime.utcnow() < expires_dt - timedelta(minutes=5):
                 return True  # Token still valid
         
-        # TODO: Implement actual Outlook OAuth token refresh
-        logger.warning(f"Outlook token refresh not implemented for user {user_id}")
-        return False
+        # Implement actual Outlook OAuth token refresh using Microsoft's OAuth endpoint
+        refresh_token = outlook_tokens.get("refresh_token")
+        client_id = os.environ.get("MICROSOFT_CLIENT_ID")
+        client_secret = os.environ.get("MICROSOFT_CLIENT_SECRET")
+        tenant_id = os.environ.get("MICROSOFT_TENANT_ID", "common")
+        
+        if not refresh_token or not client_id or not client_secret:
+            logger.error(f"Missing Outlook OAuth credentials for user {user_id}")
+            return False
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                data = {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                    "scope": "https://graph.microsoft.com/.default"
+                }
+                
+                async with session.post(
+                    f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+                    data=data
+                ) as response:
+                    if response.status != 200:
+                        error_data = await response.text()
+                        logger.error(f"Outlook token refresh failed: {error_data}")
+                        return False
+                    
+                    token_data = await response.json()
+                    
+                    # Update tokens
+                    new_tokens = {
+                        "access_token": token_data["access_token"],
+                        "refresh_token": token_data.get("refresh_token", refresh_token),
+                        "expires_at": (datetime.utcnow() + timedelta(seconds=token_data.get("expires_in", 3600))).isoformat(),
+                        "token_type": token_data.get("token_type", "Bearer")
+                    }
+                    
+                    tokens["outlook"] = new_tokens
+                    self.sso.update_oauth_tokens(user_id, tokens)
+                    
+                    logger.info(f"Outlook token refreshed successfully for user {user_id}")
+                    return True
+                    
+        except Exception as e:
+            logger.error(f"Outlook token refresh error for user {user_id}: {e}")
+            return False
 
 
 class SSOAuthenticationMiddleware:

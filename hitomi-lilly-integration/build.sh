@@ -21,4 +21,4 @@ echo "Open http://localhost:8098 in your browser to download the APK"
 echo ""
 
 # Run the container
-docker run --rm -p 8098:8098 lilly-overlay:latest
+docker run --rm -p 8098:8098  lilly-overlay:latest

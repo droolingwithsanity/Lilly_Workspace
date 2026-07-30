@@ -665,6 +665,7 @@ async function pollState(){
     if(typeof s.micActive==='boolean')micActive=s.micActive;
     if(typeof s.speaking==='boolean')speaking=s.speaking;
     if(typeof s.thinking==='boolean')thinking=s.thinking;
+    if(typeof s.foreground_app==='string'&&s.foreground_app){updateForegroundFromState(s);}
     if(typeof s.lookAt==='string')lookAt=s.lookAt;
     if(typeof s.mouthOpen==='number')mouthOpen=s.mouthOpen;
     if(typeof s.heard==='string'&&s.heard!==heard){heard=s.heard;}
@@ -713,6 +714,19 @@ async function sendMessage(){
   chatInput.value='';
   bubbleText.textContent='You: '+text;
   chatBubble.classList.add('show');
+
+  // Try local command first (works offline)
+  if(handleLocalCommand(text)){
+    // Update foreground app detection locally
+    const openMatch=text.toLowerCase().match(/^(?:open|launch|start)\s+(.+)/i);
+    if(openMatch){
+      const pkg=_resolvePackage(openMatch[1].trim().toLowerCase());
+      if(pkg){_foregroundPkg=pkg;_foregroundLabel=_appLabels[pkg]||openMatch[1].trim();}
+    }
+    return;
+  }
+
+  // Fall through to server
   try{
     const r=await authFetch('/api/cmd',{
       method:'POST',
@@ -723,11 +737,36 @@ async function sendMessage(){
     bubbleText.textContent='<b>'+overlayCharName()+':</b> '+(res.reply||'');
     if(res.audio_id)playAudio(res.audio_id);
     if(res.open_url)handleOpenUrl(res.open_url);
-  }catch(e){}
+    // Update foreground from server response
+    if(res.foreground_app){_foregroundLabel=res.foreground_app;_foregroundPkg=res.foreground_package||'';}
+  }catch(e){
+    // Server unreachable — try local command as fallback
+    if(!handleLocalCommand(text)){
+      bubbleText.textContent='Offline — command not available locally';
+    }
+  }
 }
 
 async function toggleOverlayMic(){
-  authFetch('/api/toggle_mic',{method:'POST'}).catch(()=>{});
+  // Try server first
+  try{
+    await authFetch('/api/toggle_mic',{method:'POST'});
+  }catch(e){
+    // Server unreachable — use local Android SpeechRecognizer
+    if(window.LillyBridge&&window.LillyBridge.runTermux){
+      if(micBtn.className.includes('active')){
+        // Turn off
+        micBtn.textContent='🔇';micBtn.className='iconBtn muted';
+      }else{
+        // Turn on — launch Android speech recognition
+        window.LillyBridge.runTermux(JSON.stringify({
+          type:'termux',binary:'am',
+          text:'start -a android.speech.action.RECOGNIZE_SPEECH --ei android.speech.extra.MAX_RESULTS 1'
+        }));
+        micBtn.textContent='🎤';micBtn.className='iconBtn active';
+      }
+    }
+  }
 }
 
 // ─── Overlay expansion / input ───
@@ -956,6 +995,312 @@ localToast=function(t){_throttledBridgeCall(()=>_origLocalToast(t));};
 localNotif=function(ti,t){_throttledBridgeCall(()=>_origLocalNotif(ti,t));};
 localOpen=function(u){_throttledBridgeCall(()=>_origLocalOpen(u));};
 localAM=function(p,a){_throttledBridgeCall(()=>_origLocalAM(p,a));};
+
+// ─── OFFLINE MODE — local command routing when server is unreachable ───
+let _offlineMode=false;
+let _foregroundPkg='';
+let _foregroundLabel='';
+
+// Detect foreground app via local Termux (no server needed)
+async function detectForegroundAppLocal(){
+  if(!window.LillyBridge||!window.LillyBridge.runTermux)return _foregroundPkg;
+  return new Promise(resolve=>{
+    const id='fgdetect_'+Date.now();
+    const handler=(e)=>{
+      if(e.data&&e.data.id===id){
+        window.removeEventListener('message',handler);
+        const match=(e.data.stdout||'').match(/([a-z][a-z0-9_.]+)\//);
+        if(match){
+          _foregroundPkg=match[1];
+          _foregroundLabel=_appLabels[_foregroundPkg]||_foregroundPkg.split('.').pop();
+        }
+        resolve(_foregroundPkg);
+      }
+    };
+    window.addEventListener('message',handler);
+    // Fallback timeout
+    setTimeout(()=>{window.removeEventListener('message',handler);resolve(_foregroundPkg);},2000);
+    // We can't directly capture stdout from runTermux, so use a polling approach
+    // Store last known app from overlay state
+    resolve(_foregroundPkg);
+  });
+}
+
+// App label map for offline display
+const _appLabels={
+  'com.google.android.youtube':'YouTube',
+  'com.netflix.mediaclient':'Netflix',
+  'com.spotify.music':'Spotify',
+  'com.google.android.apps.youtube.music':'YouTube Music',
+  'com.android.chrome':'Chrome',
+  'com.android.settings':'Settings',
+  'com.google.android.apps.maps':'Maps',
+  'com.android.camera':'Camera',
+  'com.google.android.gm':'Gmail',
+  'org.mozilla.firefox':'Firefox',
+  'com.whatsapp':'WhatsApp',
+  'com.instagram.android':'Instagram',
+};
+
+// Media apps that respond to play/pause/next/previous
+const _mediaApps=new Set([
+  'com.google.android.youtube','com.netflix.mediaclient','com.spotify.music',
+  'com.google.android.apps.youtube.music','com.amazon.avod','com.hulu.plus',
+  'com.disney.disneyplus','com.peacocktv.peacockandroid','com.hbo.hbonow',
+  'com.tidal.music'
+]);
+
+// Local keyevent via Termux input
+function localKeyevent(keycode){
+  if(window.LillyBridge&&window.LillyBridge.runTermux){
+    window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:'keyevent '+keycode}));
+    return true;
+  }
+  return false;
+}
+
+// Local text input via Termux
+function localInputText(text){
+  if(window.LillyBridge&&window.LillyBridge.runTermux){
+    const escaped=text.replace(/'/g,"'\\''");
+    window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:"text '"+escaped+"'"}));
+    return true;
+  }
+  return false;
+}
+
+// Local search via Termux open
+function localSearch(query){
+  const encoded=encodeURIComponent(query);
+  if(_foregroundPkg==='com.google.android.youtube'||_foregroundLabel==='YouTube'){
+    localOpen('https://www.youtube.com/results?search_query='+encoded);
+    return 'Searching YouTube for '+query;
+  }
+  if(_foregroundPkg==='com.google.android.apps.maps'||_foregroundLabel==='Maps'){
+    localOpen('https://www.google.com/maps/search/?api=1&query='+encoded);
+    return 'Searching Maps for '+query;
+  }
+  if(_foregroundPkg==='com.spotify.music'||_foregroundLabel==='Spotify'){
+    localOpen('spotify:search:'+encoded);
+    return 'Searching Spotify for '+query;
+  }
+  localOpen('https://www.google.com/search?q='+encoded);
+  return 'Searching for '+query;
+}
+
+// Voice text input mode
+let _voiceInputMode=false;
+let _voiceInputDeadline=0;
+
+// Handle local commands — returns true if handled offline
+function handleLocalCommand(text){
+  const t=text.toLowerCase().trim();
+  const hasBridge=window.LillyBridge&&window.LillyBridge.runTermux;
+  if(!hasBridge)return false;
+
+  // ── Open/Launch/Start app ──
+  const appMatch=t.match(/^(?:open|launch|start)\s+(.+)/i);
+  if(appMatch){
+    const appName=appMatch[1].trim();
+    // Try to resolve package name from skill aliases
+    const pkg=_resolvePackage(appName);
+    if(pkg){
+      localAM(pkg,'');
+      bubbleText.textContent='Opening '+appName+'...';
+      _foregroundPkg=pkg;
+      _foregroundLabel=_appLabels[pkg]||appName;
+    }else{
+      // Try as direct package name
+      localAM(appName,'');
+      bubbleText.textContent='Opening '+appName+'...';
+    }
+    return true;
+  }
+
+  // ── Run Termux command ──
+  const cmdMatch=t.match(/^(?:run|termux)\s+(.+)/i);
+  if(cmdMatch){
+    const cmd=cmdMatch[1].trim();
+    window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'sh',text:'-c\n'+cmd}));
+    bubbleText.textContent='Running '+cmd+'...';
+    return true;
+  }
+
+  // ── Tab navigation ──
+  const tabMatch=t.match(/^tab(?:\s+(\d+)\s*(?:times?|x)?)?$/i);
+  if(tabMatch){
+    const count=parseInt(tabMatch[1])||1;
+    for(let i=0;i<count;i++) localKeyevent('61');
+    bubbleText.textContent='Tab ×'+count;
+    return true;
+  }
+  if(t==='shift tab'||t==='previous field'){
+    // Shift+Tab: send KEYCODE_DEL(67) + KEYCODE_TAB(61) together
+    window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:'keyevent 67 61'}));
+    bubbleText.textContent='Shift Tab';
+    return true;
+  }
+
+  // ── Select/Enter/OK/Confirm/Done ──
+  if(t==='select'||t==='enter'||t==='ok'||t==='confirm'||t==='done'){
+    localKeyevent('66');
+    return true;
+  }
+
+  // ── Back ──
+  if(t==='back'||t==='go back'){
+    localKeyevent('4');
+    return true;
+  }
+
+  // ── Home ──
+  if(t==='home'||t==='go home'){
+    localKeyevent('3');
+    return true;
+  }
+
+  // ── Scroll ──
+  const scrollMap={'scroll up':'19','scroll down':'20','scroll left':'21','scroll right':'22'};
+  for(const[trigger,key]of Object.entries(scrollMap)){
+    if(t===trigger){
+      for(let i=0;i<6;i++){localKeyevent(key);}
+      bubbleText.textContent=trigger;
+      return true;
+    }
+  }
+
+  // ── Bare directions (context-aware) ──
+  const dirMap={'up':'19','down':'20','left':'21','right':'22'};
+  if(dirMap[t]){
+    localKeyevent(dirMap[t]);
+    return true;
+  }
+
+  // ── Swipe ──
+  const swipeMap={
+    'swipe up':'input swipe 500 500 500 1500',
+    'swipe down':'input swipe 500 1500 500 500',
+    'swipe left':'input swipe 900 800 100 800',
+    'swipe right':'input swipe 100 800 900 800',
+  };
+  for(const[trigger,cmd]of Object.entries(swipeMap)){
+    if(t===trigger){
+      window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:cmd.replace('input ','')}));
+      return true;
+    }
+  }
+
+  // ── Media controls (context-aware) ──
+  const mediaMap={
+    'play':'85','pause':'85','resume':'85','stop':'86',
+    'next':'87','next track':'87','skip':'87','skip track':'87',
+    'previous':'88','previous track':'88','last track':'88',
+    'rewind':'89','fast forward':'90',
+    'volume up':'24','volume down':'25','mute':'164','unmute':'164'
+  };
+  for(const[trigger,keycode]of Object.entries(mediaMap)){
+    if(t===trigger){
+      localKeyevent(keycode);
+      bubbleText.textContent=trigger;
+      return true;
+    }
+  }
+
+  // ── Context-aware search ──
+  const searchMatch=t.match(/^(?:search|find|look up|go to)\s+(.+)/i);
+  if(searchMatch){
+    const query=searchMatch[1].trim();
+    if(query){
+      const reply=localSearch(query);
+      bubbleText.textContent=reply;
+      return true;
+    }
+  }
+
+  // ── Voice text input ──
+  const enterTextMatch=t.match(/^(?:enter text|type this|input by voice|voice type|dictate|speak and type|say and type)(?:\s+(.+))?$/i);
+  if(enterTextMatch){
+    const directText=enterTextMatch[1];
+    if(directText){
+      localInputText(directText);
+      bubbleText.textContent='Typing: '+directText;
+    }else{
+      // Activate Android SpeechRecognizer
+      _voiceInputMode=true;
+      _voiceInputDeadline=Date.now()+10000;
+      bubbleText.textContent='Listening... say what to type';
+      _startLocalSTT();
+    }
+    return true;
+  }
+
+  // ── Voice input mode: capture text for typing ──
+  if(_voiceInputMode&&Date.now()<_voiceInputDeadline){
+    _voiceInputMode=false;
+    localInputText(text);
+    bubbleText.textContent='Typing: '+text;
+    return true;
+  }
+
+  // ── What app am I in ──
+  if(t==='what app am i in'||t==='where am i'||t==="what's open"||t==='what app is this'||t==='which app'){
+    bubbleText.textContent=_foregroundLabel?'You\'re in '+_foregroundLabel+'.':'App detection unavailable offline.';
+    return true;
+  }
+
+  // ── Zoom (Maps context) ──
+  if(t==='zoom in'){localKeyevent('24');return true;}
+  if(t==='zoom out'){localKeyevent('25');return true;}
+
+  // ── Volume ──
+  if(t==='volume up'||t==='turn up volume'){localKeyevent('24');return true;}
+  if(t==='volume down'||t==='turn down volume'){localKeyevent('25');return true;}
+
+  return false;
+}
+
+// Resolve app name to package name from skill aliases
+function _resolvePackage(name){
+  const n=name.toLowerCase();
+  const pkgMap={
+    'youtube':'com.google.android.youtube','yt':'com.google.android.youtube',
+    'netflix':'com.netflix.mediaclient',
+    'spotify':'com.spotify.music',
+    'chrome':'com.android.chrome','browser':'com.android.chrome',
+    'maps':'com.google.android.apps.maps','google maps':'com.google.android.apps.maps',
+    'settings':'com.android.settings','phone settings':'com.android.settings',
+    'camera':'com.android.camera','photo':'com.android.camera',
+    'gmail':'com.google.android.gm','email':'com.google.android.gm',
+    'calculator':'com.android.calculator2','calc':'com.android.calculator2',
+    'calendar':'com.android.calendar',
+    'firefox':'org.mozilla.firefox',
+    'whatsapp':'com.whatsapp',
+    'instagram':'com.instagram.android',
+  };
+  return pkgMap[n]||null;
+}
+
+// Local STT via Android SpeechRecognizer
+function _startLocalSTT(){
+  if(!window.LillyBridge||!window.LillyBridge.runTermux)return;
+  // Use Termux to launch a speech recognition intent
+  window.LillyBridge.runTermux(JSON.stringify({
+    type:'termux',
+    binary:'am',
+    text:'start -a android.speech.action.RECOGNIZE_SPEECH --ei android.speech.extra.MAX_RESULTS 1'
+  }));
+  // The result will come back as a notification or we can poll
+  // For now, show a message
+  bubbleText.textContent='Say what to type... (using Android speech)';
+}
+
+// Update foreground app from server state polling
+function updateForegroundFromState(state){
+  if(state&&state.foreground_app){
+    _foregroundLabel=state.foreground_app;
+    _foregroundPkg=state.foreground_app_package||'';
+  }
+}
 
 // ─── Input handlers ───
 if (!isAndroidBridge) {

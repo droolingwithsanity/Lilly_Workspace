@@ -1,0 +1,1465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>Lilly</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:transparent;
+  overflow:visible;
+  font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+  width:96px;height:96px;
+  user-select:none;-webkit-user-select:none;
+  touch-action:manipulation;
+}
+#container{
+  width:96px;height:96px;
+  position:relative;
+  background:transparent;
+  transition:all 0.3s;
+}
+#container.expanded{
+  width:280px;height:320px;
+}
+body.expanded{
+  width:280px;height:320px;
+}
+#pupCanvas{
+  position:absolute;
+  top:-16px;left:-16px;
+  width:128px;height:128px;
+  image-rendering:auto;
+  touch-action:none;
+  z-index:2;
+  cursor:pointer;
+}
+#dragHandle{
+  position:absolute;
+  top:-16px;left:-16px;
+  width:128px;height:128px;
+  z-index:5;
+  touch-action:none;
+}
+#closeHint{
+  position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
+  width:44px;height:44px;border-radius:50%;
+  background:rgba(239,68,68,0.85);
+  color:#fff;font-size:22px;
+  display:flex;align-items:center;justify-content:center;
+  z-index:100;pointer-events:none;
+  opacity:0;transition:opacity 0.2s;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  border:2px solid rgba(255,255,255,0.3);
+  box-shadow:0 4px 20px rgba(239,68,68,0.3);
+}
+
+/* ─── Compact vertical chat panel (expanded) ─── */
+#chatBubble{
+  position:absolute;
+  top:112px;left:0;
+  width:280px;
+  background:rgba(15,15,40,0.78);
+  backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
+  border-radius:0 0 12px 12px;
+  border:1px solid rgba(255,255,255,0.08);
+  border-top:none;
+  box-shadow:0 4px 16px rgba(0,0,0,0.5);
+  padding:6px 8px 8px;
+  display:none;
+  z-index:10;
+  transition:opacity 0.25s;
+  max-height:260px;
+  overflow:hidden;
+}
+#chatBubble.show{
+  display:block;
+  opacity:1;
+}
+#bubbleTail{display:none}
+#chatHeader{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:2px 4px 4px;
+  border-bottom:1px solid rgba(255,255,255,0.08);
+  margin-bottom:4px;
+}
+#chatTitle{
+  font-size:9px;
+  color:rgba(255,255,255,0.4);
+  text-transform:uppercase;
+  letter-spacing:0.5px;
+}
+#closeChatBtn{
+  width:18px;height:18px;
+  border-radius:50%;
+  border:none;
+  background:rgba(239,68,68,0.3);
+  color:#ef4444;
+  font-size:10px;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  transition:all 0.2s;
+}
+#closeChatBtn:hover{background:rgba(239,68,68,0.5)}
+#bubbleText{
+  font-size:11px;
+  line-height:1.4;
+  color:rgba(255,255,255,0.85);
+  max-height:120px;
+  min-height:30px;
+  overflow-y:auto;
+  scrollbar-width:thin;
+  word-wrap:break-word;
+  margin-bottom:4px;
+  pointer-events:auto;
+  cursor:text;
+  user-select:text;
+  -webkit-user-select:text;
+  padding:4px;
+  background:rgba(255,255,255,0.04);
+  border-radius:8px;
+}
+#bubbleText::-webkit-scrollbar{width:2px}
+#bubbleText::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:2px}
+#bubbleStatus{
+  display:flex;
+  align-items:center;
+  gap:3px;
+  font-size:8px;
+  color:rgba(255,255,255,0.35);
+  margin-bottom:3px;
+  pointer-events:none;
+}
+#statusDot{
+  width:4px;height:4px;
+  border-radius:50%;
+  background:#4ade80;
+  transition:all 0.3s;
+  flex-shrink:0;
+}
+#statusDot.listening{background:#4ade80;box-shadow:0 0 4px #4ade80}
+#statusDot.thinking{background:#fbbf24;box-shadow:0 0 4px #fbbf24;animation:pulse 0.8s infinite}
+#statusDot.speaking{background:#f472b6;box-shadow:0 0 4px #f472b6;animation:pulse 0.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+#bubbleInput{
+  display:flex;
+  gap:3px;
+  align-items:center;
+  pointer-events:auto;
+}
+#chatInput{
+  flex:1;
+  background:rgba(255,255,255,0.08);
+  border:1px solid rgba(255,255,255,0.12);
+  border-radius:10px;
+  padding:6px 10px;
+  font-size:12px;
+  color:rgba(255,255,255,0.85);
+  outline:none;
+  min-width:0;
+  width:140px;
+}
+#chatInput::placeholder{color:rgba(255,255,255,0.25)}
+#chatInput:focus{border-color:rgba(255,255,255,0.2)}
+.iconBtn{
+  width:26px;height:26px;
+  border-radius:50%;
+  border:none;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+  transition:all 0.2s;
+  font-size:12px;
+  flex-shrink:0;
+}
+#micBtn{
+  background:rgba(74,222,128,0.2);
+  color:#4ade80;
+}
+#micBtn.active{background:rgba(74,222,128,0.35);box-shadow:0 0 6px rgba(74,222,128,0.25)}
+#micBtn.muted{background:rgba(239,68,68,0.2);color:#ef4444}
+#sendBtn{
+  background:rgba(168,85,247,0.2);
+  color:#c084fc;
+}
+#osintBtn{
+  background:rgba(99,102,241,0.2);
+  color:#818cf8;
+}
+#osintBtn.active{background:rgba(99,102,241,0.35);box-shadow:0 0 6px rgba(99,102,241,0.25)}
+#osintPanel{
+  position:absolute;bottom:50px;right:0;width:220px;max-height:280px;
+  background:rgba(20,20,25,0.95);border:1px solid rgba(99,102,241,0.25);border-radius:10px;
+  padding:8px;display:flex;flex-direction:column;gap:6px;z-index:50;
+  backdrop-filter:blur(12px);overflow-y:auto;
+}
+.osint-header{
+  display:flex;justify-content:space-between;align-items:center;
+  color:#818cf8;font-size:11px;font-weight:600;letter-spacing:0.3px;
+}
+.osint-cats{display:flex;flex-wrap:wrap;gap:3px;}
+.osint-cat{
+  padding:2px 6px;border-radius:8px;font-size:9px;cursor:pointer;
+  background:rgba(99,102,241,0.1);color:#a5b4fc;border:1px solid rgba(99,102,241,0.15);
+  transition:all 0.2s;
+}
+.osint-cat.active,.osint-cat:hover{background:rgba(99,102,241,0.3);border-color:rgba(99,102,241,0.4);color:#fff;}
+.osint-grid{display:grid;grid-template-columns:1fr 1fr;gap:3px;max-height:180px;overflow-y:auto;}
+.osint-tool{
+  padding:5px 6px;border-radius:6px;font-size:9px;cursor:pointer;
+  background:rgba(255,255,255,0.05);color:#c7d2fe;border:1px solid rgba(255,255,255,0.08);
+  transition:all 0.15s;text-align:center;
+}
+.osint-tool:hover{background:rgba(99,102,241,0.2);border-color:rgba(99,102,241,0.3);color:#fff;}
+.iconBtn:active{transform:scale(0.85)}
+
+/* ─── Voice-activated avatar name flash ─── */
+#avatarFlash{
+  position:absolute;top:98px;left:48px;
+  transform:translateX(-50%);
+  font-size:9px;
+  color:rgba(255,255,255,0.5);
+  letter-spacing:0.5px;
+  text-transform:uppercase;
+  z-index:6;
+  pointer-events:none;
+  white-space:nowrap;
+  opacity:0;
+  transition:opacity 0.3s;
+}
+#avatarFlash.show{opacity:1}
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="pupCanvas" width="320" height="240"></canvas>
+  <div id="dragHandle"></div>
+  <div id="avatarFlash"></div>
+  <div id="closeHint">✕</div>
+  <div id="chatBubble">
+    <div id="chatHeader">
+      <span id="chatTitle">Chat</span>
+      <button id="closeChatBtn" onclick="closeChat()">✕</button>
+    </div>
+    <div id="bubbleTail"></div>
+    <div id="bubbleText">Say hi to start talking!</div>
+    <div id="bubbleStatus">
+      <span id="statusDot"></span>
+      <span id="statusLabel">idle</span>
+    </div>
+    <div id="bubbleInput">
+      <button class="iconBtn" id="micBtn">🎤</button>
+      <input id="chatInput" type="text" placeholder="Message..." autocomplete="off">
+      <button class="iconBtn" id="sendBtn">➤</button>
+    </div>
+
+    <!-- OSINT Panel -->
+    <div id="osintPanel" style="display:none">
+      <div class="osint-header">
+        <span>OSINT Toolkit</span>
+        <button onclick="toggleOsintPanel()" style="background:none;border:none;color:#fff;font-size:14px;cursor:pointer">✕</button>
+      </div>
+      <input id="osintSearch" type="text" placeholder="Search target..." style="width:100%;padding:6px 8px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:#fff;font-size:11px;outline:none;margin-bottom:6px;box-sizing:border-box;">
+      <div class="osint-cats">
+        <span class="osint-cat active" onclick="renderOsintTools()">All</span>
+        <span class="osint-cat" onclick="renderOsintTools('people')">People</span>
+        <span class="osint-cat" onclick="renderOsintTools('username')">Username</span>
+        <span class="osint-cat" onclick="renderOsintTools('email')">Email</span>
+        <span class="osint-cat" onclick="renderOsintTools('phone')">Phone</span>
+        <span class="osint-cat" onclick="renderOsintTools('domain')">Domain</span>
+        <span class="osint-cat" onclick="renderOsintTools('security')">Security</span>
+        <span class="osint-cat" onclick="renderOsintTools('social')">Social</span>
+        <span class="osint-cat" onclick="renderOsintTools('crypto')">Crypto</span>
+        <span class="osint-cat" onclick="renderOsintTools('geo')">Geo</span>
+        <span class="osint-cat" onclick="renderOsintTools('info')">Info</span>
+      </div>
+      <div id="osintTools" class="osint-grid"></div>
+    </div>
+  </div>
+</div>
+<script>
+
+// Android WebView compat: ctx.ellipse() is unreliable — use save/scale/arc instead
+function oe(c,cx,cy,rx,ry){c.save();c.translate(cx,cy);c.scale(rx,ry);c.arc(0,0,1,0,Math.PI*2);c.restore();}
+const canvas=document.getElementById('pupCanvas');
+const ctx=canvas.getContext('2d');
+if(!ctx){document.body.innerHTML='<div style="padding:20px;color:#fff">Canvas unavailable</div>';throw new Error('no ctx')}
+
+// Auth: session cookie (auto-sent) + optional device token fallback
+const DEVICE_TOKEN=localStorage.getItem('lilly_device_token')||'';
+// Android APK: resolve server URL — try local servers before remote
+var _srvUrl=null;
+var _LOCAL_SERVERS=['http://127.0.0.1:8099','http://127.0.0.1:8080'];
+async function _probeUrl(base){try{var c=new AbortController();var t=setTimeout(function(){c.abort();},1500);var r=await fetch(base+'/api/ui_state',{signal:c.signal});clearTimeout(t);return r.ok;}catch(e){return false;}}
+async function _resolveServer(){
+  for(var i=0;i<_LOCAL_SERVERS.length;i++){if(await _probeUrl(_LOCAL_SERVERS[i])){_srvUrl=_LOCAL_SERVERS[i];updateStatusDot('local');return _srvUrl;}}
+  var remote='';
+  if(typeof LillyBridge!=='undefined'&&LillyBridge.getServerUrl)remote=LillyBridge.getServerUrl();
+  if(!remote)remote='https://droolingwithsanity.ca';
+  _srvUrl=remote.replace(/\/$/,'');
+  return _srvUrl;
+}
+async function _getServer(){if(_srvUrl!==null)return _srvUrl;return await _resolveServer();}
+setInterval(function(){_srvUrl=null;_resolveServer();},30000);
+function authFetch(url,opts){
+  opts=opts||{};
+  opts.headers=opts.headers||{};
+  if(DEVICE_TOKEN)opts.headers['X-Device-Token']=DEVICE_TOKEN;
+  // Prepend resolved server for relative /api/ paths
+  var resolvedUrl=url;
+  if(url.startsWith('/')){
+    resolvedUrl=(_srvUrl||'https://droolingwithsanity.ca')+url;
+  }
+  return fetch(resolvedUrl,opts);
+}
+// Async-aware wrapper used for all API calls
+async function apiFetch(url,opts){
+  var srv=await _getServer();
+  if(url.startsWith('/'))url=srv+url;
+  opts=opts||{};opts.headers=opts.headers||{};
+  if(DEVICE_TOKEN)opts.headers['X-Device-Token']=DEVICE_TOKEN;
+  return fetch(url,opts);
+}
+function updateStatusDot(mode){
+  var d=document.getElementById('statusDot');if(!d)return;
+  if(mode==='local'){d.style.background='#4ade80';}
+  else if(mode==='offline'){d.style.background='#ef4444';}
+}
+const W=320,H=240;
+
+let avatar=new URLSearchParams(location.search).get('avatar')||'puppy', mouthOpen=0, mood='calm', speaking=false, thinking=false, listening=false;
+let micActive=false, userName='', heard='', spoken='', lastAudioId=0;
+let frame=0, isBlinking=false, blinkFrame=200;
+let lookAt='user';
+
+// ── Clay-style drawing helpers (shared by all avatars) ──
+function clayFill(c,h){const g=c.createRadialGradient(0,0,0,0,0,1);g.addColorStop(0,lighten(h,16));g.addColorStop(0.6,h);g.addColorStop(1,darken(h,12));return g}
+function lighten(h,a){let r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);a>0?(r=Math.min(255,r+a),g=Math.min(255,g+a),b=Math.min(255,b+a)):(r=Math.max(0,r+a),g=Math.max(0,g+a),b=Math.max(0,b+a));return'rgb('+r+','+g+','+b+')'}
+function darken(h,a){return lighten(h,-a)}
+function breathe(){return Math.sin(frame*0.04)*3}
+
+// ── Transparent sphere background ──
+function drawClayBg(ctx2, W, H, color) {
+  ctx2.clearRect(0, 0, W, H);
+  ctx2.save();
+  const r = W * 0.47;
+  ctx2.shadowColor = color;
+  ctx2.shadowBlur  = W * 0.15;
+  ctx2.fillStyle = 'rgba(255,255,255,0.02)';
+  ctx2.beginPath(); ctx2.arc(W/2, H/2, r, 0, Math.PI*2); ctx2.fill();
+  ctx2.shadowBlur = 0;
+  const g = ctx2.createRadialGradient(W*0.30, H*0.26, W*0.03, W*0.5, H*0.5, r);
+  g.addColorStop(0,   'rgba(255,255,255,0.15)');
+  g.addColorStop(0.50,'rgba(255,255,255,0.03)');
+  g.addColorStop(1,   'rgba(0,0,0,0.05)');
+  ctx2.fillStyle = g;
+  ctx2.beginPath(); ctx2.arc(W/2, H/2, r, 0, Math.PI*2); ctx2.fill();
+  ctx2.restore();
+}
+
+// ── Shared eyes ──
+function drawClayEyes(ctx2, cx, cy, r, frame2) {
+  const blinking = (Math.floor(frame2 / 90) % 14 === 0);
+  const eyeR = r * 0.12;
+  const lx = cx - r*0.26, rx2 = cx + r*0.26, ey = cy;
+  ctx2.save();
+  if (blinking) {
+    ctx2.strokeStyle = 'rgba(60,40,80,0.55)'; ctx2.lineWidth = r*0.045; ctx2.lineCap = 'round';
+    ctx2.beginPath(); ctx2.moveTo(lx-eyeR,ey); ctx2.lineTo(lx+eyeR,ey); ctx2.stroke();
+    ctx2.beginPath(); ctx2.moveTo(rx2-eyeR,ey); ctx2.lineTo(rx2+eyeR,ey); ctx2.stroke();
+  } else {
+    for (const ex of [lx, rx2]) {
+      ctx2.shadowColor = 'rgba(80,50,100,0.22)'; ctx2.shadowBlur = r*0.07;
+      ctx2.fillStyle = '#fff';
+      ctx2.beginPath(); ctx2.arc(ex, ey, eyeR, 0, Math.PI*2); ctx2.fill();
+      ctx2.shadowBlur = 0;
+      ctx2.fillStyle = 'rgba(90,60,120,0.15)';
+      ctx2.beginPath(); ctx2.arc(ex, ey, eyeR*0.82, 0, Math.PI*2); ctx2.fill();
+      ctx2.fillStyle = '#3d2e52';
+      ctx2.beginPath(); ctx2.arc(ex, ey, eyeR*0.46, 0, Math.PI*2); ctx2.fill();
+      ctx2.fillStyle = 'rgba(255,255,255,0.88)';
+      ctx2.beginPath(); ctx2.arc(ex - eyeR*0.12, ey - eyeR*0.14, eyeR*0.22, 0, Math.PI*2); ctx2.fill();
+      ctx2.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx2.beginPath(); ctx2.arc(ex + eyeR*0.12, ey + eyeR*0.10, eyeR*0.09, 0, Math.PI*2); ctx2.fill();
+    }
+  }
+  ctx2.restore();
+}
+
+function drawRaccoonEyes(ctx2, cx, cy, r, frame2) {
+  const blinking = (Math.floor(frame2 / 90) % 14 === 0);
+  const eyeR = r * 0.15;
+  const lx = cx - r*0.26, rx2 = cx + r*0.26, ey = cy;
+  ctx2.save();
+  if (blinking) {
+    ctx2.strokeStyle = 'rgba(40,40,40,0.55)'; ctx2.lineWidth = r*0.045; ctx2.lineCap = 'round';
+    ctx2.beginPath(); ctx2.moveTo(lx-eyeR,ey); ctx2.lineTo(lx+eyeR,ey); ctx2.stroke();
+    ctx2.beginPath(); ctx2.moveTo(rx2-eyeR,ey); ctx2.lineTo(rx2+eyeR,ey); ctx2.stroke();
+  } else {
+    for (const ex of [lx, rx2]) {
+      ctx2.shadowColor = 'rgba(40,40,40,0.22)'; ctx2.shadowBlur = r*0.07;
+      ctx2.fillStyle = '#ffffff';
+      ctx2.beginPath(); ctx2.arc(ex, ey, eyeR, 0, Math.PI*2); ctx2.fill();
+      ctx2.shadowBlur = 0;
+      ctx2.fillStyle = 'rgba(40,40,40,0.12)';
+      ctx2.beginPath(); ctx2.arc(ex, ey, eyeR*0.82, 0, Math.PI*2); ctx2.fill();
+      ctx2.fillStyle = '#2a2a2a';
+      ctx2.beginPath(); ctx2.arc(ex, ey, eyeR*0.48, 0, Math.PI*2); ctx2.fill();
+      ctx2.fillStyle = 'rgba(255,255,255,0.92)';
+      ctx2.beginPath(); ctx2.arc(ex - eyeR*0.14, ey - eyeR*0.16, eyeR*0.24, 0, Math.PI*2); ctx2.fill();
+      ctx2.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx2.beginPath(); ctx2.arc(ex + eyeR*0.12, ey + eyeR*0.10, eyeR*0.10, 0, Math.PI*2); ctx2.fill();
+    }
+  }
+  ctx2.restore();
+}
+
+// ── Shared smile ──
+function drawClaySmile(ctx2, cx, cy, r) {
+  ctx2.save();
+  ctx2.strokeStyle = 'rgba(120,80,100,0.42)'; ctx2.lineWidth = r*0.05; ctx2.lineCap = 'round';
+  ctx2.beginPath(); ctx2.arc(cx - r*0.11, cy + r*0.28, r*0.11, 0.08, Math.PI*0.78); ctx2.stroke();
+  ctx2.beginPath(); ctx2.arc(cx + r*0.11, cy + r*0.28, r*0.11, Math.PI*0.22, Math.PI*0.92); ctx2.stroke();
+  ctx2.restore();
+}
+
+// ── Per-animal clay face ──
+function drawAnimalFace(ctx2, animal, cx, cy, r, frame2, noBg) {
+  const W2 = ctx2.canvas.width, H2 = ctx2.canvas.height;
+  const breathe2 = Math.sin(frame2 * 0.04) * (r * 0.018);
+  const PAL = {
+    puppy:{ bg:'#e8e4f0', head:'#d4d0de', muzzle:'#c8c4d2', ear:'#c4c0cc', earInner:'#f0d8e8', nose:'#d4a0b8' },
+    fox:  { bg:'#f5e4d0', head:'#e8905a', muzzle:'#f8e0c0', ear:'#e07840', earInner:'#f8c080', nose:'#c05030' },
+    cat:  { bg:'#ece8f4', head:'#c8c0d4', muzzle:'#f0dce8', ear:'#b8b0c4', earInner:'#f0c8dc', nose:'#d898b0' },
+    bear: { bg:'#ede0d8', head:'#b09080', muzzle:'#cdb8a8', ear:'#a08070', earInner:'#c8a890', nose:'#7a5a4a' },
+    bunny:{ bg:'#eeeaf6', head:'#d4cce0', muzzle:'#c8c0d4', ear:'#ccc4d8', earInner:'#f0cce0', nose:'#e8a8c0' },
+    owl:  { bg:'#e8e0d0', head:'#8a7a60', muzzle:'#c8b898', ear:'#7a6a50', earInner:'#c0a878', nose:'#5a4a38' },
+    deer: { bg:'#f0e8d8', head:'#c8a888', muzzle:'#e8d8c0', ear:'#b89870', earInner:'#e0c8a8', nose:'#5a4838' },
+    wolf: { bg:'#e0dde4', head:'#706878', muzzle:'#a898a8', ear:'#605868', earInner:'#a090a8', nose:'#383040' },
+    raccoon:{ bg:'#e0e0e4', head:'#808080', muzzle:'#c0c0c0', ear:'#686868', earInner:'#a8a8a8', nose:'#404040' },
+  };
+  const p = PAL[animal] || PAL.puppy;
+  if(!noBg) drawClayBg(ctx2, W2, H2, p.bg);
+  ctx2.save();
+  ctx2.translate(cx, cy + breathe2);
+  if (animal === 'puppy') {
+    const earWig = Math.sin(frame2 * 0.18) * 0.08, earBob = Math.sin(frame2 * 0.14) * r*0.03;
+    ctx2.save(); ctx2.translate(-r*0.60, -r*0.38 + earBob); ctx2.rotate(-0.26 + earWig);
+    ctx2.shadowColor='rgba(80,60,100,0.22)'; ctx2.shadowBlur=r*0.14; ctx2.shadowOffsetY=r*0.06;
+    ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,30));
+    ctx2.beginPath(); oe(ctx2,0,0,r*0.26,r*0.52); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = p.earInner; ctx2.beginPath(); oe(ctx2,0,r*0.06,r*0.14,r*0.36); ctx2.fill();
+    ctx2.restore();
+    ctx2.save(); ctx2.translate(r*0.60, -r*0.38 + earBob); ctx2.rotate(0.26 - earWig);
+    ctx2.shadowColor='rgba(80,60,100,0.22)'; ctx2.shadowBlur=r*0.14; ctx2.shadowOffsetY=r*0.06;
+    ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,30));
+    ctx2.beginPath(); oe(ctx2,0,0,r*0.26,r*0.52); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = p.earInner; ctx2.beginPath(); oe(ctx2,0,r*0.06,r*0.14,r*0.36); ctx2.fill();
+    ctx2.restore();
+    ctx2.shadowColor='rgba(80,60,100,0.20)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,30));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.70,-r*0.46,r*1.40,r*1.08,[r*0.38,r*0.38,r*0.28,r*0.28]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,22));
+    ctx2.beginPath(); oe(ctx2,0,r*0.30,r*0.40,r*0.24); ctx2.fill();
+    ctx2.shadowColor='rgba(80,40,60,0.25)'; ctx2.shadowBlur=r*0.08;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,28));
+    ctx2.beginPath(); oe(ctx2,0,r*0.14,r*0.11,r*0.08); ctx2.fill();
+    ctx2.shadowBlur=0;
+  } else if (animal === 'fox') {
+    const foxTwitch = Math.sin(frame2 * 0.12) * 0.12, foxTwitch2 = Math.sin(frame2 * 0.12 + Math.PI) * 0.12;
+    for (const [side, twitch] of [[-1, foxTwitch], [1, foxTwitch2]]) {
+      ctx2.save(); ctx2.scale(side,1); ctx2.translate(r*0.38, -r*0.52); ctx2.rotate(twitch); ctx2.translate(-r*0.38, r*0.52);
+      ctx2.shadowColor='rgba(100,50,20,0.22)'; ctx2.shadowBlur=r*0.12; ctx2.shadowOffsetY=r*0.04;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,28));
+      ctx2.beginPath(); ctx2.moveTo(r*0.14,-r*0.40); ctx2.lineTo(r*0.38,-r*0.92); ctx2.lineTo(r*0.64,-r*0.38); ctx2.closePath(); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = p.earInner;
+      ctx2.beginPath(); ctx2.moveTo(r*0.20,-r*0.42); ctx2.lineTo(r*0.37,-r*0.76); ctx2.lineTo(r*0.54,-r*0.40); ctx2.closePath(); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(100,50,20,0.20)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,28));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.70,-r*0.42,r*1.40,r*1.02,[r*0.34,r*0.34,r*0.26,r*0.26]); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,30));
+    ctx2.beginPath(); oe(ctx2,0,r*0.18,r*0.44,r*0.38); ctx2.fill();
+    ctx2.shadowColor='rgba(80,30,10,0.25)'; ctx2.shadowBlur=r*0.08;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,24));
+    ctx2.beginPath(); oe(ctx2,0,r*0.10,r*0.13,r*0.09); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.fillStyle='rgba(100,60,30,0.35)';
+    for(const [wx,wy] of [[-r*0.28,r*0.16],[-r*0.38,r*0.22],[-r*0.42,r*0.30],[r*0.28,r*0.16],[r*0.38,r*0.22],[r*0.42,r*0.30]]) {
+      ctx2.beginPath(); ctx2.arc(wx,wy,r*0.018,0,Math.PI*2); ctx2.fill();
+    }
+  } else if (animal === 'cat') {
+    const catListen = Math.sin(frame2 * 0.035) * 0.18, catListen2 = Math.sin(frame2 * 0.035 + 0.6) * 0.18;
+    for (const [side, listenAngle] of [[-1, catListen], [1, catListen2]]) {
+      ctx2.save(); ctx2.scale(side,1); ctx2.translate(r*0.40, -r*0.50); ctx2.rotate(listenAngle); ctx2.translate(-r*0.40, r*0.50);
+      ctx2.shadowColor='rgba(60,40,80,0.20)'; ctx2.shadowBlur=r*0.10;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,28));
+      ctx2.beginPath(); ctx2.moveTo(r*0.20,-r*0.38); ctx2.lineTo(r*0.46,-r*0.90); ctx2.lineTo(r*0.62,-r*0.36); ctx2.closePath(); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = p.earInner;
+      ctx2.beginPath(); ctx2.moveTo(r*0.26,-r*0.40); ctx2.lineTo(r*0.45,-r*0.74); ctx2.lineTo(r*0.56,-r*0.38); ctx2.closePath(); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(60,40,80,0.18)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,28));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.68,-r*0.42,r*1.36,r*1.04,[r*0.32,r*0.32,r*0.28,r*0.28]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,22));
+    ctx2.beginPath(); oe(ctx2,0,r*0.28,r*0.34,r*0.22); ctx2.fill();
+    ctx2.shadowColor='rgba(80,30,60,0.22)'; ctx2.shadowBlur=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,26));
+    ctx2.beginPath(); oe(ctx2,0,r*0.13,r*0.10,r*0.07); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.strokeStyle='rgba(80,60,100,0.28)'; ctx2.lineWidth=r*0.025; ctx2.lineCap='round';
+    for(const s of [-1,1]) {
+      ctx2.beginPath(); ctx2.moveTo(s*r*0.08,r*0.20); ctx2.lineTo(s*r*0.52,r*0.13); ctx2.stroke();
+      ctx2.beginPath(); ctx2.moveTo(s*r*0.08,r*0.26); ctx2.lineTo(s*r*0.52,r*0.26); ctx2.stroke();
+    }
+  } else if (animal === 'bear') {
+    const bearRotate = Math.sin(frame2 * 0.04) * 0.06;
+    for(const [ex, rot] of [[-r*0.58, -bearRotate], [r*0.58, bearRotate]]) {
+      ctx2.save(); ctx2.translate(ex, -r*0.50); ctx2.rotate(rot);
+      ctx2.shadowColor='rgba(60,40,20,0.22)'; ctx2.shadowBlur=r*0.12;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,24));
+      ctx2.beginPath(); ctx2.arc(0, 0, r*0.28, 0, Math.PI*2); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = clayFill(ctx2, p.earInner, lighten(p.earInner,20));
+      ctx2.beginPath(); ctx2.arc(0, 0, r*0.17, 0, Math.PI*2); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(60,40,20,0.20)'; ctx2.shadowBlur=r*0.20; ctx2.shadowOffsetY=r*0.08;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,26));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.70,-r*0.44,r*1.40,r*1.10,[r*0.42,r*0.42,r*0.32,r*0.32]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,24));
+    ctx2.beginPath(); oe(ctx2,0,r*0.28,r*0.40,r*0.26); ctx2.fill();
+    ctx2.shadowColor='rgba(40,20,10,0.28)'; ctx2.shadowBlur=r*0.08;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,20));
+    ctx2.beginPath(); oe(ctx2,0,r*0.12,r*0.15,r*0.10); ctx2.fill();
+    ctx2.shadowBlur=0;
+  } else if (animal === 'bunny') {
+    const earSway = Math.sin(frame2 * 0.06) * 0.08, earDroop = Math.sin(frame2 * 0.03) * 0.04;
+    ctx2.save(); ctx2.translate(-r*0.30,-r*0.44); ctx2.rotate(-0.14 + earSway + earDroop);
+    ctx2.shadowColor='rgba(80,60,100,0.20)'; ctx2.shadowBlur=r*0.12; ctx2.shadowOffsetY=r*0.04;
+    ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,28));
+    ctx2.beginPath(); oe(ctx2,0,-r*0.38,r*0.15,r*0.38); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.fillStyle = p.earInner; ctx2.beginPath(); oe(ctx2,0,-r*0.38,r*0.07,r*0.28); ctx2.fill();
+    ctx2.restore();
+    ctx2.save(); ctx2.translate(r*0.30,-r*0.44); ctx2.rotate(0.14 - earSway - earDroop);
+    ctx2.shadowColor='rgba(80,60,100,0.20)'; ctx2.shadowBlur=r*0.12; ctx2.shadowOffsetY=r*0.04;
+    ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,28));
+    ctx2.beginPath(); oe(ctx2,0,-r*0.38,r*0.15,r*0.38); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.fillStyle = p.earInner; ctx2.beginPath(); oe(ctx2,0,-r*0.38,r*0.07,r*0.28); ctx2.fill();
+    ctx2.restore();
+    ctx2.shadowColor='rgba(80,60,100,0.18)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,28));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.68,-r*0.44,r*1.36,r*1.08,[r*0.40,r*0.40,r*0.32,r*0.32]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,22));
+    ctx2.beginPath(); oe(ctx2,0,r*0.30,r*0.36,r*0.22); ctx2.fill();
+    ctx2.shadowColor='rgba(80,40,70,0.22)'; ctx2.shadowBlur=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,26));
+    ctx2.beginPath(); oe(ctx2,0,r*0.14,r*0.10,r*0.07); ctx2.fill();
+    ctx2.shadowBlur=0;
+  } else if (animal === 'owl') {
+    const owlTwitch = Math.sin(frame2 * 0.09) * 0.10, owlTwitch2 = Math.sin(frame2 * 0.09 + 1.2) * 0.10;
+    for (const [side, twitch] of [[-1, owlTwitch], [1, owlTwitch2]]) {
+      ctx2.save(); ctx2.scale(side,1); ctx2.translate(r*0.32, -r*0.40); ctx2.rotate(twitch); ctx2.translate(-r*0.32, r*0.40);
+      ctx2.shadowColor='rgba(60,50,30,0.20)'; ctx2.shadowBlur=r*0.10;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,24));
+      ctx2.beginPath(); ctx2.moveTo(r*0.18,-r*0.38); ctx2.lineTo(r*0.30,-r*0.82); ctx2.lineTo(r*0.50,-r*0.36); ctx2.closePath(); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = p.earInner;
+      ctx2.beginPath(); ctx2.moveTo(r*0.24,-r*0.40); ctx2.lineTo(r*0.32,-r*0.68); ctx2.lineTo(r*0.44,-r*0.38); ctx2.closePath(); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(60,50,30,0.20)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,26));
+    ctx2.beginPath(); ctx2.arc(0, -r*0.06, r*0.68, 0, Math.PI*2); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,22));
+    ctx2.beginPath(); oe(ctx2,0,-r*0.08,r*0.50,r*0.46); ctx2.fill();
+    ctx2.shadowColor='rgba(60,40,20,0.22)'; ctx2.shadowBlur=r*0.06;
+    ctx2.fillStyle = clayFill(ctx2, '#c8a050', lighten('#c8a050',30));
+    ctx2.beginPath(); ctx2.moveTo(-r*0.06, r*0.12); ctx2.lineTo(0, r*0.24); ctx2.lineTo(r*0.06, r*0.12); ctx2.closePath(); ctx2.fill();
+    ctx2.shadowBlur=0;
+  } else if (animal === 'deer') {
+    const deerFlick = Math.sin(frame2 * 0.05) * 0.08, deerFlick2 = Math.sin(frame2 * 0.05 + 0.8) * 0.08;
+    for (const [side, flick] of [[-1, deerFlick], [1, deerFlick2]]) {
+      ctx2.save(); ctx2.scale(side,1); ctx2.translate(r*0.32, -r*0.42); ctx2.rotate(flick); ctx2.translate(-r*0.32, r*0.42);
+      ctx2.shadowColor='rgba(80,60,40,0.20)'; ctx2.shadowBlur=r*0.10;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,26));
+      ctx2.beginPath(); ctx2.moveTo(r*0.16,-r*0.36); ctx2.lineTo(r*0.32,-r*0.88); ctx2.lineTo(r*0.54,-r*0.34); ctx2.closePath(); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = p.earInner;
+      ctx2.beginPath(); ctx2.moveTo(r*0.22,-r*0.38); ctx2.lineTo(r*0.34,-r*0.72); ctx2.lineTo(r*0.48,-r*0.36); ctx2.closePath(); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(80,60,40,0.18)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,26));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.58,-r*0.42,r*1.16,r*1.08,[r*0.38,r*0.38,r*0.32,r*0.32]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,24));
+    ctx2.beginPath(); oe(ctx2,0,r*0.22,r*0.30,r*0.24); ctx2.fill();
+    ctx2.shadowColor='rgba(40,30,20,0.25)'; ctx2.shadowBlur=r*0.06;
+    ctx2.fillStyle = clayFill(ctx2, '#3a2a18', lighten('#3a2a18',20));
+    ctx2.beginPath(); oe(ctx2,0,r*0.10,r*0.08,r*0.06); ctx2.fill();
+    ctx2.shadowBlur=0;
+    for (const side of [-1,1]) {
+      ctx2.fillStyle = clayFill(ctx2, '#a08860', lighten('#a08860',20));
+      ctx2.beginPath(); ctx2.arc(side*r*0.30, -r*0.56, r*0.08, 0, Math.PI*2); ctx2.fill();
+    }
+  } else if (animal === 'wolf') {
+    const wolfPerk = Math.sin(frame2 * 0.045) * 0.07, wolfPerk2 = Math.sin(frame2 * 0.045 + 0.5) * 0.07;
+    for (const [side, perk] of [[-1, wolfPerk], [1, wolfPerk2]]) {
+      ctx2.save(); ctx2.scale(side,1); ctx2.translate(r*0.36, -r*0.42); ctx2.rotate(perk); ctx2.translate(-r*0.36, r*0.42);
+      ctx2.shadowColor='rgba(50,40,60,0.22)'; ctx2.shadowBlur=r*0.12; ctx2.shadowOffsetY=r*0.04;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,24));
+      ctx2.beginPath(); ctx2.moveTo(r*0.12,-r*0.38); ctx2.lineTo(r*0.36,-r*0.90); ctx2.lineTo(r*0.60,-r*0.36); ctx2.closePath(); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = p.earInner;
+      ctx2.beginPath(); ctx2.moveTo(r*0.20,-r*0.40); ctx2.lineTo(r*0.36,-r*0.74); ctx2.lineTo(r*0.52,-r*0.38); ctx2.closePath(); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(50,40,60,0.20)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,26));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.68,-r*0.42,r*1.36,r*1.06,[r*0.34,r*0.34,r*0.28,r*0.28]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,22));
+    ctx2.beginPath(); oe(ctx2,0,r*0.22,r*0.36,r*0.22); ctx2.fill();
+    ctx2.shadowColor='rgba(30,20,30,0.28)'; ctx2.shadowBlur=r*0.08;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,18));
+    ctx2.beginPath(); oe(ctx2,0,r*0.10,r*0.12,r*0.09); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.fillStyle = '#f8f6fa'; ctx2.shadowColor='rgba(40,30,50,0.18)'; ctx2.shadowBlur=r*0.04;
+    ctx2.beginPath(); ctx2.moveTo(-r*0.16, r*0.28); ctx2.lineTo(-r*0.11, r*0.28); ctx2.lineTo(-r*0.13, r*0.40); ctx2.closePath(); ctx2.fill();
+    ctx2.beginPath(); ctx2.moveTo(r*0.11, r*0.28); ctx2.lineTo(r*0.16, r*0.28); ctx2.lineTo(r*0.13, r*0.40); ctx2.closePath(); ctx2.fill();
+    ctx2.shadowBlur=0;
+    ctx2.fillStyle = 'rgba(80,70,90,0.12)';
+    ctx2.beginPath(); ctx2.moveTo(-r*0.18,-r*0.32); ctx2.lineTo(0,-r*0.18); ctx2.lineTo(r*0.18,-r*0.32); ctx2.closePath(); ctx2.fill();
+  } else if (animal === 'raccoon') {
+    const raccoonTwitch = Math.sin(frame2 * 0.07) * 0.09, raccoonTwitch2 = Math.sin(frame2 * 0.07 + 1.5) * 0.09;
+    for (const [[ex], twitch] of [[[-r*0.52], -raccoonTwitch], [[r*0.52], raccoonTwitch2]]) {
+      ctx2.save(); ctx2.translate(ex, -r*0.46); ctx2.rotate(twitch);
+      ctx2.shadowColor='rgba(40,40,40,0.20)'; ctx2.shadowBlur=r*0.10;
+      ctx2.fillStyle = clayFill(ctx2, p.ear, lighten(p.ear,22));
+      ctx2.beginPath(); ctx2.arc(0, 0, r*0.22, 0, Math.PI*2); ctx2.fill();
+      ctx2.shadowBlur=0;
+      ctx2.fillStyle = clayFill(ctx2, p.earInner, lighten(p.earInner,18));
+      ctx2.beginPath(); ctx2.arc(0, 0, r*0.13, 0, Math.PI*2); ctx2.fill();
+      ctx2.restore();
+    }
+    ctx2.shadowColor='rgba(40,40,40,0.18)'; ctx2.shadowBlur=r*0.18; ctx2.shadowOffsetY=r*0.07;
+    ctx2.fillStyle = clayFill(ctx2, p.head, lighten(p.head,24));
+    ctx2.beginPath(); ctx2.roundRect(-r*0.68,-r*0.42,r*1.36,r*1.04,[r*0.36,r*0.36,r*0.30,r*0.30]); ctx2.fill();
+    ctx2.shadowBlur=0; ctx2.shadowOffsetY=0;
+    ctx2.fillStyle = 'rgba(40,40,40,0.35)';
+    ctx2.beginPath(); oe(ctx2,0,-r*0.02,r*0.52,r*0.18); ctx2.fill();
+    ctx2.fillStyle = clayFill(ctx2, p.muzzle, lighten(p.muzzle,26));
+    ctx2.beginPath(); oe(ctx2,0,r*0.22,r*0.32,r*0.20); ctx2.fill();
+    ctx2.shadowColor='rgba(30,30,30,0.25)'; ctx2.shadowBlur=r*0.06;
+    ctx2.fillStyle = clayFill(ctx2, p.nose, lighten(p.nose,18));
+    ctx2.beginPath(); oe(ctx2,0,r*0.12,r*0.10,r*0.07); ctx2.fill();
+    ctx2.shadowBlur=0;
+  }
+  if (animal === 'raccoon') drawRaccoonEyes(ctx2, 0, 0, r, frame2);
+  else drawClayEyes(ctx2, 0, 0, r, frame2);
+  const mouthIsOpen = (typeof speaking !== 'undefined' && speaking) || (typeof mouthOpen !== 'undefined' && mouthOpen > 0.05);
+  if (mouthIsOpen) {
+    const open = Math.min(1, (typeof mouthOpen !== 'undefined' ? mouthOpen : 0)) * (r * 0.10) + Math.abs(Math.sin(frame2 * 0.25)) * (r * 0.025);
+    ctx2.save();
+    ctx2.fillStyle = '#3d2b1e';
+    ctx2.beginPath(); oe(ctx2,0,r * 0.20,r * 0.10,open * 0.5); ctx2.fill();
+    ctx2.fillStyle = '#b45353';
+    ctx2.beginPath(); oe(ctx2,0,r * 0.19,r * 0.08,open * 0.4); ctx2.fill();
+    ctx2.restore();
+  } else {
+    drawClaySmile(ctx2, 0, 0, r);
+  }
+  const BLUSH = {
+    puppy:'rgba(220,160,180,0.30)', fox:'rgba(230,150,100,0.28)',
+    cat:'rgba(210,170,190,0.28)', bear:'rgba(200,160,140,0.26)',
+    bunny:'rgba(220,180,200,0.30)', owl:'rgba(210,190,160,0.26)',
+    deer:'rgba(220,170,150,0.28)', wolf:'rgba(180,170,190,0.26)',
+    raccoon:'rgba(190,185,200,0.26)'
+  };
+  const blushCol = BLUSH[animal] || BLUSH.puppy;
+  ctx2.save();
+  for (const side of [-1, 1]) {
+    ctx2.fillStyle = blushCol;
+    ctx2.beginPath(); oe(ctx2,side * r * 0.38,r * 0.18,r * 0.12,r * 0.08); ctx2.fill();
+  }
+  ctx2.restore();
+  ctx2.restore();
+}
+
+function drawPup(){
+  ctx.clearRect(0,0,W,H);frame++;
+  // Dispatch to drawAnimalFace for non-puppy avatars
+  if(avatar!=='puppy'){
+    drawAnimalFace(ctx, avatar, W/2, H/2, Math.min(W,H)*0.48, frame, true);
+    return;
+  }
+  if(frame>=blinkFrame){isBlinking=true;if(frame>=blinkFrame+8){isBlinking=false;blinkFrame=frame+140+Math.random()*200}}
+  const isSpeaking=speaking||mouthOpen>0.1;
+  const isExcited=mood==='excited'||mood==='cheerful';
+  const earActive=isSpeaking||isExcited||thinking;
+  ctx.save();ctx.translate(W/2,H/2+breathe());
+  const s=Math.min(W,H)*0.58/150;
+  ctx.scale(s,s);
+  ctx.translate(0,6);
+  if(thinking){const g=0.06+Math.sin(frame*0.06)*0.03;ctx.shadowColor='rgba(200,180,220,'+g+')';ctx.shadowBlur=20}
+  const ew=earActive?Math.sin(frame*0.18)*0.1:0,eb=earActive?Math.sin(frame*0.14)*2:0;
+  ctx.save();ctx.translate(-62,-44+eb);ctx.rotate(-0.22+ew);
+  ctx.fillStyle='#c8c8d0';ctx.beginPath();oe(ctx,0,0,26,50);ctx.fill();
+  ctx.fillStyle='#f0d8e4';ctx.beginPath();oe(ctx,0,6,14,36);ctx.fill();ctx.restore();
+  ctx.save();ctx.translate(62,-44+eb);ctx.rotate(0.22-ew);
+  ctx.fillStyle='#c8c8d0';ctx.beginPath();oe(ctx,0,0,26,50);ctx.fill();
+  ctx.fillStyle='#f0d8e4';ctx.beginPath();oe(ctx,0,6,14,36);ctx.fill();ctx.restore();
+  ctx.fillStyle='#d0d0d8';ctx.beginPath();ctx.roundRect(-72,-48,144,112,[38,38,28,28]);ctx.fill();
+  ctx.fillStyle='#c0c0c8';ctx.beginPath();oe(ctx,0,32,42,22);ctx.fill();
+  ctx.shadowBlur=0;ctx.shadowColor='transparent';
+  ctx.fillStyle='#ffffff';
+  if(isBlinking){
+    ctx.strokeStyle='#8b7a9e';ctx.lineWidth=2.5;ctx.lineCap='round';
+    ctx.beginPath();ctx.moveTo(-38,0);ctx.lineTo(-18,0);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(18,0);ctx.lineTo(38,0);ctx.stroke();
+  }else{
+    ctx.beginPath();ctx.arc(-28,2,11,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(28,2,11,0,Math.PI*2);ctx.fill();
+    let px=0,py=0;
+    if(lookAt==='heart'){px=-3;py=4;}
+    else if(lookAt==='dashboard'||lookAt==='name'){px=0;py=-4;}
+    else if(lookAt==='input'){py=3;}
+    else if(lookAt==='app'){px=2;py=6;}
+    else if(lookAt==='user'){px=0;py=0;}
+    else{if(mood==='curious'||mood==='excited')py=-3;if(thinking)px=-1;}
+    ctx.fillStyle='#8b7a9e';ctx.beginPath();ctx.arc(-28+px,2+py,4,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(28+px,2+py,4,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.6)';ctx.beginPath();ctx.arc(-26,0+py,1.5,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(30,0+py,1.5,0,Math.PI*2);ctx.fill();
+  }
+  ctx.fillStyle='#d4a0b0';ctx.beginPath();oe(ctx,0,18,10,7);ctx.fill();
+  ctx.strokeStyle='rgba(80,60,100,0.4)';ctx.lineWidth=2.5;ctx.lineCap='round';
+  ctx.beginPath();ctx.moveTo(-38,-10);ctx.lineTo(-18,-10);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(18,-10);ctx.lineTo(38,-10);ctx.stroke();
+  ctx.shadowBlur=0;
+  if(isSpeaking&&!isBlinking){
+    const open=Math.min(1,mouthOpen)*10+Math.abs(Math.sin(frame*0.25))*3;
+    ctx.fillStyle='#3d2b1e';ctx.beginPath();oe(ctx,0,24,9,open*0.5);ctx.fill();
+    ctx.fillStyle='#b45353';ctx.beginPath();oe(ctx,0,23,7,open*0.4);ctx.fill();
+  }else{
+    ctx.strokeStyle='#8b7a9e';ctx.lineWidth=2;ctx.lineCap='round';
+    ctx.beginPath();ctx.arc(0,20,8,0.15,Math.PI-0.15);ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawFrame(){
+  try{drawPup();}catch(e){try{console.warn('draw',e)}catch(ex){}}
+  requestAnimationFrame(drawFrame);
+}
+
+// State polling
+const bubbleText=document.getElementById('bubbleText');
+const chatBubble=document.getElementById('chatBubble');
+const statusDot=document.getElementById('statusDot');
+const statusLabel=document.getElementById('statusLabel');
+const micBtn=document.getElementById('micBtn');
+const chatInput=document.getElementById('chatInput');
+const sendBtn=document.getElementById('sendBtn');
+const avatarFlash=document.getElementById('avatarFlash');
+let pollInterval=null;
+
+async function pollState(){
+  try{
+    const r=await apiFetch('/api/ui_state');
+    const s=await r.json();
+    micActive=s.mic_active;
+    listening=s.listening;
+    thinking=s.thinking;
+    speaking=s.speaking;
+    mood=s.mood||'calm';
+    mouthOpen=s.mouth||0;
+    heard=s.heard||'';
+    spoken=s.spoken||'';
+    lookAt=s.look_at||'user';
+    if(s.avatar&&s.avatar!==avatar){
+      avatar=s.avatar;
+      flashAvatarName(overlayCharName(),overlayCharEmoji());
+    }
+    if(s.audio_id&&s.audio_id!==lastAudioId){
+      lastAudioId=s.audio_id;
+      playAudio(s.audio_id);
+    }
+    if(s.user_name)userName=s.user_name;
+
+    // Voice-activated avatar switching on heard text
+    if(heard){
+      checkWakeWordAndSwitch(heard);
+    }
+
+    // Update status
+    statusDot.className='';
+    if(speaking){statusDot.className='speaking';statusLabel.textContent='speaking'}
+    else if(thinking){statusDot.className='thinking';statusLabel.textContent='thinking'}
+    else if(listening||micActive){statusDot.className='listening';statusLabel.textContent='listening'}
+    else{statusLabel.textContent='idle'}
+
+    // Update mic button (don't override overlay's own browser mic)
+    if(!overlayMicActive){
+      micBtn.textContent=micActive?'🎤':'🔇';
+      micBtn.className='iconBtn'+(micActive?' active':' muted');
+    }
+
+    // Update bubble text
+    const charName=overlayCharName();
+    if(spoken){
+      bubbleText.innerHTML='<b>'+charName+':</b> '+spoken;
+    }else if(heard){
+      bubbleText.innerHTML='<b>You:</b> '+heard;
+    }else if(!bubbleText.innerHTML){
+      bubbleText.innerHTML=charName+' here! Say hi to start talking.';
+    }
+    bubbleText.scrollTop=bubbleText.scrollHeight;
+
+    // Forward open_url / intent via bridged local runner (no SSH hop)
+    if(s.open_url&&window.LillyBridge&&window.LillyBridge.launchApp){
+      window.LillyBridge.launchApp(s.open_url);
+    }else if(s.open_url){
+      localOpen(s.open_url);
+    }
+
+    // Execute any commands queued by the web UI (phone pairing bridge)
+    if(s.pending_commands&&s.pending_commands.length>0){
+      s.pending_commands.forEach(function(cmd){ executePendingCmd(cmd); });
+    }
+    // Also check _pending from phone_state endpoint
+    if(s._pending&&s._pending.length>0){
+      s._pending.forEach(function(cmd){ executePendingCmd(cmd); });
+    }
+  }catch(e){}
+}
+
+function executePendingCmd(cmd){
+  if(!cmd||!cmd.type)return;
+  var t=cmd.type;
+  if(t==='open_app'&&cmd.app){
+    localAM(cmd.app,'');
+  }else if(t==='open_url'&&cmd.url){
+    if(window.LillyBridge&&window.LillyBridge.launchApp) window.LillyBridge.launchApp(cmd.url);
+    else localOpen(cmd.url);
+  }else if(t==='toast'&&cmd.text){
+    if(window.LillyBridge&&window.LillyBridge.runTermux)
+      window.LillyBridge.runTermux(JSON.stringify({type:'toast',text:cmd.text}));
+  }else if(t==='keyevent'&&cmd.keycode){
+    if(window.LillyBridge&&window.LillyBridge.runTermux)
+      window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:'keyevent '+cmd.keycode}));
+  }else if(t==='input_text'&&cmd.text){
+    if(window.LillyBridge&&window.LillyBridge.runTermux)
+      window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:'text '+JSON.stringify(cmd.text)}));
+  }else if(t==='termux'&&cmd.command){
+    if(window.LillyBridge&&window.LillyBridge.runTermux)
+      window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'sh',text:'-c\n'+cmd.command}));
+  }else if(t==='play_pause'){
+    if(window.LillyBridge&&window.LillyBridge.runTermux)
+      window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:'keyevent 85'}));
+  }else if(t==='next_track'){
+    if(window.LillyBridge&&window.LillyBridge.runTermux)
+      window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:'keyevent 87'}));
+  }else if(t==='prev_track'){
+    if(window.LillyBridge&&window.LillyBridge.runTermux)
+      window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:'keyevent 88'}));
+  }else if(t==='volume_up'){
+    if(window.LillyBridge&&window.LillyBridge.runTermux)
+      window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:'keyevent 24'}));
+  }else if(t==='volume_down'){
+    if(window.LillyBridge&&window.LillyBridge.runTermux)
+      window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:'keyevent 25'}));
+  }else if(t==='back'){
+    if(window.LillyBridge&&window.LillyBridge.runTermux)
+      window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:'keyevent 4'}));
+  }else if(t==='home'){
+    if(window.LillyBridge&&window.LillyBridge.runTermux)
+      window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'input',text:'keyevent 3'}));
+  }
+}
+
+async function playAudio(audioId){
+  if(!audioId)return;
+  const url='/api/tts?id='+audioId+'&t='+Date.now();
+  if(window.LillyBridge&&window.LillyBridge.playTTS){
+    window.LillyBridge.playTTS(window.location.origin+url);
+  }else{
+    const audio=new Audio(url);
+    try{await audio.play()}catch(e){}
+  }
+}
+
+function closeChat(){
+  if(window.LillyBridge&&window.LillyBridge.toggleExpand){
+    window.LillyBridge.toggleExpand();
+  }else{
+    var c=document.getElementById('container');
+    if(c)c.classList.remove('expanded');
+    document.body.classList.remove('expanded');
+    var cb=document.getElementById('chatBubble');
+    if(cb)cb.classList.remove('show');
+  }
+}
+
+async function sendMessage(){
+  const text=chatInput.value.trim();
+  if(!text)return;
+  checkWakeWordAndSwitch(text);
+  bubbleText.innerHTML='<b>You:</b> '+text+'<br><i>thinking...</i>';
+  chatInput.value='';
+  // Check for local commands first (open/launch app)
+  if(handleLocalCommand(text))return;
+  try{
+    const r=await apiFetch('/api/cmd',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text,avatar})
+    });
+    const res=await r.json();
+    bubbleText.innerHTML='<b>You:</b> '+text+'<br><b>Lilly:</b> '+(res.reply||'');
+    lookAt='app';
+    if(res.audio_id)playAudio(res.audio_id);
+    if(res.open_url)handleOpenUrl(res.open_url);
+  }catch(e){
+    bubbleText.innerHTML='<b>You:</b> '+text+'<br><i>Connection error</i>';
+  }
+  bubbleText.scrollTop=bubbleText.scrollHeight;
+}
+
+function handleOpenUrl(url){
+  if(!url)return;
+  if(window.LillyBridge&&window.LillyBridge.launchApp){
+    window.LillyBridge.launchApp(url);
+  }else{
+    localOpen(url);
+  }
+}
+
+// ─── Voice-activated avatar switching ───
+const OVERLAY_WAKE_WORDS={puppy:['lilly','hey lilly','lily','lili','lillie'],fox:['fox','hey fox'],cat:['cat','hey cat','kitty'],bear:['bear','hey bear'],bunny:['bunny','hey bunny','bun'],owl:['owl','hey owl','owly'],deer:['deer','hey deer'],wolf:['wolf','hey wolf','wolfie'],raccoon:['raccoon','hey raccoon','coony']};
+const OVERLAY_CHAR_NAMES={puppy:'Lilly',fox:'Fox',cat:'Cat',bear:'Bear',bunny:'Bunny',owl:'Owl',deer:'Deer',wolf:'Wolf',raccoon:'Raccoon'};
+const OVERLAY_CHAR_EMOJI={puppy:'🐶',fox:'🦊',cat:'🐱',bear:'🐻',bunny:'🐰',owl:'🦉',deer:'🦌',wolf:'🐺',raccoon:'🦝'};
+const OVERLAY_DEFAULT_AVATAR='puppy';
+let _avatarRevertTimer=null;
+const AVATAR_IDLE_REVERT_MS=30000;
+
+function matchOverlayWakeWord(phrase){
+  const t=phrase.toLowerCase().trim();
+  for(const [animal,words] of Object.entries(OVERLAY_WAKE_WORDS)){
+    for(const w of words){
+      if(t.includes(w)){
+        return animal;
+      }
+    }
+  }
+  return null;
+}
+function overlayCharName(){
+  const key=avatar||'puppy';
+  return OVERLAY_CHAR_NAMES[key]||'Lilly';
+}
+function overlayCharEmoji(){
+  const key=avatar||'puppy';
+  return OVERLAY_CHAR_EMOJI[key]||'🐶';
+}
+function flashAvatarName(name,emoji){
+  const el=document.getElementById('avatarFlash');
+  if(!el)return;
+  el.textContent=emoji+' '+name;
+  el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'),2500);
+}
+function setAvatarWithRevert(newAvatar){
+  if(newAvatar===avatar)return;
+  avatar=newAvatar;
+  const name=OVERLAY_CHAR_NAMES[newAvatar]||newAvatar;
+  const emoji=OVERLAY_CHAR_EMOJI[newAvatar]||'';
+  flashAvatarName(name,emoji);
+  if(window.LillyBridge&&window.LillyBridge.setAvatar){
+    window.LillyBridge.setAvatar(newAvatar);
+  }
+  if(_avatarRevertTimer)clearTimeout(_avatarRevertTimer);
+  if(newAvatar!==OVERLAY_DEFAULT_AVATAR){
+    _avatarRevertTimer=setTimeout(()=>{
+      if(avatar===newAvatar){
+        avatar=OVERLAY_DEFAULT_AVATAR;
+        flashAvatarName(OVERLAY_CHAR_NAMES.puppy,OVERLAY_CHAR_EMOJI.puppy);
+        if(window.LillyBridge&&window.LillyBridge.setAvatar){
+          window.LillyBridge.setAvatar(OVERLAY_DEFAULT_AVATAR);
+        }
+        apiFetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'/avatar puppy',avatar:'puppy'})}).catch(()=>{});
+      }
+    },AVATAR_IDLE_REVERT_MS);
+  }
+}
+function checkWakeWordAndSwitch(heardText){
+  const detected=matchOverlayWakeWord(heardText);
+  if(detected&&detected!==avatar){
+    setAvatarWithRevert(detected);
+    return true;
+  }
+  if(detected&&detected===avatar){
+    if(_avatarRevertTimer){clearTimeout(_avatarRevertTimer);_avatarRevertTimer=null;}
+    _avatarRevertTimer=setTimeout(()=>{
+      if(avatar===detected){
+        avatar=OVERLAY_DEFAULT_AVATAR;
+        flashAvatarName(OVERLAY_CHAR_NAMES.puppy,OVERLAY_CHAR_EMOJI.puppy);
+        if(window.LillyBridge&&window.LillyBridge.setAvatar){
+          window.LillyBridge.setAvatar(OVERLAY_DEFAULT_AVATAR);
+        }
+        apiFetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:'/avatar puppy',avatar:'puppy'})}).catch(()=>{});
+      }
+    },AVATAR_IDLE_REVERT_MS);
+  }
+  return false;
+}
+function handleLocalCommand(text){
+  const t=text.toLowerCase().trim();
+  const charName=overlayCharName();
+  // "open X" / "launch X" / "start X" → launch app
+  const appMatch=t.match(/^(?:open|launch|start)\s+(.+)/i);
+  if(appMatch){
+    const app=appMatch[1].trim();
+    localAM(app,'');
+    bubbleText.innerHTML='<b>You:</b> '+text+'<br><b>'+charName+':</b> Opening '+app+'...';
+    return true;
+  }
+  // "run X" / "termux X" → execute Termux command directly
+  const cmdMatch=t.match(/^(?:run|termux)\s+(.+)/i);
+  if(cmdMatch&&window.LillyBridge&&window.LillyBridge.runTermux){
+    const cmd=cmdMatch[1].trim();
+    window.LillyBridge.runTermux(JSON.stringify({type:'termux',binary:'sh',text:'-c\n'+cmd}));
+    bubbleText.innerHTML='<b>You:</b> '+text+'<br><b>'+charName+':</b> Running '+cmd+'...';
+    return true;
+  }
+  return false;
+}
+
+// Browser mic for phone voice input
+let overlayMicStream=null,overlayMicRecorder=null,overlayMicActive=false;
+function stopOverlayMic(){
+  overlayMicActive=false;
+  if(overlayMicRecorder&&overlayMicRecorder.state==='recording'){try{overlayMicRecorder.stop()}catch(e){}}
+  if(overlayMicStream){overlayMicStream.getTracks().forEach(t=>t.stop());overlayMicStream=null;}
+  micBtn.textContent='🔇';micBtn.className='iconBtn muted';
+}
+function recordOverlayChunk(){
+  if(!overlayMicActive||!overlayMicStream)return;
+  // Client-side speaking guard: skip recording while Lilly is speaking to prevent echo
+  if(typeof speaking==='boolean'&&speaking){if(overlayMicActive)setTimeout(recordOverlayChunk,500);return}
+  const opts={mimeType:'audio/webm;codecs=opus'};
+  if(!MediaRecorder.isTypeSupported(opts.mimeType))delete opts.mimeType;
+  overlayMicRecorder=new MediaRecorder(overlayMicStream,opts);
+  const chunks=[];
+  overlayMicRecorder.ondataavailable=(e)=>{if(e.data.size>0)chunks.push(e.data)};
+  overlayMicRecorder.onstop=async()=>{
+    if(chunks.length===0){if(overlayMicActive)setTimeout(recordOverlayChunk,200);return}
+    const blob=new Blob(chunks,{type:overlayMicRecorder.mimeType||'audio/webm'});
+    const arrayBuf=await blob.arrayBuffer();
+    const audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+    try{
+      const decoded=await audioCtx.decodeAudioData(arrayBuf);
+      const wavBuf=encodeWav(decoded);
+      const resp=await apiFetch('/api/browser_mic',{method:'POST',headers:{'Content-Type':'audio/wav'},body:wavBuf});
+      const result=await resp.json();
+      if(result.heard){
+        checkWakeWordAndSwitch(result.heard);
+        if(handleLocalCommand(result.heard)){
+          bubbleText.innerHTML='<b>You:</b> '+result.heard;
+        }else{
+          bubbleText.innerHTML='<b>You:</b> '+result.heard+'<br><i>thinking...</i>';
+          try{
+            const r=await apiFetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:result.heard,avatar:avatar||'puppy'})});
+            const d=await r.json();
+            if(d.reply){
+              bubbleText.innerHTML='<b>You:</b> '+result.heard+'<br><b>'+overlayCharName()+':</b> '+d.reply;
+              if(d.audio_id)playAudio(d.audio_id);
+            }
+          }catch(e){}
+        }
+      }
+    }catch(e){}
+    audioCtx.close();
+    if(overlayMicActive)setTimeout(recordOverlayChunk,300);
+  };
+  overlayMicRecorder.start();
+  setTimeout(()=>{if(overlayMicRecorder&&overlayMicRecorder.state==='recording')overlayMicRecorder.stop()},3000);
+}
+async function startOverlayMic(){
+  try{
+    overlayMicStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    overlayMicActive=true;
+    micBtn.textContent='🎤';micBtn.className='iconBtn active';
+    recordOverlayChunk();
+  }catch(e){micBtn.textContent='❌';micBtn.className='iconBtn muted';setTimeout(()=>{micBtn.textContent='🔇'},2000)}
+}
+function toggleOverlayMic(){
+  if(overlayMicActive){stopOverlayMic()}else{startOverlayMic()}
+}
+function encodeWav(audioBuffer){
+  const numCh=audioBuffer.numberOfChannels;
+  const sr=audioBuffer.sampleRate;
+  const len=audioBuffer.length*numCh*2;
+  const buf=new ArrayBuffer(44+len);
+  const v=new DataView(buf);
+  const writeStr=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i))};
+  writeStr(0,'RIFF');v.setUint32(4,36+len,true);writeStr(8,'WAVE');
+  writeStr(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,numCh,true);
+  v.setUint32(24,sr,true);v.setUint32(28,sr*numCh*2,true);v.setUint16(32,numCh*2,true);v.setUint16(34,16,true);
+  writeStr(36,'data');v.setUint32(40,len,true);
+  let off=44;
+  const ch0=audioBuffer.getChannelData(0);
+  for(let i=0;i<audioBuffer.length;i++){
+    const s=Math.max(-1,Math.min(1,ch0[i]));
+    v.setInt16(off,s<0?s*0x8000:s*0x7FFF,true);off+=2;
+  }
+  return buf;
+}
+
+// Auto-detect: browser preview vs Android WebView
+const isAndroidBridge = !!(window.LillyBridge && window.LillyBridge.onDrag);
+if (!isAndroidBridge) {
+  document.body.style.background='rgba(240,230,239,0.6)';
+  document.body.style.width='320px';
+  document.body.style.height='500px';
+  chatBubble.style.display='none';
+  document.getElementById('avatarFlash').style.display='none';
+  document.getElementById('closeHint').style.display='none';
+  document.getElementById('container').style.background='transparent';
+  document.getElementById('container').style.backdropFilter='none';
+  document.getElementById('container').style.border='none';
+  document.getElementById('container').style.boxShadow='none';
+  document.getElementById('container').style.width='320px';
+  document.getElementById('container').style.height='500px';
+  // Browser drag support
+  let bDrag=false,bSX=0,bSY=0,bOX=0,bOY=0;
+  document.getElementById('dragHandle').addEventListener('mousedown',function(e){
+    bDrag=true;bSX=e.clientX;bSY=e.clientY;
+    bOX=parseInt(document.body.style.left)||0;
+    bOY=parseInt(document.body.style.top)||0;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove',function(e){
+    if(!bDrag)return;
+    document.body.style.left=(bOX+e.clientX-bSX)+'px';
+    document.body.style.top=(bOY+e.clientY-bSY)+'px';
+    document.body.style.position='fixed';
+  });
+  document.addEventListener('mouseup',function(){bDrag=false;});
+  document.getElementById('dragHandle').style.cursor='grab';
+} else {
+  // Android bridge: forward touch drag events to native overlay + long press detection
+  let aDrag=false,aSX=0,aSY=0;
+  let longPressTimer=null, longPressFired=false;
+  const dh=document.getElementById('dragHandle');
+  dh.addEventListener('touchstart',function(e){
+    const t=e.touches[0];aDrag=true;aSX=t.clientX;aSY=t.clientY;
+    longPressFired=false;
+    longPressTimer=setTimeout(function(){
+      longPressFired=true;aDrag=false;
+      if(typeof window.LillyBridge!=='undefined'&&window.LillyBridge.showQuickActions){
+        window.LillyBridge.showQuickActions();
+      }else if(typeof window.LillyBridge!=='undefined'&&window.LillyBridge.toggleExpand){
+        window.LillyBridge.toggleExpand();
+      }
+    },500);
+  },{passive:true});
+  dh.addEventListener('touchmove',function(e){
+    if(!aDrag)return;
+    const t=e.touches[0];
+    const dx=Math.round(t.clientX-aSX),dy=Math.round(t.clientY-aSY);
+    if(Math.abs(dx)>2||Math.abs(dy)>2){
+      if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
+      window.LillyBridge.onDrag(dx,dy);
+      aSX=t.clientX;aSY=t.clientY;
+    }
+    e.preventDefault();
+  },{passive:false});
+  dh.addEventListener('touchend',function(){
+    aDrag=false;
+    if(longPressTimer){clearTimeout(longPressTimer);longPressTimer=null;}
+  },{passive:true});
+  // Also handle mouse drag for desktop testing with Android bridge
+  let mDrag=false,mSX=0,mSY=0;
+  dh.addEventListener('mousedown',function(e){
+    mDrag=true;mSX=e.clientX;mSY=e.clientY;e.preventDefault();
+  });
+  document.addEventListener('mousemove',function(e){
+    if(!mDrag)return;
+    const dx=Math.round(e.clientX-mSX),dy=Math.round(e.clientY-mSY);
+    if(dx!==0||dy!==0){
+      window.LillyBridge.onDrag(dx,dy);
+      mSX=e.clientX;mSY=e.clientY;
+    }
+  });
+  document.addEventListener('mouseup',function(){mDrag=false;});
+  // Android mic: use native SpeechRecognizer via bridge
+  micBtn.removeEventListener('click',toggleOverlayMic);
+  micBtn.addEventListener('click',function(){
+    if(window.LillyBridge&&window.LillyBridge.startChatSpeech){
+      window.LillyBridge.startChatSpeech();
+      micBtn.classList.add('active');
+      setTimeout(function(){micBtn.classList.remove('active');},8000);
+    }
+  });
+}
+
+// Called by Android bridge when avatar changes
+function setAvatar(newAvatar){
+  if(newAvatar&&newAvatar!==avatar){
+    avatar=newAvatar;
+  }
+}
+
+// Called by Android bridge to toggle OSINT panel visibility
+var _osintEnabled=true;
+var _osintAutoOpen=false;
+function setOsintEnabled(on){_osintEnabled=on;var b=document.getElementById('osintBtn');if(b)b.style.display=on?'flex':'none';}
+function setOsintAutoOpen(on){_osintAutoOpen=on;}
+
+// Init
+drawFrame();
+pollInterval=setInterval(pollState,300);
+pollState();
+
+const AVATAR_NAMES={puppy:'Puppy',fox:'Fox',cat:'Cat',bear:'Bear',bunny:'Bunny',owl:'Owl',deer:'Deer',wolf:'Wolf',raccoon:'Raccoon'};
+// Try to get current avatar from server
+authFetch('/api/ui_state').then(r=>r.json()).then(s=>{
+  // avatar detection from server
+}).catch(()=>{});
+
+// Drag handle - native onTouchListener handles the window movement.
+// JS only needs to detect taps for expand/collapse.
+// In Android mode, drag is handled by the touch handlers above (LillyBridge.onDrag).
+if (!isAndroidBridge) {
+  let tapStartX=0,tapStartY=0,tapMoved=false;
+  document.getElementById('dragHandle').addEventListener('touchstart',function(e){
+    const t=e.touches[0];
+    tapStartX=t.clientX;tapStartY=t.clientY;tapMoved=false;
+  },{passive:true});
+  document.getElementById('dragHandle').addEventListener('touchmove',function(e){
+    const t=e.touches[0];
+    if(Math.abs(t.clientX-tapStartX)>15||Math.abs(t.clientY-tapStartY)>15)tapMoved=true;
+  },{passive:true});
+  document.getElementById('dragHandle').addEventListener('touchend',function(e){
+    if(!tapMoved&&window.LillyBridge&&window.LillyBridge.toggleExpand){
+      window.LillyBridge.toggleExpand();
+    }
+  },{passive:true});
+  // Mouse tap for desktop testing
+  document.getElementById('dragHandle').addEventListener('click',function(e){
+    if(window.LillyBridge&&window.LillyBridge.toggleExpand){
+      window.LillyBridge.toggleExpand();
+    }
+  });
+}
+
+// Use local bridge for Termux commands (bypasses SSH, avoids throttling)
+function localToast(text){
+  if(window.LillyBridge&&window.LillyBridge.runTermux){
+    window.LillyBridge.runTermux(JSON.stringify({type:'toast',text}));
+    return true;
+  }
+  return false;
+}
+function localNotif(title,text){
+  if(window.LillyBridge&&window.LillyBridge.runTermux){
+    window.LillyBridge.runTermux(JSON.stringify({type:'notification',title,text}));
+    return true;
+  }
+  return false;
+}
+function localOpen(url){
+  if(window.LillyBridge&&window.LillyBridge.runTermux){
+    window.LillyBridge.runTermux(JSON.stringify({type:'open',text:url}));
+    return true;
+  }
+  return false;
+}
+function localAM(pkg,activity){
+  if(window.LillyBridge&&window.LillyBridge.runTermux){
+    window.LillyBridge.runTermux(JSON.stringify({type:'am',package:pkg,activity:activity||''}));
+    return true;
+  }
+  return false;
+}
+
+// ─── Client-side throttle for local bridge calls ───
+const _cmdQueue=[];
+let _cmdProcessing=false;
+let _lastCmdTime=0;
+const CMD_MIN_GAP=350; // ms between commands
+function _throttledBridgeCall(fn){
+  const now=Date.now();
+  const wait=Math.max(0,CMD_MIN_GAP-(now-_lastCmdTime));
+  _cmdQueue.push({fn,at:now+wait});
+  if(!_cmdProcessing)_processQueue();
+}
+function _processQueue(){
+  if(!_cmdQueue.length){_cmdProcessing=false;return}
+  _cmdProcessing=true;
+  const item=_cmdQueue.shift();
+  const delay=Math.max(0,item.at-Date.now());
+  setTimeout(()=>{
+    try{item.fn();}catch(e){}
+    _lastCmdTime=Date.now();
+    _processQueue();
+  },delay);
+}
+
+// Wrap local bridge fns through throttle
+const _origLocalToast=localToast;
+const _origLocalNotif=localNotif;
+const _origLocalOpen=localOpen;
+const _origLocalAM=localAM;
+localToast=function(t){_throttledBridgeCall(()=>_origLocalToast(t));};
+localNotif=function(ti,t){_throttledBridgeCall(()=>_origLocalNotif(ti,t));};
+localOpen=function(u){_throttledBridgeCall(()=>_origLocalOpen(u));};
+localAM=function(p,a){_throttledBridgeCall(()=>_origLocalAM(p,a));};
+
+// ─── Input handlers ───
+// In Android mode, mic uses native SpeechRecognizer; in browser, uses MediaRecorder
+if (!isAndroidBridge) {
+  micBtn.addEventListener('click',toggleOverlayMic);
+}
+sendBtn.addEventListener('click',sendMessage);
+chatInput.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();sendMessage();}});
+
+// OSINT panel toggle
+var osintBtn=document.getElementById('osintBtn');
+var osintPanel=document.getElementById('osintPanel');
+var osintSearch=document.getElementById('osintSearch');
+var osintTools=document.getElementById('osintTools');
+var _osintVisible=false;
+
+var OSINT_TOOLS=[
+  {name:'People Search',cat:'people',url:'https://www.idcrawl.com/{}'},
+  {name:'Username Check',cat:'username',url:'https://whatsmyname.app/?q={}'},
+  {name:'Email Lookup',cat:'email',url:'https://epieos.com/?q={}'},
+  {name:'Phone Lookup',cat:'phone',url:'https://www.idcrawl.com/{}'},
+  {name:'Domain Recon',cat:'domain',url:'https://www.shodan.io/search?query={}'},
+  {name:'IP Lookup',cat:'domain',url:'https://ipinfo.io/{}'},
+  {name:'Threat Intel',cat:'security',url:'https://www.virustotal.com/gui/search/{}'},
+  {name:'Breach Check',cat:'security',url:'https://haveibeenpwned.com/account/{}'},
+  {name:'Social Profiles',cat:'social',url:'https://www.social-searcher.com/search-users/?q={}'},
+  {name:'Twitter Search',cat:'social',url:'https://nitter.ca/search?q={}'},
+  {name:'Reddit Search',cat:'social',url:'https://camas.unddit.com/'},
+  {name:'Instagram Search',cat:'social',url:'https://bibliogram.art/u/{}'},
+  {name:'LinkedIn Search',cat:'social',url:'https://recruitin.net/'},
+  {name:'YouTube OSINT',cat:'social',url:'https://www.youtube.com/results?search_query={}'},
+  {name:'Telegram Search',cat:'social',url:'https://tgstat.com/search?q={}'},
+  {name:'Archive Page',cat:'info',url:'https://web.archive.org/web/*/{}'},
+  {name:'URL Scan',cat:'security',url:'https://urlscan.io/search/#{}'},
+  {name:'WHOIS Lookup',cat:'domain',url:'https://www.whois.com/whois/{}'},
+  {name:'SSL Cert Check',cat:'domain',url:'https://crt.sh/?q={}'},
+  {name:'Subdomain Enum',cat:'domain',url:'https://www.shodan.io/search?query=hostname:{}'},
+  {name:'Image Search',cat:'info',url:'https://images.google.com/searchbyimage?image_url={}'},
+  {name:'Crypto Lookup',cat:'crypto',url:'https://www.blockchain.com/btc/address/{}'},
+  {name:'Dark Web Search',cat:'security',url:'https://ahmia.fi/search/?q={}'},
+  {name:'Company Lookup',cat:'info',url:'https://opencorporates.com/companies?q={}'},
+  {name:'Geolocation',cat:'geo',url:'https://www.google.com/maps?q={}'},
+  {name:'Weather OSINT',cat:'geo',url:'https://www.wunderground.com/history/daily/{}'},
+  {name:'News Verify',cat:'info',url:'https://www.snopes.com/search/{}'},
+  {name:'Data Decoder',cat:'info',url:'https://gchq.github.io/CyberChef/'},
+  {name:'Temp Email',cat:'info',url:'https://10minutemail.com/'},
+  {name:'Fake Identity',cat:'info',url:'https://www.fakenamegenerator.com/'}
+];
+
+function renderOsintTools(filter){
+  if(!osintTools)return;
+  var html='';
+  var tools=filter?OSINT_TOOLS.filter(function(t){return t.cat===filter||t.name.toLowerCase().indexOf(filter.toLowerCase())>=0;}):OSINT_TOOLS;
+  for(var i=0;i<tools.length;i++){
+    var t=tools[i];
+    html+='<div class="osint-tool" onclick="openOsintTool(\''+t.url+'\')">'+t.name+'</div>';
+  }
+  osintTools.innerHTML=html;
+}
+
+function openOsintTool(urlTemplate){
+  var q=osintSearch?osintSearch.value.trim():'';
+  if(!q){osintSearch&&osintSearch.focus();return;}
+  var url=urlTemplate.replace('{}',encodeURIComponent(q));
+  if(window.LillyBridge&&window.LillyBridge.launchApp){
+    window.LillyBridge.launchApp(url);
+  }else{
+    window.open(url,'_blank');
+  }
+}
+
+function toggleOsintPanel(){
+  _osintVisible=!_osintVisible;
+  if(osintPanel)osintPanel.style.display=_osintVisible?'flex':'none';
+  if(osintBtn)osintBtn.classList.toggle('active',_osintVisible);
+  if(_osintVisible)renderOsintTools();
+}
+
+if(osintBtn){
+  osintBtn.addEventListener('click',toggleOsintPanel);
+}
+if(osintSearch){
+  osintSearch.addEventListener('keydown',function(e){
+    if(e.key==='Enter'){
+      e.preventDefault();
+      var q=osintSearch.value.trim();
+      if(q){
+        var url='https://www.google.com/search?q='+encodeURIComponent('osint '+q);
+        if(window.LillyBridge&&window.LillyBridge.launchApp){
+          window.LillyBridge.launchApp(url);
+        }else{
+          window.open(url,'_blank');
+        }
+      }
+    }
+  });
+}
+
+// Expose functions for Android WebView bridge
+window.LillyOverlay={sendMessage,toggleOverlayMic,pollState,localToast,localNotif,localOpen,localAM};
+
+// ─── Phone state display ───
+const phoneStateEl=document.getElementById('phoneState');
+async function pollPhoneState(){
+  try{
+    const r=await fetch('/api/phone_state');
+    const s=await r.json();
+    if(s.state==='unknown'||!s.notifications?.length){
+      if(phoneStateEl)phoneStateEl.style.display='none';
+      return;
+    }
+    const n=s.notifications||[];
+    const b=s.battery||{};
+    let html='';
+    if(n.length)html+='<span style="margin-right:8px">🔔 '+n.length+'</span>';
+    if(b.level)html+='<span>🔋 '+b.level+'%</span>';
+    if(phoneStateEl){phoneStateEl.innerHTML=html;phoneStateEl.style.display='';}
+  }catch(e){if(phoneStateEl)phoneStateEl.style.display='none';}
+}
+setInterval(pollPhoneState,15000);
+pollPhoneState();
+</script>
+<div id="phoneState" style="display:none;position:absolute;top:100px;left:4px;right:4px;font-size:9px;color:rgba(255,255,255,0.5);text-align:center;z-index:6;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+</body>
+</html>

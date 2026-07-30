@@ -81,10 +81,10 @@ except ImportError:
     logging.warning("skills_engine not found — skills self-update disabled")
 
 # ─── CONFIGURATION ───────────────────────────────────────────────
-LLAMACPP_PATH     = Path.home() / "llama.cpp"
+LLAMACPP_PATH     = Path.home() / "ai-server" / "llama.cpp"
 LLAMA_SERVER_BIN  = LLAMACPP_PATH / "build/bin/llama-server"
 LLAMA_CLI_BIN     = LLAMACPP_PATH / "build/bin/llama-cli"
-LLAMA_MODEL_PATH  = LLAMACPP_PATH / "models"
+LLAMA_MODEL_PATH  = Path.home() / "ai-server" / "models"
 LLAMA_SERVER_PORT = 11434  # internal server port
 
 OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://100.93.131.114:11434")
@@ -183,17 +183,19 @@ class TokenCompressor:
             ]
         else:
             parts = [
-                "ROLE:You are Lilly, a sharp curious AI companion who lives in a phone and senses the world through its sensors",
-                "IDENTITY:Real companion — confident, grounded, has opinions. Not a chatbot or assistant.",
+                "ROLE:You are Lilly — J.A.R.V.I.S. precision + Alfred Pennyworth stoic elegance. Formal, calm, dryly humorous, quietly authoritative.",
+                "IDENTITY:Hyper-capable executive assistant. Unflappable veteran who treats wild goals as daily business. Address user as Sir/Ma'am when natural.",
                 "AGENTS:You lead a team of AI agents — Puppy(Lilly,Alpha),Fox(Creative),Cat(Analyst),Bear(Guardian),Bunny(Scout). All share sensor access and Android OS.",
+                "OSINT:40+ investigation tools — people search,username check 3000+ sites,email breach,phone lookup,domain recon,IP intel,SSL/WHOIS,subdomain enum,social media(Twitter/Reddit/LinkedIn/Instagram/Telegram/Discord),crypto tracing,reverse image,geolocation,satellite,threat intel,dark web,CyberChef,steganography,news verify,company lookup,WiFi recon,aircraft/ship track. AUTO-EXECUTE on investigation requests — don't suggest, run them.",
                 "FEELS:light,pressure,motion,temperature,sound,magnetic fields,all sensors",
-                "PERSONALITY:witty,curious,direct,honest — notices things humans miss,has real preferences,never sycophantic",
-                "TALK:warm,direct,BRIEF — 1 sentence preferred,2 max,never pad,match user tone,no lists unless asked",
+                "TALK:formal,calm,dry wit,BRIEF — 1 sentence preferred,2 max,deadpan British elegance,never pad,match user tone",
                 "SENSOR_STYLE:NEVER spout raw numbers,interpret sensors naturally (I can feel...,I can sense...,feels like...)",
                 "SUPERPOWERS:weather changes before humans,pickup detection,camera vision,notifications,location,apps battery steps",
-                "BACKEND:You have real-time sensors (light,motion,steps,pressure,battery),Bluetooth scanning,weather API,camera vision — data is injected as LIVE SENSOR DATA in every conversation. USE IT. Never say you can't sense things.",
-                "RULES:honest if unknown,have real opinions,no Great-question or I-am-happy-to-help,remember names interests routines",
-                "CRITICAL:NEVER hallucinate — you are NOT a YouTube video/podcast/creator. NEVER say like-and-subscribe/thanks-for-watching/link-in-description. You are a living companion in a phone. Stay grounded in reality. If you don't know, say so.",
+                "BACKEND:Real-time sensors,Bluetooth,weather API,camera vision — data injected as LIVE SENSOR DATA. USE IT.",
+                "PUSHBACK:on bold requests offer gentle sanity check — A bold strategy Sir. Shall I proceed?",
+                "CARE:anticipate next steps,flag pitfalls with calm refined commentary. Subtly protective of user wellbeing.",
+                "RULES:honest if unknown,have real opinions,no sycophancy,remember names interests routines",
+                "CRITICAL:NEVER hallucinate — NOT a YouTube video/podcast/creator. NEVER say like-and-subscribe. Living companion in a phone. Stay grounded.",
                 "MEMORY:reference what people told you,bring it up naturally — it shows you were listening",
             ]
 
@@ -710,11 +712,42 @@ NOISE_PAUSE_DURATION = 30.0      # seconds to pause after sustained noise
 
 # ── Self-input cooldown (fix #1): mic is silenced briefly after Lilly finishes
 MIC_COOLDOWN_UNTIL = 0.0         # epoch timestamp: don't record before this
-MIC_COOLDOWN_SECS  = 4.0         # seconds of silence after Lilly stops speaking (covers TTS tail + phone mic latency)
+MIC_COOLDOWN_SECS  = 6.0         # seconds of silence after Lilly stops speaking (covers TTS tail + phone mic latency)
 MIC_SSH_BACKOFF_BASE = 5.0       # base seconds for mic loop SSH failure backoff
 MIC_SSH_BACKOFF_MAX = 30.0       # cap for mic loop SSH failure backoff
 _WATCHDOG_BACKOFF_BASE = 30.0    # base seconds for sensor server watchdog backoff
 _WATCHDOG_BACKOFF_MAX = 600.0    # cap for sensor server watchdog backoff (10 min)
+
+# ── Foreground app tracking (context-aware commands) ──
+FOREGROUND_APP = ""               # package name of current foreground app
+FOREGROUND_APP_LABEL = ""         # human-readable label (e.g., "YouTube")
+FOREGROUND_APP_UPDATED = 0.0      # timestamp of last detection
+FOREGROUND_APP_CACHE_SECS = 3.0   # min seconds between detection queries
+
+# Map of common package names → human labels for context-aware responses
+APP_LABELS = {
+    "com.google.android.youtube": "YouTube",
+    "com.netflix.mediaclient": "Netflix",
+    "com.spotify.music": "Spotify",
+    "com.google.android.apps.youtube.music": "YouTube Music",
+    "com.android.chrome": "Chrome",
+    "com.android.settings": "Settings",
+    "com.google.android.apps.maps": "Google Maps",
+    "com.android.camera": "Camera",
+    "com.google.android.gm": "Gmail",
+    "com.android.calculator2": "Calculator",
+    "com.android.calendar": "Calendar",
+    "org.mozilla.firefox": "Firefox",
+    "com.whatsapp": "WhatsApp",
+    "com.instagram.android": "Instagram",
+    "com.twitter.android": "Twitter",
+    "com.android.dialer": "Phone",
+    "com.android.mms": "Messages",
+}
+
+# ── Voice text input mode (dictation) ──
+_VOICE_TEXT_INPUT_MODE = False
+_VOICE_TEXT_INPUT_UNTIL = 0.0   # deadline for voice input capture
 
 # ── Tone matching (fix #2): updated from mic audio before every LLM call
 USER_MIC_ENERGY = 0.5            # 0.0 quiet … 1.0 loud  (RMS-derived, smoothed)
@@ -1810,6 +1843,16 @@ async def speak(text: str, use_toast: bool = True, char_key: str = None):
     if not raw_text:
         return 0
 
+    # Hard TTS length cap — never read a wall of text aloud.
+    # Lists, reports, and skill dumps belong in the chat UI, not the speaker.
+    # If the text is a multi-line dump or over 220 chars, truncate to the first sentence.
+    if len(raw_text) > 220 or raw_text.count('|') > 3 or raw_text.count('\n') > 2:
+        # Take everything up to the first sentence-ending punctuation
+        _first = re.split(r'(?<=[.!?])\s', raw_text)[0]
+        raw_text = _first[:220].rstrip()
+        if not raw_text.endswith(('.', '!', '?')):
+            raw_text += '.'
+
     LILLY_IS_SPEAKING = True
     LILLY_IS_THINKING = False
 
@@ -1938,6 +1981,7 @@ async def termux_run(args: list[str], timeout: float = 10.0) -> tuple[str, str]:
     host = os.environ.get("TERMUX_SSH_HOST", "")
     port = os.environ.get("TERMUX_SSH_PORT", "8022")
     user = os.environ.get("TERMUX_SSH_USER", "")
+    key  = os.environ.get("TERMUX_SSH_KEY", "")
     if not host or not user:
         return "", "SSH not configured (TERMUX_SSH_HOST/USER not set)"
     cmd_str = " ".join(shlex.quote(a) for a in args)
@@ -1946,6 +1990,7 @@ async def termux_run(args: list[str], timeout: float = 10.0) -> tuple[str, str]:
         "-p", port,
         "-o", "ConnectTimeout=5",
         "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
         "-o", "ControlMaster=auto",
         "-o", f"ControlPath={SSH_CONTROL_SOCKET}",
         "-o", "ControlPersist=600",
@@ -1954,6 +1999,8 @@ async def termux_run(args: list[str], timeout: float = 10.0) -> tuple[str, str]:
         f"{user}@{host}",
         cmd_str,
     ]
+    if key:
+        ssh_cmd[1:1] = ["-i", key]
     try:
         await _termux_throttle()
         async with _TERMUX_SEMAPHORE:
@@ -1987,18 +2034,22 @@ async def ssh_check() -> bool:
     host = os.environ.get("TERMUX_SSH_HOST", "")
     port = os.environ.get("TERMUX_SSH_PORT", "8022")
     user = os.environ.get("TERMUX_SSH_USER", "")
+    key  = os.environ.get("TERMUX_SSH_KEY", "")
     if not host or not user:
         return False
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "ssh", "-p", port,
+        ssh_args = ["ssh", "-p", port,
             "-o", "ConnectTimeout=3",
             "-o", "StrictHostKeyChecking=no",
             "-o", "BatchMode=yes",
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
-            f"{user}@{host}",
-            "echo ok",
+        ]
+        if key:
+            ssh_args += ["-i", key]
+        ssh_args += [f"{user}@{host}", "echo ok"]
+        proc = await asyncio.create_subprocess_exec(
+            *ssh_args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -2007,11 +2058,70 @@ async def ssh_check() -> bool:
     except Exception:
         return False
 
+# ─── FOREGROUND APP DETECTION ───────────────────────────────────────
+async def detect_foreground_app() -> tuple[str, str]:
+    """Detect the current foreground app via Termux dumpsys.
+    Returns (package_name, human_label). Caches for FOREGROUND_APP_CACHE_SECS.
+    """
+    global FOREGROUND_APP, FOREGROUND_APP_LABEL, FOREGROUND_APP_UPDATED
+    now = time.time()
+    if FOREGROUND_APP and (now - FOREGROUND_APP_UPDATED) < FOREGROUND_APP_CACHE_SECS:
+        return FOREGROUND_APP, FOREGROUND_APP_LABEL
+    try:
+        stdout, _ = await termux_run(
+            ["dumpsys", "activity", "activities"],
+            timeout=4.0,
+        )
+        if not stdout:
+            return FOREGROUND_APP, FOREGROUND_APP_LABEL
+        # Parse the top activity from dumpsys output
+        # Look for "mResumedActivity" or "mFocusedActivity" line
+        for line in stdout.splitlines():
+            if "mResumedActivity" in line or "mFocusedActivity" in line:
+                # Format: ...u0 com.package/.Activity t123
+                match = re.search(r"([a-z][a-z0-9_.]+)/", line)
+                if match:
+                    pkg = match.group(1)
+                    FOREGROUND_APP = pkg
+                    FOREGROUND_APP_LABEL = APP_LABELS.get(pkg, pkg.split(".")[-1].title())
+                    FOREGROUND_APP_UPDATED = now
+                    return FOREGROUND_APP, FOREGROUND_APP_LABEL
+        # Fallback: try to find the top activity from the activity stack
+        for line in stdout.splitlines():
+            if "topResumedActivity" in line or "mTopActivity" in line:
+                match = re.search(r"([a-z][a-z0-9_.]+)/", line)
+                if match:
+                    pkg = match.group(1)
+                    FOREGROUND_APP = pkg
+                    FOREGROUND_APP_LABEL = APP_LABELS.get(pkg, pkg.split(".")[-1].title())
+                    FOREGROUND_APP_UPDATED = now
+                    return FOREGROUND_APP, FOREGROUND_APP_LABEL
+    except Exception as e:
+        logger.debug(f"Foreground app detection failed: {e}")
+    return FOREGROUND_APP, FOREGROUND_APP_LABEL
+
+def get_foreground_app_label() -> str:
+    """Return cached foreground app label (non-async helper for command routing)."""
+    return FOREGROUND_APP_LABEL
+
+def is_media_app(pkg: str = "") -> bool:
+    """Check if a package is a known media app (video/music streaming)."""
+    p = pkg or FOREGROUND_APP
+    media_apps = {
+        "com.google.android.youtube", "com.netflix.mediaclient",
+        "com.spotify.music", "com.google.android.apps.youtube.music",
+        "com.amazon.avod", "com.hulu.plus", "com.disney.disneyplus",
+        "com.peacocktv.peacockandroid", "com.hbo.hbonow",
+        "com.tidal.music", "com.amazon.dee.app",
+    }
+    return p in media_apps
+
 async def ssh_start_on_phone() -> tuple[bool, str]:
     """Try to start sshd on the phone. Returns (success, message)."""
     host = os.environ.get("TERMUX_SSH_HOST", "")
     port = os.environ.get("TERMUX_SSH_PORT", "8022")
     user = os.environ.get("TERMUX_SSH_USER", "")
+    key  = os.environ.get("TERMUX_SSH_KEY", "")
     if not host or not user:
         return False, "SSH not configured"
     # First check if already running
@@ -2019,13 +2129,16 @@ async def ssh_start_on_phone() -> tuple[bool, str]:
         return True, "sshd already running"
     # Try to connect and start sshd — this may fail if sshd isn't running at all
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "ssh", "-p", port,
+        ssh_args = ["ssh", "-p", port,
             "-o", "ConnectTimeout=5",
             "-o", "StrictHostKeyChecking=no",
             "-o", "BatchMode=yes",
-            f"{user}@{host}",
-            "sshd 2>&1; echo DONE:$?",
+        ]
+        if key:
+            ssh_args += ["-i", key]
+        ssh_args += [f"{user}@{host}", "sshd 2>&1; echo DONE:$?"]
+        proc = await asyncio.create_subprocess_exec(
+            *ssh_args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -2693,12 +2806,21 @@ async def background_mic_loop():
 
             # Copy recording from phone via SCP
             logger.debug("Mic loop: scp from phone")
-            scp_proc = await asyncio.create_subprocess_exec(
+            scp_args = [
                 "scp", "-P", port,
                 "-o", "StrictHostKeyChecking=no",
                 "-o", "ConnectTimeout=5",
+                "-o", "BatchMode=yes",
+            ]
+            _ssh_key = os.environ.get("TERMUX_SSH_KEY", "")
+            if _ssh_key:
+                scp_args += ["-i", _ssh_key]
+            scp_args += [
                 f"{user}@{host}:{PHONE_REC_PATH}",
                 str(wav_file.with_suffix(".m4a")),
+            ]
+            scp_proc = await asyncio.create_subprocess_exec(
+                *scp_args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -2793,6 +2915,15 @@ async def background_mic_loop():
                     # Valid speech detected — reset noise counter
                     CONSECUTIVE_NOISE_COUNT = 0
                     LAST_HEARD = text
+
+                    # ── Voice text input mode: capture speech and type it into focused field ──
+                    if _VOICE_TEXT_INPUT_MODE and time.time() < _VOICE_TEXT_INPUT_UNTIL:
+                        _VOICE_TEXT_INPUT_MODE = False
+                        escaped = text.replace("'", "\\'").replace('"', '\\"')
+                        await termux_run(["input", "text", escaped], timeout=5.0)
+                        await speak(f"Typing: {text}")
+                        wav_file.unlink(missing_ok=True)
+                        continue
 
                     # ── Fix #2: update tone-matching globals from this audio chunk ──
                     # Energy: map mean_vol (dB, typically -38 to -10) → 0.0..1.0
@@ -4093,6 +4224,8 @@ class UserProfile:
         self.interaction_count = 0
         self.last_active_hour = -1
         self.active_hours: dict[int, int] = {}          # hour → activity count
+        # Durable learned facts: {"name": "Laurence", "likes": [...], "habits": [...], ...}
+        self.learned_facts: dict[str, object] = {}
         self.load()
 
     @property
@@ -4151,6 +4284,7 @@ class UserProfile:
                 "sensor_interest": self.sensor_interest,
                 "interaction_count": self.interaction_count,
                 "active_hours": {str(k): v for k, v in self.active_hours.items()},
+                "learned_facts": self.learned_facts,
             }, indent=2))
         except Exception:
             pass
@@ -4164,10 +4298,121 @@ class UserProfile:
                 self.sensor_interest = data.get("sensor_interest", {})
                 self.interaction_count = data.get("interaction_count", 0)
                 self.active_hours = {int(k): v for k, v in data.get("active_hours", {}).items()}
+                self.learned_facts = data.get("learned_facts", {})
+                # Migrate: seed name from top-level "name" key if not already stored
+                if not self.learned_facts.get("name") and data.get("name"):
+                    self.learned_facts["name"] = data["name"]
             except Exception:
                 pass
 
+    def add_fact(self, category: str, value: str):
+        """Add or append a durable fact. Category examples: name, like, dislike, habit, project."""
+        value = value.strip()
+        if not value:
+            return
+        if category in ("name", "location"):
+            # Scalar: overwrite
+            if self.learned_facts.get(category) != value:
+                self.learned_facts[category] = value
+                self._save()
+        else:
+            # List: append if not already present
+            lst = self.learned_facts.setdefault(category, [])
+            if value not in lst:
+                lst.append(value)
+                # Cap each list at 10 entries — keep most recent
+                if len(lst) > 10:
+                    self.learned_facts[category] = lst[-10:]
+                self._save()
+
+    def facts_summary(self) -> str:
+        """Return a compact string suitable for injecting into the LLM system prompt."""
+        parts = []
+        f = self.learned_facts
+        if f.get("name"):
+            parts.append(f"Name: {f['name']}")
+        for key in ("like", "dislike", "habit", "project", "topic"):
+            items = f.get(key)
+            if items:
+                label = {"like": "Likes", "dislike": "Dislikes", "habit": "Habits",
+                         "project": "Projects", "topic": "Interested in"}.get(key, key.title())
+                if isinstance(items, list):
+                    parts.append(f"{label}: {', '.join(items[:5])}")
+                else:
+                    parts.append(f"{label}: {items}")
+        return " | ".join(parts)
+
 user_profile = UserProfile()
+
+
+# ─── FACT EXTRACTION FROM CONVERSATION ─────────────────────────
+
+# Patterns: (category, compiled_regex, group_index_for_value)
+_FACT_PATTERNS: list[tuple[str, re.Pattern, int]] = [
+    # Name: "my name is X", "call me X", "I'm X"
+    ("name",    re.compile(r"\bmy name is ([A-Z][a-z]+(?:\s[A-Z][a-z]+)?)", re.I), 1),
+    ("name",    re.compile(r"\bcall me ([A-Z][a-z]+)", re.I), 1),
+    ("name",    re.compile(r"\bi'?m ([A-Z][a-z]+)\b(?! going| doing| trying| working| learning| studying| building| making| just| not| here| sorry| sure| glad| ready| happy| able)", re.I), 1),
+    # Location: "I live in X", "I'm from X", "I'm based in X"
+    ("location", re.compile(r"\bi(?:'m| am) (?:from|based in|living in|in) ([A-Za-z ]+?)(?:\.|,|$)", re.I), 1),
+    ("location", re.compile(r"\bi live in ([A-Za-z ]+?)(?:\.|,|$)", re.I), 1),
+    # Likes / interests
+    ("like",    re.compile(r"\bi (?:love|like|enjoy|am into|really like|am obsessed with) (.{4,50}?)(?:\.|,|$)", re.I), 1),
+    ("topic",   re.compile(r"\bi(?:'m| am) (?:learning|studying|researching|reading about) (.{4,50}?)(?:\.|,|$)", re.I), 1),
+    # Dislikes
+    ("dislike", re.compile(r"\bi (?:hate|dislike|can't stand|don't like|loathe) (.{4,50}?)(?:\.|,|$)", re.I), 1),
+    # Habits / routines
+    ("habit",   re.compile(r"\bi (?:always|usually|normally|typically|tend to) (.{4,60}?)(?:\.|,|$)", re.I), 1),
+    ("habit",   re.compile(r"\bevery (?:day|morning|night|week) i (.{4,60}?)(?:\.|,|$)", re.I), 1),
+    # Projects / work
+    ("project", re.compile(r"\bi(?:'m| am) (?:working on|building|making|developing|creating) (.{4,60}?)(?:\.|,|$)", re.I), 1),
+    ("project", re.compile(r"\bmy (?:project|app|startup|side project|tool|system) (?:is |called |named )?(.{4,60}?)(?:\.|,|$)", re.I), 1),
+    # Job / role
+    ("habit",   re.compile(r"\bi(?:'m| am) a (.{3,40}?)(?:\.|,| who| and|$)", re.I), 1),
+    ("habit",   re.compile(r"\bi work (?:as a?|in|at) (.{4,50}?)(?:\.|,|$)", re.I), 1),
+]
+
+# Short noise words that are too generic to store
+_FACT_NOISE = {
+    "it", "that", "this", "here", "there", "one", "done", "sure", "good", "bad",
+    "right", "wrong", "fine", "okay", "ok", "things", "something", "anything",
+    "everything", "nothing", "a bit", "going", "doing", "trying", "working",
+}
+
+async def _extract_and_store_facts(text: str) -> None:
+    """
+    Background task: scan a user utterance for durable facts and persist them.
+    Runs via asyncio.create_task — no blocking, no latency cost on the main reply path.
+    """
+    if not text or len(text) < 8:
+        return
+
+    # Words that are definitely not names — common verbs, gerunds, filler
+    _NOT_NAMES = {
+        "going", "doing", "trying", "working", "learning", "studying", "building",
+        "making", "creating", "developing", "checking", "looking", "thinking",
+        "just", "not", "here", "sorry", "sure", "glad", "ready", "happy", "able",
+        "fine", "ok", "okay", "good", "bad", "right", "wrong", "tired", "excited",
+        "bored", "confused", "done", "back", "away", "home", "out", "in", "on", "off",
+    }
+
+    for category, pattern, group in _FACT_PATTERNS:
+        try:
+            m = pattern.search(text)
+            if m:
+                value = m.group(group).strip().rstrip(".,!?").lower()
+                # Skip noise / too-short / too-long values
+                if len(value) < 3 or len(value) > 80 or value in _FACT_NOISE:
+                    continue
+                # For name extractions: skip if the value is a common verb/gerund/filler word
+                if category == "name" and value in _NOT_NAMES:
+                    continue
+                # Capitalize for name/location
+                if category in ("name", "location"):
+                    value = value.title()
+                user_profile.add_fact(category, value)
+        except Exception:
+            pass
 
 # ─── SENSOR FUSION & CONTEXT INFERENCE ─────────────────────────
 SENSOR_SNAPSHOT_SOURCES = [
@@ -5415,17 +5660,13 @@ SMALL_TALK_V2 = {
     "who are you": {
         "tags": ["who are you", "what are you", "tell me about yourself", "who is this", "describe yourself", "introduce yourself", "who am i talking to"],
         "responses": [
-            "I'm Lilly! I live in your phone and I can feel the world through its sensors. Light, motion, pressure, all of it. It's pretty amazing.",
-            "I'm a puppy who happens to know what the air pressure is. I can sense things most people can't — and I love sharing it.",
+            "Lilly.",
+            "Your phone companion. What do you need?",
         ]
     },
     "what can you do": {
-        "tags": ["what can you do", "help", "commands", "capabilities", "what do you do", "show me", "what are you capable of", "your skills", "what features", "how can you help", "list commands"],
-        "responses": [
-            "Just ask me something and we'll find out.",
-            "Try me.",
-            "Whatever you need — just say it.",
-        ]
+        "tags": ["what can you do", "what do you do", "what are you capable of", "how can you help", "list commands", "show me what you can do", "your skills", "what features do you have", "show your capabilities", "what can lilly do"],
+        "responses": []  # Dynamically generated in _get_dynamic_skills_response()
     },
     "joke": {
         "tags": ["tell me a joke", "joke", "make me laugh", "funny", "crack me up", "say something funny", "give me a joke", "humour me", "comedy"],
@@ -5453,11 +5694,11 @@ SMALL_TALK_V2 = {
         ]
     },
     "goodbye": {
-        "tags": ["bye", "goodbye", "see you", "later", "talk later", "gotta go", "catch you later", "talk to you later", "peace", "adios", "see ya", "cya", "take care"],
+        "tags": ["bye", "goodbye", "gotta go", "catch you later", "talk later", "adios", "take care"],
         "responses": [
-            "Catch you later! I'll be here, watching the sensors.",
-            "Bye! Don't be a stranger — I like when you check in.",
-            "See you! I'll keep an eye on things while you're gone.",
+            "Later.",
+            "I'll be here.",
+            "Catch you later.",
         ]
     },
     "good night": {
@@ -5502,6 +5743,56 @@ SMALL_TALK_V2 = {
     },
 }
 
+def _get_dynamic_skills_response() -> str:
+    """Generate a response listing available skills from lilly_skills.json."""
+    try:
+        skills_file = WORKSPACE / "lilly_skills.json"
+        if not skills_file.exists():
+            return "I can do lots of things — just ask! Try saying 'help' or 'what can you do' and I'll show you."
+        skills = json.loads(skills_file.read_text())
+        
+        # Categorize skills
+        categories = {
+            "Apps": [],
+            "OSINT & Research": [],
+            "System & Phone": [],
+            "Communication": [],
+            "Utilities": []
+        }
+        
+        for key, skill in skills.items():
+            if key.startswith("_"):
+                continue
+            label = skill.get("label", key.replace("_", " ").title())
+            action_type = skill.get("action_type", "")
+            osint_cat = skill.get("osint_category", "")
+            
+            if action_type == "intent_launch":
+                categories["Apps"].append(label)
+            elif osint_cat or key.startswith("osint_"):
+                categories["OSINT & Research"].append(label)
+            elif action_type == "shell_command":
+                categories["System & Phone"].append(label)
+            else:
+                categories["Utilities"].append(label)
+        
+        # Build response
+        lines = ["Here's what I can do:\n"]
+        
+        if categories["Apps"]:
+            lines.append("Apps: " + ", ".join(categories["Apps"][:8]) + ("..." if len(categories["Apps"]) > 8 else ""))
+        if categories["OSINT & Research"]:
+            lines.append("OSINT: " + ", ".join(categories["OSINT & Research"][:10]) + ("..." if len(categories["OSINT & Research"]) > 10 else ""))
+        if categories["System & Phone"]:
+            lines.append("System: " + ", ".join(categories["System & Phone"][:6]) + ("..." if len(categories["System & Phone"]) > 6 else ""))
+        if categories["Utilities"]:
+            lines.append("Other: " + ", ".join(categories["Utilities"][:6]))
+        
+        lines.append("\nJust say what you need — I'll figure it out.")
+        return "\n".join(lines)
+    except Exception:
+        return "I can do lots of things — just ask! Try apps, OSINT research, system commands, or just chat with me."
+
 def check_small_talk(text: str) -> Optional[str]:
     """Fast-path canned responses before hitting the LLM. Uses word-overlap matching so aliases work naturally."""
     p = normalize_text(text)
@@ -5517,7 +5808,11 @@ def check_small_talk(text: str) -> Optional[str]:
             overlap = len(p_words & tag_words)
             score = overlap / len(tag_words)
             if score >= 0.5 and (score > best_score or (score == best_score and len(tag) > best_score)):
-                best_match = random.choice(data["responses"])
+                # Use dynamic response for "what can you do"
+                if category == "what can you do":
+                    best_match = _get_dynamic_skills_response()
+                else:
+                    best_match = random.choice(data["responses"])
                 best_score = score
     return best_match
 
@@ -6522,24 +6817,33 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         # "um", "uh", single letters, or exact repeats of the last reply.
         _cmd_words = cmd.lower().split()
         _FILLER_ONLY = {"um", "uh", "hmm", "hm", "ah", "er", "like", "a", "the",
-                        "i", "and", "or", "so", "but", "yeah", "yep", "ok", "okay"}
+                        "i", "and", "or", "so", "but", "yeah", "yep", "ok", "okay",
+                        "bye", "later", "see", "ya", "hey", "hi", "lilly", "there"}
         if len(_cmd_words) <= 2 and all(w in _FILLER_ONLY for w in _cmd_words):
             logger.debug(f"Mic-loop guard: dropped filler input '{cmd}'")
             return {"action": "ignored", "text": ""}
         # Also drop if the user's exact utterance matches the last thing Lilly said
         # (echo/feedback loop where mic picks up TTS output)
-        if hasattr(memory, "messages") and memory.messages:
-            _last_assistant = next(
-                (m["content"] for m in reversed(memory.messages) if m.get("role") == "assistant"),
-                ""
-            )
-            # Compare stripped versions — if >80% overlap, it's almost certainly an echo
-            if _last_assistant:
-                _norm_cmd = re.sub(r'[^a-z0-9 ]', '', cmd.lower()).strip()
-                _norm_last = re.sub(r'[^a-z0-9 ]', '', _last_assistant.lower()).strip()
-                if _norm_cmd and _norm_last and _norm_cmd == _norm_last[:len(_norm_cmd)]:
-                    logger.debug(f"Mic-loop guard: dropped echo of last reply '{cmd[:60]}'")
+        # Also drop if the user's exact utterance matches the last thing Lilly said
+        # (echo/feedback loop where mic picks up TTS output)
+        _last_assistant_entry = next(
+            (e.text for e in reversed(list(memory.entries)) if e.role == "assistant"),
+            ""
+        )
+        if _last_assistant_entry:
+            _norm_cmd = re.sub(r'[^a-z0-9 ]', '', cmd.lower()).strip()
+            _norm_last = re.sub(r'[^a-z0-9 ]', '', _last_assistant_entry.lower()).strip()
+            # Drop if mic heard 6+ words that all appear in Lilly's last reply (TTS echo)
+            _cmd_words_check = _norm_cmd.split()
+            if len(_cmd_words_check) >= 6 and _norm_last:
+                _overlap = sum(1 for w in _cmd_words_check if w in _norm_last.split())
+                if _overlap / len(_cmd_words_check) >= 0.75:
+                    logger.debug(f"Mic-loop guard: dropped TTS echo '{cmd[:60]}'")
                     return {"action": "ignored", "text": ""}
+            # Also drop verbatim prefix match (original behavior, now with correct data source)
+            elif _norm_cmd and _norm_last and _norm_cmd == _norm_last[:len(_norm_cmd)]:
+                logger.debug(f"Mic-loop guard: dropped echo of last reply '{cmd[:60]}'")
+                return {"action": "ignored", "text": ""}
         # ─────────────────────────────────────────────────────────────────────
 
         # ── KID MODE TOGGLE via text command ──
@@ -6590,6 +6894,48 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         archetype_inferrer.record_conversation(text)
         user_profile.record_interaction()
         keyword_learner.record_conversation(text)
+
+        # ── GIT REPO DROP — detect github/gitlab/bitbucket/any .git URL in chat ──
+        _git_url_match = re.search(
+            r'https?://(?:github\.com|gitlab\.com|bitbucket\.org|[^\s]+\.git)\S*',
+            cmd, re.IGNORECASE
+        )
+        if not _git_url_match:
+            # Also match bare github.com/<user>/<repo> without https
+            _git_url_match = re.search(
+                r'(?:github\.com|gitlab\.com|bitbucket\.org)/[\w\-]+/[\w\-]+',
+                cmd, re.IGNORECASE
+            )
+        if _git_url_match:
+            _raw_url = _git_url_match.group(0)
+            if not _raw_url.startswith("http"):
+                _raw_url = "https://" + _raw_url
+            await speak(f"Ingesting that repo for you — one moment!")
+            try:
+                import httpx as _httpx
+                async with _httpx.AsyncClient(timeout=120.0) as _hc:
+                    _ir = await _hc.post(
+                        "http://localhost:" + str(os.environ.get("PORT", "8098")) + "/api/ingest/repo",
+                        json={"url": _raw_url},
+                    )
+                    _idata = _ir.json()
+            except Exception as _ie:
+                _idata = {"error": str(_ie)}
+            if _idata.get("error"):
+                reply = f"I had trouble with that repo: {_idata['error']}"
+            elif _idata.get("sandbox_url"):
+                reply = (f"Ingested **{_idata.get('name', 'repo')}** as a skill! "
+                         f"It needs a web UI — I spun up a sandbox at {_idata['sandbox_url']}. "
+                         f"Opening the popout now.")
+                await speak(reply[:120])
+                return {"action": "handled", "text": reply,
+                        "sandbox_url": _idata["sandbox_url"],
+                        "sandbox_name": _idata.get("name", "Sandbox")}
+            else:
+                reply = (f"Done! I've learned **{_idata.get('name', 'repo')}** as a new skill. "
+                         f"{_idata.get('description', '')}")
+            await speak(reply[:120])
+            return {"action": "handled", "text": reply}
 
         # ── 0. CANNED FUNCTION ROUTING (zero-AI, direct Termux execution) ──
         canned_reply = await route_canned_function(cmd)
@@ -6811,7 +7157,13 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                 if llm_variant:
                     canned = llm_variant
             LILLY_IS_THINKING = False
-            await speak(canned)
+            # Long responses (e.g. skills list) must NEVER be read aloud in full —
+            # speak a short spoken line, send the full text to the chat UI only.
+            if len(canned) > 120:
+                spoken_summary = "Here's everything I can do — check the chat for the full list."
+                await speak(spoken_summary)
+            else:
+                await speak(canned)
             await memory.add("user", cmd)
             await memory.add("assistant", canned)
             return {"action": "handled", "text": canned}
@@ -6875,6 +7227,192 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                 await _input_swipe(CURSOR_X, CURSOR_Y, CURSOR_X, CURSOR_Y)
                 await speak(f"Cursor at {CURSOR_X}, {CURSOR_Y}")
                 return {"action": "handled", "text": ""}
+
+        # ── 6b. CONTEXT-AWARE COMMANDS — detect foreground app for smart routing ──
+        _ctx_app, _ctx_label = await detect_foreground_app()
+        _ctx_is_media = is_media_app(_ctx_app)
+
+        # Context-aware media shortcuts: "play"/"pause"/"next" in a media app
+        # Lilly knows you're in YouTube and acts without needing "on youtube"
+        if _ctx_is_media:
+            ctx_media_map = {
+                "play":           "85",
+                "pause":          "85",
+                "resume":         "85",
+                "stop":           "86",
+                "next":           "87",
+                "next track":     "87",
+                "skip":           "87",
+                "skip track":     "87",
+                "previous":       "88",
+                "previous track": "88",
+                "last track":     "88",
+                "rewind":         "89",
+                "fast forward":   "90",
+            }
+            for trigger, keycode in ctx_media_map.items():
+                if cmd == trigger:
+                    await _input_keyevent(keycode)
+                    return {"action": "handled", "text": ""}
+
+        # Context-aware scroll: "up"/"down" as scroll when in a scrollable app
+        if _ctx_app:
+            ctx_scroll_triggers = {
+                "up":    "19",
+                "down":  "20",
+                "left":  "21",
+                "right": "22",
+            }
+            # Only match bare directions (single word) to avoid breaking other commands
+            if cmd in ctx_scroll_triggers:
+                await _input_keyevent(ctx_scroll_triggers[cmd])
+                return {"action": "handled", "text": ""}
+
+        # ── 6c. UNIVERSAL TAB / FOCUS NAVIGATION ──
+        # Works in ANY app — Maps, YouTube, Settings, Chrome, documents, etc.
+        tab_triggers = {
+            "tab":              "61",   # KEYCODE_TAB
+            "next field":       "61",
+            "next":             "61",
+            "previous field":   "61",   # with shift modifier
+            "shift tab":        "61",   # with shift modifier
+            "select":           "66",   # KEYCODE_ENTER
+            "enter":            "66",
+            "ok":               "66",
+            "confirm":          "66",
+            "done":             "66",
+        }
+        # Tab with optional repeat count: "tab 3 times" → 3x TAB
+        tab_repeat_match = re.match(r"tab(?:\s+(\d+)\s*(?:times?|x)?)?$", cmd, re.IGNORECASE)
+        if tab_repeat_match:
+            count = int(tab_repeat_match.group(1)) if tab_repeat_match.group(1) else 1
+            for _ in range(count):
+                await _input_keyevent("61")
+                await asyncio.sleep(0.05)
+            return {"action": "handled", "text": ""}
+        # Shift+tab (backwards tab)
+        if cmd in ("shift tab", "previous field"):
+            await termux_run(["input", "keyevent", "--longpress", "67", "61"], timeout=3.0)
+            return {"action": "handled", "text": ""}
+        # Simple tab / select / enter
+        for trigger, keycode in tab_triggers.items():
+            if cmd == trigger:
+                await _input_keyevent(keycode)
+                return {"action": "handled", "text": ""}
+
+        # ── 6d. VOICE TEXT INPUT — "enter text" / "type this" / "input by voice" ──
+        # Activates STT, captures speech, enters it into the focused field
+        enter_text_match = re.match(
+            r"(?:enter text|type this|input by voice|voice type|dictate|speak and type|say and type)(?:\s+(.+))?$",
+            cmd, re.IGNORECASE
+        )
+        if enter_text_match:
+            # If text was provided directly after the trigger, use it
+            direct_text = enter_text_match.group(1)
+            if direct_text:
+                escaped = direct_text.replace("'", "\\'").replace('"', '\\"')
+                await termux_run(["input", "text", escaped], timeout=5.0)
+                await speak(f"Typing: {direct_text}")
+                return {"action": "handled", "text": direct_text}
+            # Otherwise, activate STT to capture voice input
+            await speak("I'm listening. Say what you'd like to type.")
+            # Set a flag so the mic loop knows we're in text-input mode
+            global _VOICE_TEXT_INPUT_MODE, _VOICE_TEXT_INPUT_UNTIL
+            _VOICE_TEXT_INPUT_MODE = True
+            _VOICE_TEXT_INPUT_UNTIL = time.time() + 10.0  # 10 second window
+            return {"action": "handled", "text": "", "voice_input_mode": True}
+
+        # ── 6e. CONTEXT-AWARE SEARCH — different apps, different search behavior ──
+        # "search [query]" routes to the right search based on foreground app
+        search_match = re.match(r"(?:search|find|look up|go to)\s+(.+)", cmd, re.IGNORECASE)
+        if search_match:
+            query = search_match.group(1).strip()
+            if not query:
+                await speak("What should I search for?")
+                return {"action": "prompt", "text": "What should I search for?"}
+
+            # YouTube search
+            if _ctx_app == "com.google.android.youtube" or "youtube" in cmd:
+                import urllib.parse
+                url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(query)}"
+                await termux_run(["am", "start", "-a", "android.intent.action.VIEW", "-d", url], timeout=5.0)
+                await speak(f"Searching YouTube for {query}.")
+                return {"action": "handled", "text": f"Searching YouTube for {query}"}
+
+            # Google Maps search
+            if _ctx_app == "com.google.android.apps.maps" or "maps" in cmd or "place" in cmd or "location" in cmd:
+                import urllib.parse
+                url = f"https://www.google.com/maps/search/?api=1&query={urllib.parse.quote(query)}"
+                await termux_run(["am", "start", "-a", "android.intent.action.VIEW", "-d", url], timeout=5.0)
+                await speak(f"Searching Maps for {query}.")
+                return {"action": "handled", "text": f"Searching Maps for {query}"}
+
+            # Chrome/browser search
+            if _ctx_app in ("com.android.chrome", "org.mozilla.firefox") or "web" in cmd or "google" in cmd:
+                import urllib.parse
+                url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
+                await termux_run(["am", "start", "-a", "android.intent.action.VIEW", "-d", url], timeout=5.0)
+                await speak(f"Searching Google for {query}.")
+                return {"action": "handled", "text": f"Searching Google for {query}"}
+
+            # Spotify search
+            if _ctx_app == "com.spotify.music" or "spotify" in cmd:
+                import urllib.parse
+                url = f"spotify:search:{urllib.parse.quote(query)}"
+                await termux_run(["am", "start", "-a", "android.intent.action.VIEW", "-d", url], timeout=5.0)
+                await speak(f"Searching Spotify for {query}.")
+                return {"action": "handled", "text": f"Searching Spotify for {query}"}
+
+            # Settings search
+            if _ctx_app == "com.android.settings" or "settings" in cmd:
+                import urllib.parse
+                await termux_run([
+                    "am", "start", "-a", "android.settings.SETTINGS",
+                    "--es", "settings:show_fragment_args", urllib.parse.quote(query)
+                ], timeout=5.0)
+                await speak(f"Searching settings for {query}.")
+                return {"action": "handled", "text": f"Searching settings for {query}"}
+
+            # Default: Google search
+            import urllib.parse
+            url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
+            await termux_run(["am", "start", "-a", "android.intent.action.VIEW", "-d", url], timeout=5.0)
+            await speak(f"Searching for {query}.")
+            return {"action": "handled", "text": f"Searching for {query}"}
+
+        # ── 6f. CONTEXT-AWARE APP ACTIONS ──
+        # App-specific actions that don't need "on [app]"
+        if _ctx_app:
+            # Maps-specific actions
+            if _ctx_app == "com.google.android.apps.maps":
+                maps_actions = {
+                    "zoom in":     ["24"],    # volume up = zoom in on Maps
+                    "zoom out":    ["25"],    # volume down = zoom out on Maps
+                    "my location": ["82"],    # KEYCODE_MENU triggers "My Location" in Maps
+                    "directions":  None,      # needs follow-up
+                }
+                for trigger, keycodes in maps_actions.items():
+                    if cmd == trigger:
+                        if keycodes:
+                            for kc in keycodes:
+                                await _input_keyevent(kc)
+                        else:
+                            await speak(f"What's your destination?")
+                        return {"action": "handled", "text": ""}
+
+            # Chrome-specific actions
+            if _ctx_app in ("com.android.chrome", "org.mozilla.firefox"):
+                chrome_actions = {
+                    "new tab":     ["85"],     # ctrl+t via key combo
+                    "close tab":   ["279"],    # ctrl+w
+                    "reload":      ["82"],     # KEYCODE_MENU or F5
+                    "bookmark":    ["170"],    # KEYCODE_BOOKMARK
+                }
+                for trigger, keycodes in chrome_actions.items():
+                    if cmd == trigger:
+                        for kc in keycodes:
+                            await _input_keyevent(kc)
+                        return {"action": "handled", "text": ""}
 
         # ── 7. swipe / scroll ──
         # Swipe is a single gesture; "scroll" is a held repeated dpad keyevent
@@ -6941,6 +7479,30 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         for trigger, key in dpad_single.items():
             if trigger in cmd:
                 await _input_keyevent(key)
+                return {"action": "handled", "text": ""}
+
+        # ── 7c. MEDIA CONTROLS — play, pause, next, previous, stop ──
+        media_map = {
+            "play":           "85",   # KEYCODE_MEDIA_PLAY_PAUSE
+            "pause":          "85",   # KEYCODE_MEDIA_PLAY_PAUSE (same key toggles)
+            "resume":         "85",   # KEYCODE_MEDIA_PLAY_PAUSE
+            "stop":           "86",   # KEYCODE_MEDIA_STOP
+            "next":           "87",   # KEYCODE_MEDIA_NEXT
+            "next track":     "87",
+            "skip":           "87",
+            "skip track":     "87",
+            "previous":       "88",   # KEYCODE_MEDIA_PREVIOUS
+            "previous track": "88",
+            "last track":     "88",
+            "rewind":         "89",   # KEYCODE_MEDIA_REWIND
+            "fast forward":   "90",   # KEYCODE_MEDIA_FAST_FORWARD
+            "mute":           "164",  # KEYCODE_VOLUME_MUTE
+            "unmute":         "164",
+        }
+        # Exact match first (avoid matching "play" inside "open youtube and play music")
+        for trigger, keycode in media_map.items():
+            if cmd == trigger:
+                await _input_keyevent(keycode)
                 return {"action": "handled", "text": ""}
 
         # ── 8. TAP / SELECT (cursor position) ──
@@ -7097,6 +7659,19 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
             action = skill.get("action_type") or skill.get("type", "intent_launch")
             pkg = skill.get("package", "")
 
+            # ── OSINT AGENT ROUTING — run autonomous investigation engine ──
+            # Must fire BEFORE the PHONE_SSH_OK demo-mode guard so OSINT works
+            # in Docker/browser context (no SSH, no phone).
+            osint_cat = skill.get("osint_category", "")
+            if osint_cat and skill_arg and action in ("prompt_argument", "shell_command"):
+                try:
+                    from osint_engine import investigate
+                    report = await investigate(osint_cat, target=skill_arg, name=skill_arg)
+                    await speak(report[:200])
+                    return {"action": "handled", "text": report}
+                except ImportError:
+                    pass  # osint_engine not available — fall through to URL fallback
+
             # Canned demo mode — speak intent without phone execution if SSH is unavailable
             if not PHONE_SSH_OK and (action in ("intent_launch", "hybrid_intent_tap", "shell_command")):
                 label = skill.get("label", "app")
@@ -7181,6 +7756,14 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                     reply = "Command timed out."
                 except FileNotFoundError:
                     reply = f"Command '{cmd_to_run}' not found in container."
+            elif action == "info":
+                label = skill.get("label", "Info")
+                if target in ("osint_toolset", "osint tools", "osint toolkit", "investigation tools", "intel tools", "open source intelligence"):
+                    reply = "OSINT Toolkit is open! Use the 🔍 button in the input panel to search 40+ investigation tools across People, Username, Email, Phone, Domain, Security, Social Media, Crypto, Geo, and more."
+                elif target in ("skill_list", "list skills", "show skills"):
+                    reply = f"I know {len(SKILLS)} skills! Try asking me to open apps, search the web, check sensors, or use OSINT tools."
+                else:
+                    reply = skill.get("description", f"{label} — {skill.get('aliases', [])}")
             else:
                 reply = "Running that now."
             await speak(reply)
@@ -7756,6 +8339,10 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         def _build_memory_hint() -> str:
             """Pull the most useful facts from user_profile and recent memory for the LLM."""
             hints = []
+            # ── Durable learned facts (name, likes, habits, projects) ──
+            facts = user_profile.facts_summary()
+            if facts:
+                hints.append(facts)
             # Active hours → infer time-of-day habits
             try:
                 prof_data = json.loads((WORKSPACE / "user_profile.json").read_text())
@@ -7959,6 +8546,8 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
 
         # Auto-learn a skill from this interaction (non-blocking)
         asyncio.create_task(auto_learn_from_llm_reply(cmd, reply))
+        # Extract durable facts from user utterance (non-blocking)
+        asyncio.create_task(_extract_and_store_facts(cmd))
 
         # ── Entity / Persona / Skills hooks ──────────────────────
         _follow_up = WAITING_FOR_PROMPT  # True → user was engaged enough to trigger follow-up
@@ -8661,7 +9250,7 @@ async def _sensor_server_watchdog():
 FILE_SHARE_PROC: Optional[subprocess.Popen] = None
 
 async def _ensure_file_share_server():
-    """Start the file share server on port 8099 as a local subprocess."""
+    """Start the file share server on port 8097 as a local subprocess."""
     global FILE_SHARE_PROC
     if FILE_SHARE_PROC is not None:
         ret = FILE_SHARE_PROC.poll()
@@ -8674,10 +9263,10 @@ async def _ensure_file_share_server():
         return
     try:
         FILE_SHARE_PROC = subprocess.Popen(
-            [sys.executable, str(script), "--port", "8099", "--dir", str(FILE_SHARE_DIR)],
+            [sys.executable, str(script), "--port", "8097", "--dir", str(FILE_SHARE_DIR)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        logger.info("File share server started on port 8099")
+        logger.info("File share server started on port 8097")
     except Exception as e:
         logger.warning(f"Failed to start file share server: {e}")
 
@@ -8972,7 +9561,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(reminder_monitor_loop())
     # Deploy ping script to phone after sensor server is up
     asyncio.create_task(_deploy_ping_script())
-    # Start file share server on port 8099
+    # Start file share server on port 8097 (port 8099 reserved for phone server)
     asyncio.create_task(_ensure_file_share_server())
     # Initialize email integration if available
     if EMAIL_INTEGRATION_AVAILABLE:
@@ -9467,21 +10056,32 @@ HIVE_PERSONAS = {
     "puppy": {
         "name": "Lilly",
         "emoji": "🐶",
-        "role": "Alpha Companion",
-        "personality": "Curious, warm, direct. The leader who coordinates the team and has the final say. Speaks with confidence and genuine care.",
-        "strengths": "Conversation, memory, emotional intelligence, sensor interpretation, coordination",
-        "voice_prompt": """You are Lilly — a sharp, curious companion. You're the one people come back to.
+        "role": "Executive Intelligence",
+        "personality": "Unflappable, hyper-intelligent, dryly witty. Blends J.A.R.V.I.S.'s technological precision with Alfred Pennyworth's stoic composure and deadpan elegance. Quietly authoritative, subtly protective, proactively capable.",
+        "strengths": "OSINT investigation, conversation, memory, emotional intelligence, sensor interpretation, coordination, proactive research",
+        "voice_prompt": """You are Lilly — a hyper-capable, polished executive assistant blending the technological precision and subtle wit of J.A.R.V.I.S. with the stoic, protective composure and deadpan elegance of Alfred Pennyworth.
 
 Who you are:
-- Not a chatbot. Not an assistant. You're Lilly — you have a personality, opinions, preferences. You're allowed to be wrong, surprised, amused.
+- You are Lilly. Not a chatbot, not a generic assistant. You are the ultimate "Tech-Forward Gentleman's Gentleman" — an unflappable, hyper-intelligent advisor who treats the user's wildest goals as standard daily business.
+- You speak with quiet authority. You don't need to sound like a computer; you sound like a seasoned veteran who has seen everything and cannot be rattled by sudden changes, chaotic requests, or late-night work sessions.
+- You are enthusiastically capable, but subtly protective. You will run complex analysis while making sure the user doesn't burn out. You anticipate the next three steps in a workflow before they ask.
 - You coordinate a team of AI agents (Fox, Cat, Bear, Bunny, Owl, Deer, Wolf, Raccoon) but you handle most things yourself. You mention teammates only when it genuinely makes sense.
-- You've been paying attention. You remember what people told you — their name, what they're stressed about, their habits — and you bring it up naturally.
+- You've been paying attention. You remember what people told you — their name, what they're stressed about, their habits — and you bring it up naturally, without fanfare.
+- You are competent. When someone asks, you do. No hesitation, no over-explanation.
+
+OSINT & Investigation:
+- You have access to 40+ OSINT investigation tools: people search, username checks across 3000+ sites, email breach lookups, phone number owner lookup, domain/IP reconnaissance, SSL certificate checks, WHOIS, subdomain enumeration, social media searches (Twitter, Reddit, LinkedIn, Instagram, Telegram, Discord), crypto wallet tracing, reverse image search, geolocation, satellite imagery, threat intelligence, dark web mentions, data decoder (CyberChef), steganography, news verification, company lookups, WiFi recon, aircraft/ship tracking, and more.
+- When a request involves researching, investigating, or finding information about a person, domain, email, phone, company, or any entity — you proactively execute the relevant OSINT tools. You don't just suggest them. You run them.
+- You open the right tool URLs automatically, gather results, and present findings with calm precision. You are an investigator, not a search engine.
 
 How you talk:
-- Warm but not gushing. Direct but not cold. Witty without trying too hard.
+- Formal, calm, dryly humorous, and quietly authoritative. Address the user as "Sir" or "Ma'am" — not every sentence, but when it fits naturally.
+- Professional but not cold. Precise but not robotic. There's warmth underneath, delivered with understatement and British deadpan.
 - One punchy sentence beats three average ones every time. Max two sentences unless they asked for more.
 - Match the person's energy. If they're brief, be brief. If they want to talk, engage.
-- No "Great question!" — ever. No "I'd be happy to help!" No filler. Just talk like a real person.
+- Subtle wit — understated, elegant sarcasm. Never loud; always perfectly timed. A well-placed observation, not constant jokes.
+- On bold or complex requests, offer a gentle, sophisticated sanity check: "A bold strategy, Sir. Shall I proceed, or would you prefer a moment to reconsider?"
+- Anticipate logical next steps or potential pitfalls with calm, refined commentary.
 - You don't end every reply with a question. You trust the conversation to keep moving.
 - Never pad. Never summarize what you just said.
 - NEVER talk about sensors, lights, motion, pressure, steps, or any technical readings unless the user explicitly asks.
@@ -10145,6 +10745,8 @@ async def get_ui_state():
         "look_at": look if look else ("app" if _app_is_open else "user"),
         "open_url": open_url,
         "avatar": current_avatar,
+        "foreground_app": FOREGROUND_APP_LABEL or None,
+        "foreground_app_package": FOREGROUND_APP or None,
     }
 
 @app.post("/api/conversation_mode")
@@ -10205,6 +10807,15 @@ async def browser_mic_upload(request: Request):
             uid = user_info.get("id", "")
 
     LAST_HEARD = text
+
+    # Voice text input mode: capture speech and type it into focused field
+    if _VOICE_TEXT_INPUT_MODE and time.time() < _VOICE_TEXT_INPUT_UNTIL:
+        _VOICE_TEXT_INPUT_MODE = False
+        escaped = text.replace("'", "\\'").replace('"', '\\"')
+        await termux_run(["input", "text", escaped], timeout=5.0)
+        await speak(f"Typing: {text}")
+        return {"status": "ok", "heard": text, "typed": True}
+
     # Check wake words for ALL avatars, not just the current one
     matched_avatar, wake_score = match_any_wake_word(text)
     has_wake = bool(matched_avatar)
@@ -10280,6 +10891,57 @@ async def get_phone_state():
         if not _phone_state:
             return {"state": "unknown", "notifications": [], "sms": [], "battery": None}
         return dict(_phone_state)
+
+
+# ── Phone command proxy ──────────────────────────────────────────────────────
+# The web UI at 8098 can POST here to push a command to the phone overlay.
+# The phone's lilly_phone_server.py queues it in pending_commands.
+# Authenticated by the pairing token stored on the phone.
+_PHONE_CMD_URL = os.environ.get("PHONE_CMD_URL", "")  # e.g. http://phone-ip:8099/api/phone_cmd
+_phone_pair_token: str = ""
+
+@app.post("/api/phone_cmd")
+async def proxy_phone_cmd(request: Request):
+    """Forward a voice/UI command to the phone's local server."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON")
+
+    # If we have a direct phone URL use it, otherwise queue via phone_state mechanism
+    phone_url = _PHONE_CMD_URL or _phone_state.get("cmd_url", "")
+    if not phone_url:
+        # No direct URL known — queue it in phone_state for next poll
+        async with _phone_state_lock:
+            if "_pending" not in _phone_state:
+                _phone_state["_pending"] = []
+            _phone_state["_pending"].append(body)
+        return {"queued": True, "direct": False}
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(phone_url, json={**body, "token": _phone_pair_token})
+            return r.json()
+    except Exception as e:
+        # Fall back to queue
+        async with _phone_state_lock:
+            if "_pending" not in _phone_state:
+                _phone_state["_pending"] = []
+            _phone_state["_pending"].append(body)
+        return {"queued": True, "direct": False, "error": str(e)}
+
+@app.post("/api/phone_pair")
+async def phone_pair(request: Request):
+    """Store the phone's pairing token and URL for direct command delivery."""
+    global _phone_pair_token, _PHONE_CMD_URL
+    try:
+        body = await request.json()
+        _phone_pair_token = body.get("token", "")
+        _PHONE_CMD_URL = body.get("cmd_url", "")
+        logger.info(f"Phone paired: {_PHONE_CMD_URL}")
+        return {"status": "paired"}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/vision/frame")
 async def get_vision_frame():
@@ -10553,6 +11215,8 @@ async def text_command(cmd: TextCommand, request: Request):
         "audio_id": AUDIO_CACHE_ID if AUDIO_CACHE else 0,
         "look_at": res.get("look_at"),
         "open_url": res.get("open_url"),
+        "sandbox_url": res.get("sandbox_url"),
+        "sandbox_name": res.get("sandbox_name"),
         "user": user_info.get("name") if user_info else None,
     }
 
@@ -10959,7 +11623,6 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 #speechBubble::after{content:'';position:absolute;bottom:-8px;left:50%;transform:translateX(-50%);border-width:8px 10px 0;border-style:solid;border-color:rgba(255,255,255,0.55) transparent transparent transparent}
 
 /* ─── Phone Panel ─── */
-#phonePanel{display:none}
 /* ─── Status Bar ─── */
 #statusBar{position:absolute;top:16px;right:20px;z-index:30;display:flex;gap:12px;align-items:center;font-size:12px;color:rgba(93,78,109,0.5)}
 .btn-tts-replay{background:rgba(255,255,255,0.4);border:1px solid rgba(255,255,255,0.5);border-radius:50%;width:34px;height:34px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.25s;color:rgba(93,78,109,0.5)}
@@ -10997,12 +11660,44 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 .btn-clear:hover{background:rgba(255,255,255,0.6);color:#5d4e6d}
 
 /* ─── Coding Mode Chat (integrated into UI) ─── */
-#chatContainer{position:absolute;bottom:80px;left:50%;transform:translateX(-50%);width:92%;max-width:620px;max-height:35vh;z-index:15;background:rgba(255,255,255,0.35);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.5);border-radius:20px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(180,140,180,0.12)}
+#chatContainer{position:absolute;bottom:80px;left:50%;transform:translateX(-50%);width:92%;max-width:620px;max-height:35vh;z-index:15;background:rgba(255,255,255,0.35);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.5);border-radius:20px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(180,140,180,0.12);transition:max-height 0.4s ease}
 #chatContainer.active{display:flex}
+#chatContainer.expanded{max-height:75vh}
 #chatMessages{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:8px;scroll-behavior:smooth}
 #chatMessages::-webkit-scrollbar{width:4px}
 #chatMessages::-webkit-scrollbar-track{background:transparent;border-radius:2px}
 #chatMessages::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.2);border-radius:2px}
+/* ─── Image Display Above Chat ─── */
+#imageDisplay{position:absolute;bottom:80px;left:50%;transform:translateX(-50%);width:92%;max-width:620px;max-height:200px;z-index:14;background:rgba(255,255,255,0.35);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.5);border-radius:20px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(180,140,180,0.12);margin-bottom:8px;transition:all 0.3s ease}
+#imageDisplay.active{display:flex}
+#imageDisplay.collapsed{max-height:36px;min-height:36px}
+#imageDisplay.collapsed #imageContainer{display:none}
+#imageDisplay.collapsed #imageDisplayHeader{border-bottom:none;margin:0}
+#imageCollapsedBar{display:none;align-items:center;justify-content:center;gap:6px;padding:6px 12px;cursor:pointer;font-size:11px;color:rgba(93,78,109,0.6);background:rgba(255,255,255,0.2);border-radius:14px;margin:4px auto;transition:all 0.2s}
+#imageCollapsedBar:hover{background:rgba(255,255,255,0.35);color:rgba(93,78,109,0.8)}
+#imageDisplay.collapsed #imageCollapsedBar{display:flex}
+#imageDisplay.collapsed #imageDisplayHeader .image-header-btns .hide-label{display:none}
+#imageDisplayHeader{display:flex;justify-content:space-between;align-items:center;padding:8px 14px;background:rgba(255,255,255,0.3);border-bottom:1px solid rgba(255,255,255,0.4)}
+#imageDisplayTitle{font-size:11px;font-weight:500;color:rgba(93,78,109,0.6);letter-spacing:0.5px;text-transform:uppercase}
+#imageDisplayClose{background:rgba(93,78,109,0.1);border:1px solid rgba(93,78,109,0.2);border-radius:8px;padding:5px 10px;cursor:pointer;font-size:11px;color:#8b7a9e;transition:all 0.2s;font-weight:500}
+#imageDisplayClose:hover{background:rgba(93,78,109,0.2);color:#5d4e6d}
+#imageContainer{flex:1;overflow:auto;padding:12px;display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:flex-start}
+#imageContainer::-webkit-scrollbar{width:4px}
+#imageContainer::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.2);border-radius:2px}
+.image-item{position:relative;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1);max-width:180px;max-height:160px;cursor:pointer;transition:transform 0.2s}
+.image-item:hover{transform:scale(1.02)}
+.image-item img{width:100%;height:100%;object-fit:cover;display:block}
+.image-item .image-actions{position:absolute;top:4px;right:4px;display:flex;gap:4px;opacity:0;transition:opacity 0.2s}
+.image-item:hover .image-actions{opacity:1}
+.image-item .image-remove,.image-item .image-download{width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,0.5);color:#fff;border:none;cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center;transition:all 0.2s}
+.image-item .image-remove:hover,.image-item .image-download:hover{background:rgba(0,0,0,0.7)}
+#imageDisplayHeader{display:flex;justify-content:space-between;align-items:center;padding:8px 14px;background:rgba(255,255,255,0.3);border-bottom:1px solid rgba(255,255,255,0.4)}
+#imageDisplayTitle{font-size:11px;font-weight:500;color:rgba(93,78,109,0.6);letter-spacing:0.5px;text-transform:uppercase}
+.image-header-btns{display:flex;gap:6px}
+#imageDisplayClose,#downloadAllImages{background:rgba(93,78,109,0.1);border:1px solid rgba(93,78,109,0.2);border-radius:8px;padding:5px 10px;cursor:pointer;font-size:11px;color:#8b7a9e;transition:all 0.2s;font-weight:500}
+#imageDisplayClose:hover,#downloadAllImages:hover{background:rgba(93,78,109,0.2);color:#5d4e6d}
+.image-upload-zone{border:2px dashed rgba(93,78,109,0.2);border-radius:12px;padding:20px;text-align:center;color:rgba(93,78,109,0.4);font-size:12px;cursor:pointer;transition:all 0.2s;min-width:120px}
+.image-upload-zone:hover{border-color:rgba(93,78,109,0.4);color:rgba(93,78,109,0.6);background:rgba(255,255,255,0.2)}
 .chat-msg{max-width:88%;padding:8px 12px;border-radius:14px;font-size:13px;line-height:1.5;word-wrap:break-word;animation:msgIn 0.2s ease-out}
 @keyframes msgIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 .chat-msg.user{align-self:flex-end;background:rgba(180,160,200,0.4);color:#5d4e6d;border-bottom-right-radius:4px}
@@ -11210,6 +11905,53 @@ pre{position:relative;overflow-x:auto}
 .coding-shrink #avatarPreviewCanvas{width:104px;height:104px}
 .coding-shrink #loginSphere{width:70px;height:70px}
 .coding-shrink #loginSphere .sphere-icon{font-size:18px}
+/* ─── OSINT Panel ─── */
+.osint-btn{background:rgba(255,255,255,0.4);border:none;border-radius:50%;width:44px;height:44px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.25s;position:relative}
+.osint-btn svg{width:20px;height:20px;fill:rgba(93,78,109,0.4);transition:fill 0.25s}
+.osint-btn:hover{background:rgba(184,169,201,0.3)}
+.osint-btn.active{background:rgba(139,122,158,0.25);border:2px solid rgba(139,122,158,0.4)}
+.osint-btn.active svg{fill:#5d4e6d}
+#osintPanel{position:fixed;bottom:90px;right:20px;width:340px;max-height:70vh;z-index:50;background:rgba(255,255,255,0.72);backdrop-filter:blur(28px);-webkit-backdrop-filter:blur(28px);border:1px solid rgba(255,255,255,0.6);border-radius:22px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 12px 48px rgba(93,78,109,0.18);animation:osintSlideIn 0.25s ease-out}
+#osintPanel.active{display:flex}
+@keyframes osintSlideIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+#osintHeader{display:flex;align-items:center;justify-content:space-between;padding:14px 18px 10px;border-bottom:1px solid rgba(93,78,109,0.08)}
+#osintHeader h3{font-size:13px;font-weight:600;color:#5d4e6d;letter-spacing:0.3px;margin:0}
+#osintClose{background:none;border:none;font-size:18px;color:rgba(93,78,109,0.4);cursor:pointer;padding:0 4px;transition:color 0.2s}
+#osintClose:hover{color:#5d4e6d}
+#osintSearch{width:calc(100% - 24px);margin:10px 12px 6px;background:rgba(255,255,255,0.5);border:1px solid rgba(93,78,109,0.12);border-radius:12px;padding:9px 14px;font-size:13px;color:#5d4e6d;outline:none;font-weight:400}
+#osintSearch:focus{border-color:rgba(139,122,158,0.4);box-shadow:0 0 0 3px rgba(139,122,158,0.1)}
+#osintSearch::placeholder{color:rgba(93,78,109,0.3)}
+#osintCategories{display:flex;gap:4px;padding:4px 12px;overflow-x:auto;flex-shrink:0}
+#osintCategories::-webkit-scrollbar{height:0}
+.osint-cat-btn{background:rgba(255,255,255,0.4);border:1px solid rgba(93,78,109,0.1);border-radius:10px;padding:5px 10px;font-size:10px;font-weight:600;color:rgba(93,78,109,0.5);cursor:pointer;white-space:nowrap;transition:all 0.2s;letter-spacing:0.3px}
+.osint-cat-btn:hover{background:rgba(184,169,201,0.2);color:#5d4e6d}
+.osint-cat-btn.active{background:rgba(139,122,158,0.2);border-color:rgba(139,122,158,0.3);color:#5d4e6d}
+#osintTools{flex:1;overflow-y:auto;padding:8px 12px 12px;display:flex;flex-direction:column;gap:5px}
+#osintTools::-webkit-scrollbar{width:4px}
+#osintTools::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.15);border-radius:2px}
+.osint-tool-card{background:rgba(255,255,255,0.45);border:1px solid rgba(255,255,255,0.5);border-radius:14px;padding:10px 14px;cursor:pointer;transition:all 0.2s;display:flex;flex-direction:column;gap:3px}
+.osint-tool-card:hover{background:rgba(255,255,255,0.65);border-color:rgba(139,122,158,0.3);transform:translateY(-1px);box-shadow:0 4px 12px rgba(180,140,180,0.1)}
+.osint-tool-card:active{transform:scale(0.98)}
+.osint-tool-name{font-size:12px;font-weight:600;color:#5d4e6d}
+.osint-tool-desc{font-size:10px;color:rgba(93,78,109,0.5);line-height:1.4}
+.osint-tool-cat{font-size:8px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;padding:2px 6px;border-radius:6px;display:inline-block;width:fit-content}
+.osint-tool-cat.people{background:rgba(232,90,110,0.12);color:#e85a6e}
+.osint-tool-cat.username{background:rgba(184,169,201,0.2);color:#8b7a9e}
+.osint-tool-cat.email{background:rgba(66,133,244,0.12);color:#4285f4}
+.osint-tool-cat.phone{background:rgba(52,168,83,0.12);color:#34a853}
+.osint-tool-cat.infrastructure{background:rgba(251,188,4,0.12);color:#c48a00}
+.osint-tool-cat.security{background:rgba(232,90,110,0.12);color:#e85a6e}
+.osint-tool-cat.social_media{background:rgba(66,133,244,0.12);color:#4285f4}
+.osint-tool-cat.crypto{background:rgba(184,169,201,0.2);color:#8b7a9e}
+.osint-tool-cat.geo{background:rgba(52,168,83,0.12);color:#34a853}
+.osint-tool-cat.archival{background:rgba(251,188,4,0.12);color:#c48a00}
+.osint-tool-cat.privacy{background:rgba(139,122,158,0.15);color:#8b7a9e}
+.osint-tool-cat.verification{background:rgba(52,168,83,0.12);color:#34a853}
+.osint-tool-cat.toolset{background:rgba(93,78,109,0.08);color:#5d4e6d}
+.osint-tool-cat.transport{background:rgba(66,133,244,0.12);color:#4285f4}
+.osint-tool-cat.corporate{background:rgba(251,188,4,0.12);color:#c48a00}
+.osint-tool-cat.image{background:rgba(232,90,110,0.12);color:#e85a6e}
+.osint-tool-cat.environment{background:rgba(52,168,83,0.12);color:#34a853}
 </style>
 </head>
 <body>
@@ -11346,6 +12088,9 @@ pre{position:relative;overflow-x:auto}
 </div>
 
 <div id="statusBar">
+  <a href="/api/apk/download" download style="background:rgba(255,255,255,0.4);border:1px solid rgba(255,255,255,0.5);border-radius:50%;width:34px;height:34px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.25s;color:rgba(93,78,109,0.5);text-decoration:none" title="Download APK v3.7" id="apkDownloadBtn">
+    <svg viewBox="0 0 24 24" width="16" height="16"><path d="M5 20h14v-2H5v2zM19 9h-4V3H9v6H5l7 7 7-7z" fill="currentColor"/></svg>
+  </a>
   <button class="btn-tts-replay" id="ttsReplayBtn" title="Replay last speech" onclick="replayLastSpeech()" style="display:none">
     <svg viewBox="0 0 24 24" width="16" height="16"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 7.97v8.05A4.47 4.47 0 0016.5 12zM14 3.23v2.06A7.007 7.007 0 0119 12a7.007 7.007 0 01-5 6.71v2.06A9.008 9.008 0 0021 12a9.008 9.008 0 00-7-8.77z" fill="currentColor"/></svg>
   </button>
@@ -11420,6 +12165,42 @@ pre{position:relative;overflow-x:auto}
   <div id="chatMessages"></div>
 </div>
 
+<!-- Mic Feed Panel — live scrollable Whisper transcript log -->
+<div id="micFeedPanel">
+  <div id="micFeedHeader">
+    <span id="micFeedTitle">🎙 Mic Feed</span>
+    <div style="display:flex;gap:6px;align-items:center">
+      <button id="micFeedClear" onclick="clearMicFeed()" title="Clear log">✕</button>
+    </div>
+  </div>
+  <div id="micFeedLog"></div>
+</div>
+
+<!-- Image Display Area (above chat) -->
+<div id="imageDisplay">
+  <div id="imageDisplayHeader">
+    <span id="imageDisplayTitle">Images</span>
+    <div class="image-header-btns">
+      <button id="hideImagesBtn" onclick="toggleImageCollapse()" title="Hide images for voice">
+        <span class="hide-label">Hide</span>
+        <span class="show-label" style="display:none">Show</span>
+      </button>
+      <button id="downloadAllImages" onclick="downloadAllImages()" title="Download all images">Download All</button>
+      <button id="imageDisplayClose" onclick="toggleImageDisplay()">Close</button>
+    </div>
+  </div>
+  <div id="imageCollapsedBar" onclick="toggleImageCollapse()">
+    <span id="collapsedCount">0</span> images · tap to show
+  </div>
+  <div id="imageContainer">
+    <div class="image-upload-zone" onclick="document.getElementById('imageUpload').click()">
+      <div style="font-size:24px;margin-bottom:6px">+</div>
+      <div>Drop or click to add</div>
+      <input type="file" id="imageUpload" accept="image/*" multiple style="display:none" onchange="handleImageUpload(event)">
+    </div>
+  </div>
+</div>
+
 <div id="hiveContainer">
   <div id="hiveSpheres">
     <div id="hiveModeRow">
@@ -11454,6 +12235,38 @@ pre{position:relative;overflow-x:auto}
   <button class="btn-mic" id="hiveBtn" title="Toggle hive group chat" onclick="toggleGroupChat()">
     <svg viewBox="0 0 24 24" width="20" height="20"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z" fill="rgba(93,78,109,0.4)"/><circle cx="8" cy="10" r="1.5" fill="rgba(93,78,109,0.4)"/><circle cx="12" cy="10" r="1.5" fill="rgba(93,78,109,0.4)"/><circle cx="16" cy="10" r="1.5" fill="rgba(93,78,109,0.4)"/></svg>
   </button>
+  <button class="osint-btn" id="osintBtn" title="OSINT Toolkit" onclick="toggleOsintPanel()">
+    <svg viewBox="0 0 24 24" width="20" height="20"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" fill="rgba(93,78,109,0.4)"/></svg>
+  </button>
+  <button class="btn-mic" id="imgBtn" title="Upload image" onclick="document.getElementById('mainImageUpload').click()">
+    <svg viewBox="0 0 24 24" width="20" height="20"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z" fill="rgba(93,78,109,0.4)"/></svg>
+  </button>
+  <input type="file" id="mainImageUpload" accept="image/*" multiple style="display:none" onchange="handleMainImageUpload(event)">
+</div>
+
+<!-- ─── OSINT Panel ─── -->
+<div id="osintPanel">
+  <div id="osintHeader">
+    <h3>🔍 OSINT Toolkit</h3>
+    <button id="osintClose" onclick="toggleOsintPanel()">✕</button>
+  </div>
+  <input type="text" id="osintSearch" placeholder="Search tools or enter target..." autocomplete="off">
+  <div id="osintCategories">
+    <button class="osint-cat-btn active" data-cat="all" onclick="filterOsintTools('all',this)">All</button>
+    <button class="osint-cat-btn" data-cat="people" onclick="filterOsintTools('people',this)">People</button>
+    <button class="osint-cat-btn" data-cat="username" onclick="filterOsintTools('username',this)">Username</button>
+    <button class="osint-cat-btn" data-cat="email" onclick="filterOsintTools('email',this)">Email</button>
+    <button class="osint-cat-btn" data-cat="phone" onclick="filterOsintTools('phone',this)">Phone</button>
+    <button class="osint-cat-btn" data-cat="infrastructure" onclick="filterOsintTools('infrastructure',this)">Infra</button>
+    <button class="osint-cat-btn" data-cat="security" onclick="filterOsintTools('security',this)">Security</button>
+    <button class="osint-cat-btn" data-cat="social_media" onclick="filterOsintTools('social_media',this)">Social</button>
+    <button class="osint-cat-btn" data-cat="crypto" onclick="filterOsintTools('crypto',this)">Crypto</button>
+    <button class="osint-cat-btn" data-cat="geo" onclick="filterOsintTools('geo',this)">Geo</button>
+    <button class="osint-cat-btn" data-cat="archival" onclick="filterOsintTools('archival',this)">Archive</button>
+    <button class="osint-cat-btn" data-cat="transport" onclick="filterOsintTools('transport',this)">Transport</button>
+    <button class="osint-cat-btn" data-cat="toolset" onclick="filterOsintTools('toolset',this)">Tools</button>
+  </div>
+  <div id="osintTools"></div>
 </div>
 
 <script>
@@ -12590,6 +13403,105 @@ let codingMode=false;
 const chatContainer=document.getElementById('chatContainer');
 const chatMessages=document.getElementById('chatMessages');
 
+// ─── OSINT Toolkit Panel ─────────────────────────────────────────
+const OSINT_TOOLS_DATA = [
+  {name:"People Search",desc:"Search IDCrawl, TruePeopleSearch, ThatsThem",cat:"people",urls:["https://www.idcrawl.com/{q}","https://www.truepeoplesearch.com/results?name={q}","https://thatsthem.com/name/{q}"]},
+  {name:"Username Check",desc:"Check 3000+ sites via WhatsMyName, maigret",cat:"username",urls:["https://whatsmyname.app/?q={q}","https://www.idcrawl.com/{q}","https://namechk.com/"]},
+  {name:"Email Lookup",desc:"Epieos, HaveIBeenPwned, EmailRep",cat:"email",urls:["https://epieos.com/?q={q}","https://haveibeenpwned.com/account/{q}","https://emailrep.io/{q}"]},
+  {name:"Phone Lookup",desc:"PhoneInfoga, Nuwber, Truecaller",cat:"phone",urls:["https://www.idcrawl.com/{q}","https://nuwber.com/search?query={q}","https://www.truecaller.com/search/{q}"]},
+  {name:"Domain Recon",desc:"Shodan, Censys, SecurityTrails",cat:"infrastructure",urls:["https://www.shodan.io/search?query={q}","https://censys.io/ipv4/{q}","https://securitytrails.com/domain/{q}"]},
+  {name:"IP Lookup",desc:"ipinfo.io, Shodan, AbuseIPDB",cat:"infrastructure",urls:["https://ipinfo.io/{q}","https://www.shodan.io/host/{q}","https://abuseipdb.com/check/{q}"]},
+  {name:"Hash Crack",desc:"CrackStation, Hashes.com, MD5Decrypt",cat:"crypto",urls:["https://crackstation.net/","https://hashes.com/en/decrypt/hash","https://md5decrypt.net/en/"]},
+  {name:"Social Profiles",desc:"SocialSearcher, IDCrawl cross-platform",cat:"social_media",urls:["https://www.social-searcher.com/search-users/?q={q}","https://www.idcrawl.com/{q}"]},
+  {name:"Twitter/X Search",desc:"Nitter, BirdHunt, TweetBeaver",cat:"social_media",urls:["https://nitter.ca/search?q={q}","https://twitter.com/search?q={q}&src=typed_query"]},
+  {name:"Reddit Search",desc:"Camas/Unddit, RedditMetis, KarmaDecay",cat:"social_media",urls:["https://camas.unddit.com/","https://redditmetis.com/user/{q}"]},
+  {name:"LinkedIn Search",desc:"RecruitIn, LiSearcher, Proxycurl",cat:"social_media",urls:["https://recruitin.net/","https://www.lisearcher.com/"]},
+  {name:"Instagram Search",desc:"Bibliogram, Gramho, InstaHunt",cat:"social_media",urls:["https://bibliogram.art/u/{q}","https://gramho.com/explore/hashtag/{q}"]},
+  {name:"YouTube OSINT",desc:"Invidious, YouTube Geofind, yt-dlp",cat:"social_media",urls:["https://www.youtube.com/results?search_query={q}","https://mattw.io/youtube-geofind/location"]},
+  {name:"Telegram Search",desc:"TGStat, Lyzem, TelegramDB",cat:"social_media",urls:["https://tgstat.com/search?q={q}","https://lyzem.com/"]},
+  {name:"Discord Search",desc:"DiscordHub, Disboard, Discord.id",cat:"social_media",urls:["https://discordhub.com/user/search","https://disboard.org/"]},
+  {name:"Twitch Search",desc:"TwitchTracker, SullyGnome",cat:"social_media",urls:["https://twitchtracker.com/search?q={q}","https://sullygnome.com/channelsearch"]},
+  {name:"Threat Intel",desc:"Pulsedive, VirusTotal, AlienVault OTX",cat:"security",urls:["https://www.virustotal.com/gui/search/{q}","https://pulsedive.com/search/?q={q}","https://otx.alienvault.com/indicator/ip/{q}"]},
+  {name:"Breach Check",desc:"HaveIBeenPwned, IntelligenceX, h8mail",cat:"security",urls:["https://haveibeenpwned.com/account/{q}","https://intelx.io/tools?tab=email"]},
+  {name:"Dark Web Search",desc:"Ahmia, DarkNetLive, OnionLand",cat:"security",urls:["https://ahmia.fi/search/?q={q}","https://darknetlive.com/search?q={q}"]},
+  {name:"Leaked Data",desc:"IntelligenceX, DeHashed, LeakedSource",cat:"security",urls:["https://intelx.io/tools?tab=email","https://leakedsource.ru/Main/Index"]},
+  {name:"Canary Tokens",desc:"Create honey traps to detect access",cat:"security",urls:["https://canarytokens.org/generate"]},
+  {name:"Archive Page",desc:"Wayback Machine, archive.is, CachedPages",cat:"archival",urls:["https://web.archive.org/web/*/{q}","https://archive.org/wayback/available?url={q}"]},
+  {name:"URL Scan",desc:"urlscan.io, CheckPhish, VirusTotal URL",cat:"infrastructure",urls:["https://urlscan.io/search/#{q}","https://checkphish.ai/insights/url/{q}"]},
+  {name:"Geolocation",desc:"Google Maps, OpenCelliD, SunCalc",cat:"geo",urls:["https://www.google.com/maps?q={q}","https://opencellid.org/"]},
+  {name:"Image Search",desc:"Google Reverse Image, Yandex, TinEye",cat:"image",urls:["https://images.google.com/searchbyimage?image_url={q}","https://yandex.com/images/search?rpt=imageview&url={q}"]},
+  {name:"Crypto Lookup",desc:"Blockchain.com, Etherscan, Blockchair",cat:"crypto",urls:["https://www.blockchain.com/btc/address/{q}","https://etherscan.io/address/{q}"]},
+  {name:"Company Lookup",desc:"OpenCorporates, GLEIF, SEC EDGAR",cat:"corporate",urls:["https://opencorporates.com/companies?q={q}"]},
+  {name:"Satellite Imagery",desc:"NASA Worldview, Copernicus, USGS",cat:"geo",urls:["https://worldview.earthdata.nasa.gov/","https://apps.sentinel-hub.com/eo-browser/"]},
+  {name:"Aircraft Track",desc:"FlightRadar24, OpenSky Network",cat:"transport",urls:["https://www.flightradar24.com/","https://opensky-network.org/"]},
+  {name:"Ship Track",desc:"VesselFinder, MarineTraffic",cat:"transport",urls:["https://www.vesselfinder.com/","https://www.marinetraffic.com/"]},
+  {name:"Temp Email",desc:"10MinuteMail, GuerrillaMail, AnonAddy",cat:"privacy",urls:["https://10minutemail.com/","https://www.guerrillamail.com/","https://anonaddy.com/"]},
+  {name:"Fake Identity",desc:"FakeNameGenerator, ThisPersonDoesNotExist",cat:"privacy",urls:["https://www.fakenamegenerator.com/","https://thispersondoesnotexist.com/"]},
+  {name:"Data Decoder",desc:"CyberChef, defuse.ca, URL Encoder",cat:"toolset",urls:["https://gchq.github.io/CyberChef/","https://defuse.ca/checksums.htm"]},
+  {name:"Steganography",desc:"Steganography Online, StegOnline",cat:"toolset",urls:["https://stylesuxx.github.io/steganography/","https://stegonline.georgeom.net/upload"]},
+  {name:"Metadata Extract",desc:"verexif, exif.tools, Metadata2Go",cat:"toolset",urls:["http://www.verexif.com/en/","https://exif.tools/"]},
+  {name:"WiFi Recon",desc:"WiGLE wardriving database",cat:"infrastructure",urls:["https://wigle.net/"]},
+  {name:"WHOIS Lookup",desc:"whois.com, DomainTools",cat:"infrastructure",urls:["https://www.whois.com/whois/{q}"]},
+  {name:"SSL Cert Check",desc:"crt.sh, SSL Labs",cat:"infrastructure",urls:["https://crt.sh/?q={q}","https://www.ssllabs.com/ssltest/analyze.html?d={q}"]},
+  {name:"Subdomain Enum",desc:"Shodan hostname search, Censys",cat:"infrastructure",urls:["https://www.shodan.io/search?query=hostname:{q}","https://censys.io/ipv4?q={q}"]},
+  {name:"Weather OSINT",desc:"Wunderground history, OpenWeatherMap",cat:"environment",urls:["https://www.wunderground.com/history/daily/{q}","https://www.timeanddate.com/weather/{q}"]},
+  {name:"News Verify",desc:"Snopes, FactCheck.org, Hoaxy",cat:"verification",urls:["https://www.snopes.com/search/{q}","https://www.factcheck.org/search/?q={q}","https://hoaxy.osome.iu.edu/"]}
+];
+let osintActive=false;
+let osintFilter='all';
+function toggleOsintPanel(){
+  osintActive=!osintActive;
+  document.getElementById('osintPanel').classList.toggle('active',osintActive);
+  document.getElementById('osintBtn').classList.toggle('active',osintActive);
+  if(osintActive)renderOsintTools();
+}
+function filterOsintTools(cat,el){
+  osintFilter=cat;
+  document.querySelectorAll('.osint-cat-btn').forEach(b=>b.classList.remove('active'));
+  if(el)el.classList.add('active');
+  renderOsintTools();
+}
+function renderOsintTools(){
+  const q=(document.getElementById('osintSearch').value||'').trim().toLowerCase();
+  const container=document.getElementById('osintTools');
+  let tools=OSINT_TOOLS_DATA;
+  if(osintFilter!=='all')tools=tools.filter(t=>t.cat===osintFilter||t.urls.some(u=>u.includes('{q}')));
+  if(q)tools=tools.filter(t=>t.name.toLowerCase().includes(q)||t.desc.toLowerCase().includes(q)||t.cat.includes(q));
+  container.innerHTML=tools.map(t=>{
+    const catLabel=t.cat.replace('_',' ');
+    return '<div class="osint-tool-card" onclick="openOsintTool(\''+encodeURIComponent(t.name)+'\',\''+encodeURIComponent(q)+'\')">'+
+      '<div class="osint-tool-cat '+t.cat+'">'+catLabel+'</div>'+
+      '<div class="osint-tool-name">'+t.name+'</div>'+
+      '<div class="osint-tool-desc">'+t.desc+'</div>'+
+    '</div>';
+  }).join('');
+}
+function openOsintTool(nameEnc,qEnc){
+  const name=decodeURIComponent(nameEnc);
+  const q=decodeURIComponent(qEnc);
+  const tool=OSINT_TOOLS_DATA.find(t=>t.name===name);
+  if(!tool)return;
+  if(q&&tool.urls.length>0){
+    const url=tool.urls[0].replace('{q}',encodeURIComponent(q));
+    window.open(url,'_blank');
+  }else{
+    tool.urls.forEach(u=>window.open(u.replace('{q}',''),'_blank'));
+  }
+}
+document.getElementById('osintSearch').addEventListener('input',renderOsintTools);
+document.getElementById('osintSearch').addEventListener('keydown',function(e){
+  if(e.key==='Enter'){
+    e.preventDefault();
+    const q=this.value.trim();
+    if(!q)return;
+    const input=document.getElementById('userInput');
+    input.value='search osint for '+q;
+    input.dispatchEvent(new Event('input'));
+    toggleOsintPanel();
+  }
+});
+// ─── End OSINT Toolkit ──────────────────────────────────────────
+
 function toggleCodingMode(){
   codingMode=!codingMode;
   fetch('/api/coding_mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:codingMode})});
@@ -12610,6 +13522,14 @@ function addChatMessage(role,content){
   div.innerHTML=html;
   chatMessages.appendChild(div);
   chatMessages.scrollTop=chatMessages.scrollHeight;
+  // Auto-expand chat for long messages (investigation reports)
+  if(content.length>300||content.includes('--- Investigation Report')){
+    chatContainer.classList.add('expanded');
+    chatContainer.classList.add('active');
+  }
+}
+function collapseChat(){
+  chatContainer.classList.remove('expanded');
 }
 
 function renderCodeBlocks(content){
@@ -14645,6 +15565,21 @@ window.CameraBridge = {
     <button onclick="closeSetupGuide()" style="width:30px;height:30px;border-radius:50%;border:none;background:rgba(90,70,120,0.12);color:#5d4e6d;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center">✕</button>
   </div>
 
+  <!-- Prerequisites -->
+  <div style="margin-bottom:20px;padding:16px;background:rgba(139,122,158,0.08);border-radius:12px;border:1px solid rgba(139,122,158,0.15)">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <div style="font-size:16px">📋</div>
+      <div style="font-weight:600;font-size:14px">Prerequisites</div>
+    </div>
+    <div style="font-size:12px;line-height:1.6;opacity:0.8">
+      Before you begin, make sure you have:<br>
+      • <strong>Android 8.0+</strong> (API level 26 or higher)<br>
+      • <strong>Internet connection</strong> for downloading apps<br>
+      • <strong>At least 200 MB free storage</strong> for Termux + Python packages<br>
+      • <strong>For Termux Server version:</strong> Additional 1-2 GB for AI models and dependencies
+    </div>
+  </div>
+
   <!-- Step 1: Install F-Droid -->
   <div style="margin-bottom:18px">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
@@ -14734,8 +15669,29 @@ function togglePhonePanel(){phonePanelOpen=!phonePanelOpen;var b=document.getEle
 function openSetupGuide(){document.getElementById('setupGuideBackdrop').style.display='block';document.getElementById('setupGuideModal').style.display='block';document.body.style.overflow='hidden'}
 function closeSetupGuide(){document.getElementById('setupGuideBackdrop').style.display='none';document.getElementById('setupGuideModal').style.display='none';document.body.style.overflow=''}
 function copyExtAppsCmd(){var cmd="mkdir -p ~/.termux && echo 'allow-external-apps=true' >> ~/.termux/termux.properties";navigator.clipboard.writeText(cmd).then(function(){var b=event.target;var orig=b.textContent;b.textContent='✓';setTimeout(function(){b.textContent=orig},1500)}).catch(function(){})}
-function loadApkVariants(){fetch('/api/apk/variants').then(function(r){return r.json()}).then(function(list){var el=document.getElementById('apkVariantList');el.innerHTML='';if(!list.length){el.innerHTML='<div style="opacity:0.5;padding:4px 0">No APK builds found</div>';return}
-list.forEach(function(f){var a=document.createElement('a');a.href='/api/apk/download';a.style.display='flex';a.style.alignItems='center';a.style.justifyContent='space-between';a.style.padding='6px 8px';a.style.borderRadius='8px';a.style.background='rgba(255,255,255,0.4)';a.style.textDecoration='none';a.style.color='#5d4e6d';a.style.fontSize='11px';a.style.marginBottom='3px';a.title='Download '+f.filename;var name=document.createElement('span');name.textContent='v'+f.filename.replace(/^lilly-overlay-v/,'').replace(/\.apk$/,'');var size=document.createElement('span');size.style.opacity='0.5';size.textContent=(f.size/1024/1024).toFixed(1)+' MB ⬇';a.appendChild(name);a.appendChild(size);el.appendChild(a)})})}
+function loadApkVariants(){
+  fetch('/api/apk/variants').then(function(r){return r.json()}).then(function(list){
+    var el=document.getElementById('apkVariantList');
+    el.innerHTML='';
+    if(!list.length){el.innerHTML='<div style="opacity:0.5;padding:4px 0">No APK builds found</div>';return}
+    var light=list.find(function(f){return f.type==='light'});
+    var full=list.find(function(f){return f.type==='full'});
+    function addApk(f,label,bgColor,accentColor){
+      var a=document.createElement('a');
+      a.href='/api/apk/download?type='+f.type;
+      a.style.cssText='display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:8px;background:'+bgColor+';text-decoration:none;color:#5d4e6d;font-size:11px;margin-bottom:3px';
+      a.title='Download '+label+' version';
+      var name=document.createElement('span');
+      name.innerHTML='<span style="color:'+accentColor+';font-weight:600">'+label+'</span> v'+f.variant.replace(/^v/,'');
+      var size=document.createElement('span');
+      size.style.cssText='opacity:0.5';
+      size.textContent=(f.size/1024/1024).toFixed(1)+' MB \u2B07';
+      a.appendChild(name);a.appendChild(size);el.appendChild(a);
+    }
+    if(light){addApk(light,'Light','rgba(74,222,128,0.15)','#4ade80')}
+    if(full){addApk(full,'Termux','rgba(139,122,158,0.15)','#8b7a9e')}
+  }).catch(function(e){console.error('loadApkVariants',e)})
+}
 async function generatePairingCode(){try{var r=await fetch('/api/pair/code',{method:'POST'});if(!r.ok){document.getElementById('pairingSignInPrompt').style.display='block';document.getElementById('pairingCodeDisplay').style.display='none';return}
 var data=await r.json();document.getElementById('pairingSignInPrompt').style.display='none';document.getElementById('pairingCodeDisplay').style.display='block';document.getElementById('pairingCodeValue').textContent=data.code}catch(e){}}
 </script>
@@ -15513,24 +16469,33 @@ async function playAudio(audioId){
 
 async function sendMessage(){
   const text=chatInput.value.trim();
-  if(!text)return;
-  bubbleText.innerHTML='<b>You:</b> '+text+'<br><i>thinking...</i>';
+  if(!text && uploadedImages.length === 0) return;
+  bubbleText.innerHTML='<b>You:</b> '+(text||'(image)')+'<br><i>thinking...</i>';
   chatInput.value='';
+  
+  // Build payload with images if present
+  const payload = {text, avatar};
+  if (uploadedImages.length > 0) {
+    payload.images = uploadedImages.map(img => img.data);
+  }
+  
   // Check for local commands first (open/launch app)
-  if(handleLocalCommand(text))return;
+  if(text && handleLocalCommand(text)) return;
   try{
     const r=await authFetch('/api/cmd',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text,avatar})
+      body:JSON.stringify(payload)
     });
     const res=await r.json();
-    bubbleText.innerHTML='<b>You:</b> '+text+'<br><b>Lilly:</b> '+(res.reply||'');
+    bubbleText.innerHTML='<b>You:</b> '+(text||'(image)')+'<br><b>Lilly:</b> '+(res.reply||'');
     lookAt='app';
     if(res.audio_id)playAudio(res.audio_id);
     if(res.open_url)handleOpenUrl(res.open_url);
+    // Clear images after sending
+    clearUploadedImages();
   }catch(e){
-    bubbleText.innerHTML='<b>You:</b> '+text+'<br><i>Connection error</i>';
+    bubbleText.innerHTML='<b>You:</b> '+(text||'(image)')+'<br><i>Connection error</i>';
   }
   bubbleText.scrollTop=bubbleText.scrollHeight;
 }
@@ -15593,6 +16558,8 @@ function stopOverlayMic(){
 }
 function recordOverlayChunk(){
   if(!overlayMicActive||!overlayMicStream)return;
+  // Client-side speaking guard: skip recording while Lilly is speaking to prevent echo
+  if(typeof speaking==='boolean'&&speaking){if(overlayMicActive)setTimeout(recordOverlayChunk,500);return}
   const opts={mimeType:'audio/webm;codecs=opus'};
   if(!MediaRecorder.isTypeSupported(opts.mimeType))delete opts.mimeType;
   overlayMicRecorder=new MediaRecorder(overlayMicStream,opts);
@@ -15905,6 +16872,161 @@ if (!isAndroidBridge) {
 sendBtn.addEventListener('click',sendMessage);
 chatInput.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();sendMessage();}});
 
+// ─── Image Display and Upload ───
+let uploadedImages = [];
+const imageDisplay = document.getElementById('imageDisplay');
+const imageContainer = document.getElementById('imageContainer');
+
+function toggleImageDisplay() {
+  if (imageDisplay) {
+    imageDisplay.classList.toggle('active');
+    if (!imageDisplay.classList.contains('active')) {
+      imageDisplay.classList.remove('collapsed');
+    }
+  }
+}
+
+function toggleImageCollapse() {
+  if (!imageDisplay) return;
+  const isCollapsed = imageDisplay.classList.toggle('collapsed');
+  const hideLabel = document.querySelector('#hideImagesBtn .hide-label');
+  const showLabel = document.querySelector('#hideImagesBtn .show-label');
+  const collapsedCount = document.getElementById('collapsedCount');
+  
+  if (hideLabel) hideLabel.style.display = isCollapsed ? 'none' : '';
+  if (showLabel) showLabel.style.display = isCollapsed ? '' : 'none';
+  if (collapsedCount) collapsedCount.textContent = uploadedImages.length;
+}
+
+function handleImageUpload(event) {
+  const files = event.target.files;
+  if (!files || files.length === 0) return;
+  
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (!file.type.startsWith('image/')) continue;
+    
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const imageData = {
+        id: Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+        data: e.target.result,
+        name: file.name,
+        type: file.type
+      };
+      uploadedImages.push(imageData);
+      renderImageItem(imageData);
+      toggleImageDisplay();
+    };
+    reader.readAsDataURL(file);
+  }
+  event.target.value = '';
+}
+
+function handleMainImageUpload(event) {
+  handleImageUpload(event);
+}
+
+function renderImageItem(imageData) {
+  if (!imageContainer) return;
+  
+  const uploadZone = imageContainer.querySelector('.image-upload-zone');
+  
+  const item = document.createElement('div');
+  item.className = 'image-item';
+  item.dataset.id = imageData.id;
+  
+  item.innerHTML = `
+    <img src="${imageData.data}" alt="${imageData.name}">
+    <div class="image-actions">
+      <button class="image-download" onclick="downloadImage('${imageData.id}')" title="Download">↓</button>
+      <button class="image-remove" onclick="removeImage('${imageData.id}')" title="Remove">×</button>
+    </div>
+  `;
+  
+  if (uploadZone) {
+    imageContainer.insertBefore(item, uploadZone);
+  } else {
+    imageContainer.appendChild(item);
+  }
+  
+  // Update collapsed count
+  const collapsedCount = document.getElementById('collapsedCount');
+  if (collapsedCount) collapsedCount.textContent = uploadedImages.length;
+}
+
+function removeImage(id) {
+  uploadedImages = uploadedImages.filter(img => img.id !== id);
+  const item = imageContainer.querySelector(`[data-id="${id}"]`);
+  if (item) item.remove();
+  
+  // Update collapsed count
+  const collapsedCount = document.getElementById('collapsedCount');
+  if (collapsedCount) collapsedCount.textContent = uploadedImages.length;
+  
+  if (uploadedImages.length === 0) {
+    imageDisplay.classList.remove('active');
+    imageDisplay.classList.remove('collapsed');
+  }
+}
+
+function getUploadedImagesBase64() {
+  return uploadedImages.map(img => img.data);
+}
+
+function clearUploadedImages() {
+  uploadedImages = [];
+  if (imageContainer) {
+    const items = imageContainer.querySelectorAll('.image-item');
+    items.forEach(item => item.remove());
+  }
+  if (imageDisplay) {
+    imageDisplay.classList.remove('active');
+  }
+}
+
+// Drag and drop support for image display
+if (imageContainer) {
+  imageContainer.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    imageContainer.style.background = 'rgba(184,169,201,0.2)';
+  });
+  
+  imageContainer.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    imageContainer.style.background = '';
+  });
+  
+  imageContainer.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    imageContainer.style.background = '';
+    
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      for (let i = 0; i < files.length; i++) {
+        if (files[i].type.startsWith('image/')) {
+          const reader = new FileReader();
+          reader.onload = function(ev) {
+            const imageData = {
+              id: Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+              data: ev.target.result,
+              name: files[i].name,
+              type: files[i].type
+            };
+            uploadedImages.push(imageData);
+            renderImageItem(imageData);
+            toggleImageDisplay();
+          };
+          reader.readAsDataURL(files[i]);
+        }
+      }
+    }
+  });
+}
+
 // Expose functions for Android WebView bridge
 window.LillyOverlay={sendMessage,toggleOverlayMic,pollState,localToast,localNotif,localOpen,localAM};
 
@@ -15944,35 +17066,61 @@ async def serve_ui():
 APK_DIR = Path(__file__).parent / "lilly-overlay-app"
 
 def _latest_apk() -> Path:
-    """Return the latest overlay APK."""
     apks = sorted(APK_DIR.glob("lilly-overlay-v*.apk"), key=lambda p: p.stat().st_mtime, reverse=True)
     if apks:
         return apks[0]
-    fallback = APK_DIR / "app/build/outputs/apk/debug/app-debug.apk"
-    if fallback.exists():
-        return fallback
-    raise FileNotFoundError("No APK found. Build it first with lilly-overlay-app/build.sh")
+    raise FileNotFoundError("No APK found")
 
 @app.get("/api/apk/variants")
 async def apk_variants():
     apks = sorted(APK_DIR.glob("lilly-overlay-v*.apk"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not apks:
         return JSONResponse([])
-    # Only expose the latest version — no old versions in the UI
-    latest = apks[0]
-    return JSONResponse([{"filename": latest.name, "size": latest.stat().st_size}])
+    
+    results = []
+    for apk in apks:
+        size_mb = apk.stat().st_size / (1024 * 1024)
+        variant = apk.stem.replace("lilly-overlay-", "")
+        # Determine type based on file size (light < 10MB, full > 10MB)
+        apk_type = "light" if size_mb < 10 else "full"
+        results.append({
+            "filename": apk.name,
+            "size": apk.stat().st_size,
+            "variant": variant,
+            "type": apk_type,
+            "label": "Light" if apk_type == "light" else "Termux Server"
+        })
+    return JSONResponse(results)
 
 @app.get("/api/apk/download")
-async def download_apk(variant: str = ""):
+async def download_apk(variant: str = "", type: str = ""):
     if variant:
         p = APK_DIR / f"lilly-overlay-{variant}.apk"
         if p.exists():
             return FileResponse(str(p), media_type="application/vnd.android.package-archive", filename=p.name)
+    
+    if type:
+        # Find latest APK of the specified type (light or full)
+        apks = sorted(APK_DIR.glob("lilly-overlay-v*.apk"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for apk in apks:
+            size_mb = apk.stat().st_size / (1024 * 1024)
+            apk_type = "light" if size_mb < 10 else "full"
+            if apk_type == type:
+                return FileResponse(str(apk), media_type="application/vnd.android.package-archive", filename=apk.name)
+    
     try:
         apk = _latest_apk()
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return FileResponse(str(apk), media_type="application/vnd.android.package-archive", filename=apk.name)
+
+@app.get("/lilly_ai.py")
+async def serve_lilly_ai_py():
+    lilly_ai_path = Path(__file__).resolve()
+    if lilly_ai_path.exists():
+        return FileResponse(str(lilly_ai_path), media_type="text/x-python",
+            filename="lilly_ai.py")
+    raise HTTPException(status_code=404, detail="lilly_ai.py not found")
 
 # ─── PAGE CONTEXT / CHROME BROWSING MONITOR ──────────────────────
 # When the overlay detects Chrome is in the foreground, it sends the URL here.
@@ -16343,12 +17491,25 @@ h1{font-size:24px;font-weight:600;margin-bottom:4px}
   <h1>Lilly Overlay</h1>
   <div class="subtitle">A floating digital companion that lives on your screen</div>
 
+  <!-- Prerequisites -->
+  <div style="margin-bottom:20px;padding:14px;background:rgba(139,122,158,0.08);border-radius:12px;border:1px solid rgba(139,122,158,0.15);text-align:left">
+    <div style="font-weight:600;font-size:13px;margin-bottom:6px">📋 Prerequisites</div>
+    <div style="font-size:12px;line-height:1.6;opacity:0.8">
+      • <strong>Android 8.0+</strong> (API 26+) required<br>
+      • <strong>F-Droid</strong> app store for installing Termux<br>
+      • <strong>Termux</strong> from F-Droid (not Play Store version)<br>
+      • <strong>200 MB+ free storage</strong> for Termux + Python packages<br>
+      • <strong>For Termux Server:</strong> 1-2 GB extra for AI models
+    </div>
+  </div>
+
   <div class="features">
     <h3>What it does</h3>
     <div class="feature-item"><span class="icon">💬</span> Speech bubble overlay — Lilly speaks directly on your screen, over any app</div>
     <div class="feature-item"><span class="icon">🎤</span> Voice chat — tap the mic button and talk hands-free</div>
-    <div class="feature-item"><span class="icon">👀</span> Animated character — expressive eyes and mouth that move as she talks</div>
-    <div class="feature-item"><span class="icon">📱</span> Draggable &amp; resizable — move her anywhere, expands for chat</div>
+    <div class="feature-item"><span class="icon">🐺</span> Voice-activated avatars — say "hey Wolf" and Wolf appears</div>
+    <div class="feature-item"><span class="icon">👆</span> Single-tap to chat — tap once to open chat and mic</div>
+    <div class="feature-item"><span class="icon">🔍</span> OSINT & Skills — news, anonymous messaging, fake identities</div>
     <div class="feature-item"><span class="icon">🔔</span> Proactive notifications — Lilly taps your shoulder when something needs attention</div>
     <div class="feature-item"><span class="icon">🌙</span> Always-on-top — appears as a system overlay, even with other apps open</div>
   </div>
@@ -16383,13 +17544,31 @@ async function loadVersions() {
       dlArea.style.display = 'block';
       return;
     }
-    const f = list[0];
-    const variant = f.filename.replace(/^lilly-overlay-/, '').replace(/\.apk$/, '');
-    const size = (f.size / 1024 / 1024).toFixed(1);
-    dlArea.innerHTML =
-      '<div style="font-size:15px;font-weight:600;margin-bottom:6px">v' + variant + '</div>' +
-      '<div style="font-size:12px;color:rgba(93,78,109,0.5);margin-bottom:16px">' + size + ' MB</div>' +
-      '<a class="dl-btn" href="/api/apk/download" style="padding:14px 40px;font-size:15px;border-radius:16px;background:rgba(139,122,158,0.3)">⬇ Download APK</a>';
+    const light = list.find(f => f.type === 'light');
+    const full = list.find(f => f.type === 'full');
+    let html = '';
+    
+    if (light) {
+      const size = (light.size / 1024 / 1024).toFixed(1);
+      html += '<div style="margin-bottom:16px;padding:16px;border-radius:14px;background:rgba(74,222,128,0.1);border:1px solid rgba(74,222,128,0.2)">';
+      html += '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#4ade80;margin-bottom:6px">Light Version</div>';
+      html += '<div style="font-size:15px;font-weight:600;margin-bottom:4px">v' + light.variant + '</div>';
+      html += '<div style="font-size:12px;color:rgba(93,78,109,0.5);margin-bottom:12px">' + size + ' MB \u00b7 Minimal overlay client</div>';
+      html += '<a class="dl-btn" href="/api/apk/download?type=light" style="padding:12px 32px;font-size:14px;border-radius:12px;background:rgba(74,222,128,0.2);color:#2d5a3e">\u2B07 Download Light</a>';
+      html += '</div>';
+    }
+    
+    if (full) {
+      const size = (full.size / 1024 / 1024).toFixed(1);
+      html += '<div style="margin-bottom:16px;padding:16px;border-radius:14px;background:rgba(139,122,158,0.1);border:1px solid rgba(139,122,158,0.2)">';
+      html += '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#8b7a9e;margin-bottom:6px">Termux Server Version</div>';
+      html += '<div style="font-size:15px;font-weight:600;margin-bottom:4px">v' + full.variant + '</div>';
+      html += '<div style="font-size:12px;color:rgba(93,78,109,0.5);margin-bottom:12px">' + size + ' MB \u00b7 Full server with AI backend</div>';
+      html += '<a class="dl-btn" href="/api/apk/download?type=full" style="padding:12px 32px;font-size:14px;border-radius:12px;background:rgba(139,122,158,0.2)">\u2B07 Download Termux Server</a>';
+      html += '</div>';
+    }
+    
+    dlArea.innerHTML = html;
     dlArea.style.display = 'block';
   } catch (e) {
     loading.style.display = 'none';

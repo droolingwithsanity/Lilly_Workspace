@@ -1,5 +1,5 @@
 plugins {
-    id 'com.android.application'
+    id 'com.android.application' version '8.1.0'
 }
 
 android {
@@ -10,8 +10,8 @@ android {
         applicationId 'ai.agent1c.hitomi'
         minSdk 21
         targetSdk 34
-        versionCode 23
-        versionName "2.3"
+        versionCode 27
+        versionName "3.2"
     }
 
     buildTypes {

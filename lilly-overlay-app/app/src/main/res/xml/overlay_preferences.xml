@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <!-- Termux AI Server -->
+    <PreferenceCategory app:title="Termux AI Server">
+
+        <Preference
+            app:key="termux_status"
+            app:title="Termux Status"
+            app:summary="Checking..."
+            app:icon="@android:drawable/ic_dialog_info" />
+
+        <Preference
+            app:key="termux_deploy"
+            app:title="Deploy llama.cpp to Termux"
+            app:summary="Install AI server, build llama.cpp, download manager scripts"
+            app:icon="@android:drawable/ic_menu_upload" />
+
+        <Preference
+            app:key="termux_start_server"
+            app:title="Start AI Server"
+            app:summary="Start llama.cpp server on port 8080"
+            app:icon="@android:drawable/ic_media_play" />
+
+        <Preference
+            app:key="termux_stop_server"
+            app:title="Stop AI Server"
+            app:summary="Stop running llama.cpp server"
+            app:icon="@android:drawable/ic_media_pause" />
+
+        <Preference
+            app:key="termux_server_status"
+            app:title="Server Status"
+            app:summary="Check if AI server is running"
+            app:icon="@android:drawable/ic_dialog_info" />
+
+        <Preference
+            app:key="termux_test"
+            app:title="Test Termux Connection"
+            app:summary="Verify command bridge works"
+            app:icon="@android:drawable/ic_menu_send" />
+
+        <EditTextPreference
+            app:key="termux_server_url"
+            app:title="AI Server URL"
+            app:summary="llama.cpp server endpoint"
+            app:defaultValue="http://127.0.0.1:8080"
+            app:dialogTitle="Set AI Server URL" />
+
+    </PreferenceCategory>
+
+    <!-- Mic & Voice -->
+    <PreferenceCategory app:title="Microphone">
+
+        <SwitchPreferenceCompat
+            app:key="mic_always_listening"
+            app:title="Always Listening"
+            app:summary="Keep microphone active for wake word"
+            app:defaultValue="false" />
+
+        <SwitchPreferenceCompat
+            app:key="mic_loop_guard"
+            app:title="Mic Loop Guard"
+            app:summary="Prevent mic from picking up its own TTS output"
+            app:defaultValue="true" />
+
+        <SwitchPreferenceCompat
+            app:key="tts_enabled"
+            app:title="Voice Output"
+            app:summary="Speak responses aloud"
+            app:defaultValue="true" />
+
+        <SeekBarPreference
+            app:key="tts_volume"
+            app:title="Voice Volume"
+            app:summary="Adjust TTS volume"
+            app:defaultValue="80" />
+
+    </PreferenceCategory>
+
+    <!-- Phone Assistant -->
+    <PreferenceCategory app:title="Phone Assistant">
+
+        <SwitchPreferenceCompat
+            app:key="notification_reading"
+            app:title="Read Notifications"
+            app:summary="Access and read phone notifications"
+            app:defaultValue="true" />
+
+        <SwitchPreferenceCompat
+            app:key="sensor_access"
+            app:title="Sensor Access"
+            app:summary="Read accelerometer, light, proximity sensors"
+            app:defaultValue="true" />
+
+        <SwitchPreferenceCompat
+            app:key="navigation_control"
+            app:title="Navigation Control"
+            app:summary="Open apps, scroll, tap via accessibility"
+            app:defaultValue="false" />
+
+        <SwitchPreferenceCompat
+            app:key="silent_mode"
+            app:title="Silent Mode"
+            app:summary="Don't report status unless asked"
+            app:defaultValue="true" />
+
+    </PreferenceCategory>
+
+    <!-- OSINT -->
+    <PreferenceCategory app:title="OSINT Tools">
+
+        <SwitchPreferenceCompat
+            app:key="osint_enabled"
+            app:title="Enable OSINT Panel"
+            app:summary="Show OSINT investigation tools in chat overlay"
+            app:defaultValue="true" />
+
+        <SwitchPreferenceCompat
+            app:key="osint_auto_open"
+            app:title="Auto-Open URLs"
+            app:summary="Automatically open OSINT links in browser when selected"
+            app:defaultValue="false" />
+
+    </PreferenceCategory>
+
+    <!-- Server -->
+    <PreferenceCategory app:title="Server">
+
+        <EditTextPreference
+            app:key="overlay_server_url"
+            app:title="Lilly Server URL"
+            app:summary="Main AI server endpoint"
+            app:defaultValue="https://droolingwithsanity.ca"
+            app:dialogTitle="Set Server URL" />
+
+        <Preference
+            app:key="deploy_phone_server"
+            app:title="Deploy Phone Server"
+            app:summary="Push sensor/notification server to Termux"
+            app:icon="@android:drawable/ic_menu_upload" />
+
+        <Preference
+            app:key="start_phone_server"
+            app:title="Start Phone Server"
+            app:summary="Start sensor/notification server on port 8099"
+            app:icon="@android:drawable/ic_media_play" />
+
+    </PreferenceCategory>
+
+</PreferenceScreen>

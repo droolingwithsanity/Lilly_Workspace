@@ -3,8 +3,9 @@ set -euo pipefail
 # ─── llama.cpp setup for Lilly AI ───────────────────────────────
 # Run this on Termux (Android) or Linux to build llama.cpp
 
-LLAMA_DIR="$HOME/llama.cpp"
-MODEL_DIR="$LLAMA_DIR/models"
+INSTALL_DIR="$HOME/ai-server"
+LLAMA_DIR="$INSTALL_DIR/llama.cpp"
+MODEL_DIR="$INSTALL_DIR/models"
 
 echo "==> Installing dependencies (Termux)..."
 if command -v pkg &>/dev/null; then
@@ -16,6 +17,7 @@ elif command -v apt &>/dev/null; then
 fi
 
 echo "==> Cloning llama.cpp..."
+mkdir -p "$INSTALL_DIR"
 if [ ! -d "$LLAMA_DIR" ]; then
     git clone --depth 1 https://github.com/ggml-org/llama.cpp "$LLAMA_DIR"
 fi
@@ -35,5 +37,6 @@ echo ""
 echo "==> Setup complete!"
 echo "    Server binary: $LLAMA_DIR/build/bin/llama-server"
 echo "    CLI binary:    $LLAMA_DIR/build/bin/llama-cli"
+echo "    Models dir:    $MODEL_DIR"
 echo ""
 echo "To start Lilly: python3 $HOME/Lilly_Workspace/lilly_ai.py"
