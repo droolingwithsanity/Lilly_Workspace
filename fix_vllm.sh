@@ -6,7 +6,7 @@ echo "=========================================="
 
 # 1. Update package lists
 echo "[1/4] Updating package lists..."
-sudo apt-update -y
+sudo apt update -y
 
 # 2. Install modern NVIDIA drivers (Version 535 is highly stable for modern PyTorch)
 echo "[2/4] Installing modern NVIDIA drivers (nvidia-driver-535)..."

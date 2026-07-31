@@ -2,6 +2,7 @@
 Lilly AI — Simple Email/Password Authentication
 Per-user sessions with JWT tokens and isolated memory.
 """
+
 import os, json, hashlib, secrets, time
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -20,6 +21,7 @@ USERS_FILE = DATA_DIR / "users.json"
 USER_MEMORY_DIR = DATA_DIR / "users"
 GOOGLE_TOKENS_FILE = DATA_DIR / "google_tokens.json"
 
+
 # ─── PASSWORD HASHING ───────────────────────────────────────────
 def _hash_password(password: str, salt: str = None) -> str:
     """Hash password with PBKDF2-SHA256."""
@@ -28,16 +30,19 @@ def _hash_password(password: str, salt: str = None) -> str:
     dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100_000)
     return f"{salt}:{dk.hex()}"
 
+
 def _verify_password(password: str, stored: str) -> bool:
     """Verify password against stored hash."""
     salt, hash_hex = stored.split(":", 1)
     return _hash_password(password, salt) == stored
+
 
 # ─── JWT TOKENS ──────────────────────────────────────────────────
 try:
     import jwt as pyjwt
 except ImportError:
     pyjwt = None
+
 
 def create_token(user_id: str, email: str, name: str) -> str:
     """Create a JWT access token."""
@@ -53,8 +58,12 @@ def create_token(user_id: str, email: str, name: str) -> str:
         return pyjwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     # Fallback: base64 JSON token (no library needed)
     import base64
-    serializable = {k: v.isoformat() if isinstance(v, datetime) else v for k, v in payload.items()}
+
+    serializable = {
+        k: v.isoformat() if isinstance(v, datetime) else v for k, v in payload.items()
+    }
     return base64.urlsafe_b64encode(json.dumps(serializable).encode()).decode()
+
 
 def verify_token(token: str) -> Optional[Dict[str, Any]]:
     """Verify JWT token and return payload."""
@@ -65,6 +74,7 @@ def verify_token(token: str) -> Optional[Dict[str, Any]]:
             return pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         # Fallback decode
         import base64
+
         payload = json.loads(base64.urlsafe_b64decode(token.encode()))
         # Check expiry
         exp = payload.get("exp", 0)
@@ -77,6 +87,7 @@ def verify_token(token: str) -> Optional[Dict[str, Any]]:
         logger.debug(f"Token verification failed: {e}")
         return None
 
+
 # ─── USER STORE ──────────────────────────────────────────────────
 @dataclass
 class User:
@@ -86,6 +97,7 @@ class User:
     password_hash: str
     created_at: str
     role: str = "user"
+
 
 class UserStore:
     """Persistent user storage with file backend."""
@@ -130,7 +142,9 @@ class UserStore:
         # Create user memory directory
         user_dir = USER_MEMORY_DIR / user_id
         user_dir.mkdir(parents=True, exist_ok=True)
-        (user_dir / "memory.json").write_text(json.dumps({"summary": "", "entries": []}, indent=2))
+        (user_dir / "memory.json").write_text(
+            json.dumps({"summary": "", "entries": []}, indent=2)
+        )
 
         logger.info(f"Created user: {email_lower} (id={user_id})")
         return user
@@ -160,7 +174,9 @@ class UserStore:
                 return User(**{k: v for k, v in u.items() if k != "password_hash"})
         return None
 
-    def create_google_user(self, email: str, name: str, google_id: str) -> Optional[User]:
+    def create_google_user(
+        self, email: str, name: str, google_id: str
+    ) -> Optional[User]:
         """Create a user from Google OAuth (no password)."""
         email_lower = email.lower().strip()
         for u in self._users.values():
@@ -181,7 +197,9 @@ class UserStore:
 
         user_dir = USER_MEMORY_DIR / user_id
         user_dir.mkdir(parents=True, exist_ok=True)
-        (user_dir / "memory.json").write_text(json.dumps({"summary": "", "entries": []}, indent=2))
+        (user_dir / "memory.json").write_text(
+            json.dumps({"summary": "", "entries": []}, indent=2)
+        )
 
         logger.info(f"Created Google user: {email_lower} (id={user_id})")
         return user
@@ -217,12 +235,14 @@ class UserStore:
             for u in self._users.values()
         ]
 
+
 # ─── PER-USER MEMORY ─────────────────────────────────────────────
 def get_user_memory_path(user_id: str) -> Path:
     """Get the memory file path for a user."""
     user_dir = USER_MEMORY_DIR / user_id
     user_dir.mkdir(parents=True, exist_ok=True)
     return user_dir / "memory.json"
+
 
 def load_user_memory(user_id: str) -> dict:
     """Load a user's conversation memory."""
@@ -234,6 +254,7 @@ def load_user_memory(user_id: str) -> dict:
             pass
     return {"summary": "", "entries": []}
 
+
 def save_user_memory(user_id: str, data: dict):
     """Save a user's conversation memory."""
     path = get_user_memory_path(user_id)
@@ -243,12 +264,11 @@ def save_user_memory(user_id: str, data: dict):
 # ─── MODULE COMPATIBILITY WRAPPERS ─────────────────────────────
 # ─── COMPATIBILITY WRAPPERS ─────────────────────────────────────
 
-def get_google_tokens(user_id: str) -> Optional[dict]:
-    """Module-level wrapper for Google OAuth token retrieval."""
-    return get_user_store().get_google_tokens(user_id)
+
 def get_google_tokens(user_id: str) -> Optional[dict]:
     """Get Google OAuth tokens for a user."""
     return get_user_store().get_google_tokens(user_id)
+
 
 def save_google_tokens(user_id: str, tokens: dict):
     """Save Google OAuth tokens for a user."""
@@ -258,12 +278,14 @@ def save_google_tokens(user_id: str, tokens: dict):
 # ─── GLOBALS ─────────────────────────────────────────────────────
 user_store: Optional[UserStore] = None
 
+
 def init_auth() -> UserStore:
     """Initialize the auth system."""
     global user_store
     user_store = UserStore()
     logger.info(f"Auth system initialized ({len(user_store._users)} users)")
     return user_store
+
 
 def get_user_store() -> UserStore:
     global user_store

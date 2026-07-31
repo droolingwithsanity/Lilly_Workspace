@@ -1,0 +1,9 @@
+{
+  "projects": {
+    "opencv-detect": {
+      "port": 8123,
+      "url": "http://localhost:8123",
+      "updated": "2026-07-30T23:44:02"
+    }
+  }
+}

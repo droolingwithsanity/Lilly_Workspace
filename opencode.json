@@ -1,0 +1,156 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "username": "labhrasd",
+  "model": "anthropic/claude-sonnet-4-6",
+  "small_model": "anthropic/claude-sonnet-4-6",
+  "default_agent": "termux-agent",
+  "shell": "/bin/bash",
+  "logLevel": "INFO",
+  "share": "manual",
+  "autoupdate": true,
+  "snapshot": true,
+  "instructions": ["AGENTS.md", "PLAYBOOK.md"],
+
+  "skills": {
+    "paths": [".opencode/skills"]
+  },
+
+  "references": {
+    "lilly-docs": {
+      "path": "./docs",
+      "description": "Lilly AI project documentation and setup guides"
+    },
+    "hitomi": {
+      "path": "./hitomi-lilly-integration",
+      "description": "Hitomi Android integration layer for Lilly AI"
+    },
+    "termux-utils": {
+      "path": "./termux_utils.py",
+      "description": "Termux utility functions for Android sensor access"
+    },
+    "private-code": {
+      "path": "./PrivateCode",
+      "description": "Private code repository with benchmarks and tests"
+    },
+    "open-connector": {
+      "path": "./open-connector",
+      "description": "Node.js email/calendar API proxy for Lilly AI"
+    },
+    "hitomi-android": {
+      "path": "./hitomi-android",
+      "description": "Hitomi Android application source code"
+    },
+    "opencv-detect": {
+      "path": "./projects/opencv-detect",
+      "description": "OpenCV stop-sign detector demo project (Haar Cascades + Flask web UI)"
+    }
+  },
+
+  "agent": {
+    "termux-agent": {
+      "description": "Agent for managing Termux SSH connections and Android phone operations",
+      "mode": "primary",
+      "model": "anthropic/claude-sonnet-4-6",
+      "permission": {
+        "bash": {
+          "ssh *": "allow",
+          "termux-*": "allow",
+          "*": "ask"
+        },
+        "edit": "allow",
+        "read": "allow"
+      },
+      "prompt": "You are a Termux SSH assistant for the Lilly AI project. You help manage SSH connections to Android phones running Termux, execute remote commands, manage sensor data, and handle phone-specific operations. Always use the SSH keys and connection details from the environment variables."
+    },
+    "lilly-builder": {
+      "description": "Agent for building and deploying Lilly AI components",
+      "mode": "subagent",
+      "model": "anthropic/claude-sonnet-4-6",
+      "permission": {
+        "bash": {
+          "docker *": "allow",
+          "git *": "allow",
+          "make *": "allow",
+          "*": "ask"
+        },
+        "edit": "allow",
+        "read": "allow"
+      }
+    }
+  },
+
+  "command": {
+    "termux-ssh": {
+      "description": "Connect to Termux on Android phone via SSH",
+      "template": "Connect to Termux using SSH with the following parameters:\n- Host: $TERMUX_SSH_HOST\n- Port: $TERMUX_SSH_PORT\n- User: $TERMUX_SSH_USER\n- Key: $TERMUX_SSH_KEY\n\nExecute: ssh -i $TERMUX_SSH_KEY -p $TERMUX_SSH_PORT $TERMUX_SSH_USER@$TERMUX_SSH_HOST"
+    },
+    "termux-status": {
+      "description": "Check Termux server status and phone sensors",
+      "template": "Check the status of the Termux AI server and phone sensors:\n1. SSH to Termux and run: ~/ai-server/ai-server status\n2. Check sensor server at $SENSOR_SERVER_URL\n3. Report battery, WiFi, and location status"
+    },
+    "deploy-lilly": {
+      "description": "Deploy Lilly AI using Docker Compose",
+      "template": "Deploy the Lilly AI system:\n1. Build Docker images: docker-compose build\n2. Start services: docker-compose up -d\n3. Verify all services are running\n4. Check logs for any errors"
+    },
+    "setup-ssh": {
+      "description": "Set up SSH connection to Termux phone",
+      "template": "Run the SSH setup script:\n./setup-termux-ssh.sh\n\nThis will:\n1. Verify SSH key exists\n2. Check phone connectivity\n3. Create SSH config\n4. Test the connection"
+    },
+    "git-submodules": {
+      "description": "Update and manage git submodules",
+      "template": "Update git submodules:\n1. Initialize: git submodule init\n2. Update: git submodule update --remote\n3. Check status: git submodule status"
+    },
+    "list-repos": {
+      "description": "List all git repositories in the workspace",
+      "template": "List all git repositories:\n1. Main repo: git remote -v\n2. Submodules: git submodule foreach 'echo $name: $(git remote -v | head -1)'"
+    }
+  },
+
+  "mcp": {
+    "termux-sensors": {
+      "type": "local",
+      "command": ["python3", "termux_utils.py"],
+      "enabled": true,
+      "env": {
+        "TERMUX_SSH_HOST": "100.115.234.87",
+        "TERMUX_SSH_PORT": "8022",
+        "TERMUX_SSH_USER": "u0_a401"
+      }
+    }
+  },
+
+  "permission": {
+    "bash": {
+      "ssh *": "allow",
+      "termux-*": "allow",
+      "docker *": "allow",
+      "git *": "allow",
+      "*": "ask"
+    },
+    "edit": "allow",
+    "read": "allow",
+    "external_directory": {
+      "~/.ssh/*": "allow",
+      "~/ai-server/*": "allow",
+      "*": "ask"
+    }
+  },
+
+  "formatter": true,
+  "lsp": true,
+
+  "experimental": {
+    "primary_tools": ["edit", "bash"],
+    "mcp_timeout": 30000
+  },
+
+  "tool_output": {
+    "max_lines": 200,
+    "max_bytes": 8192
+  },
+
+  "compaction": {
+    "auto": true,
+    "tail_turns": 15
+  }
+}

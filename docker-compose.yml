@@ -2,12 +2,11 @@ services:
   lilly:
     build: .
     container_name: lilly-ai
-    ports:
-      - "8098:8098"
-      - "3007:3002"
+    network_mode: host
     volumes:
       - .:/app
       - /home/labhrasd/.ssh:/root/.ssh:ro
+      - /home/labhrasd/Lilly_Workspace/Lilly_Workspace:/root/lilly_termux_key:ro
       - /root/ai-server:/root/ai-server:rw
       - lilly-data:/app/data
       - connector-data:/app/data/connect
@@ -22,6 +21,7 @@ services:
       - TERMUX_SSH_HOST=${TERMUX_SSH_HOST}
       - TERMUX_SSH_PORT=${TERMUX_SSH_PORT:-8022}
       - TERMUX_SSH_USER=${TERMUX_SSH_USER}
+      - TERMUX_SSH_KEY=/root/lilly_termux_key
       # Auth0 OIDC — port 8098 only
       - AUTH0_DOMAIN=${AUTH0_DOMAIN}
       - AUTH0_CLIENT_ID=${AUTH0_CLIENT_ID}
@@ -43,15 +43,7 @@ services:
       - FAST_MODEL=${FAST_MODEL:-Ternary-Bonsai-27B-Q2_g64}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    networks:
-      - default
-      - whisper-net
     restart: unless-stopped
-
-networks:
-  whisper-net:
-    name: supernova_default
-    external: true
 
 volumes:
   lilly-data:

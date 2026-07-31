@@ -96,6 +96,7 @@ public class LillyOverlayService extends Service {
 
     private LillyAIChatClient chatClient;
     private TermuxCommandBridge termuxBridge;
+    private LocalPhoneClient phoneClient;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable statePoller = this::pollLillyState;
@@ -166,8 +167,11 @@ public class LillyOverlayService extends Service {
         try {
             createNotificationChannel();
             startForeground(NOTIF_ID, buildNotification());
+            phoneClient = new LocalPhoneClient();
             ensureOverlay();
             overlayRunning = true;
+            // Auto-start the phone server if Termux is available
+            startLillyPhoneServer();
         } catch (Exception e) {
             Log.e(TAG, "Failed to start overlay service", e);
             stopSelf();
@@ -187,6 +191,7 @@ public class LillyOverlayService extends Service {
         mainHandler.removeCallbacks(statePoller);
         stopSpeech();
         if (termuxBridge != null) termuxBridge.shutdown();
+        if (phoneClient != null) phoneClient.shutdown();
         executor.shutdownNow();
         if (ttsPlayer != null) {
             ttsPlayer.release();
@@ -210,6 +215,73 @@ public class LillyOverlayService extends Service {
                 try { windowManager.removeView(closeTargetView); } catch (Exception ignored) {}
             }
         }
+    }
+
+    /**
+     * Auto-start the Lilly phone server (lilly_phone_server.py) in Termux
+     * if it is not already running. Uses TermuxCommandBridge to launch
+     * the server in the background.
+     */
+    private void startLillyPhoneServer() {
+        if (termuxBridge == null) {
+            termuxBridge = new TermuxCommandBridge(this);
+        }
+        if (!termuxBridge.isTermuxInstalled()) {
+            Log.d(TAG, "Termux not installed — cannot auto-start phone server");
+            return;
+        }
+        // Check if already running
+        termuxBridge.runCommand(
+            "/data/data/com.termux/files/usr/bin/sh",
+            new String[]{"-c",
+                "pgrep -f lilly_phone_server.py > /dev/null 2>&1 && echo 'RUNNING' || echo 'STOPPED'"},
+            null,
+            new TermuxCommandBridge.Callback() {
+                @Override
+                public void onResult(TermuxCommandBridge.Result result) {
+                    String out = result.stdout != null ? result.stdout.trim() : "";
+                    if (out.contains("RUNNING")) {
+                        Log.d(TAG, "Phone server already running on :8099");
+                    } else {
+                        Log.d(TAG, "Starting phone server in Termux...");
+                        // Deploy the raw resource version to ~/Lilly_Workspace/
+                        // and start it if lilly_phone_server.py exists
+                        String deployScript =
+                            "mkdir -p ~/Lilly_Workspace && " +
+                            "if [ -f ~/Lilly_Workspace/lilly_phone_server.py ]; then " +
+                            "  pkill -f lilly_phone_server.py 2>/dev/null; " +
+                            "  sleep 0.3; " +
+                            "  nohup python ~/Lilly_Workspace/lilly_phone_server.py" +
+                            " > /tmp/lilly_phone.log 2>&1 & " +
+                            "  sleep 1; " +
+                            "  pgrep -f lilly_phone_server.py > /dev/null && echo 'SERVER_STARTED' || echo 'SERVER_FAILED'; " +
+                            "else " +
+                            "  echo 'NO_SERVER_FILE'; " +
+                            "fi";
+                        termuxBridge.runCommand(
+                            "/data/data/com.termux/files/usr/bin/sh",
+                            new String[]{"-c", deployScript},
+                            null,
+                            new TermuxCommandBridge.Callback() {
+                                @Override
+                                public void onResult(TermuxCommandBridge.Result r) {
+                                    String o = r.stdout != null ? r.stdout.trim() : "";
+                                    if (o.contains("SERVER_STARTED")) {
+                                        Log.i(TAG, "Phone server started on :8099");
+                                        Toast.makeText(LillyOverlayService.this,
+                                            "Phone server started on :8099", Toast.LENGTH_SHORT).show();
+                                    } else if (o.contains("NO_SERVER_FILE")) {
+                                        Log.w(TAG, "No phone server file — deploy via settings first");
+                                    } else {
+                                        Log.w(TAG, "Phone server start result: " + o);
+                                    }
+                                }
+                            }
+                        );
+                    }
+                }
+            }
+        );
     }
 
     private void ensureOverlay() {
@@ -266,6 +338,7 @@ public class LillyOverlayService extends Service {
 
         chatClient = new LillyAIChatClient(this);
         termuxBridge = new TermuxCommandBridge(this);
+        phoneClient = new LocalPhoneClient();
         loadSkills();
         initSpeechRecognizer();
         startStatePolling();
@@ -826,24 +899,16 @@ public class LillyOverlayService extends Service {
     private String currentAvatar = "puppy";
 
     private void showPairingCode() {
-        new Thread(() -> {
+        if (phoneClient == null) phoneClient = new LocalPhoneClient();
+        executor.execute(() -> {
             String code = "";
             try {
-                java.net.URL url = new java.net.URL("http://127.0.0.1:8099/api/pair_token");
-                java.net.HttpURLConnection c = (java.net.HttpURLConnection) url.openConnection();
-                c.setConnectTimeout(2000); c.setReadTimeout(3000);
-                if (c.getResponseCode() == 200) {
-                    java.io.BufferedReader r = new java.io.BufferedReader(
-                        new java.io.InputStreamReader(c.getInputStream()));
-                    StringBuilder sb = new StringBuilder();
-                    String line;
-                    while ((line = r.readLine()) != null) sb.append(line);
-                    r.close();
-                    c.disconnect();
-                    org.json.JSONObject obj = new org.json.JSONObject(sb.toString());
-                    code = obj.optString("token", "");
-                } else { c.disconnect(); }
-            } catch (Exception ignored) {}
+                String response = phoneClient.get("/api/pair_token");
+                org.json.JSONObject obj = new org.json.JSONObject(response);
+                code = obj.optString("token", "");
+            } catch (Exception e) {
+                Log.d(TAG, "Pair token fetch failed: " + e.getMessage());
+            }
             final String finalCode = code;
             mainHandler.post(() -> {
                 if (finalCode.isEmpty()) {
@@ -858,7 +923,7 @@ public class LillyOverlayService extends Service {
                         Toast.LENGTH_LONG).show();
                 }
             });
-        }).start();
+        });
     }
 
     private void updateMicLabel(View micContainer) {
@@ -1283,39 +1348,37 @@ public class LillyOverlayService extends Service {
         long now = System.currentTimeMillis();
         if (now - lastPairTime < 5 * 60 * 1000) return;
         lastPairTime = now;
-        try {
-            // Get pair token from local phone server
-            java.net.URL tokenUrl = new java.net.URL("http://127.0.0.1:8099/api/pair_token");
-            java.net.HttpURLConnection tc = (java.net.HttpURLConnection) tokenUrl.openConnection();
-            tc.setConnectTimeout(2000);
-            tc.setReadTimeout(2000);
-            if (tc.getResponseCode() != 200) return;
-            String tokenJson = readStreamToString(tc.getInputStream());
-            tc.disconnect();
-            org.json.JSONObject tokenData = new org.json.JSONObject(tokenJson);
-            String token = tokenData.optString("token", "");
-            if (token.isEmpty()) return;
 
-            // Register with remote server
-            String remoteUrl = getSharedPreferences("lilly_prefs", android.content.Context.MODE_PRIVATE)
-                .getString("lilly_server_url", "https://droolingwithsanity.ca");
-            java.net.URL pairUrl = new java.net.URL(remoteUrl + "/api/phone_pair");
-            java.net.HttpURLConnection pc = (java.net.HttpURLConnection) pairUrl.openConnection();
-            pc.setRequestMethod("POST");
-            pc.setConnectTimeout(5000);
-            pc.setReadTimeout(5000);
-            pc.setRequestProperty("Content-Type", "application/json");
-            pc.setDoOutput(true);
-            org.json.JSONObject body = new org.json.JSONObject();
-            body.put("token", token);
-            body.put("cmd_url", "http://127.0.0.1:8099/api/phone_cmd");
-            pc.getOutputStream().write(body.toString().getBytes("UTF-8"));
-            int code = pc.getResponseCode();
-            pc.disconnect();
-            Log.d(TAG, "Auto-pair with remote: HTTP " + code);
-        } catch (Exception e) {
-            Log.d(TAG, "Auto-pair skipped: " + e.getMessage());
-        }
+        if (phoneClient == null) phoneClient = new LocalPhoneClient();
+        executor.execute(() -> {
+            try {
+                // Get pair token from local phone server via LocalPhoneClient
+                String tokenJson = phoneClient.get("/api/pair_token");
+                org.json.JSONObject tokenData = new org.json.JSONObject(tokenJson);
+                String token = tokenData.optString("token", "");
+                if (token.isEmpty()) return;
+
+                // Register with remote server
+                String remoteUrl = getSharedPreferences("lilly_prefs", android.content.Context.MODE_PRIVATE)
+                    .getString("lilly_server_url", "https://droolingwithsanity.ca");
+                java.net.URL pairUrl = new java.net.URL(remoteUrl + "/api/phone_pair");
+                java.net.HttpURLConnection pc = (java.net.HttpURLConnection) pairUrl.openConnection();
+                pc.setRequestMethod("POST");
+                pc.setConnectTimeout(5000);
+                pc.setReadTimeout(5000);
+                pc.setRequestProperty("Content-Type", "application/json");
+                pc.setDoOutput(true);
+                org.json.JSONObject body = new org.json.JSONObject();
+                body.put("token", token);
+                body.put("cmd_url", "http://127.0.0.1:8099/api/phone_cmd");
+                pc.getOutputStream().write(body.toString().getBytes("UTF-8"));
+                int code = pc.getResponseCode();
+                pc.disconnect();
+                Log.d(TAG, "Auto-pair with remote: HTTP " + code);
+            } catch (Exception e) {
+                Log.d(TAG, "Auto-pair skipped: " + e.getMessage());
+            }
+        });
     }
 
     private static String readStreamToString(java.io.InputStream is) throws Exception {
@@ -1376,7 +1439,91 @@ public class LillyOverlayService extends Service {
             });
             openUrl(url);
         }
+
+        // Execute any commands queued by the web UI (phone pairing bridge)
+        if (state.pendingCommands != null && state.pendingCommands.length() > 0) {
+            Log.d(TAG, "Processing " + state.pendingCommands.length() + " pending commands");
+            for (int i = 0; i < state.pendingCommands.length(); i++) {
+                try {
+                    org.json.JSONObject cmd = state.pendingCommands.getJSONObject(i);
+                    executePendingCommand(cmd);
+                } catch (Exception e) {
+                    Log.w(TAG, "Failed to process pending command: " + e.getMessage());
+                }
+            }
+        }
         // lookAt is already handled by the overlay page's own ui_state polling
+    }
+
+    private void executePendingCommand(org.json.JSONObject cmd) {
+        String type = cmd.optString("type", "");
+        switch (type) {
+            case "open_app": {
+                String app = cmd.optString("app", "").toLowerCase();
+                java.util.HashMap<String, String> apps = new java.util.HashMap<>();
+                apps.put("chrome", "com.android.chrome");
+                apps.put("settings", "com.android.settings");
+                apps.put("maps", "com.google.android.apps.maps");
+                apps.put("youtube", "com.google.android.youtube");
+                apps.put("spotify", "com.spotify.music");
+                apps.put("gmail", "com.google.android.gm");
+                String pkg = apps.get(app);
+                if (pkg != null) {
+                    Intent intent = getPackageManager().getLaunchIntentForPackage(pkg);
+                    if (intent != null) {
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(intent);
+                    }
+                }
+                break;
+            }
+            case "open_url": {
+                String url = cmd.optString("url", "");
+                openUrl(url);
+                break;
+            }
+            case "toast": {
+                String text = cmd.optString("text", "");
+                if (!text.isEmpty()) {
+                    Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
+                }
+                break;
+            }
+            case "termux":
+            case "run": {
+                org.json.JSONObject termuxCmd = new org.json.JSONObject();
+                termuxCmd.put("binary", cmd.optString("binary", "echo"));
+                termuxCmd.put("text", cmd.optString("text", ""));
+                runTermuxViaBridge(termuxCmd);
+                break;
+            }
+            case "keyevent": {
+                String keycode = cmd.optString("keycode", "KEYCODE_HOME");
+                if (phoneClient != null) {
+                    try {
+                        phoneClient.runTermuxCommand(
+                            "{\"type\":\"termux\",\"text\":\"input keyevent " + keycode + "\"}");
+                    } catch (Exception e) {
+                        Log.w(TAG, "keyevent via phone client failed: " + e.getMessage());
+                    }
+                }
+                break;
+            }
+            case "input_text": {
+                String text = cmd.optString("text", "");
+                if (phoneClient != null) {
+                    try {
+                        phoneClient.runTermuxCommand(
+                            "{\"type\":\"termux\",\"text\":\"input text " + text.replace(" ", "%s") + "\"}");
+                    } catch (Exception e) {
+                        Log.w(TAG, "input_text via phone client failed: " + e.getMessage());
+                    }
+                }
+                break;
+            }
+            default:
+                Log.d(TAG, "Unhandled pending command type: " + type);
+        }
     }
 
     private void openUrl(String url) {

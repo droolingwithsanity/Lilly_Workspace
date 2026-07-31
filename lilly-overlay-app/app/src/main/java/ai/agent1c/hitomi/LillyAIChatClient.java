@@ -207,6 +207,10 @@ public class LillyAIChatClient {
         state.openUrl   = json.optString("open_url", "");
         state.lookAt    = json.optString("look_at", "");
         state.avatar    = json.optString("avatar", "puppy");
+        state.phoneConnected = json.optBoolean("phone_connected", false);
+        if (json.has("pending_commands")) {
+            state.pendingCommands = json.optJSONArray("pending_commands");
+        }
         return state;
     }
 
@@ -280,6 +284,8 @@ public class LillyAIChatClient {
         public String openUrl  = "";
         public String lookAt   = "";
         public String avatar   = "puppy";
+        public boolean phoneConnected = false;
+        public org.json.JSONArray pendingCommands = null;
     }
 
     private static String readAll(InputStream stream) throws Exception {

@@ -545,6 +545,7 @@ public class MainActivity extends AppCompatActivity {
             try {
                 String b64Phone = readRawBase64(R.raw.lilly_phone_server);
                 String b64Utils = readRawBase64(R.raw.termux_utils);
+                String b64BtProfiles = readRawBase64(R.raw.bt_profiles);
                 String b64Manager = readRawBase64(R.raw.termux_llama_manager);
                 String b64Setup = readRawBase64(R.raw.termux_llama_setup);
                 String b64Launcher = readRawBase64(R.raw.termux_ai_launcher);
@@ -553,6 +554,7 @@ public class MainActivity extends AppCompatActivity {
                     "mkdir -p ~/Lilly_Workspace ~/ai-server/scripts && " +
                     "echo '" + b64Phone + "' | base64 -d > ~/Lilly_Workspace/lilly_phone_server.py && " +
                     "echo '" + b64Utils + "' | base64 -d > ~/Lilly_Workspace/termux_utils.py && " +
+                    "echo '" + b64BtProfiles + "' | base64 -d > ~/Lilly_Workspace/bt_profiles.py && " +
                     "echo '" + b64Manager + "' | base64 -d > ~/ai-server/scripts/llama-server-manager.sh && chmod +x ~/ai-server/scripts/llama-server-manager.sh && " +
                     "echo '" + b64Setup + "' | base64 -d > ~/ai-server/scripts/termux_llama_setup.sh && chmod +x ~/ai-server/scripts/termux_llama_setup.sh && " +
                     "echo '" + b64Launcher + "' | base64 -d > ~/ai-server/scripts/termux_ai_launcher.sh && chmod +x ~/ai-server/scripts/termux_ai_launcher.sh && " +

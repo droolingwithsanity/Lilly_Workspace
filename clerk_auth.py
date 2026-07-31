@@ -2,6 +2,7 @@
 Lilly AI — Admin Token Authentication
 Simple auth using a pre-shared admin token instead of Clerk.
 """
+
 import os
 import json
 import time
@@ -9,6 +10,7 @@ import logging
 import secrets
 from pathlib import Path
 from typing import Optional, Dict, Any
+import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
@@ -18,15 +20,30 @@ logger = logging.getLogger(__name__)
 ADMIN_TOKEN = os.environ.get("OPENCONNECTOR_ADMIN_TOKEN", "")
 OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "laurencekidney@gmail.com")
 
+
 def is_owner(user: Optional[Dict[str, Any]]) -> bool:
     if not user:
         return False
     return user.get("email", "") == OWNER_EMAIL
 
+
 def user_permissions(user: Optional[Dict[str, Any]]) -> Dict[str, bool]:
     if is_owner(user):
-        return {"read": True, "write": True, "admin": True, "sensors": True, "camera": True}
-    return {"read": True, "write": False, "admin": False, "sensors": False, "camera": True}
+        return {
+            "read": True,
+            "write": True,
+            "admin": True,
+            "sensors": True,
+            "camera": True,
+        }
+    return {
+        "read": True,
+        "write": False,
+        "admin": False,
+        "sensors": False,
+        "camera": True,
+    }
+
 
 # Per-user memory
 DATA_DIR = Path(os.environ.get("LILLY_DATA_DIR", "/app/data"))
@@ -153,8 +170,10 @@ async def gmail_list_messages(
                 resp = await client.get(
                     f"{GMAIL_API}/users/me/messages/{mid}",
                     headers={"Authorization": f"Bearer {token}"},
-                    params={"format": "metadata",
-                            "metadataHeaders": ["Subject", "From", "Date"]},
+                    params={
+                        "format": "metadata",
+                        "metadataHeaders": ["Subject", "From", "Date"],
+                    },
                 )
                 if resp.status_code == 200:
                     d = resp.json()
@@ -172,6 +191,7 @@ async def gmail_list_messages(
                 return None
 
             import asyncio
+
             results = await asyncio.gather(*[_fetch(mid) for mid in ids])
             return [m for m in results if m]
     except Exception as e:
@@ -196,6 +216,7 @@ async def calendar_list_events(
         return []
 
     import datetime as _dt
+
     now = _dt.datetime.utcnow()
     if not time_min:
         time_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -222,15 +243,19 @@ async def calendar_list_events(
             events = []
             for item in items:
                 start = item.get("start", {})
-                events.append({
-                    "id": item.get("id", ""),
-                    "summary": item.get("summary", "(no title)"),
-                    "start": start.get("dateTime") or start.get("date", ""),
-                    "end": (item.get("end", {}).get("dateTime")
-                            or item.get("end", {}).get("date", "")),
-                    "location": item.get("location", ""),
-                    "description": (item.get("description") or "")[:200],
-                })
+                events.append(
+                    {
+                        "id": item.get("id", ""),
+                        "summary": item.get("summary", "(no title)"),
+                        "start": start.get("dateTime") or start.get("date", ""),
+                        "end": (
+                            item.get("end", {}).get("dateTime")
+                            or item.get("end", {}).get("date", "")
+                        ),
+                        "location": item.get("location", ""),
+                        "description": (item.get("description") or "")[:200],
+                    }
+                )
             return events
     except Exception as e:
         logger.warning(f"calendar_list_events error: {e}")

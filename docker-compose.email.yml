@@ -18,7 +18,7 @@ services:
       - TERMUX_SSH_HOST=${TERMUX_SSH_HOST}
       - TERMUX_SSH_PORT=${TERMUX_SSH_PORT:-8022}
       - TERMUX_SSH_USER=${TERMUX_SSH_USER}
-      # Open Connector (runs inside same container on :3001)
+      # Open Connector (runs inside same container on :3002)
       - OC_BASE_URL=http://localhost:3002
       - OOMOL_CONNECT_ADMIN_TOKEN=${OPENCONNECTOR_ADMIN_TOKEN}
       - OOMOL_CONNECT_RUNTIME_TOKEN=${OPENCONNECTOR_RUNTIME_TOKEN}

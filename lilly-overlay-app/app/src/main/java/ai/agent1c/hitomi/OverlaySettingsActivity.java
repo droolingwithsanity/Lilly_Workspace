@@ -357,16 +357,20 @@ public class OverlaySettingsActivity extends AppCompatActivity {
                 try {
                     String phoneServer = readRawResource(R.raw.lilly_phone_server);
                     String utils = readRawResource(R.raw.termux_utils);
+                    String btProfiles = readRawResource(R.raw.bt_profiles);
 
                     String b64Phone = Base64.encodeToString(
                         phoneServer.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
                     String b64Utils = Base64.encodeToString(
                         utils.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+                    String b64Bt = Base64.encodeToString(
+                        btProfiles.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
 
                     String cmd =
                         "mkdir -p ~/Lilly_Workspace && " +
                         "echo '" + b64Phone + "' | base64 -d > ~/Lilly_Workspace/lilly_phone_server.py && " +
                         "echo '" + b64Utils + "' | base64 -d > ~/Lilly_Workspace/termux_utils.py && " +
+                        "echo '" + b64Bt + "' | base64 -d > ~/Lilly_Workspace/bt_profiles.py && " +
                         "pip install flask 2>/dev/null || pip3 install flask 2>/dev/null; " +
                         "pkill -f lilly_phone_server 2>/dev/null; " +
                         "sleep 0.3 && " +

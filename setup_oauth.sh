@@ -52,11 +52,11 @@ echo ""
 
 # Start Open Connector
 echo "Starting Open Connector..."
-docker compose -f docker-compose.email.yml up -d connector
+docker compose -f docker-compose.email.yml up -d lilly
 
 echo "Waiting for Open Connector to be healthy..."
 for i in {1..30}; do
-    if curl -sf http://localhost:3000/health > /dev/null 2>&1; then
+    if curl -sf http://localhost:3002/health > /dev/null 2>&1; then
         echo "Open Connector is ready!"
         break
     fi
@@ -67,7 +67,7 @@ done
 # Test connection
 echo ""
 echo "Testing Gmail connection..."
-response=$(curl -s -X POST http://localhost:3000/v1/actions/gmail.get_profile \
+response=$(curl -s -X POST http://localhost:3002/v1/actions/gmail.get_profile \
     -H "Authorization: Bearer $OPENCONNECTOR_RUNTIME_TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"input":{}}' 2>&1)
@@ -79,14 +79,14 @@ else
     echo "Response: $response"
     echo ""
     echo "Please ensure you've:"
-    echo "1. Configured Gmail OAuth in Open Connector UI (http://localhost:3000)"
+    echo "1. Configured Gmail OAuth in Open Connector UI (http://localhost:3002)"
     echo "2. Connected your Gmail account"
     echo "3. Created a runtime token"
 fi
 
 echo ""
 echo "Testing Outlook connection..."
-response=$(curl -s -X POST http://localhost:3000/v1/actions/outlook.get_profile \
+response=$(curl -s -X POST http://localhost:3002/v1/actions/outlook.get_profile \
     -H "Authorization: Bearer $OPENCONNECTOR_RUNTIME_TOKEN" \
     -H "Content-Type: application/json" \
     -d '{"input":{}}' 2>&1)
@@ -98,7 +98,7 @@ else
     echo "Response: $response"
     echo ""
     echo "Please ensure you've:"
-    echo "1. Configured Outlook OAuth in Open Connector UI (http://localhost:3000)"
+    echo "1. Configured Outlook OAuth in Open Connector UI (http://localhost:3002)"
     echo "2. Connected your Outlook account"
 fi
 
@@ -109,5 +109,5 @@ echo "Next steps:"
 echo "1. Start Lilly AI with email integration:"
 echo "   docker compose -f docker-compose.email.yml up -d"
 echo ""
-echo "2. Access Open Connector UI: http://localhost:3000"
+echo "2. Access Open Connector UI: http://localhost:3002"
 echo "3. Test email features via Lilly API endpoints"

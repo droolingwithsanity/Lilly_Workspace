@@ -87,3 +87,6 @@ hitomi-lilly-integration/android/app/build/
 # Termux SSH credentials
 *termux*
 .aider*
+
+# Deployed demo projects (repo-to-project skill)
+projects/
