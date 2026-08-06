@@ -12361,6 +12361,28 @@ async function checkAuth() {
     if (r.ok) {
       const data = await r.json();
       currentUser = data.user;
+      // Extract username from Google email and set it as USER_NAME
+      if (currentUser && currentUser.email) {
+        const emailUsername = currentUser.email.split('@')[0];
+        // Format: capitalize first letter of each word separated by dots/underscores
+        const formattedName = emailUsername
+          .replace(/[._-]/g, ' ')
+          .split(' ')
+          .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+          .join(' ');
+        
+        // Update localStorage and server
+        localStorage.setItem('lilly_user_name', formattedName);
+        fetch('/api/set_name', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: formattedName})
+        });
+        
+        // Update the name tag in UI
+        const nameLabel = document.getElementById('nameLabel');
+        if (nameLabel) nameLabel.textContent = formattedName;
+      }
       // Auto-skip picker after auth redirect
       hideStartScreen();
       return true;
