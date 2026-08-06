@@ -13846,6 +13846,8 @@ inputField.addEventListener('keydown',async(e)=>{
     const isStory=STORY_TRIGGERS.some(t=>lower.includes(t));
     if(isStory){
       try{
+        showMainChat();
+        addChatMessage('user',text);
         isStreaming=true;
         pupSpeech='...';speechTimer=999;
         statusLabel.textContent='generating story...';
@@ -13861,14 +13863,21 @@ inputField.addEventListener('keydown',async(e)=>{
           pupSpeech=full;speechTimer=999;
         }
         isStreaming=false;
+        addChatMessage('assistant',full);
         statusLabel.textContent='story delivered';
         setTimeout(()=>{statusLabel.textContent='idle'},2000);
       }catch(e){isStreaming=false;statusLabel.textContent='error';}
     }else{
       try{
+        // Show chat container and append to scrollable chat
+        showMainChat();
+        addChatMessage('user',text);
         const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,avatar:localStorage.getItem('lilly_avatar')||'puppy'})});
         const d=await r.json();
-        if(d.reply)displaySpeech(d.reply);
+        if(d.reply){
+          addChatMessage('assistant',d.reply);
+          displaySpeech(d.reply);
+        }
         if(d.audio_id)playAudio(d.audio_id);
         if(d.look_at)setLookAt(d.look_at,5000);
         if(d.open_url)window.open(d.open_url,'_blank','noopener,noreferrer');
@@ -15221,6 +15230,8 @@ function vcAppendThinking(){
   chatMessages.scrollTop = chatMessages.scrollHeight;
   return div;
 }
+
+</script>
 
 </body>
 </html>"""
