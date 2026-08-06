@@ -4,6 +4,42 @@
       "port": 8123,
       "url": "http://localhost:8123",
       "updated": "2026-07-30T23:44:02"
+    },
+    "my-landing2": {
+      "port": 8201,
+      "updated": "2026-08-03T05:06:23"
+    },
+    "test-site": {
+      "port": 8202,
+      "updated": "2026-08-03T11:21:53"
+    },
+    "my-vue-dashboard": {
+      "port": 8203,
+      "updated": "2026-08-03T13:12:51"
+    },
+    "my-cool-dashboard": {
+      "port": 8204,
+      "updated": "2026-08-03T16:23:03"
+    },
+    "my-cool-vue-app": {
+      "port": 8205,
+      "updated": "2026-08-03T16:32:10"
+    },
+    "lookup-test-app": {
+      "port": 8206,
+      "updated": "2026-08-03T16:32:10"
+    },
+    "alpha-final-vue-app": {
+      "port": 8207,
+      "updated": "2026-08-03T16:53:24"
+    },
+    "dummy-test": {
+      "port": 8208,
+      "updated": "2026-08-04T17:35:10"
+    },
+    "my-landing-page": {
+      "port": 8209,
+      "updated": "2026-08-06T19:56:39"
     }
   }
 }

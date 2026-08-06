@@ -38,7 +38,7 @@ RUN npm ci --omit=dev --ignore-scripts
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg wget ca-certificates openssh-client curl && \
+    ffmpeg wget ca-certificates openssh-client curl git && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 24.x for Open Connector
