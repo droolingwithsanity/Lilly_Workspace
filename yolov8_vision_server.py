@@ -28,27 +28,99 @@ CONF_THRESHOLD = float(os.environ.get("CONF_THRESHOLD", "0.35"))
 MODEL_NAME = os.environ.get("YOLO_MODEL", "yolov8n.pt")
 
 PERSON_KEYWORDS = {"person", "human", "face", "man", "woman"}
-VEHICLE_KEYWORDS = {"car", "truck", "bus", "motorcycle", "bicycle", "motorbike", "train", "airplane", "boat"}
-DEVICE_KEYWORDS = {"laptop", "cell phone", "tv", "mouse", "keyboard", "remote", "monitor", "screen"}
-ANIMAL_KEYWORDS = {"cat", "dog", "bird", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"}
-FOOD_ITEMS = {"banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake",
-              "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl"}
+VEHICLE_KEYWORDS = {
+    "car",
+    "truck",
+    "bus",
+    "motorcycle",
+    "bicycle",
+    "motorbike",
+    "train",
+    "airplane",
+    "boat",
+}
+DEVICE_KEYWORDS = {
+    "laptop",
+    "cell phone",
+    "tv",
+    "mouse",
+    "keyboard",
+    "remote",
+    "monitor",
+    "screen",
+}
+ANIMAL_KEYWORDS = {
+    "cat",
+    "dog",
+    "bird",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+}
+FOOD_ITEMS = {
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+}
 FASHION_ITEMS = {"tie", "backpack", "handbag", "suitcase", "umbrella"}
 
 # Average real-world widths (meters) for common YOLO classes
 YOLO_CLASS_WIDTHS = {
-    "person": 0.5, "bicycle": 0.6, "car": 1.8, "motorcycle": 0.8,
-    "bus": 2.5, "truck": 2.5, "cat": 0.4, "dog": 0.5,
-    "chair": 0.5, "couch": 2.0, "dining table": 1.2, "bed": 1.5,
-    "laptop": 0.35, "tv": 1.0, "cell phone": 0.08, "book": 0.2,
-    "bottle": 0.08, "cup": 0.08, "bowl": 0.15, "keyboard": 0.4,
-    "mouse": 0.06, "remote": 0.15, "backpack": 0.3, "umbrella": 1.0,
-    "suitcase": 0.5, "clock": 0.2, "vase": 0.15, "potted plant": 0.3,
-    "sink": 0.6, "toilet": 0.4, "refrigerator": 0.8, "microwave": 0.5,
+    "person": 0.5,
+    "bicycle": 0.6,
+    "car": 1.8,
+    "motorcycle": 0.8,
+    "bus": 2.5,
+    "truck": 2.5,
+    "cat": 0.4,
+    "dog": 0.5,
+    "chair": 0.5,
+    "couch": 2.0,
+    "dining table": 1.2,
+    "bed": 1.5,
+    "laptop": 0.35,
+    "tv": 1.0,
+    "cell phone": 0.08,
+    "book": 0.2,
+    "bottle": 0.08,
+    "cup": 0.08,
+    "bowl": 0.15,
+    "keyboard": 0.4,
+    "mouse": 0.06,
+    "remote": 0.15,
+    "backpack": 0.3,
+    "umbrella": 1.0,
+    "suitcase": 0.5,
+    "clock": 0.2,
+    "vase": 0.15,
+    "potted plant": 0.3,
+    "sink": 0.6,
+    "toilet": 0.4,
+    "refrigerator": 0.8,
+    "microwave": 0.5,
 }
 
 DEFAULT_FOCAL_MM = 4.0
 DEFAULT_SENSOR_WIDTH_MM = 5.6
+
 
 def estimate_distance(label: str, bbox_w_px: int, img_w_px: int) -> float | None:
     real_w = YOLO_CLASS_WIDTHS.get(label.lower())
@@ -58,24 +130,37 @@ def estimate_distance(label: str, bbox_w_px: int, img_w_px: int) -> float | None
     dist = (real_w * focal_px) / bbox_w_px
     return round(max(0.1, dist), 2)
 
+
 def distance_desc(m: float) -> str:
-    if m < 0.5: return "very close"
-    if m < 1.5: return "arm's length"
-    if m < 3: return "a few steps"
-    if m < 10: return "nearby"
-    if m < 30: return "across the room"
-    if m < 100: return "in the distance"
+    if m < 0.5:
+        return "very close"
+    if m < 1.5:
+        return "arm's length"
+    if m < 3:
+        return "a few steps"
+    if m < 10:
+        return "nearby"
+    if m < 30:
+        return "across the room"
+    if m < 100:
+        return "in the distance"
     return f"{int(m)}m away"
 
 
 def classify_label(label: str) -> str:
     low = label.lower()
-    if low in PERSON_KEYWORDS: return "person"
-    if low in VEHICLE_KEYWORDS: return "vehicle"
-    if low in DEVICE_KEYWORDS: return "device"
-    if low in ANIMAL_KEYWORDS: return "animal"
-    if low in FOOD_ITEMS: return "food"
-    if low in FASHION_ITEMS: return "fashion"
+    if low in PERSON_KEYWORDS:
+        return "person"
+    if low in VEHICLE_KEYWORDS:
+        return "vehicle"
+    if low in DEVICE_KEYWORDS:
+        return "device"
+    if low in ANIMAL_KEYWORDS:
+        return "animal"
+    if low in FOOD_ITEMS:
+        return "food"
+    if low in FASHION_ITEMS:
+        return "fashion"
     return low
 
 
@@ -85,8 +170,10 @@ def build_sensor_context(sensors: dict) -> str:
     parts = []
     light = sensors.get("light", sensors.get("ambient_light"))
     if light is not None:
-        if light < 50: parts.append("dark room")
-        elif light > 1000: parts.append("bright daylight")
+        if light < 50:
+            parts.append("dark room")
+        elif light > 1000:
+            parts.append("bright daylight")
     temp = sensors.get("temperature")
     if temp is not None and (temp > 30 or temp < 10):
         parts.append(f"{temp}°C")
@@ -104,8 +191,8 @@ AGENTS = {
     "puppy": {
         "name": "Puppy",
         "emoji": "🐕",
-        "voice": "en-US-AvaNeural",        # Female, expressive, caring
-        "rate": "+10%",                      # Slightly faster
+        "voice": "en-US-AvaNeural",  # Female, expressive, caring
+        "rate": "+10%",  # Slightly faster
         "lines": {
             "person": [
                 "Oh hey, someone's there. They look like they're just vibing.",
@@ -151,8 +238,8 @@ AGENTS = {
     "fox": {
         "name": "Fox",
         "emoji": "🦊",
-        "voice": "en-US-AndrewNeural",       # Male, warm, confident
-        "rate": "-5%",                        # Slightly slower, more deliberate
+        "voice": "en-US-AndrewNeural",  # Male, warm, confident
+        "rate": "-5%",  # Slightly slower, more deliberate
         "lines": {
             "person": [
                 "Another human. Groundbreaking. What are the odds in a world of 8 billion people.",
@@ -194,8 +281,8 @@ AGENTS = {
     "cat": {
         "name": "Cat",
         "emoji": "🐱",
-        "voice": "en-US-EmmaNeural",         # Female, cheerful, clear
-        "rate": "-10%",                       # Slower, more deliberate
+        "voice": "en-US-EmmaNeural",  # Female, cheerful, clear
+        "rate": "-10%",  # Slower, more deliberate
         "lines": {
             "person": [
                 "A human. They think they're the main character. Adorable.",
@@ -237,8 +324,8 @@ AGENTS = {
     "bear": {
         "name": "Bear",
         "emoji": "🐻",
-        "voice": "en-US-BrianNeural",        # Male, approachable, casual
-        "rate": "-15%",                       # Slower, more thoughtful
+        "voice": "en-US-BrianNeural",  # Male, approachable, casual
+        "rate": "-15%",  # Slower, more thoughtful
         "lines": {
             "person": [
                 "A person. You know what, everyone's just trying to figure it out. No judgment.",
@@ -280,8 +367,8 @@ AGENTS = {
     "bunny": {
         "name": "Bunny",
         "emoji": "🐰",
-        "voice": "en-US-JennyNeural",        # Female, friendly, considerate
-        "rate": "+5%",                        # Slightly faster, energetic
+        "voice": "en-US-JennyNeural",  # Female, friendly, considerate
+        "rate": "+5%",  # Slightly faster, energetic
         "lines": {
             "person": [
                 "Oh hey, someone's here! They seem cool. I'd chat with them.",
@@ -324,7 +411,7 @@ AGENTS = {
         "name": "Owl",
         "emoji": "🦉",
         "voice": "en-US-ChristopherNeural",  # Male, reliable, authority
-        "rate": "-20%",                       # Slowest, most measured
+        "rate": "-20%",  # Slowest, most measured
         "lines": {
             "person": [
                 "A human. The most fascinating and contradictory species on this planet.",
@@ -395,11 +482,13 @@ async def generate_tts(text: str, voice: str, rate: str) -> int:
 
 def generate_reply(detections: list) -> str:
     if not detections:
-        return random.choice([
-            "Nothing detected. Either it's dark or you live in a minimalist nightmare.",
-            "Zero targets. Try pointing me at something that isn't a wall.",
-            "I see absolutely nothing. Are you testing me or is this just your life?",
-        ])
+        return random.choice(
+            [
+                "Nothing detected. Either it's dark or you live in a minimalist nightmare.",
+                "Zero targets. Try pointing me at something that isn't a wall.",
+                "I see absolutely nothing. Are you testing me or is this just your life?",
+            ]
+        )
     total = len(detections)
     labels = [d["label"] for d in detections]
     return f"Detected {total} targets: {', '.join(labels[:5])}"
@@ -449,12 +538,14 @@ def generate_agent_replies(detections: list, sensors: dict, avatar: str) -> list
             if ctx:
                 sensor_prefix = f"[{ctx}] "
 
-        replies.append({
-            "agent": agent["name"],
-            "emoji": agent["emoji"],
-            "voice": agent["voice"],
-            "text": f"{sensor_prefix}{line}",
-        })
+        replies.append(
+            {
+                "agent": agent["name"],
+                "emoji": agent["emoji"],
+                "voice": agent["voice"],
+                "text": f"{sensor_prefix}{line}",
+            }
+        )
 
     return replies
 
@@ -470,6 +561,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Lilly Vision Server", lifespan=lifespan)
+
+_BOOT_TIME = time.time()
+
+
+@app.get("/health")
+@app.get("/api/health")
+async def health():
+    return {
+        "status": "ok",
+        "service": "lilly-vision",
+        "yolo": MODEL is not None,
+        "uptime_sec": int(time.time() - _BOOT_TIME),
+    }
 
 
 @app.get("/api/vision/status")
@@ -506,9 +610,13 @@ async def vision_detect(request: Request):
         buf = np.frombuffer(raw, dtype=np.uint8)
         frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         if frame is None:
-            return JSONResponse(status_code=400, content={"error": "Could not decode image"})
+            return JSONResponse(
+                status_code=400, content={"error": "Could not decode image"}
+            )
     except Exception as e:
-        return JSONResponse(status_code=400, content={"error": f"Image decode error: {e}"})
+        return JSONResponse(
+            status_code=400, content={"error": f"Image decode error: {e}"}
+        )
 
     if MODEL is None:
         return JSONResponse(status_code=503, content={"error": "YOLO model not loaded"})
@@ -535,16 +643,22 @@ async def vision_detect(request: Request):
             nw = float(x2 - x1) / w
             nh = float(y2 - y1) / h
 
-            detections.append({
-                "label": label,
-                "x": round(nx, 4),
-                "y": round(ny, 4),
-                "w": round(nw, 4),
-                "h": round(nh, 4),
-                "conf": round(conf, 4),
-                "distance_m": estimate_distance(label, int(x2 - x1), w),
-                "distance_desc": distance_desc(estimate_distance(label, int(x2 - x1), w)) if estimate_distance(label, int(x2 - x1), w) else None,
-            })
+            detections.append(
+                {
+                    "label": label,
+                    "x": round(nx, 4),
+                    "y": round(ny, 4),
+                    "w": round(nw, 4),
+                    "h": round(nh, 4),
+                    "conf": round(conf, 4),
+                    "distance_m": estimate_distance(label, int(x2 - x1), w),
+                    "distance_desc": distance_desc(
+                        estimate_distance(label, int(x2 - x1), w)
+                    )
+                    if estimate_distance(label, int(x2 - x1), w)
+                    else None,
+                }
+            )
 
     elapsed = round(time.time() - t0, 3)
     reply = generate_reply(detections)
@@ -559,7 +673,9 @@ async def vision_detect(request: Request):
             audio_id = await generate_tts(reply, voice, rate)
             agent_reply["audio_id"] = audio_id
 
-    log.info(f"Detected {len(detections)} targets in {elapsed}s — {len(agents)} agents responded")
+    log.info(
+        f"Detected {len(detections)} targets in {elapsed}s — {len(agents)} agents responded"
+    )
 
     return {
         "reply": reply,
@@ -633,14 +749,18 @@ async def vision_proactive(request: Request):
     # - Enough time has passed since last speak
     new_labels = current_labels - _last_proactive_labels
     scene_changed = (
-        (len(new_labels) > 0) or
-        (len(_last_proactive_labels) > 0 and len(current_labels) == 0) or
-        (len(current_labels) > 0 and len(_last_proactive_labels) == 0)
+        (len(new_labels) > 0)
+        or (len(_last_proactive_labels) > 0 and len(current_labels) == 0)
+        or (len(current_labels) > 0 and len(_last_proactive_labels) == 0)
     )
 
     if not scene_changed:
         _last_proactive_labels = current_labels
-        return {"should_speak": False, "reason": "no_change", "labels": list(current_labels)}
+        return {
+            "should_speak": False,
+            "reason": "no_change",
+            "labels": list(current_labels),
+        }
 
     # Scene changed — generate commentary
     _last_proactive_labels = current_labels
@@ -656,14 +776,16 @@ async def vision_proactive(request: Request):
             conf = float(box.conf[0])
             cls_id = int(box.cls[0])
             label = MODEL.names[cls_id]
-            detections.append({
-                "label": label,
-                "x": round(float(x1) / w, 4),
-                "y": round(float(y1) / h, 4),
-                "w": round(float(x2 - x1) / w, 4),
-                "h": round(float(y2 - y1) / h, 4),
-                "conf": round(conf, 4),
-            })
+            detections.append(
+                {
+                    "label": label,
+                    "x": round(float(x1) / w, 4),
+                    "y": round(float(y1) / h, 4),
+                    "w": round(float(x2 - x1) / w, 4),
+                    "h": round(float(y2 - y1) / h, 4),
+                    "conf": round(conf, 4),
+                }
+            )
 
     reply = generate_reply(detections)
     agents = generate_agent_replies(detections, sensors, avatar)
@@ -716,6 +838,7 @@ async def ui_state():
 
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.environ.get("PORT", "8198"))
     host = os.environ.get("HOST", "0.0.0.0")
     log.info(f"Starting Lilly Vision server on {host}:{port}")

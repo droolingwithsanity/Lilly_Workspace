@@ -2,29 +2,27 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>VibeCode — Lilly</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=coverage">
+<title>DroolingWithSanity — VibeCode</title>
 <style>
 :root{
-  --frost-bg:rgba(15,15,28,0.88);
-  --frost-surface:rgba(255,255,255,0.06);
-  --frost-border:rgba(255,255,255,0.10);
-  --frost-glow:rgba(130,100,220,0.18);
-  --accent:#a78bfa;
-  --accent2:#818cf8;
-  --green:#4ade80;
-  --red:#f87171;
-  --yellow:#fbbf24;
-  --text:rgba(255,255,255,0.88);
-  --text-dim:rgba(255,255,255,0.42);
+  --frost-bg:rgba(240,230,239,0.78);
+  --frost-surface:rgba(255,255,255,0.55);
+  --frost-border:rgba(93,78,109,0.18);
+  --frost-glow:rgba(139,122,158,0.22);
+  --accent:#8b7a9e;
+  --accent2:#8b7a9e;
+  --green:#3a8a6a;
+  --red:#c05555;
+  --yellow:#b58900;
+  --text:#5d4e6d;
+  --text-dim:rgba(93,78,109,0.55);
   --radius:14px;
   --chat-w:380px;
 }
 *{margin:0;padding:0;box-sizing:border-box}
 body{
-  background:#0b0b18;
-  background-image:radial-gradient(ellipse at 20% 20%,rgba(88,60,160,0.22) 0%,transparent 55%),
-                   radial-gradient(ellipse at 80% 80%,rgba(40,80,160,0.18) 0%,transparent 55%);
+  background:linear-gradient(135deg,#f5d5e0 0%,#f0e6ef 45%,#d5f0e6 100%);
   color:var(--text);
   font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
   height:100vh;overflow:hidden;
@@ -45,7 +43,7 @@ body{
 #topbar{
   display:flex;align-items:center;gap:12px;
   padding:10px 16px;
-  background:rgba(10,10,22,0.92);
+  background:rgba(240,230,239,0.92);
   border-bottom:1px solid var(--frost-border);
   flex-shrink:0;
   z-index:100;
@@ -59,7 +57,7 @@ body{
   color:var(--text);
   border-radius:9px;padding:6px 10px;font-size:13px;outline:none;
 }
-#project-select option{background:#1a1a2e;color:#fff}
+#project-select option{background:#f0e6ef;color:#5d4e6d}
 .topbtn{
   background:var(--frost-surface);border:1px solid var(--frost-border);
   color:var(--text-dim);border-radius:9px;padding:6px 12px;
@@ -177,6 +175,7 @@ body{
   border-left:1px solid var(--frost-border);
   transition:width .25s ease;
   overflow:hidden;
+  position:relative;
 }
 #chat-panel.reduced{width:48px}
 #chat-panel.hidden{width:0;border-left:none}
@@ -205,11 +204,13 @@ body{
 #chat-panel.reduced #chat-input-row,
 #chat-panel.reduced #chat-context-bar{display:none}
 .cmsg{border-radius:10px;padding:9px 12px;font-size:12px;line-height:1.55;max-width:100%;word-break:break-word}
-.cmsg.user{background:rgba(167,139,250,.15);color:#c4b5fd;align-self:flex-end;margin-left:16px}
+.cmsg.user{background:rgba(167,139,250,.18);color:var(--accent);align-self:flex-end;margin-left:16px}
 .cmsg.assistant{background:var(--frost-surface);color:var(--text);border:1px solid var(--frost-border)}
 .cmsg.system{background:rgba(74,222,128,.08);color:rgba(74,222,128,.8);font-size:11px;font-style:italic;border:1px solid rgba(74,222,128,.15)}
 .cmsg pre{background:rgba(0,0,0,.35);border-radius:6px;padding:8px;margin-top:6px;overflow-x:auto;font-size:11px}
 .cmsg code{font-family:'JetBrains Mono',monospace;font-size:11px}
+.cmsg-sender{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;color:var(--accent);margin-bottom:3px}
+.cmsg-alpha{font-size:8px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;background:rgba(167,139,250,.22);color:var(--accent);border-radius:5px;padding:1px 5px}
 .apply-btn{
   margin-top:6px;background:rgba(167,139,250,.18);border:1px solid rgba(167,139,250,.3);
   color:var(--accent);border-radius:7px;padding:4px 10px;font-size:11px;cursor:pointer;transition:all .2s;
@@ -255,33 +256,127 @@ body{
 }
 #chat-panel.reduced #reduce-icon{display:block}
 
-/* ── Logs panel ── */
-#logs-panel{
-  height:0;overflow:hidden;border-top:1px solid var(--frost-border);
-  transition:height .25s ease;flex-shrink:0;
-  background:rgba(0,0,0,.35);
+/* ── Alpha roster bar (inline strip shown when in Alpha/vibecode mode) ── */
+#alpha-roster-bar{
+  display:none;flex-shrink:0;
+  border-bottom:1px solid var(--frost-border);
+  background:rgba(167,139,250,.05);
+  overflow:hidden;
+  transition:max-height .2s ease, opacity .2s ease;
+  max-height:0;opacity:0;
 }
-#logs-panel.open{height:180px}
+#alpha-roster-bar.open{
+  display:flex;max-height:52px;opacity:1;
+}
+#alpha-roster-bar-inner{
+  display:flex;align-items:center;gap:6px;
+  padding:6px 10px;flex-wrap:nowrap;overflow-x:auto;width:100%;
+  scrollbar-width:none;
+}
+#alpha-roster-bar-inner::-webkit-scrollbar{display:none}
+.alpha-bar-label{
+  font-size:10px;font-weight:700;color:var(--accent);
+  letter-spacing:.4px;text-transform:uppercase;white-space:nowrap;flex-shrink:0;
+}
+#vc-roster{
+  display:flex;align-items:center;gap:4px;flex-shrink:0;
+}
+.vc-char{
+  width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:15px;cursor:pointer;background:var(--frost-surface);border:1.5px solid var(--frost-border);
+  transition:all .15s;position:relative;flex-shrink:0;
+}
+.vc-char:hover{transform:scale(1.12)}
+.vc-char.sel{border-color:rgba(167,139,250,.7);background:rgba(167,139,250,.18);transform:scale(1.12)}
+.vc-char .vc-tip{position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);font-size:8px;color:var(--text-dim);white-space:nowrap;background:var(--frost-surface);border:1px solid var(--frost-border);padding:2px 6px;border-radius:6px;opacity:0;transition:opacity .15s;pointer-events:none;z-index:6}
+.vc-char:hover .vc-tip{opacity:1}
+/* Alpha-mode sender label in shared messages */
+#chat-messages .cmsg-sender{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;color:var(--accent);margin-bottom:3px}
+#chat-messages .cmsg-alpha{font-size:8px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;background:rgba(167,139,250,.22);color:var(--accent);border-radius:5px;padding:1px 5px}
+/* Typing indicator */
+#vc-typing{display:flex;gap:8px;align-items:center;padding:4px 0;animation:msgIn .25s ease-out}
+#vc-typing .vc-dots{display:flex;gap:4px;padding:8px 12px;background:var(--frost-surface);border:1px solid var(--frost-border);border-radius:12px}
+#vc-typing .vc-dots span{width:6px;height:6px;border-radius:50%;background:rgba(139,122,158,.4);animation:thinkBounce 1.2s ease-in-out infinite}
+#vc-typing .vc-dots span:nth-child(2){animation-delay:.2s}
+#vc-typing .vc-dots span:nth-child(3){animation-delay:.4s}
+@keyframes thinkBounce{0%,80%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
+
+/* ── Chat mode toggle icon (under chat) ── */
+#chat-mode-toggle{
+  display:flex;align-items:center;justify-content:center;gap:4px;
+  padding:6px 12px;border-top:1px solid var(--frost-border);
+  background:rgba(255,255,255,.02);flex-shrink:0;cursor:pointer;
+  font-size:11px;color:var(--text-dim);transition:color .2s;
+}
+#chat-mode-toggle:hover{color:var(--accent)}
+#chat-mode-toggle .toggle-icon{font-size:14px;transition:transform .2s}
+#chat-mode-toggle.active-mode{color:var(--accent)}
+
+/* ── Logs panel (overlay on chat) ── */
+#logs-panel{
+  position:absolute;top:0;left:0;right:0;
+  height:0;overflow:hidden;border-bottom:1px solid var(--frost-border);
+  transition:height .25s ease;flex-shrink:0;
+  background:rgba(0,0,0,.45);z-index:10;
+}
+#logs-panel.open{height:140px}
 #logs-header{
   display:flex;align-items:center;justify-content:space-between;
-  padding:5px 12px;border-bottom:1px solid var(--frost-border);
-  background:rgba(255,255,255,.03);
+  padding:5px 10px;border-bottom:1px solid var(--frost-border);
+  background:rgba(255,255,255,.03);flex-shrink:0;
 }
 #logs-header span{font-size:11px;color:var(--text-dim);font-weight:600;letter-spacing:.3px;text-transform:uppercase}
+#logs-header .panel-ctrls{display:flex;gap:6px;align-items:center}
 #logs-header button{background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:13px;transition:color .2s}
 #logs-header button:hover{color:var(--accent)}
+#logs-panel .pw-resize{position:absolute;bottom:0;left:0;right:0;height:6px;cursor:ns-resize;background:transparent}
+#logs-panel .pw-resize:hover{background:rgba(167,139,250,.2)}
 #logs-content{
-  height:calc(100% - 30px);overflow-y:auto;padding:8px 12px;
+  height:calc(100% - 30px);overflow-y:auto;padding:8px 10px;
   font-family:'JetBrains Mono',monospace;font-size:11px;
   line-height:1.6;color:rgba(255,255,255,.65);
   white-space:pre-wrap;word-break:break-all;
   scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.1) transparent;
 }
 
+/* ── VCS panel (overlay on chat) ── */
+#vcs-panel{
+  position:absolute;top:0;left:0;right:0;
+  height:0;overflow:hidden;border-bottom:1px solid var(--frost-border);
+  transition:height .25s ease;flex-shrink:0;
+  background:rgba(0,0,0,.45);z-index:10;
+}
+#vcs-panel.open{height:180px}
+#vcs-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:5px 10px;border-bottom:1px solid var(--frost-border);
+  background:rgba(255,255,255,.03);flex-shrink:0;
+}
+#vcs-header span{font-size:11px;color:var(--text-dim);font-weight:600;letter-spacing:.3px;text-transform:uppercase}
+#vcs-header .panel-ctrls{display:flex;gap:6px;align-items:center}
+#vcs-header button{background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:13px;transition:color .2s}
+#vcs-header button:hover{color:var(--accent)}
+#vcs-panel .pw-resize{position:absolute;bottom:0;left:0;right:0;height:6px;cursor:ns-resize;background:transparent}
+#vcs-panel .pw-resize:hover{background:rgba(167,139,250,.2)}
+#vcs-body{
+  height:calc(100% - 60px);overflow-y:auto;padding:8px 10px;
+  font-family:'JetBrains Mono',monospace;font-size:11px;
+  line-height:1.6;color:rgba(255,255,255,.65);
+  white-space:pre-wrap;word-break:break-all;
+  scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.1) transparent;
+}
+#vcs-actions{display:flex;gap:6px;padding:6px 10px;border-bottom:1px solid var(--frost-border);background:rgba(255,255,255,.02)}
+#vcs-actions button{
+  background:rgba(167,139,250,.15);border:1px solid rgba(167,139,250,.3);
+  color:var(--accent);border-radius:6px;padding:3px 10px;font-size:11px;cursor:pointer;
+}
+#vcs-actions button:hover{background:rgba(167,139,250,.25)}
+#vcs-actions button:disabled{opacity:.4;cursor:not-allowed}
+
 /* ── Repo drop overlay ── */
 #drop-overlay{
   position:fixed;inset:0;
-  background:rgba(10,10,22,.92);
+  background:rgba(240,230,239,0.92);
   backdrop-filter:blur(8px);
   display:flex;flex-direction:column;align-items:center;justify-content:center;
   gap:20px;z-index:200;
@@ -359,12 +454,214 @@ body{
 .toast.err{border-color:rgba(248,113,113,.3);color:var(--red)}
 @keyframes toastIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
 @keyframes toastOut{to{opacity:0;transform:translateY(8px)}}
+
+/* ── Project preview overlay ── */
+.pw-tab{background:transparent;border:none;border-bottom:2px solid transparent;color:var(--text-dim);font-size:11px;font-weight:600;padding:6px 12px;cursor:pointer;border-radius:8px 8px 0 0;transition:all .15s}
+.pw-tab:hover{color:var(--text)}
+.pw-tab.active{color:var(--accent);border-bottom-color:var(--accent);background:rgba(167,139,250,.08)}
+.pw-resize{position:absolute;z-index:5}
+.pw-resize.n{top:-3px;left:8px;right:8px;height:6px;cursor:ns-resize}
+.pw-resize.s{bottom:-3px;left:8px;right:8px;height:6px;cursor:ns-resize}
+.pw-resize.e{right:-3px;top:8px;bottom:8px;width:6px;cursor:ew-resize}
+.pw-resize.w{left:-3px;top:8px;bottom:8px;width:6px;cursor:ew-resize}
+.pw-resize.ne{top:-4px;right:-4px;width:12px;height:12px;cursor:nesw-resize}
+.pw-resize.nw{top:-4px;left:-4px;width:12px;height:12px;cursor:nwse-resize}
+.pw-resize.se{bottom:-4px;right:-4px;width:12px;height:12px;cursor:nwse-resize}
+.pw-resize.sw{bottom:-4px;left:-4px;width:12px;height:12px;cursor:nesw-resize}
+.hud-mode-btn{background:var(--frost-surface);border:1px solid var(--frost-border);border-radius:10px;padding:3px 10px;font-size:10px;font-weight:600;color:var(--text-dim);cursor:pointer;transition:all .15s}
+.hud-mode-btn:hover{color:var(--text)}
+.hud-mode-btn.active{background:rgba(167,139,250,.2);border-color:rgba(167,139,250,.45);color:var(--accent)}
+.hud-char{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;background:var(--frost-surface);border:1.5px solid var(--frost-border);cursor:pointer;transition:all .15s;position:relative}
+.hud-char:hover{transform:scale(1.12)}
+.hud-char.selected{border-color:rgba(167,139,250,.7);background:rgba(167,139,250,.18);transform:scale(1.12)}
+.hud-char .hud-tip{position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);font-size:8px;color:var(--text-dim);white-space:nowrap;background:var(--frost-surface);border:1px solid var(--frost-border);padding:2px 6px;border-radius:6px;opacity:0;transition:opacity .15s;pointer-events:none;z-index:6}
+.hud-char:hover .hud-tip{opacity:1}
+.hud-msg{display:flex;gap:8px;align-items:flex-start;animation:msgIn .25s ease-out}
+.hud-msg .hud-avatar{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;background:var(--frost-surface);border:1.5px solid var(--frost-border)}
+.hud-msg .hud-body{flex:1;min-width:0}
+.hud-msg .hud-name{font-size:9px;font-weight:700;color:var(--text-dim);letter-spacing:.3px;text-transform:uppercase;margin-bottom:2px}
+.hud-msg .hud-name .hud-alpha{color:var(--accent);font-weight:700}
+.hud-msg .hud-text{background:var(--frost-surface);border:1px solid var(--frost-border);padding:8px 12px;border-radius:14px;border-top-left-radius:4px;font-size:12px;color:var(--text);line-height:1.5}
+.hud-msg.user{flex-direction:row-reverse}
+.hud-msg.user .hud-avatar{background:rgba(167,139,250,.15);border-color:rgba(167,139,250,.35)}
+.hud-msg.user .hud-body{display:flex;flex-direction:column;align-items:flex-end}
+.hud-msg.user .hud-text{background:rgba(167,139,250,.15);border-color:rgba(167,139,250,.3);border-top-left-radius:14px;border-top-right-radius:4px}
+.hud-typing{display:flex;gap:8px;align-items:center;padding:4px 0;animation:msgIn .2s ease-out}
+.hud-typing .hud-dots{display:flex;gap:4px;padding:8px 12px;background:var(--frost-surface);border:1px solid var(--frost-border);border-radius:12px}
+.hud-typing .hud-dots span{width:6px;height:6px;border-radius:50%;background:rgba(139,122,158,.4);animation:thinkBounce 1.2s ease-in-out infinite}
+.hud-typing .hud-dots span:nth-child(2){animation-delay:.2s}
+.hud-typing .hud-dots span:nth-child(3){animation-delay:.4s}
+
+/* ── Template wizard cards ── */
+.template-card{
+  display:flex;flex-direction:column;gap:6px;
+  padding:12px 14px;border-radius:12px;cursor:pointer;
+  background:var(--frost-surface);border:1px solid var(--frost-border);
+  transition:all .2s;
+}
+.template-card:hover{background:rgba(167,139,250,.12);border-color:rgba(167,139,250,.3)}
+.template-card.selected{background:rgba(167,139,250,.18);border-color:rgba(167,139,250,.5)}
+.template-card .t-title{
+  font-size:13px;font-weight:600;color:var(--text);display:flex;align-items:center;gap:6px
+}
+.template-card .t-desc{
+  font-size:11px;color:var(--text-dim);line-height:1.4
+}
+.template-card .t-tag{
+  font-size:10px;color:var(--accent);background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.2);border-radius:4px;padding:1px 6px;align-self:flex-start
+}
+
+/* ── Mobile section switcher (files / code / chat) ── */
+#mobile-sections{display:none}
+
+/* ── Mobile responsive ── */
+@media(max-width:768px){
+  :root{--chat-w:100vw}
+  #main{flex-direction:column}
+  #mobile-sections{display:flex;flex-shrink:0;align-items:stretch;background:rgba(240,230,239,.92);border-bottom:1px solid var(--frost-border);z-index:501;position:relative}
+  #mobile-sections button{flex:1;background:none;border:none;color:var(--text-dim);font-size:12px;font-weight:600;padding:12px 4px;cursor:pointer;border-bottom:2px solid transparent;-webkit-tap-highlight-color:transparent;font-family:inherit}
+  #mobile-sections button.active{color:var(--accent);border-bottom-color:var(--accent);background:rgba(167,139,250,.08)}
+  body[data-msection="files"] #sidebar{display:flex}
+  body[data-msection="files"] #editor-wrap,
+  body[data-msection="files"] #chat-panel{display:none!important}
+  body[data-msection="code"] #editor-wrap{display:flex}
+  body[data-msection="code"] #sidebar,
+  body[data-msection="code"] #chat-panel{display:none!important}
+  body[data-msection="chat"] #chat-panel{display:flex}
+  body[data-msection="chat"] #sidebar,
+  body[data-msection="chat"] #editor-wrap{display:none!important}
+  #sidebar{width:100%;border-right:none;flex:1;min-height:0}
+  #editor-wrap{flex:1;min-height:0}
+  #chat-panel{width:100%!important;position:fixed!important;top:calc(100px + env(safe-area-inset-top,0))!important;right:0;bottom:0;left:0;border-left:none!important;z-index:500 !important}
+  #chat-panel{padding-top:env(safe-area-inset-top,0);padding-bottom:env(safe-area-inset-bottom,0);padding-left:env(safe-area-inset-left,0);padding-right:env(safe-area-inset-right,0);box-sizing:border-box}
+  #chat-header{padding-left:calc(12px + env(safe-area-inset-left,0));padding-right:calc(12px + env(safe-area-inset-right,0));padding-top:calc(10px + env(safe-area-inset-top,0))}
+  #chat-input-row{padding:12px 14px calc(12px + env(safe-area-inset-bottom,0))!important;gap:8px}
+  #chat-input{min-height:44px;font-size:16px;padding:10px 14px}
+  #chat-fs-input{font-size:16px}
+  #code-editor{font-size:16px;-webkit-text-size-adjust:100%}
+  #editor-toolbar{flex-wrap:wrap;gap:6px}
+  #editor-toolbar .einfo{width:100%;flex-basis:100%}
+  #chat-send,#chat-mic{width:44px;height:44px;font-size:16px}
+  #sections-bar{padding:8px 12px;border-bottom:1px solid var(--frost-border)}
+  .section-btn{padding:8px 14px;font-size:12px}
+  #project-window{min-width:90vw;min-height:60vh;left:5vw!important;top:calc(10vh + env(safe-area-inset-top,0))!important}
+  #notif-dropdown{width:min(320px,90vw)!important;right:5vw!important}
+  #topbar{padding:calc(8px + env(safe-area-inset-top,0)) 10px;gap:8px}
+  #topbar .logo{font-size:13px}
+  #project-select{max-width:160px;font-size:11px}
+  .topbtn{padding:5px 8px;font-size:11px}
+  .topbtn{min-height:40px;min-width:40px}
+}
+@media(max-width:480px){
+  #chat-panel{font-size:11px}
+  #chat-input-row{padding:12px 14px calc(12px + env(safe-area-inset-bottom,0))!important;gap:6px}
+  #chat-input{padding:10px 12px;font-size:12px;min-height:40px}
+  #chat-send,#chat-mic{width:40px;height:40px;font-size:13px}
+  .cmsg{padding:7px 10px;font-size:11px}
+  #drop-zone{width:95vw;padding:24px 16px}
+  #drop-zone .dz-icon{font-size:36px}
+  #drop-zone .dz-title{font-size:16px}
+  #repo-url-input,#repo-name-input{font-size:12px;padding:8px 10px}
+  #clone-btn{padding:8px 14px;font-size:12px}
+   #notif-dropdown{width:calc(100vw - 20px)!important;right:10px!important;max-width:none!important}
+  #dashboard-window{width:96vw;left:2vw;top:calc(6vh + env(safe-area-inset-top,0));height:88vh}
+  #dw-body{padding:12px 12px calc(12px + env(safe-area-inset-bottom,0));font-size:12px}
+  #dw-body .dw-section{margin-bottom:12px}
+  #dw-body .dw-section h3{font-size:10px}
+  #dw-body .dw-stat{font-size:11px}
+  #dw-files .dw-file{font-size:9px}
+  #dw-files{max-height:14vh}
+  #dw-skills{max-height:26vh}
+  #dw-skills .dw-skill-card{padding:7px 9px}
+  #dw-skills .dw-skill-name{font-size:11px}
+  #dw-skills .dw-skill-desc{font-size:9px}
+}
+@media(max-width:850px) and (orientation:landscape){
+  #dashboard-window{left:4vw;top:6vh;width:92vw;height:88vh}
+}
+
+/* ── Dashboard pop-out ── */
+#dashboard-window{
+  position:fixed;left:5vw;top:10vh;width:50vw;height:60vh;
+  z-index:600;border-radius:16px;overflow:hidden;display:none;
+}
+#dw-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:8px 12px;border-bottom:1px solid var(--frost-border);
+  background:rgba(255,255,255,.04);font-size:13px;font-weight:600;
+  color:var(--accent);white-space:nowrap;overflow:hidden;
+}
+#dw-body{
+  padding:16px;overflow-y:auto;height:calc(100% - 36px);
+  font-family:'Segoe UI',system-ui,sans-serif;font-size:13px;
+  color:var(--text);line-height:1.6;
+}
+#dw-body .dw-section{margin-bottom:18px}
+#dw-body .dw-section h3{
+  font-size:11px;text-transform:uppercase;letter-spacing:.5px;
+  color:var(--text-dim);margin-bottom:8px
+}
+#dw-body .dw-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px}
+#dw-body .dw-stat{background:var(--frost-surface);border:1px solid var(--frost-border);
+  border-radius:8px;padding:8px 10px;font-size:12px}
+#dw-body .dw-stat .dw-label{color:var(--text-dim);font-size:10px}
+#dw-body .dw-stat .dw-value{color:var(--text);font-weight:600;font-size:13px}
+#dw-body pre{background:rgba(0,0,0,.25);border-radius:8px;padding:10px;
+  font-size:11px;line-height:1.5;overflow:auto;max-height:140px;
+  border:1px solid var(--frost-border);font-family:'JetBrains Mono',monospace}
+#dw-files{max-height:120px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:10px;line-height:1.4}
+  #dw-files .dw-file{padding:2px 0;color:var(--text-dim)}
+  #dw-files .dw-file:before{content:'• ';color:var(--accent2)}
+  .dw-tag{display:inline-block;font-size:9px;padding:1px 5px;border-radius:3px;
+    background:rgba(167,139,250,.1);color:var(--accent);margin-right:3px}
+  .dw-hint{font-size:9px;font-weight:400;color:var(--text-dim);text-transform:none;letter-spacing:0;margin-left:6px}
+  #dw-skills{max-height:200px;overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+  #dw-skills .dw-skill-card{background:var(--frost-surface);border:1px solid var(--frost-border);
+    border-radius:10px;padding:8px 10px}
+  #dw-skills .dw-skill-card:hover{border-color:rgba(167,139,250,.4)}
+  #dw-skills .dw-skill-top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  #dw-skills .dw-skill-name{font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #dw-skills .dw-skill-stars{font-size:10px;color:var(--yellow);white-space:nowrap}
+  #dw-skills .dw-skill-desc{font-size:10px;color:var(--text-dim);margin-top:3px;line-height:1.4;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  #dw-skills .dw-skill-meta{margin-top:5px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  #dw-skills .dw-skill-lang{font-size:9px;color:var(--accent2);font-weight:600}
+  #dw-skills .dw-skill-apply{font-size:10px;padding:3px 10px;border-radius:6px;cursor:pointer;white-space:nowrap;
+    background:rgba(74,222,128,.15);border:1px solid rgba(74,222,128,.4);color:var(--green)}
+  #dw-skills .dw-skill-apply:hover{background:rgba(74,222,128,.28)}
+  #dw-skills .dw-skill-apply[disabled]{opacity:.5;cursor:default}
+
+/* ── Inline Vibe chat dashboard (pinned above chat messages) ── */
+#chat-dashboard{
+  display:none;margin:8px 10px 0;padding:10px 12px;flex-shrink:0;
+  background:var(--frost-surface);border:1px solid rgba(167,139,250,.35);
+  border-radius:12px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.25);
+}
+#chat-dashboard.open{display:block;animation:cdIn .3s ease}
+@keyframes cdIn{from{transform:translateY(-10px);opacity:0}to{transform:translateY(0);opacity:1}}
+#chat-panel.reduced #chat-dashboard{display:none!important}
+#chat-dashboard .cd-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#chat-dashboard .cd-title{font-size:11px;font-weight:700;color:var(--accent);white-space:nowrap}
+#chat-dashboard .cd-project{font-size:11px;font-weight:600;color:var(--text);max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#chat-dashboard .cd-status{font-size:9px;padding:1px 6px;border-radius:6px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+#chat-dashboard .cd-status.running{background:rgba(74,222,128,.15);color:var(--green)}
+#chat-dashboard .cd-status.stopped{background:rgba(248,113,113,.15);color:var(--red)}
+#chat-dashboard .cd-port{font-size:10px;color:var(--text-dim);white-space:nowrap}
+#chat-dashboard .cd-btn{background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3);color:var(--accent);
+  border-radius:6px;padding:2px 7px;font-size:10px;cursor:pointer;line-height:1.4;flex-shrink:0}
+#chat-dashboard .cd-btn:hover{background:rgba(167,139,250,.25)}
+#chat-dashboard .cd-btn.danger{color:var(--red);border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.1)}
+#chat-dashboard .cd-stats{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+#chat-dashboard .cd-stat{font-size:10px;color:var(--text-dim);background:rgba(0,0,0,.18);border-radius:6px;padding:3px 8px}
+#chat-dashboard .cd-stat b{color:var(--text);font-weight:600}
+#chat-dashboard .cd-note{font-size:10px;color:var(--text-dim);margin-top:6px;font-style:italic}
+
 </style>
 </head>
 <body>
 
 <!-- ── Repo drop / project picker overlay ── -->
-<div id="drop-overlay">
+<div id="drop-overlay" class="hidden">
   <div id="drop-zone">
     <div class="dz-icon">🧬</div>
     <div class="dz-title">VibeCode</div>
@@ -374,7 +671,22 @@ body{
     <button id="clone-btn" onclick="cloneRepo()">⬇ Clone &amp; Open</button>
     <div id="clone-progress"></div>
     <div class="or-row"><div class="or-line"></div><div class="or-text">or open existing</div><div class="or-line"></div></div>
+    <button id="create-template-btn" onclick="showTemplateWizard()" style="width:100%;background:rgba(167,139,250,.15);border:1px solid rgba(167,139,250,.4);color:var(--accent);border-radius:10px;padding:10px;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s;margin-bottom:10px">🏗 Create from template</button>
   </div>
+
+  <!-- Template wizard -->
+  <div id="template-wizard" style="display:none;width:480px;max-width:90vw;background:var(--frost-bg);border:1px solid var(--frost-border);border-radius:16px;box-shadow:0 12px 48px rgba(0,0,0,.6);backdrop-filter:blur(24px) saturate(1.4);overflow:hidden">
+    <div style="padding:14px 18px;border-bottom:1px solid var(--frost-border);display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:14px;font-weight:600;color:var(--accent)">🏗 Create Project</span>
+      <button onclick="closeTemplateWizard()" class="topbtn" style="font-size:13px">✕</button>
+    </div>
+    <div id="template-list" style="padding:12px 14px;max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px"></div>
+    <div style="padding:10px 14px;border-top:1px solid var(--frost-border);display:flex;gap:8px">
+      <input id="template-project-name" type="text" placeholder="project-name (optional)" autocomplete="off" style="flex:1;background:var(--frost-surface);border:1px solid var(--frost-border);color:var(--text);border-radius:10px;padding:8px 12px;font-size:13px;outline:none">
+      <button onclick="createFromSelectedTemplate()" id="template-create-btn" style="padding:8px 16px;background:rgba(167,139,250,.22);border:1px solid rgba(167,139,250,.4);color:var(--accent);border-radius:10px;font-size:13px;font-weight:600;cursor:pointer">Create</button>
+    </div>
+  </div>
+
   <div id="project-list-overlay"></div>
   <button id="skip-btn" onclick="closeDropOverlay()">✕ Close</button>
 </div>
@@ -392,13 +704,24 @@ body{
   <button class="topbtn" id="build-btn" onclick="buildProject()" style="display:none">🔨 Build</button>
   <button class="topbtn success" id="run-btn" onclick="runProject()" style="display:none">▶ Run</button>
   <button class="topbtn danger" id="stop-btn" onclick="stopProject()" style="display:none">■ Stop</button>
-  <button class="topbtn" id="logs-toggle-btn" onclick="toggleLogs()" style="display:none">📋 Logs</button>
-  <button class="topbtn" onclick="toggleSidebar()" title="Toggle file tree">📁</button>
+    <button class="topbtn" id="logs-toggle-btn" onclick="toggleLogs()" style="display:none">📋 Logs</button>
+    <button class="topbtn" id="vcs-toggle-btn" onclick="toggleVCS()" style="display:none">🔀 VCS</button>
+   <button class="topbtn" id="download-btn" onclick="downloadProject()" title="Download project as .zip" style="display:none">⬇</button>
+   <button class="topbtn" id="notify-btn" onclick="showNotifyPanel()" title="Send push notification" style="display:none">🔔</button>
+   <button class="topbtn" onclick="toggleSidebar()" title="Toggle file tree">📁</button>
   <button class="topbtn" onclick="toggleChat()" title="Toggle chat">💬</button>
+  <button class="topbtn" onclick="testDashboard()" title="Test project dashboard">📊 Test Dashboard</button>
 </div>
 
 <!-- ── Main layout ── -->
 <div id="main">
+
+  <!-- Mobile section switcher (files / code / chat) -->
+  <div id="mobile-sections">
+    <button data-sec="files" onclick="setMobileSection('files')">📁 Files</button>
+    <button data-sec="code" onclick="setMobileSection('code')">✏️ Code</button>
+    <button data-sec="chat" onclick="setMobileSection('chat')">💬 Chat</button>
+  </div>
 
   <!-- File manager sidebar -->
   <div id="sidebar" class="frost" style="border-radius:0">
@@ -418,69 +741,239 @@ body{
       <button onclick="applyAISuggestion()" id="apply-ai-btn" style="display:none">✨ Apply AI</button>
       <button onclick="askAboutFile()" id="ask-btn" style="display:none">🤖 Ask Lilly</button>
     </div>
-    <div id="editor-box">
-      <div id="editor-placeholder">
-        <div class="ph-icon">🗂</div>
-        <div class="ph-text">Select a file from the tree to start editing.<br>Changes are saved live to the project.</div>
-      </div>
-      <textarea id="code-editor" spellcheck="false" style="display:none" oninput="onEditorChange()" onkeydown="handleEditorKey(event)"></textarea>
-    </div>
-    <div id="logs-panel">
-      <div id="logs-header">
-        <span>Container Logs</span>
-        <div style="display:flex;gap:8px">
-          <button onclick="refreshLogs()" title="Refresh">↻</button>
-          <button onclick="toggleLogs()" title="Close">✕</button>
-        </div>
-      </div>
-      <div id="logs-content">No logs yet.</div>
-    </div>
-  </div>
+     <div id="editor-box">
+       <div id="editor-placeholder">
+         <div class="ph-icon">🗂</div>
+         <div class="ph-text">Select a file from the tree to start editing.<br>Changes are saved live to the project.</div>
+       </div>
+       <textarea id="code-editor" spellcheck="false" style="display:none" oninput="onEditorChange()" onkeydown="handleEditorKey(event)"></textarea>
+     </div>
+   </div>
 
-  <!-- Chat panel (frost window) -->
-  <div id="chat-panel" class="frost" style="border-radius:0">
-    <div id="chat-header">
-      <span class="title">🤖 Lilly · VibeCode</span>
-      <div class="chat-controls">
-        <button class="chat-ctrl-btn non-reduce" onclick="chatFullscreen()" title="Fullscreen chat">⛶</button>
-        <button class="chat-ctrl-btn non-reduce" onclick="reduceChat()" title="Reduce chat">→</button>
-        <button class="chat-ctrl-btn" onclick="hideChat()" title="Hide chat">✕</button>
-      </div>
-    </div>
-    <div id="reduce-icon" onclick="expandChat()" title="Expand chat">Lilly Chat</div>
-    <div id="chat-context-bar">
-      <input type="checkbox" id="ctx-include-file" checked title="Include current file as context">
-      <span>context:</span>
-      <span class="ctx-file" id="ctx-file-label">no file</span>
-    </div>
-    <div id="chat-messages">
-      <div class="cmsg system">Lilly is ready. Open a project and start coding — ask me anything about the codebase.</div>
-    </div>
-    <div id="chat-input-row">
-      <textarea id="chat-input" placeholder="Ask Lilly about the code..." rows="1"
-        onkeydown="chatKeydown(event)" oninput="autoResize(this)"></textarea>
-      <button id="chat-send" onclick="sendChat()" title="Send (Enter)">➤</button>
-    </div>
-  </div>
+   <!-- Chat panel (frost window, right side) -->
+   <div id="chat-panel" class="frost" style="border-radius:0">
+     <div id="chat-header">
+       <span class="title">🐶 Lilly · VibeCode</span>
+       <div class="chat-controls">
+         <button class="chat-ctrl-btn non-reduce" onclick="chatFullscreen()" title="Fullscreen chat">⛶</button>
+         <button class="chat-ctrl-btn non-reduce" onclick="reduceChat()" title="Reduce chat">→</button>
+         <button class="chat-ctrl-btn" onclick="hideChat()" title="Hide chat">✕</button>
+       </div>
+     </div>
+     <div id="reduce-icon" onclick="expandChat()" title="Expand chat">Lilly Chat</div>
+
+     <!-- Overlay panels (logs / VCS) — shortened, positioned at top of chat -->
+     <div id="logs-panel">
+       <div id="logs-header">
+         <span>📋 Logs</span>
+         <div class="panel-ctrls">
+           <button onclick="refreshLogs()" title="Refresh">↻</button>
+           <button onclick="toggleLogs()" title="Close">✕</button>
+         </div>
+       </div>
+       <div id="logs-content">No logs yet.</div>
+       <div class="pw-resize" data-dir="s"></div>
+     </div>
+     <div id="vcs-panel">
+       <div id="vcs-header">
+         <span>🔀 Git — <span id="vcs-branch-label">—</span></span>
+         <div class="panel-ctrls">
+           <button onclick="refreshVCS()" title="Refresh">↻</button>
+           <button onclick="toggleVCS()" title="Close">✕</button>
+         </div>
+       </div>
+       <div id="vcs-actions">
+         <button onclick="gitCommit()" title="Stage all and commit">Commit</button>
+         <button onclick="gitPush()" title="Push to remote">Push</button>
+         <button onclick="gitDiff()" title="Show diff">Diff</button>
+       </div>
+       <div id="vcs-body">No VCS info yet. Open a git project and click refresh.</div>
+       <div class="pw-resize" data-dir="s"></div>
+     </div>
+
+     <!-- Shared chat view (normal + Alpha mode — same messages/input, roster bar toggles) -->
+     <div id="normal-chat" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+       <div id="chat-context-bar">
+         <input type="checkbox" id="ctx-include-file" checked title="Include current file as context">
+         <span>context:</span>
+         <span class="ctx-file" id="ctx-file-label">no file</span>
+       </div>
+       <!-- Inline Vibe chat dashboard — pinned above the messages -->
+       <div id="chat-dashboard">
+         <div class="cd-top">
+           <span class="cd-title">📊 Vibe Dashboard</span>
+           <span class="cd-project" id="cd-project">no project</span>
+           <span class="cd-status" id="cd-status">stopped</span>
+           <span class="cd-port" id="cd-port"></span>
+           <div style="flex:1"></div>
+           <button class="cd-btn" onclick="refreshChatDashboard()" title="Refresh">↻</button>
+           <button class="cd-btn danger" onclick="closeChatDashboard()" title="Hide dashboard">✕</button>
+         </div>
+         <div class="cd-stats" id="cd-stats"></div>
+         <div class="cd-note" id="cd-note"></div>
+       </div>
+       <!-- Alpha roster bar — shown only in vibecode/Alpha mode -->
+       <div id="alpha-roster-bar">
+         <div id="alpha-roster-bar-inner">
+           <span class="alpha-bar-label">🦊 Alpha</span>
+           <div id="vc-roster"></div>
+         </div>
+       </div>
+       <div id="chat-messages">
+         <div class="cmsg system">Lilly is ready. Open a project and start coding — ask me anything about the codebase.</div>
+       </div>
+       <div id="chat-input-row">
+         <textarea id="chat-input" placeholder="Type here..." rows="1"
+           onkeydown="chatKeydown(event)" oninput="autoResize(this)" onfocus="expandChatIfCollapsed()"></textarea>
+         <button id="chat-send" onclick="sendChat()" title="Send (Enter)">➤</button>
+       </div>
+     </div>
+
+     <!-- Chat mode toggle icon (under chat) -->
+     <div id="chat-mode-toggle" onclick="toggleChatMode()">
+       <span class="toggle-icon">🦊</span>
+       <span id="chat-mode-label">Alpha Chat</span>
+     </div>
+   </div>
 
 </div><!-- /#main -->
 
+<!-- ── Notification Pop-out ────────────────────────────────────────── -->
+<div id="notify-panel" style="display:none;position:fixed;left:50%;top:30vh;width:320px;transform:translateX(-50%);z-index:300;border-radius:16px;background:var(--frost-bg);border:1px solid var(--frost-border);box-shadow:0 12px 48px rgba(0,0,0,.6);backdrop-filter:blur(24px) saturate(1.4)">
+  <div style="padding:12px 14px;border-bottom:1px solid var(--frost-border);font-size:13px;font-weight:600;color:var(--text)">📤 Push Notification</div>
+  <div style="padding:12px 16px">
+    <input id="notify-title" type="text" placeholder="Title" style="width:100%;background:var(--frost-surface);border:1px solid var(--frost-border);color:var(--text);border-radius:8px;padding:6px 10px;font-size:12px;margin-bottom:8px"><br>
+    <textarea id="notify-body" placeholder="Message" rows="3" style="width:100%;background:var(--frost-surface);border:1px solid var(--frost-border);color:var(--text);border-radius:8px;padding:6px 10px;font-size:12px;font-family:inherit;resize:none"></textarea>
+    <div style="margin-top:12px;text-align:right">
+      <button class="topbtn" onclick="closeNotifyPanel()" style="margin-right:4px">Cancel</button>
+      <button class="topbtn success" onclick="sendPushNotification()">Send</button>
+    </div>
+  </div>
+
 <!-- ── Fullscreen chat modal ── -->
-<div id="chat-fullscreen" style="display:none;position:fixed;inset:0;z-index:300;display:none;flex-direction:column;background:rgba(10,10,22,.97);backdrop-filter:blur(20px)">
+<div id="chat-fullscreen" style="display:none;position:fixed;inset:0;z-index:300;display:none;flex-direction:column;background:rgba(240,230,239,0.97);backdrop-filter:blur(20px)">
   <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:1px solid var(--frost-border)">
-    <span style="font-size:15px;font-weight:700;color:var(--accent)">🤖 Lilly · Full Chat</span>
+    <span style="font-size:15px;font-weight:700;color:var(--accent)">🐶 Lilly · Full Chat</span>
     <button onclick="exitFullscreen()" class="topbtn">✕ Close</button>
   </div>
   <div id="chat-fs-messages" style="flex:1;overflow-y:auto;padding:16px 24px;display:flex;flex-direction:column;gap:10px;scrollbar-width:thin"></div>
   <div style="display:flex;gap:10px;padding:12px 20px;border-top:1px solid var(--frost-border);background:rgba(255,255,255,.02)">
-    <textarea id="chat-fs-input" placeholder="Ask Lilly..." rows="2"
+    <textarea id="chat-fs-input" placeholder="Type here..." rows="2"
       style="flex:1;background:var(--frost-surface);border:1px solid var(--frost-border);color:var(--text);border-radius:10px;padding:10px 14px;font-size:13px;resize:none;outline:none;font-family:inherit"
       onkeydown="fsChatKeydown(event)"></textarea>
     <button onclick="sendFsChat()" style="background:rgba(167,139,250,.22);border:1px solid rgba(167,139,250,.35);color:var(--accent);border-radius:10px;padding:10px 18px;cursor:pointer;font-size:14px;font-weight:700;align-self:flex-end">➤</button>
   </div>
 </div>
 
+<!-- ── Project preview overlay (live UI + logs + agentic huddle) ── -->
+<div id="project-window" class="frost" style="display:none;position:fixed;left:10vw;top:10vh;width:52vw;height:64vh;min-width:320px;min-height:220px;z-index:250;border-radius:16px;overflow:hidden">
+  <div id="pw-header" style="display:flex;align-items:center;justify-content:space-between;padding:6px 12px;border-bottom:1px solid var(--frost-border);background:var(--frost-bg);cursor:grab;user-select:none">
+    <span id="pw-title" style="font-size:12px;font-weight:600;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0"></span>
+    <span id="pw-live" style="display:none;font-size:9px;font-weight:700;letter-spacing:1px;color:#fff;background:var(--green);border-radius:8px;padding:2px 7px;margin:0 8px;flex-shrink:0">LIVE</span>
+    <a id="pw-url" href="#" onclick="event.preventDefault();return false" title="Preview URL (in-app)" style="font-size:10px;color:var(--accent2);text-decoration:none;overflow:hidden;text-overflow:ellipsis;max-width:150px;display:none;margin:0 8px"></a>
+    <div style="display:flex;gap:4px;flex-shrink:0">
+      <button class="topbtn" id="pw-pause-btn" onclick="togglePauseProjectWindow()" title="Pause / resume preview">⏸</button>
+      <button class="topbtn" onclick="refreshProjectWindow()" title="Refresh preview">↻</button>
+      <button class="topbtn" onclick="setProjectWindowTab('logs')" title="Container logs">📋</button>
+      <button class="topbtn" onclick="setProjectWindowTab('huddle')" title="Agentic huddle">👥</button>
+      <button class="topbtn" onclick="toggleProjectWindowSize()" title="Maximize / restore">⛶</button>
+      <button class="topbtn danger" onclick="closeProjectWindow()" title="Close">✕</button>
+    </div>
+  </div>
+  <!-- Preview / Logs / Huddle tabs -->
+  <div id="pw-tabs" style="display:flex;gap:2px;padding:4px 10px 0;border-bottom:1px solid var(--frost-border);background:var(--frost-bg);flex-shrink:0">
+    <button class="pw-tab active" data-tab="preview" onclick="setProjectWindowTab('preview')">Preview</button>
+    <button class="pw-tab" data-tab="logs" onclick="setProjectWindowTab('logs')">Logs</button>
+    <button class="pw-tab" data-tab="huddle" onclick="setProjectWindowTab('huddle')">👥 Huddle</button>
+  </div>
+  <div id="pw-loading" style="display:none;position:absolute;top:64px;left:0;right:0;bottom:0;align-items:center;justify-content:center;background:rgba(240,230,239,0.9);z-index:2">
+    <div style="color:var(--text-dim);font-size:12px">Loading preview…</div>
+  </div>
+  <div id="pw-paused" style="display:none;position:absolute;top:64px;left:0;right:0;bottom:0;align-items:center;justify-content:center;background:rgba(240,230,239,0.92);z-index:2;flex-direction:column;gap:10px">
+    <div style="font-size:26px">⏸</div>
+    <div style="color:var(--text-dim);font-size:12px">Preview paused</div>
+    <button class="topbtn" onclick="togglePauseProjectWindow()" style="padding:6px 14px">▶ Resume</button>
+  </div>
+  <iframe id="pw-frame" style="display:none;width:100%;height:calc(100% - 64px);border:none;background:#f0e6ef"></iframe>
+  <div id="pw-stream" style="display:none;width:100%;height:calc(100% - 64px);font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.5;color:rgba(255,255,255,.75);white-space:pre-wrap;overflow:auto;background:rgba(30,30,45,.35)"></div>
+  <!-- Agentic huddle (group chat with the 9 avatars) -->
+  <div id="pw-huddle" style="display:none;flex-direction:column;height:calc(100% - 64px);background:var(--frost-bg)">
+    <div id="pw-huddle-roster" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid var(--frost-border)">
+      <div style="display:flex;gap:3px;margin-right:6px">
+        <button class="hud-mode-btn active" data-mode="hive" onclick="setHuddleMode('hive')">All</button>
+        <button class="hud-mode-btn" data-mode="individual" onclick="setHuddleMode('individual')">One</button>
+      </div>
+      <div id="pw-huddle-chars" style="display:flex;gap:5px;flex-wrap:wrap"></div>
+    </div>
+    <div id="pw-huddle-messages" style="flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;scrollbar-width:thin"></div>
+    <div style="display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--frost-border)">
+      <textarea id="pw-huddle-input" placeholder="Discuss the project with the agents…" rows="2" autocomplete="off"
+        style="flex:1;background:var(--frost-surface);border:1px solid var(--frost-border);color:var(--text);border-radius:10px;padding:8px 12px;font-size:12px;resize:none;outline:none;font-family:inherit"
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendHuddleMessage()}"></textarea>
+      <button onclick="sendHuddleMessage()" title="Send to the group"
+        style="align-self:flex-end;background:rgba(167,139,250,.22);border:1px solid rgba(167,139,250,.35);color:var(--accent);border-radius:10px;padding:8px 14px;cursor:pointer;font-size:13px;font-weight:700">➤</button>
+    </div>
+  </div>
+  <!-- Resize handles (8-way) -->
+  <div class="pw-resize n" data-dir="n"></div>
+  <div class="pw-resize s" data-dir="s"></div>
+  <div class="pw-resize e" data-dir="e"></div>
+  <div class="pw-resize w" data-dir="w"></div>
+  <div class="pw-resize ne" data-dir="ne"></div>
+  <div class="pw-resize nw" data-dir="nw"></div>
+  <div class="pw-resize se" data-dir="se"></div>
+  <div class="pw-resize sw" data-dir="sw"></div>
+</div>
+
 <div id="toast-container"></div>
+
+<!-- ── Dashboard pop-out window ── -->
+<div id="dashboard-window" class="frost">
+  <div id="dw-header">
+    <span>📊 Project Dashboard</span>
+    <div style="display:flex;gap:4px">
+      <button class="topbtn" onclick="refreshDashboard()" title="Refresh">↻</button>
+      <button class="topbtn" id="dw-max-btn" onclick="toggleDashboardSize()" title="Maximize">⛶</button>
+      <button class="topbtn danger" onclick="closeDashboard()" title="Close">✕</button>
+    </div>
+  </div>
+  <div id="dw-body">
+    <div class="dw-section">
+      <h3>Quick Stats</h3>
+      <div class="dw-grid">
+        <div class="dw-stat"><div class="dw-label">Project</div><div class="dw-value" id="dw-project">—</div></div>
+        <div class="dw-stat"><div class="dw-label">Status</div><div class="dw-value" id="dw-status">—</div></div>
+        <div class="dw-stat"><div class="dw-label">Port</div><div class="dw-value" id="dw-port">—</div></div>
+        <div class="dw-stat"><div class="dw-label">Files</div><div class="dw-value" id="dw-files-count">—</div></div>
+        <div class="dw-stat"><div class="dw-label">Backend</div><div class="dw-value" id="dw-backend">—</div></div>
+        <div class="dw-stat"><div class="dw-label">Models</div><div class="dw-value" id="dw-models">—</div></div>
+        <div class="dw-stat"><div class="dw-label">Location</div><div class="dw-value" id="dw-location">—</div></div>
+        <div class="dw-stat"><div class="dw-label">Weather</div><div class="dw-value" id="dw-weather">—</div></div>
+      </div>
+    </div>
+    <div class="dw-section">
+      <h3>Language Breakdown</h3>
+      <div id="dw-langs"></div>
+    </div>
+    <div class="dw-section">
+      <h3>Files</h3>
+      <div id="dw-files"></div>
+    </div>
+    <div class="dw-section">
+      <h3>Skills <span class="dw-hint">reusable GitHub baselines — apply to a new project</span></h3>
+      <div id="dw-skills"></div>
+    </div>
+    <div class="dw-section">
+      <h3>Preview</h3>
+      <pre id="dw-preview-text">Click the preview button below to open the live project preview.</pre>
+      <div style="margin-top:8px">
+        <button class="topbtn success" onclick="openProjectPreview(currentProject)" style="padding:8px 14px">Open Preview</button>
+    <button class="topbtn" onclick="bootstrapProject()" title="Apply VibeCode theme overlay">🎨 Theme</button>
+    <button class="topbtn" onclick="learnProject()" title="Find learning resources for this project">📚 Learn</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
 // ── State ────────────────────────────────────────────────────────
@@ -496,6 +989,41 @@ let chatMode         = 'normal'; // 'normal' | 'reduced' | 'hidden' | 'fullscree
 let cwd              = '';       // current directory in file tree
 let _autosaveTimer   = null;     // debounced live-save timer
 let _autosaveCount   = 0;
+let chatDashboardState = { visible:false, data:null };
+
+// ── Pastel theme (follows the Alpha-selected lilly_theme) ─────────
+const VIBECODE_THEMES = {
+  lilac: { bg:'#f0e6ef', a1:'#f5d5e0', a2:'#d4e8f5', a3:'#d5f0e6', accent:'#8b7a9e', text:'#5d4e6d' },
+  blush: { bg:'#f7eaed', a1:'#f5c8d0', a2:'#f5e8d4', a3:'#f0d5e0', accent:'#a0607a', text:'#6d3d50' },
+  sky:   { bg:'#e6f0f7', a1:'#b8d8f0', a2:'#d4e8f5', a3:'#c8f0e8', accent:'#4a80a0', text:'#2d5068' },
+  mint:  { bg:'#e6f5ef', a1:'#b8e8d0', a2:'#d4f5e8', a3:'#d0f0c8', accent:'#3a8a6a', text:'#2d5a44' },
+  peach: { bg:'#f7f0e6', a1:'#f5d8b0', a2:'#f5e8c8', a3:'#f0d0b8', accent:'#a07040', text:'#6d4a28' },
+  slate: { bg:'#e6eaf2', a1:'#b0c0d8', a2:'#c8d4e8', a3:'#b8c8e0', accent:'#506080', text:'#304050' },
+};
+function applyVibeCodeTheme(theme) {
+  const t = VIBECODE_THEMES[theme] || VIBECODE_THEMES.lilac;
+  const hexToRgb = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)].join(',');
+  const r = document.documentElement.style;
+  r.setProperty('--accent', t.accent);
+  r.setProperty('--accent2', t.accent);
+  r.setProperty('--green', '#3a8a6a');
+  r.setProperty('--red', '#c05555');
+  r.setProperty('--yellow', '#b58900');
+  r.setProperty('--text', t.text);
+  r.setProperty('--text-dim', 'rgba(' + hexToRgb(t.text) + ',0.55)');
+  r.setProperty('--frost-bg', 'rgba(' + hexToRgb(t.bg) + ',0.78)');
+  r.setProperty('--frost-surface', 'rgba(255,255,255,0.55)');
+  r.setProperty('--frost-border', 'rgba(' + hexToRgb(t.text) + ',0.18)');
+  r.setProperty('--frost-glow', 'rgba(' + hexToRgb(t.accent) + ',0.22)');
+  document.body.style.background =
+    'linear-gradient(135deg,' + t.a1 + '55 0%,' + t.bg + ' 45%,' + t.a3 + '66 100%) fixed';
+  document.body.style.color = t.text;
+  const tb = document.getElementById('topbar');
+  if (tb) tb.style.background = 'rgba(' + hexToRgb(t.bg) + ',0.92)';
+  const pw = document.getElementById('pw-frame');
+  if (pw) pw.style.background = t.bg;
+}
+applyVibeCodeTheme(localStorage.getItem('lilly_theme') || 'lilac');
 
 // ── Toast ────────────────────────────────────────────────────────
 function toast(msg, type='') {
@@ -514,6 +1042,731 @@ function openDropOverlay() {
 }
 function closeDropOverlay() {
   document.getElementById('drop-overlay').classList.add('hidden');
+  closeTemplateWizard();
+}
+
+// ── Template wizard ──────────────────────────────────────────────────
+let selectedTemplate = null;
+async function loadTemplates() {
+  const el = document.getElementById('template-list');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/vibecode/templates');
+    const d = await r.json();
+    const templates = d.templates || [];
+    if (!templates.length) {
+      el.innerHTML = '<div style="font-size:12px;color:var(--text-dim);text-align:center;padding:20px">No templates available</div>';
+      return;
+    }
+    el.innerHTML = '';
+    templates.forEach(t => {
+      const card = document.createElement('div');
+      card.className = 'template-card';
+      card.dataset.template = t.key;
+      card.innerHTML = `
+        <div class="t-title"><span>${t.title}</span><span class="t-tag">${t.key}</span></div>
+        <div class="t-desc">${t.description}</div>
+      `;
+      card.onclick = () => selectTemplateCard(t.key);
+      el.appendChild(card);
+    });
+  } catch(e) {
+    el.innerHTML = '<div style="font-size:12px;color:var(--red);padding:20px;text-align:center">Failed to load templates</div>';
+  }
+}
+
+function showTemplateWizard() {
+  document.getElementById('drop-zone').style.display = 'none';
+  document.getElementById('template-wizard').style.display = 'flex';
+  document.getElementById('project-list-overlay').style.display = 'none';
+  selectedTemplate = null;
+  loadTemplates();
+}
+
+function closeTemplateWizard() {
+  const wiz = document.getElementById('template-wizard');
+  if (wiz) wiz.style.display = 'none';
+  const dz = document.getElementById('drop-zone');
+  if (dz) dz.style.display = 'block';
+  document.getElementById('project-list-overlay').style.display = 'block';
+}
+
+function selectTemplateCard(key) {
+  selectedTemplate = key;
+  document.querySelectorAll('.template-card').forEach(c => {
+    c.classList.toggle('selected', c.dataset.template === key);
+  });
+}
+
+async function createFromSelectedTemplate() {
+  if (!selectedTemplate) { toast('Select a template first', 'err'); return; }
+  const name = document.getElementById('template-project-name').value.trim();
+  const btn = document.getElementById('template-create-btn');
+  btn.disabled = true;
+  btn.textContent = 'Creating…';
+  try {
+    const r = await fetch('/api/vibecode/create', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ template: selectedTemplate, name: name })
+    });
+    const d = await r.json();
+    if (!r.ok) { toast(d.error || 'Creation failed', 'err'); btn.disabled=false;btn.textContent='Create'; return; }
+    toast('Created: ' + d.slug, 'ok');
+    closeTemplateWizard();
+    await refreshProjectSelect();
+    await selectProject(d.slug);
+    setTimeout(() => buildAndRunProject(d.slug), 500);
+  } catch(e) { toast('Network error', 'err'); }
+  btn.disabled = false; btn.textContent = 'Create';
+}
+
+async function buildAndRunProject(slug) {
+  try {
+    let r = await fetch('/api/vibecode/build', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slug}) });
+    let d = await r.json();
+    if (!r.ok) { toast('Build failed: ' + (d.error||d.log?.slice(-200)||'unknown'), 'err'); return; }
+    toast('Build complete', 'ok');
+    r = await fetch('/api/vibecode/run', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slug}) });
+    d = await r.json();
+    if (!r.ok) { toast('Run failed: ' + (d.error||'unknown'), 'err'); return; }
+     toast('Running: ' + d.url, 'ok');
+     openProjectPreview(slug);
+   } catch(e) { toast('Build/run error: ' + e.message, 'err'); }
+ }
+
+async function openProjectPreview(slug) {
+  const win = document.getElementById('project-window');
+  const frame = document.getElementById('pw-frame');
+  const stream = document.getElementById('pw-stream');
+  const loading = document.getElementById('pw-loading');
+  const paused = document.getElementById('pw-paused');
+  const urlEl = document.getElementById('pw-url');
+  const titleEl = document.getElementById('pw-title');
+
+  const previewUrl = '/vibecode/p/' + slug;
+  titleEl.textContent = '👁 ' + slug + ' — Preview';
+  urlEl.href = previewUrl; urlEl.textContent = previewUrl; urlEl.style.display = 'inline-block';
+  win.dataset.paused = 'false'; win.dataset.pauseSrc = '';
+  paused.style.display = 'none';
+  document.getElementById('pw-pause-btn').textContent = '⏸';
+  stream.style.display = 'none';
+  frame.style.display = 'block';
+  loading.style.display = 'flex';
+  frame.src = 'about:blank';
+  void frame.offsetWidth;
+  frame.src = previewUrl;
+  frame.onload = () => { loading.style.display = 'none'; };
+  win.style.display = 'block';
+  win.style.left = '10vw'; win.style.top = '10vh';
+  win.style.width = '52vw'; win.style.height = '64vh';
+  win.dataset.maximized = 'false';
+  setProjectWindowTab('preview');
+  try {
+    const r = await fetch('/api/vibecode/status/' + slug);
+    const d = await r.json();
+    updatePwLiveBadge(d.status === 'running');
+  } catch(e) { updatePwLiveBadge(false); }
+}
+
+function updatePwLiveBadge(running) {
+  const b = document.getElementById('pw-live');
+  if (!b) return;
+  b.style.display = running ? 'inline-block' : 'none';
+}
+
+// ── Preview window controls ───────────────────────────────────────────
+function setProjectWindowTab(tab) {
+  const win = document.getElementById('project-window');
+  const frame = document.getElementById('pw-frame');
+  const stream = document.getElementById('pw-stream');
+  const huddle = document.getElementById('pw-huddle');
+  const loading = document.getElementById('pw-loading');
+  const paused = document.getElementById('pw-paused');
+  const slug = currentProject;
+
+  document.querySelectorAll('#pw-tabs .pw-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+
+  const pausedNow = win.dataset.paused === 'true';
+  loading.style.display = 'none';
+  if (pausedNow) { frame.style.display = 'none'; huddle.style.display = 'none'; stream.style.display = 'none'; paused.style.display = 'flex'; return; }
+  paused.style.display = 'none';
+
+  if (tab === 'preview') {
+    frame.style.display = 'block';
+    stream.style.display = 'none';
+    huddle.style.display = 'none';
+    if (stream._ws) { try { stream._ws.close(); } catch(e) {} }
+  } else if (tab === 'logs') {
+    frame.style.display = 'none';
+    huddle.style.display = 'none';
+    if (stream.style.display !== 'block' && slug) {
+      stream.style.display = 'block';
+      stream.textContent = 'Streaming logs for ' + slug + '\u2026\n';
+      loading.style.display = 'flex';
+      connectPreviewStream(slug, stream, loading);
+    } else {
+      stream.style.display = 'block';
+    }
+  } else if (tab === 'huddle') {
+    frame.style.display = 'none';
+    stream.style.display = 'none';
+    if (stream._ws) { try { stream._ws.close(); } catch(e) {} }
+    huddle.style.display = 'flex';
+    document.getElementById('pw-huddle-input').focus();
+  }
+}
+
+function togglePauseProjectWindow() {
+  const win = document.getElementById('project-window');
+  const frame = document.getElementById('pw-frame');
+  const paused = document.getElementById('pw-paused');
+  const stream = document.getElementById('pw-stream');
+  const btn = document.getElementById('pw-pause-btn');
+  const pausedNow = win.dataset.paused === 'true';
+
+  if (!pausedNow) {
+    win.dataset.pauseSrc = frame.src || '';
+    frame.src = 'about:blank';
+    if (stream._ws) { try { stream._ws.close(); } catch(e) {} }
+    win.dataset.paused = 'true';
+    paused.style.display = 'flex';
+    btn.textContent = '▶';
+    btn.title = 'Resume preview';
+  } else {
+    const src = win.dataset.pauseSrc || ('/vibecode/p/' + (currentProject || ''));
+    win.dataset.paused = 'false';
+    paused.style.display = 'none';
+    btn.textContent = '⏸';
+    btn.title = 'Pause preview';
+    if (frame.src === 'about:blank') {
+      frame.src = 'about:blank';
+      void frame.offsetWidth;
+      frame.src = src;
+    }
+    setProjectWindowTab('preview');
+  }
+}
+
+function togglePreviewLogs(slug, frame, stream, loading) {
+  if (stream.style.display === 'none') setProjectWindowTab('logs');
+  else setProjectWindowTab('preview');
+}
+
+function closeProjectWindow() {
+  const win = document.getElementById('project-window');
+  const frame = document.getElementById('pw-frame');
+  const stream = document.getElementById('pw-stream');
+  if (frame) frame.src = 'about:blank';
+  if (stream && stream._ws) { try { stream._ws.close(); } catch(e) {} }
+  win.dataset.paused = 'false';
+  document.getElementById('pw-paused').style.display = 'none';
+  win.style.display = 'none';
+  if (win.dataset) win.dataset.maximized = 'false';
+}
+
+function toggleProjectWindowSize() {
+  const win = document.getElementById('project-window');
+  if (win.dataset.maximized === 'true') {
+    win.style.left = '10vw'; win.style.top = '10vh';
+    win.style.width = '52vw'; win.style.height = '64vh';
+    win.dataset.maximized = 'false';
+  } else {
+    win.style.left = '0'; win.style.top = '0';
+    win.style.width = '92vw'; win.style.height = '92vh';
+    win.dataset.maximized = 'true';
+  }
+}
+
+function refreshProjectWindow() {
+  const win = document.getElementById('project-window');
+  const frame = document.getElementById('pw-frame');
+  if (win.dataset.paused === 'true') { togglePauseProjectWindow(); return; }
+  if (frame && frame.src && frame.style.display !== 'none') {
+    frame.src = 'about:blank';
+    void frame.offsetWidth;
+    frame.src = frame.dataset.last || ('/vibecode/p/' + (currentProject || ''));
+  } else {
+    const slug = currentProject;
+    if (slug && win.style.display !== 'none') {
+      openProjectPreview(slug);
+    }
+  }
+}
+
+function connectPreviewStream(slug, streamEl, loadingEl) {
+  loadingEl.textContent = 'Streaming logs…';
+  loadingEl.style.display = 'flex';
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(proto + '://' + location.host + '/api/vibecode/logs/ws/' + slug);
+  streamEl._ws = ws;
+  ws.onopen = () => { streamEl.textContent = ''; };
+  ws.onmessage = (e) => {
+    streamEl.textContent += e.data + '\n';
+    streamEl.scrollTop = streamEl.scrollHeight;
+  };
+  ws.onclose = () => { if (streamEl._ws === ws) loadingEl.style.display = 'none'; };
+  ws.onerror = () => { setTimeout(() => { if (streamEl._ws === ws) loadingEl.style.display = 'none'; }, 800); };
+}
+
+// ── Draggable + corner-resizable overlay ─────────────────────────────
+function makeProjectWindowDraggable() {
+  const win = document.getElementById('project-window');
+  const header = document.getElementById('pw-header');
+  let sx, sy, ox, oy;
+  header.addEventListener('pointerdown', (e) => {
+    if (win.dataset.maximized === 'true' || e.target.closest('button,a')) return;
+    sx = e.clientX; sy = e.clientY;
+    ox = win.offsetLeft; oy = win.offsetTop;
+    header.setPointerCapture(e.pointerId);
+    header.style.cursor = 'grabbing';
+    const move = (ev) => {
+      const dx = ev.clientX - sx, dy = ev.clientY - sy;
+      win.style.left = Math.min(Math.max(0, ox + dx), window.innerWidth - 120) + 'px';
+      win.style.top = Math.min(Math.max(0, oy + dy), window.innerHeight - 48) + 'px';
+    };
+    const up = (ev) => {
+      header.removeEventListener('pointermove', move);
+      header.removeEventListener('pointerup', up);
+      header.style.cursor = 'grab';
+    };
+    header.addEventListener('pointermove', move);
+    header.addEventListener('pointerup', up);
+  });
+}
+
+function pwInitResize() {
+  const win = document.getElementById('project-window');
+  const minW = 320, minH = 220;
+  document.querySelectorAll('.pw-resize').forEach(h => {
+    h.addEventListener('pointerdown', (e) => {
+      if (win.dataset.maximized === 'true') return;
+      e.preventDefault(); e.stopPropagation();
+      const dir = h.dataset.dir;
+      const sx = e.clientX, sy = e.clientY;
+      const r = win.getBoundingClientRect();
+      h.setPointerCapture(e.pointerId);
+      const move = (ev) => {
+        const dx = ev.clientX - sx, dy = ev.clientY - sy;
+        let { left, top, width, height } = r;
+        if (dir.includes('e')) width = r.width + dx;
+        if (dir.includes('s')) height = r.height + dy;
+        if (dir.includes('w')) { width = r.width - dx; left = r.left + dx; }
+        if (dir.includes('n')) { height = r.height - dy; top = r.top + dy; }
+        width = Math.max(minW, width); height = Math.max(minH, height);
+        win.style.width = width + 'px';
+        win.style.height = height + 'px';
+        win.style.left = left + 'px';
+        win.style.top = top + 'px';
+      };
+      const up = () => {
+        document.removeEventListener('pointermove', move);
+        document.removeEventListener('pointerup', up);
+      };
+      document.addEventListener('pointermove', move);
+      document.addEventListener('pointerup', up);
+    });
+  });
+}
+
+// ── Agentic huddle (group chat with the 9 avatars) ──────────────────
+const PW_HUDDLE_ROSTER = [
+  { key:'puppy',   name:'Lilly',   emoji:'🐶', role:'Alpha Companion' },
+  { key:'fox',     name:'Fox',     emoji:'🦊', role:'Creative Strategist' },
+  { key:'cat',     name:'Cat',     emoji:'🐱', role:'Precision Analyst' },
+  { key:'bear',    name:'Bear',    emoji:'🐻', role:'Steadfast Guardian' },
+  { key:'bunny',   name:'Bunny',   emoji:'🐰', role:'Energetic Scout' },
+  { key:'owl',     name:'Owl',     emoji:'🦉', role:'Wisdom Keeper' },
+  { key:'deer',    name:'Deer',    emoji:'🦌', role:'Gentle Healer' },
+  { key:'wolf',    name:'Wolf',    emoji:'🐺', role:'Fierce Protector' },
+  { key:'raccoon', name:'Raccoon', emoji:'🦝', role:'Tech Tinkerer' },
+];
+let pwHuddleMode = 'hive';
+let pwHuddleChars = [];
+
+function renderHuddleRoster() {
+  const box = document.getElementById('pw-huddle-chars');
+  if (!box) return;
+  box.innerHTML = '';
+  PW_HUDDLE_ROSTER.forEach(p => {
+    const s = document.createElement('div');
+    s.className = 'hud-char' + (p.key === 'puppy' ? ' selected' : '');
+    s.textContent = p.emoji;
+    s.dataset.key = p.key;
+    s.title = p.name;
+    s.innerHTML = p.emoji + '<span class="hud-tip">' + p.name + '<br>' + p.role + '</span>';
+    s.onclick = () => {
+      if (pwHuddleMode === 'individual') {
+        const i = pwHuddleChars.indexOf(p.key);
+        if (i >= 0) pwHuddleChars.splice(i, 1);
+        else pwHuddleChars.push(p.key);
+        s.classList.toggle('selected');
+      } else {
+        pwHuddleChars = [p.key];
+        box.querySelectorAll('.hud-char').forEach(x => x.classList.toggle('selected', x.dataset.key === p.key));
+      }
+    };
+    box.appendChild(s);
+  });
+}
+
+function setHuddleMode(mode) {
+  pwHuddleMode = mode;
+  pwHuddleChars = [];
+  document.querySelectorAll('#pw-huddle .hud-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  document.querySelectorAll('#pw-huddle .hud-char').forEach(s => s.classList.toggle('selected', mode === 'individual' ? false : s.dataset.key === 'puppy'));
+  if (mode !== 'individual') pwHuddleChars = [];
+  const ph = document.getElementById('pw-huddle-input');
+  if (ph) ph.placeholder = mode === 'hive' ? 'Ask the whole team…' : 'Choose an agent above, then ask…';
+}
+
+function appendHuddleMsg(text, name, emoji, isUser, isAlpha) {
+  const box = document.getElementById('pw-huddle-messages');
+  const el = document.createElement('div');
+  el.className = 'hud-msg' + (isUser ? ' user' : '');
+  el.innerHTML = '<div class="hud-avatar">' + (isUser ? '🙂' : (emoji||'🤖')) + '</div>' +
+    '<div class="hud-body"><div class="hud-name">' + (isUser ? 'You' : (name||'Agent')) +
+    (isAlpha ? ' <span class="hud-alpha">● Alpha</span>' : '') + '</div>' +
+    '<div class="hud-text">' + escHtml(text) + '</div></div>';
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+}
+
+function huddleTyping(active) {
+  const box = document.getElementById('pw-huddle-messages');
+  const old = document.getElementById('hud-typing');
+  if (old) old.remove();
+  if (!active) return;
+  const el = document.createElement('div');
+  el.className = 'hud-typing';
+  el.id = 'hud-typing';
+  el.innerHTML = '<div class="hud-avatar">👥</div><div class="hud-dots"><span></span><span></span><span></span></div>';
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+}
+
+async function sendHuddleMessage() {
+  const input = document.getElementById('pw-huddle-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  appendHuddleMsg(msg, 'You', '', true, false);
+
+  let ctx = 'Agentic huddle for the VibeCode project.\n';
+  if (currentProject) {
+    ctx += 'Project: ' + currentProject + '\n';
+    try {
+      const d = await (await fetch('/api/vibecode/dashboard/' + encodeURIComponent(currentProject))).json();
+      ctx += 'Status: ' + (d.status || 'stopped') + ' · Files: ' + (d.file_count ?? 0) + ' · Port: ' + (d.port || '—') + '\n';
+      if (d.stack && d.stack.length) ctx += 'Stack: ' + d.stack.join(', ') + '\n';
+      if (d.skills && d.skills.length) ctx += 'Reusable skills: ' + d.skills.map(s => s.name || s.key).join(', ') + '\n';
+    } catch(e) {}
+  }
+  if (activeTab >= 0 && openTabs[activeTab]) {
+    const f = openTabs[activeTab];
+    ctx += 'Current file: ' + f.name + '\n```\n' + (f.content || '').slice(0, 3000) + '\n```\n';
+  }
+  ctx += '\nAs the team, discuss and respond to: ' + msg;
+
+  huddleTyping(true);
+  const body = { message: ctx, selected: 'puppy', mode: pwHuddleMode, characters: pwHuddleChars, muted: true };
+  try {
+    const r = await fetch('/api/group_chat', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    huddleTyping(false);
+    const d = await r.json();
+    if (!r.ok) { appendHuddleMsg(d.error || 'Group chat failed', 'System', '', false, false); return; }
+    (d.responses || []).forEach(resp => {
+      appendHuddleMsg(resp.text, resp.name, resp.emoji, false, !!resp.alpha);
+    });
+    if (!(d.responses || []).length) appendHuddleMsg('The team is quiet right now.', 'System', '', false, false);
+  } catch(e) {
+    huddleTyping(false);
+    appendHuddleMsg('Huddle error: ' + (e.message || e), 'System', '', false, false);
+  }
+}
+
+// ── Download current project ─────────────────────────────────────────
+function downloadProject() {
+  if (!currentProject) { toast('No project selected', 'err'); return; }
+  // Reuse the VibeCode project download endpoint (serves a project ZIP).
+  window.open('/api/vibecode/download/' + encodeURIComponent(currentProject), '_blank');
+}
+
+// ── Push notification panel ───────────────────────────────────────────
+function showNotifyPanel() {
+  document.getElementById('notify-panel').style.display = 'block';
+  document.getElementById('notify-title').value = currentProject || 'Lilly';
+  document.getElementById('notify-body').value = '';
+  document.getElementById('notify-body').focus();
+}
+
+function closeNotifyPanel() {
+  document.getElementById('notify-panel').style.display = 'none';
+}
+
+async function sendPushNotification() {
+  const title = document.getElementById('notify-title').value.trim() || 'Lilly';
+  const body = document.getElementById('notify-body').value.trim() || '';
+  if (!body) { toast('Message body is required', 'err'); return; }
+  try {
+    const r = await fetch('/api/pushbullet/send', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({title, body})
+    });
+    const d = await r.json();
+    if (r.ok) {
+      toast('Push sent: ' + title, 'ok');
+      closeNotifyPanel();
+    } else {
+      toast('Push failed: ' + (d.error || 'unknown'), 'err');
+    }
+  } catch(e) {
+    toast('Network error', 'err');
+  }
+}
+
+// ── Dashboard pop-out ─────────────────────────────────────────────────
+function openDashboard(data) {
+  const win = document.getElementById('dashboard-window');
+  if (win) win.style.display = 'block';
+  if (win && win.dataset) win.dataset.maximized = 'false';
+}
+
+function closeDashboard() {
+  const win = document.getElementById('dashboard-window');
+  if (win) win.style.display = 'none';
+}
+
+// ── Inline Vibe chat dashboard (pinned above chat messages) ────────
+function showChatDashboard(data) {
+  chatDashboardState.visible = true;
+  chatDashboardState.data = data || null;
+  renderChatDashboard(data);
+  const el = document.getElementById('chat-dashboard');
+  el.classList.add('open');
+  // Make sure the chat is expanded so the dashboard is visible
+  if (chatMode === 'hidden' || chatMode === 'reduced') expandChat();
+}
+
+function closeChatDashboard() {
+  chatDashboardState.visible = false;
+  document.getElementById('chat-dashboard').classList.remove('open');
+}
+
+function renderChatDashboard(d) {
+  if (!d) return;
+  document.getElementById('cd-project').textContent = d.project || 'no project';
+  document.getElementById('cd-project').title = d.project || '';
+  const st = document.getElementById('cd-status');
+  st.textContent = d.status || 'stopped';
+  st.className = 'cd-status ' + (d.status === 'running' ? 'running' : 'stopped');
+  document.getElementById('cd-port').textContent = d.port ? ':' + d.port : '';
+
+  const stats = [];
+  if (d.file_count != null) stats.push(`<span class="cd-stat">📁 <b>${d.file_count}</b> files</span>`);
+  if (d.size_bytes) stats.push(`<span class="cd-stat">💾 <b>${(d.size_bytes/1024).toFixed(1)} KB</b></span>`);
+  if (d.backend) stats.push(`<span class="cd-stat">🧠 <b>${escHtml(d.backend)}</b></span>`);
+  if (d.location && d.location !== '—') stats.push(`<span class="cd-stat">📍 <b>${escHtml(d.location)}</b></span>`);
+  const langs = d.lang_breakdown || {};
+  const langTags = Object.keys(langs).slice(0,3).map(k => `${k}:${langs[k]}`).join(', ');
+  if (langTags) stats.push(`<span class="cd-stat">🗂 <b>${escHtml(langTags)}</b></span>`);
+  document.getElementById('cd-stats').innerHTML = stats.join('');
+
+  const skills = d.skills || [];
+  const note = document.getElementById('cd-note');
+  note.textContent = skills.length
+    ? `${skills.length} reusable skill${skills.length===1?'':'s'} available — ask "apply <skill>" or open the dashboard for more.`
+    : 'No skills yet — drop a GitHub link in chat and it becomes a reusable baseline.';
+}
+
+async function refreshChatDashboard() {
+  if (!chatDashboardState.visible) return;
+  try {
+    const url = currentProject
+      ? '/api/vibecode/dashboard/' + encodeURIComponent(currentProject)
+      : '/api/vibecode/dashboard/';
+    const d = await (await fetch(url)).json();
+    chatDashboardState.data = d;
+    renderChatDashboard(d);
+  } catch(e) {}
+}
+
+function toggleDashboardSize() {
+  const win = document.getElementById('dashboard-window');
+  if (!win) return;
+  if (win.dataset.maximized === 'true') {
+    win.style.left = '5vw'; win.style.top = '10vh';
+    win.style.width = '50vw'; win.style.height = '60vh';
+    win.dataset.maximized = 'false';
+  } else {
+    win.style.left = '0'; win.style.top = '0';
+    win.style.width = '90vw'; win.style.height = '90vh';
+    win.dataset.maximized = 'true';
+  }
+}
+
+async function testDashboard() {
+  await refreshChatDashboard();
+  if (!chatDashboardState.data) {
+    const d = await (await fetch('/api/vibecode/dashboard/')).json();
+    chatDashboardState.data = d;
+  }
+  showChatDashboard(chatDashboardState.data);
+}
+
+async function bootstrapProject() {
+  if (!currentProject) return;
+  try {
+    const r = await fetch('/api/vibecode/bootstrap/' + encodeURIComponent(currentProject), {method:'POST'});
+    const d = await r.json();
+    if (r.ok) toast('Theme applied', 'ok');
+    else toast(d.error || 'Bootstrap failed', 'err');
+  } catch(e) { toast('Bootstrap error', 'err'); }
+}
+
+async function learnProject() {
+  if (!currentProject) return;
+  try {
+    const r = await fetch('/api/vibecode/learning/' + encodeURIComponent(currentProject));
+    const d = await r.json();
+    if (d.article) {
+      toast('📚 ' + d.article.title, 'ok');
+      if (confirm('Open learning article?\n\n' + d.article.title + '\n\nStack: ' + (d.stack||[]).join(', '))) {
+        window.open(d.article.url, '_blank');
+      }
+    } else {
+      toast(d.message || 'No article found', 'err');
+    }
+  } catch(e) { toast('Learning search failed', 'err'); }
+}
+
+async function refreshDashboard() {
+  if (!currentProject) {
+    const d = await (await fetch('/api/vibecode/dashboard/')).json();
+    populateDashboard(d);
+    return;
+  }
+  const r = await fetch('/api/vibecode/dashboard/' + encodeURIComponent(currentProject));
+  const d = await r.json();
+  populateDashboard(d);
+}
+
+function populateDashboard(d) {
+  document.getElementById('dw-project').textContent = d.project || '—';
+  const statusEl = document.getElementById('dw-status');
+  statusEl.textContent = d.status || 'stopped';
+  statusEl.className = 'dw-value';
+
+  document.getElementById('dw-port').textContent = d.port || '—';
+  document.getElementById('dw-files-count').textContent = d.file_count || '0';
+
+  const backend = d.backend || '?';
+  const ready = d.llm_ready;
+  document.getElementById('dw-backend').textContent = backend;
+  document.getElementById('dw-backend').style.color = ready ? 'var(--green)' : 'var(--red)';
+
+  const models = d.llm_models || [];
+  document.getElementById('dw-models').textContent = models.length
+    ? models.slice(0,3).join(', ')
+    : (ready ? 'loading…' : 'unavailable');
+
+  document.getElementById('dw-location').textContent = d.location || '—';
+
+  const w = d.weather?.current || {};
+  document.getElementById('dw-weather').textContent = w.temp_c
+    ? `${w.temp_c}°C — ${w.desc}`
+    : '—';
+
+  // Language breakdown
+  const langs = d.lang_breakdown || {};
+  const langEl = document.getElementById('dw-langs');
+  if (Object.keys(langs).length) {
+    langEl.innerHTML = Object.entries(langs)
+      .map(([ext, cnt]) => `<span class="dw-tag">${ext} (${cnt})</span>`)
+      .join('');
+  } else {
+    langEl.textContent = 'No files';
+  }
+
+  // File list
+  const files = d.files || [];
+  const filesEl = document.getElementById('dw-files');
+  if (files.length) {
+    filesEl.innerHTML = files.slice(0, 50)
+      .map(f => `<div class="dw-file">${f}</div>`)
+      .join('');
+    if (files.length > 50) {
+      filesEl.innerHTML += `<div class="dw-file">… and ${files.length - 50} more</div>`;
+    }
+  } else {
+    filesEl.textContent = 'No files';
+  }
+
+  // Skills
+  const skills = d.skills || [];
+  const skillsEl = document.getElementById('dw-skills');
+  if (skills.length) {
+    skillsEl.innerHTML = skills.map(s => {
+      const stars = s.stars ? `<span class="dw-skill-stars">⭐ ${s.stars}</span>` : '';
+      const desc = s.description ? `<div class="dw-skill-desc">${escHtml(s.description)}</div>` : '';
+      const lang = s.language ? `<span class="dw-skill-lang">${escHtml(s.language)}</span>` : '';
+      const tags = (s.tags || []).slice(0,4).map(t => `<span class="dw-tag">${escHtml(t)}</span>`).join('');
+      const times = s.used_count ? `<span class="dw-skill-stars" style="color:var(--text-dim)">· used ${s.used_count}×</span>` : '';
+      return `<div class="dw-skill-card">
+        <div class="dw-skill-top">
+          <span class="dw-skill-name" title="${escHtml(s.repo_url||'')}">${escHtml(s.name)}</span>
+          <div style="display:flex;align-items:center;gap:6px">${stars}${times}
+            <button class="dw-skill-apply" onclick="applySkill('${escHtml(s.key)}', this)">⚡ Apply</button>
+          </div>
+        </div>${desc}
+        <div class="dw-skill-meta">${lang}${tags}</div>
+      </div>`;
+    }).join('');
+  } else {
+    skillsEl.innerHTML = '<div style="font-size:11px;color:var(--text-dim)">No skills yet — drop a GitHub link in chat or ask Lilly to "create something" and a suggested repo becomes a skill.</div>';
+  }
+
+  // Update preview text
+  const previewText = document.getElementById('dw-preview-text');
+  if (d.status === 'running' && d.port) {
+    previewText.textContent = `Project is running. Use the preview button to open it.`;
+  } else if (d.port) {
+    previewText.textContent = `Project built but not running. Click Run to start, or use the static preview.`;
+  } else {
+    previewText.textContent = 'No port allocated. Use the preview button to view files directly.';
+  }
+}
+
+async function applySkill(key, btn) {
+  if (!key) return;
+  if (btn) { btn.disabled = true; btn.textContent = 'Cloning…'; }
+  try {
+    const name = prompt('Name for the new project (optional):', key + '-app') || '';
+    const r = await fetch('/api/vibecode/skills/apply', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ key, name })
+    });
+    const d = await r.json();
+    if (!r.ok) { toast(d.error || 'Apply failed', 'err'); if (btn){btn.disabled=false;btn.textContent='⚡ Apply';} return; }
+    toast(d.message || ('Applied '+key), 'ok');
+    await refreshProjectSelect();
+    selectProject(d.slug);
+    refreshDashboard();
+  } catch(e) { toast('Apply error', 'err'); }
+  if (btn) { btn.disabled = false; btn.textContent = '⚡ Apply'; }
+}
+
+async function applySkillByName(name) {
+  const r = await fetch('/api/vibecode/skills/apply', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ name: name })
+  });
+  const d = await r.json();
+  if (!r.ok) { toast(d.error || 'Apply failed', 'err'); return null; }
+  toast(d.message || 'Applied', 'ok');
+  await refreshProjectSelect();
+  selectProject(d.slug);
+  return d;
 }
 
 async function loadProjectListOverlay() {
@@ -590,17 +1843,23 @@ async function selectProject(slug) {
   showPlaceholder();
   document.getElementById('project-select').value = slug;
   await loadFileTree('');
+  // Auto-bootstrap project with themed preview overlay if needed
+  try {
+    await fetch('/api/vibecode/bootstrap/' + encodeURIComponent(slug), {method:'POST'});
+  } catch(e) {}
   startStatusPoll();
   updateUI();
   addSysMsg('Opened project: ' + slug);
+  // Keep the inline dashboard in sync when a project gets labeled/created
+  if (chatDashboardState.visible) refreshChatDashboard();
 }
 
 function updateUI() {
   const hasProject = !!currentProject;
-  ['build-btn','run-btn','stop-btn','logs-toggle-btn'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.style.display = hasProject ? '' : 'none';
-  });
+   ['build-btn','run-btn','stop-btn','logs-toggle-btn','vcs-toggle-btn','download-btn','notify-btn'].forEach(id => {
+     const el = document.getElementById(id);
+     if (el) el.style.display = hasProject ? '' : 'none';
+   });
   if (!hasProject) {
     setStatus('stopped', 'no project');
     const url = document.getElementById('project-url');
@@ -637,9 +1896,10 @@ async function runProject() {
     const d = await r.json();
     if (!r.ok) { setStatus('error','run failed'); toast(d.error||'Run failed','err'); return; }
     setStatus('running','running');
-    toast('Container running → '+d.url,'ok');
-    const urlEl = document.getElementById('project-url');
-    urlEl.href = d.url; urlEl.textContent = d.url; urlEl.style.display='';
+    document.getElementById('download-btn').style.display='';
+    document.getElementById('notify-btn').style.display='';
+    toast('Container running — opening preview', 'ok');
+    openProjectPreview(currentProject);
   } catch(e) { setStatus('error','error'); toast('Run error','err'); }
 }
 
@@ -678,9 +1938,14 @@ async function pollStatus() {
     const d = await r.json();
     const s = d.status || 'stopped';
     setStatus(s === 'running' ? 'running' : s === 'exited' ? 'error' : 'stopped', s);
-    if (d.url && d.status === 'running') {
-      const urlEl = document.getElementById('project-url');
+    const pw = document.getElementById('project-window');
+    if (pw && pw.style.display !== 'none') updatePwLiveBadge(s === 'running');
+    const urlEl = document.getElementById('project-url');
+    if (s === 'running' && d.url) {
       urlEl.href = d.url; urlEl.textContent = d.url; urlEl.style.display='';
+    } else {
+      const staticUrl = '/vibecode/p/' + currentProject;
+      urlEl.href = staticUrl; urlEl.textContent = staticUrl; urlEl.style.display='';
     }
   } catch(e) {}
 }
@@ -703,6 +1968,88 @@ function showLogs(text) {
   const el = document.getElementById('logs-content');
   el.textContent = text;
   el.scrollTop = el.scrollHeight;
+}
+
+// ── VCS ──────────────────────────────────────────────────────────
+let vcsOpen = false;
+function toggleVCS() {
+  vcsOpen = !vcsOpen;
+  document.getElementById('vcs-panel').classList.toggle('open', vcsOpen);
+  if (vcsOpen) refreshVCS();
+}
+async function refreshVCS() {
+  if (!currentProject) return;
+  const body = document.getElementById('vcs-body');
+  body.textContent = 'Loading…';
+  try {
+    const [statusR, logR, branchesR] = await Promise.all([
+      fetch('/api/vibecode/git/status/'+currentProject),
+      fetch('/api/vibecode/git/log/'+currentProject),
+      fetch('/api/vibecode/git/branches/'+currentProject),
+    ]);
+    const status = await statusR.json();
+    const log = await logR.json();
+    const branches = await branchesR.json();
+
+    document.getElementById('vcs-branch-label').textContent = status.branch || '—';
+    let text = '';
+    text += 'branch: ' + (status.branch || '—') + '\n';
+    text += 'status: ' + (status.status || '—') + '\n\n';
+    if (log.commits && log.commits.length) {
+      text += 'commits:\n';
+      log.commits.forEach(c => {
+        text += '  ' + (c.hash||'') + ' ' + (c.date||'') + ' ' + (c.message||'') + '\n';
+      });
+    } else {
+      text += 'No commits yet.\n';
+    }
+    if (branches.local && branches.local.length) {
+      text += '\nbranches:\n';
+      branches.local.forEach(b => {
+        text += '  * ' + b + '\n';
+      });
+    }
+    body.textContent = text;
+  } catch(e) {
+    body.textContent = 'Error loading VCS info';
+  }
+}
+async function gitCommit() {
+  if (!currentProject) return;
+  const msg = prompt('Commit message:', 'VibeCode update');
+  if (!msg) return;
+  try {
+    const r = await fetch('/api/vibecode/git/commit/'+currentProject, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({message: msg})
+    });
+    const d = await r.json();
+    if (!r.ok) { alert(d.error||'Commit failed'); return; }
+    toast('Committed: ' + msg, 'ok');
+    refreshVCS();
+  } catch(e) { alert('Commit error'); }
+}
+async function gitPush() {
+  if (!currentProject) return;
+  try {
+    const r = await fetch('/api/vibecode/git/push/'+currentProject, {method:'POST'});
+    const d = await r.json();
+    if (!r.ok) { alert(d.error||'Push failed'); return; }
+    toast('Pushed', 'ok');
+    refreshVCS();
+  } catch(e) { alert('Push error'); }
+}
+async function gitDiff() {
+  if (!currentProject) return;
+  try {
+    const r = await fetch('/api/vibecode/git/diff/'+currentProject);
+    const d = await r.json();
+    if (d.diff !== undefined) {
+      alert(d.diff || 'No changes');
+    } else {
+      alert(d.error || 'Diff failed');
+    }
+  } catch(e) { alert('Diff error'); }
 }
 
 // ── File tree ─────────────────────────────────────────────────────
@@ -769,21 +2116,22 @@ function formatSize(b) {
 </script>
 <script>
 // ── Editor / tabs ─────────────────────────────────────────────────
-async function openFile(path) {
-  // Already open?
-  const existing = openTabs.findIndex(t => t.path === path);
-  if (existing !== -1) { activateTab(existing); return; }
-  try {
-    const r = await fetch('/api/vibecode/file/'+currentProject+'?path='+encodeURIComponent(path));
-    const d = await r.json();
-    if (d.error) { toast(d.error,'err'); return; }
-    openTabs.push({ path: d.path, lang: d.lang, content: d.content, dirty: false });
-    activeTab = openTabs.length - 1;
-    renderTabs();
-    activateTab(activeTab);
-    updateCtxBar();
-  } catch(e) { toast('Could not open file','err'); }
-}
+ async function openFile(path) {
+   // Already open?
+   const existing = openTabs.findIndex(t => t.path === path);
+   if (existing !== -1) { activateTab(existing); if (isMobile()) setMobileSection('code'); return; }
+   try {
+     const r = await fetch('/api/vibecode/file/'+currentProject+'?path='+encodeURIComponent(path));
+     const d = await r.json();
+     if (d.error) { toast(d.error,'err'); return; }
+     openTabs.push({ path: d.path, lang: d.lang, content: d.content, dirty: false });
+     activeTab = openTabs.length - 1;
+     renderTabs();
+     activateTab(activeTab);
+     updateCtxBar();
+     if (isMobile()) setMobileSection('code');
+   } catch(e) { toast('Could not open file','err'); }
+ }
 
 function activateTab(idx) {
   activeTab = idx;
@@ -915,6 +2263,7 @@ async function saveCurrentFile() {
 }
 
 function toggleSidebar() {
+  if (isMobile()) { setMobileSection('files'); return; }
   document.getElementById('sidebar').classList.toggle('collapsed');
 }
 
@@ -930,11 +2279,18 @@ function addSysMsg(text) {
   appendFsChatMsg('system', text);
 }
 
+let chatAgentMeta = { key:'puppy', emoji:'🐶', name:'Lilly' };
+
 function appendChatMsg(role, content, isFull) {
   const container = document.getElementById(isFull ? 'chat-fs-messages' : 'chat-messages');
   const div = document.createElement('div');
   div.className = 'cmsg '+role;
-  div.innerHTML = renderMarkdown(content);
+  let head = '';
+  if (role === 'assistant' && chatAgentMeta && chatAgentMeta.emoji) {
+    head = '<div class="cmsg-sender">' + chatAgentMeta.emoji + ' ' + escHtml(chatAgentMeta.name) +
+      (chatAgentMeta.key === 'puppy' ? ' <span class="cmsg-alpha">Alpha</span>' : '') + '</div>';
+  }
+  div.innerHTML = head + renderMarkdown(content);
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 }
@@ -965,6 +2321,8 @@ function escHtml(s) {
 }
 
 async function sendChat() {
+  // In Alpha/vibecode mode route to the VibeCode chat endpoint
+  if (vcChatMode === 'vibecode') { await sendVcChat(); return; }
   const input = document.getElementById('chat-input');
   const msg = input.value.trim();
   if (!msg) return;
@@ -995,7 +2353,49 @@ async function _doChat(msg) {
     });
     const d = await r.json();
     removeThinking(thinking);
+    if (d.agent_emoji) chatAgentMeta = { key: d.agent || 'puppy', emoji: d.agent_emoji, name: d.agent_name || 'Lilly' };
     if (!r.ok) { appendChatMsg('system','Error: '+(d.error||'unknown')+'',false); appendFsChatMsg('system',d.error||'Error'); return; }
+
+    // ── Dashboard: pin inline above the chat (persists for the session) ──
+    if (d.action === 'dashboard_open' && d.dashboard_data) {
+      populateDashboard(d.dashboard_data);
+      showChatDashboard(d.dashboard_data);
+      appendChatMsgWithApply('assistant', d.reply || 'Opening dashboard…');
+      launchAlphaPopout();
+      return;
+    }
+
+    // ── Dashboard off ──
+    if (d.action === 'dashboard_close') {
+      closeChatDashboard();
+      appendChatMsgWithApply('assistant', d.reply || 'Dashboard hidden.');
+      return;
+    }
+
+    // ── Alpha baseline suggestions → skill cards ──
+    if (d.alpha_mode === 'suggesting' && Array.isArray(d.suggestions)) {
+      appendChatMsgWithApply('assistant', d.reply || '');
+      appendSuggestionCards(d.suggestions);
+      return;
+    }
+
+    // ── Dropped repo link captured as a skill ──
+    if (d.skill_saved) {
+      appendChatMsgWithApply('assistant', d.reply || '');
+      const s = d.skill_saved;
+      appendSkillActionCard('Skill saved', s.key, s.name, 'Use this baseline for a new project');
+      return;
+    }
+
+    // ── Skill applied → open the new project ──
+    if (d.project_applied) {
+      appendChatMsgWithApply('assistant', d.reply || '');
+      await refreshProjectSelect();
+      selectProject(d.project_applied);
+      refreshChatDashboard();
+      return;
+    }
+
     const reply = d.reply || '';
     appendChatMsgWithApply('assistant', reply);
     // Store last code block for apply button
@@ -1043,6 +2443,44 @@ function appendChatMsgWithApply(role, content) {
   appendFsChatMsg(role, content);
 }
 
+function appendSuggestionCards(suggestions) {
+  const c = document.getElementById('chat-messages');
+  const card = document.createElement('div');
+  card.className = 'cmsg assistant';
+  const list = suggestions.map((s, i) => {
+    const star = s.stars ? `⭐ ${s.stars}` : '';
+    const topics = (s.topics || []).slice(0, 3).map(t => `<span class="dw-tag">${escHtml(t)}</span>`).join('');
+    const desc = s.description ? `<div class="dw-skill-desc">${escHtml(s.description)}</div>` : '';
+    return `<div class="dw-skill-card" style="margin-top:6px">
+      <div class="dw-skill-top">
+        <span class="dw-skill-name" title="${escHtml(s.repo_url||'')}">${i + 1}. ${escHtml(s.repo_name||'')}</span>
+        <div style="display:flex;align-items:center;gap:6px"><span class="dw-skill-stars">${star}</span>
+          <button class="dw-skill-apply" onclick="applySkillByName(${JSON.stringify(s.repo_name || s.repo_url).replace(/"/g,'&quot;')})">⚡ Use baseline</button>
+        </div>
+      </div>${desc}
+      <div class="dw-skill-meta">${s.language ? `<span class="dw-skill-lang">${escHtml(s.language)}</span>` : ''}${topics}</div>
+    </div>`;
+  }).join('');
+  card.innerHTML = '<div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Each of these is now a reusable skill — pick one to clone it into a new project:</div>' + list;
+  c.appendChild(card);
+  c.scrollTop = c.scrollHeight;
+}
+
+function appendSkillActionCard(label, key, name, hint) {
+  const c = document.getElementById('chat-messages');
+  const card = document.createElement('div');
+  card.className = 'cmsg assistant';
+  card.innerHTML = `<div class="dw-skill-card" style="margin-top:6px">
+    <div class="dw-skill-top">
+      <span class="dw-skill-name">${escHtml(label)}: ${escHtml(name||key)}</span>
+      <button class="dw-skill-apply" onclick="applySkillByName(${JSON.stringify(name || key).replace(/"/g,'&quot;')})">⚡ Apply to new project</button>
+    </div>
+    <div class="dw-skill-desc">${escHtml(hint||'')}</div>
+  </div>`;
+  c.appendChild(card);
+  c.scrollTop = c.scrollHeight;
+}
+
 function applyAISuggestion() {
   if (!lastAISuggestion) return;
   applyCodeToEditor(lastAISuggestion);
@@ -1074,7 +2512,18 @@ function askAboutFile() {
 }
 
 // ── Chat panel controls ───────────────────────────────────────────
+function isMobile() { return window.matchMedia('(max-width:768px)').matches; }
+function setMobileSection(name) {
+  document.body.setAttribute('data-msection', name);
+  document.querySelectorAll('#mobile-sections button').forEach(b =>
+    b.classList.toggle('active', b.dataset.sec === name));
+}
+function launchAlphaPopout() {
+  const w = window.open('/alpha-popout', 'AlphaPopout', 'width=440,height=720,left=40,top=40');
+  if (!w) toast('Popout blocked — allow popups to launch the Alpha.','err');
+}
 function toggleChat() {
+  if (isMobile()) { setMobileSection('chat'); expandChat(); return; }
   if (chatMode === 'hidden') expandChat();
   else hideChat();
 }
@@ -1087,8 +2536,13 @@ function expandChat() {
   chatMode = 'normal';
   document.getElementById('chat-panel').className = 'frost';
   document.getElementById('chat-panel').style.cssText = 'border-radius:0';
+  if (isMobile()) setMobileSection('chat');
+}
+function expandChatIfCollapsed() {
+  if (chatMode === 'hidden') expandChat();
 }
 function hideChat() {
+  if (isMobile()) { setMobileSection('files'); return; }
   chatMode = 'hidden';
   document.getElementById('chat-panel').className = 'frost hidden';
   document.getElementById('chat-panel').style.borderRadius = '0';
@@ -1115,6 +2569,135 @@ function autoResize(el) {
   el.style.height = Math.min(el.scrollHeight, 120)+'px';
 }
 
+// ── Chat mode switching (normal ↔ vibecode/Alpha) — shared panel ──
+let vcChatMode = 'normal'; // 'normal' | 'vibecode'
+let vcAgentMeta = { key:'puppy', emoji:'🐶', name:'Lilly' };
+let vcSelectedChars = ['puppy'];
+
+function switchChatMode(mode) {
+  vcChatMode = mode;
+  const rosterBar = document.getElementById('alpha-roster-bar');
+  const toggle = document.getElementById('chat-mode-toggle');
+  const label = document.getElementById('chat-mode-label');
+  const headerTitle = document.querySelector('#chat-header .title');
+  const input = document.getElementById('chat-input');
+  if (mode === 'vibecode') {
+    // Show roster bar with animation
+    rosterBar.style.display = 'flex';
+    requestAnimationFrame(() => rosterBar.classList.add('open'));
+    toggle.classList.add('active-mode');
+    label.textContent = 'Lilly Chat';
+    if (headerTitle) headerTitle.textContent = '🦊 Alpha · VibeCode';
+    if (input) input.placeholder = 'Ask the Alpha team…';
+    renderVcRoster();
+  } else {
+    rosterBar.classList.remove('open');
+    // Hide after transition
+    rosterBar.addEventListener('transitionend', () => {
+      if (!rosterBar.classList.contains('open')) rosterBar.style.display = 'none';
+    }, { once: true });
+    toggle.classList.remove('active-mode');
+    label.textContent = 'Alpha Chat';
+    if (headerTitle) headerTitle.textContent = '🐶 Lilly · VibeCode';
+    if (input) input.placeholder = 'Type here...';
+  }
+}
+
+function toggleChatMode() {
+  if (vcChatMode === 'normal') switchChatMode('vibecode');
+  else switchChatMode('normal');
+}
+
+// kept for backwards compat (buttons may still call it)
+function toggleVibecodeChat() {
+  toggleChatMode();
+}
+
+function renderVcRoster() {
+  const box = document.getElementById('vc-roster');
+  if (!box) return;
+  box.innerHTML = '';
+  PW_HUDDLE_ROSTER.forEach(p => {
+    const s = document.createElement('div');
+    s.className = 'vc-char' + (vcSelectedChars.includes(p.key) ? ' sel' : '');
+    s.dataset.key = p.key;
+    s.innerHTML = p.emoji + '<span class="vc-tip">' + p.name + '<br>' + p.role + '</span>';
+    s.onclick = () => {
+      if (vcSelectedChars.includes(p.key)) {
+        if (vcSelectedChars.length > 1) {
+          vcSelectedChars.splice(vcSelectedChars.indexOf(p.key), 1);
+        }
+      } else {
+        vcSelectedChars.push(p.key);
+      }
+      document.querySelectorAll('.vc-char').forEach(c => c.classList.toggle('sel', vcSelectedChars.includes(c.dataset.key)));
+    };
+    box.appendChild(s);
+  });
+}
+
+function appendVcMsg(text, name, emoji, isUser, agentKey) {
+  // Use the shared chat-messages box so Alpha replies appear inline
+  const box = document.getElementById('chat-messages');
+  const div = document.createElement('div');
+  div.className = 'cmsg ' + (isUser ? 'user' : 'assistant');
+  let head = '';
+  if (!isUser) {
+    const isAlpha = (agentKey === 'puppy') || (agentKey === '🐶') || (name === 'Lilly') || !agentKey;
+    head = '<div class="cmsg-sender">' + (emoji||'🤖') + ' ' + escHtml(name||'Agent') +
+      (isAlpha ? ' <span class="cmsg-alpha">ALPHA</span>' : '') + '</div>';
+  }
+  div.innerHTML = head + renderMarkdown(text);
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function vcTyping(active) {
+  // Use shared chat-messages box for typing indicator
+  const box = document.getElementById('chat-messages');
+  const old = document.getElementById('vc-typing');
+  if (old) old.remove();
+  if (!active) return;
+  const el = document.createElement('div');
+  el.className = 'vc-typing';
+  el.id = 'vc-typing';
+  el.innerHTML = '<div class="vc-dots"><span></span><span></span><span></span></div>';
+  box.appendChild(el);
+  box.scrollTop = box.scrollHeight;
+}
+
+async function sendVcChat() {
+  // Uses the shared #chat-input — called directly or via sendChat() routing
+  const input = document.getElementById('chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  autoResize(input);
+  appendVcMsg(msg, 'You', '', true);
+  vcTyping(true);
+  // Include current open file content as context
+  let fileContent = '';
+  if (activeTab >= 0 && openTabs[activeTab] && openTabs[activeTab].content) {
+    fileContent = openTabs[activeTab].content;
+  }
+  try {
+    const r = await fetch('/api/vibecode/chat', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ slug: currentProject||'', message: msg, file: fileContent, agent: vcSelectedChars[0]||'puppy', session_id: 'vibecode-chat' })
+    });
+    const d = await r.json();
+    vcTyping(false);
+    if (!r.ok) { appendVcMsg('Error: ' + (d.error||'unknown'), 'System', '', false); return; }
+    if (d.agent_emoji) vcAgentMeta = { key: d.agent||'puppy', emoji: d.agent_emoji, name: d.agent_name||'Lilly' };
+    appendVcMsg(d.reply||'', vcAgentMeta.name, vcAgentMeta.emoji, false, d.agent || vcAgentMeta.key);
+  } catch(e) {
+    vcTyping(false);
+    appendVcMsg('Network error', 'System', '', false);
+  }
+}
+
+// vcChatKeydown no longer needed — chatKeydown routes to sendVcChat via sendChat()
+
 // ── Drag & drop URL onto drop-zone ───────────────────────────────
 const dz = document.getElementById('drop-zone');
 dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over'); });
@@ -1132,6 +2715,12 @@ document.getElementById('repo-url-input').addEventListener('keydown', e => {
 
 // ── Init ─────────────────────────────────────────────────────────
 (async function init() {
+  renderHuddleRoster();
+  setHuddleMode('hive');
+  renderVcRoster();
+  makeProjectWindowDraggable();
+  pwInitResize();
+  setMobileSection('chat');
   await refreshProjectSelect();
   await loadProjectListOverlay();
   // Auto-open first running project if any

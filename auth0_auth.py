@@ -3,6 +3,7 @@ Auth0 authentication for FastAPI.
 Replaces clerk_auth.py with proper OIDC login, per-user sessions,
 and per-user data isolation (memory, contacts, profile, etc).
 """
+
 import json
 import os
 import time
@@ -44,7 +45,9 @@ if OWNER_EMAIL:
 DATA_DIR = Path(os.environ.get("LILLY_DATA_DIR", "/app/data"))
 USERS_DIR = DATA_DIR / "users"
 
-AUTH_AVAILABLE = bool(AUTH0_DOMAIN and AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET and AUTH0_SECRET)
+AUTH_AVAILABLE = bool(
+    AUTH0_DOMAIN and AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET and AUTH0_SECRET
+)
 
 
 class FastAPICookieStore(AbstractDataStore):
@@ -102,7 +105,9 @@ def create_auth0_client() -> ServerClient:
         authorization_params={"scope": "openid profile email"},
         secret=AUTH0_SECRET,
         state_store=FastAPICookieStore(AUTH0_SECRET, "_a0_session", 259200, StateData),
-        transaction_store=FastAPICookieStore(AUTH0_SECRET, "_a0_tx", 600, TransactionData),
+        transaction_store=FastAPICookieStore(
+            AUTH0_SECRET, "_a0_tx", 600, TransactionData
+        ),
     )
 
 
@@ -171,13 +176,27 @@ def is_owner(user: Optional[Dict[str, Any]]) -> bool:
 
 def user_permissions(user: Optional[Dict[str, Any]]) -> Dict[str, bool]:
     if is_owner(user):
-        return {"read": True, "write": True, "admin": True, "sensors": True, "camera": True}
-    return {"read": True, "write": False, "admin": False, "sensors": False, "camera": True}
+        return {
+            "read": True,
+            "write": True,
+            "admin": True,
+            "sensors": True,
+            "camera": True,
+        }
+    return {
+        "read": True,
+        "write": False,
+        "admin": False,
+        "sensors": False,
+        "camera": True,
+    }
 
 
-async def get_current_user(request: Request, response: Optional[Response] = None) -> Optional[dict]:
+async def get_current_user(
+    request: Request, response: Optional[Response] = None
+) -> Optional[dict]:
     """Get the authenticated user from the Auth0 session cookie.
-    
+
     Returns a dict with id, email, name, picture or None.
     Requires request; response is needed for logout flows.
     """
@@ -267,8 +286,10 @@ async def gmail_list_messages(
                 resp = await client.get(
                     f"{GMAIL_API}/users/me/messages/{mid}",
                     headers={"Authorization": f"Bearer {token}"},
-                    params={"format": "metadata",
-                            "metadataHeaders": ["Subject", "From", "Date"]},
+                    params={
+                        "format": "metadata",
+                        "metadataHeaders": ["Subject", "From", "Date"],
+                    },
                 )
                 if resp.status_code == 200:
                     d = resp.json()
@@ -286,6 +307,7 @@ async def gmail_list_messages(
                 return None
 
             import asyncio
+
             results = await asyncio.gather(*[_fetch(mid) for mid in ids])
             return [m for m in results if m]
     except Exception as e:
@@ -310,6 +332,7 @@ async def calendar_list_events(
         return []
 
     import datetime as _dt
+
     now = _dt.datetime.utcnow()
     if not time_min:
         time_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -336,15 +359,19 @@ async def calendar_list_events(
             events = []
             for item in items:
                 start = item.get("start", {})
-                events.append({
-                    "id": item.get("id", ""),
-                    "summary": item.get("summary", "(no title)"),
-                    "start": start.get("dateTime") or start.get("date", ""),
-                    "end": (item.get("end", {}).get("dateTime")
-                            or item.get("end", {}).get("date", "")),
-                    "location": item.get("location", ""),
-                    "description": (item.get("description") or "")[:200],
-                })
+                events.append(
+                    {
+                        "id": item.get("id", ""),
+                        "summary": item.get("summary", "(no title)"),
+                        "start": start.get("dateTime") or start.get("date", ""),
+                        "end": (
+                            item.get("end", {}).get("dateTime")
+                            or item.get("end", {}).get("date", "")
+                        ),
+                        "location": item.get("location", ""),
+                        "description": (item.get("description") or "")[:200],
+                    }
+                )
             return events
     except Exception as e:
         logger.warning(f"calendar_list_events error: {e}")
@@ -362,7 +389,9 @@ def add_auth0_routes(app: FastAPI):
         if not AUTH_AVAILABLE:
             return JSONResponse(
                 status_code=503,
-                content={"error": "Auth0 not configured — set AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_SECRET in .env"},
+                content={
+                    "error": "Auth0 not configured — set AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET, AUTH0_SECRET in .env"
+                },
             )
         client = get_client()
         resp = RedirectResponse(url="", status_code=302)
@@ -378,7 +407,9 @@ def add_auth0_routes(app: FastAPI):
     @app.get("/api/auth0/callback")
     async def auth0_callback(request: Request):
         if not AUTH_AVAILABLE:
-            return JSONResponse(status_code=503, content={"error": "Auth0 not configured"})
+            return JSONResponse(
+                status_code=503, content={"error": "Auth0 not configured"}
+            )
         resp = RedirectResponse(url="/", status_code=302)
         try:
             await get_client().complete_interactive_login(
@@ -386,8 +417,20 @@ def add_auth0_routes(app: FastAPI):
                 store_options={"request": request, "response": resp},
             )
         except Exception as e:
+            err_msg = str(e)
             logger.exception("Auth0 callback error")
-            return JSONResponse(status_code=400, content={"error": f"Auth0 callback failed: {e}"})
+            if "transaction" in err_msg.lower() and "missing" in err_msg.lower():
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": "Auth0 callback failed: The transaction is missing.",
+                        "hint": "Your browser cache/cookies were cleared or the login session expired. Please restart the login flow from /api/auth0/login.",
+                        "restart_url": "/api/auth0/login",
+                    },
+                )
+            return JSONResponse(
+                status_code=400, content={"error": f"Auth0 callback failed: {err_msg}"}
+            )
         return resp
 
     @app.get("/api/auth0/logout")
@@ -415,8 +458,12 @@ def add_auth0_routes(app: FastAPI):
         user = await get_current_user(request)
         if not user:
             if AUTH_AVAILABLE:
-                return JSONResponse(status_code=401, content={"error": "Not authenticated"})
-            return JSONResponse(status_code=503, content={"error": "Auth not available"})
+                return JSONResponse(
+                    status_code=401, content={"error": "Not authenticated"}
+                )
+            return JSONResponse(
+                status_code=503, content={"error": "Auth not available"}
+            )
         return {"user": user}
 
     @app.post("/api/auth/logout")

@@ -82,27 +82,103 @@ body.expanded{
   border:1px solid rgba(255,255,255,0.08);
   border-top:none;
   box-shadow:0 4px 16px rgba(0,0,0,0.5);
-  padding:4px 6px 6px;
+  padding:6px 8px 8px;
   display:none;
   z-index:10;
-  transition:opacity 0.25s;
+  transition:opacity 0.25s, top 0.3s ease, max-height 0.3s ease;
+  max-height:260px;
+  overflow:hidden;
+}
+/* ─── Typing: chat rises up + grows so the log is readable while typing ─── */
+#chatBubble.typing{
+  top:18px;
+  max-height:calc(100vh - 140px);
+  border-radius:12px;
+  border-top:1px solid rgba(255,255,255,0.08);
+}
+#chatBubble.typing #bubbleText{
+  max-height:calc(100vh - 200px);
+}
+/* ─── Scrollable message log ─── */
+.msg{
+  display:block;
+  padding:4px 6px;
+  border-radius:8px;
+  font-size:11px;
+  line-height:1.4;
+  margin:2px 0;
+  word-wrap:break-word;
+  max-width:100%;
+}
+.msg .who{
+  font-size:8px;
+  color:rgba(255,255,255,0.35);
+  display:block;
+  margin-bottom:2px;
+  text-transform:uppercase;
+  letter-spacing:0.4px;
+}
+.msg.user{background:rgba(99,102,241,0.15);color:#a5b4fc;text-align:right;margin-left:12%;}
+.msg.lilly{background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.9);}
+.msg img{
+  max-width:100%;
+  border-radius:8px;
+  margin-top:4px;
+  display:block;
+  border:1px solid rgba(255,255,255,0.15);
+  cursor:zoom-in;
 }
 #chatBubble.show{
   display:block;
   opacity:1;
 }
 #bubbleTail{display:none}
-#bubbleText{
+#chatHeader{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:2px 4px 4px;
+  border-bottom:1px solid rgba(255,255,255,0.08);
+  margin-bottom:4px;
+}
+#chatTitle{
+  font-size:9px;
+  color:rgba(255,255,255,0.4);
+  text-transform:uppercase;
+  letter-spacing:0.5px;
+}
+#closeChatBtn{
+  width:18px;height:18px;
+  border-radius:50%;
+  border:none;
+  background:rgba(239,68,68,0.3);
+  color:#ef4444;
   font-size:10px;
-  line-height:1.3;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  transition:all 0.2s;
+}
+#closeChatBtn:hover{background:rgba(239,68,68,0.5)}
+#bubbleText{
+  font-size:11px;
+  line-height:1.4;
   color:rgba(255,255,255,0.85);
-  max-height:72px;
-  min-height:20px;
+  max-height:120px;
+  min-height:30px;
   overflow-y:auto;
   scrollbar-width:thin;
   word-wrap:break-word;
-  margin-bottom:2px;
-  pointer-events:none;
+  margin-bottom:4px;
+  pointer-events:auto;
+  cursor:text;
+  user-select:text;
+  -webkit-user-select:text;
+  padding:4px;
+  background:rgba(255,255,255,0.04);
+  border-radius:8px;
+  transition:max-height 0.3s ease;
 }
 #bubbleText::-webkit-scrollbar{width:2px}
 #bubbleText::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:2px}
@@ -137,17 +213,17 @@ body.expanded{
   background:rgba(255,255,255,0.08);
   border:1px solid rgba(255,255,255,0.12);
   border-radius:10px;
-  padding:4px 6px;
-  font-size:10px;
+  padding:6px 10px;
+  font-size:12px;
   color:rgba(255,255,255,0.85);
   outline:none;
   min-width:0;
-  width:38px;
+  width:140px;
 }
 #chatInput::placeholder{color:rgba(255,255,255,0.25)}
 #chatInput:focus{border-color:rgba(255,255,255,0.2)}
 .iconBtn{
-  width:22px;height:22px;
+  width:26px;height:26px;
   border-radius:50%;
   border:none;
   display:flex;
@@ -155,7 +231,7 @@ body.expanded{
   justify-content:center;
   cursor:pointer;
   transition:all 0.2s;
-  font-size:11px;
+  font-size:12px;
   flex-shrink:0;
 }
 #micBtn{
@@ -169,15 +245,119 @@ body.expanded{
   color:#c084fc;
 }
 .iconBtn:active{transform:scale(0.85)}
+
+/* ─── Presence Radar popout (who's around) ─── */
+#radarBtn{
+  background:rgba(56,189,248,0.2);
+  color:#7dd3fc;
+}
+#radarBtn.active{background:rgba(56,189,248,0.35);box-shadow:0 0 6px rgba(56,189,248,0.25)}
+#radarPanel{
+  position:absolute;bottom:50px;right:0;width:240px;
+  background:rgba(20,24,40,0.72);
+  backdrop-filter:blur(18px);
+  -webkit-backdrop-filter:blur(18px);
+  border:1px solid rgba(148,163,184,0.25);
+  border-radius:14px;
+  padding:8px;
+  display:none;flex-direction:column;gap:6px;z-index:60;
+  box-shadow:0 8px 32px rgba(0,0,0,0.45);
+}
+#radarPanel.show{display:flex}
+.radar-header{
+  display:flex;justify-content:space-between;align-items:center;
+  color:#c7d2fe;font-size:10px;font-weight:600;letter-spacing:0.5px;
+}
+#radarCloseBtn{
+  width:18px;height:18px;border-radius:50%;border:none;
+  background:rgba(239,68,68,0.3);color:#ef4444;font-size:10px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+}
+#radarCanvas{
+  display:block;width:220px;height:220px;margin:0 auto;border-radius:10px;
+  background:radial-gradient(circle at center, rgba(56,189,248,0.12), rgba(10,12,25,0.45) 55%, rgba(10,12,25,0.85));
+}
+#radarList{
+  max-height:88px;overflow-y:auto;font-size:9px;color:rgba(255,255,255,0.75);
+  scrollbar-width:thin;
+}
+.radar-item{
+  display:flex;justify-content:space-between;gap:6px;
+  padding:2px 4px;border-bottom:1px solid rgba(255,255,255,0.06);
+  white-space:nowrap;overflow:hidden;
+}
+.radar-item .r-name{color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;max-width:110px}
+.radar-item .r-meta{color:rgba(255,255,255,0.5);flex-shrink:0}
+.radar-status{font-size:9px;color:rgba(255,255,255,0.4);text-align:center}
+
+/* ─── New-user help badges (?) next to UI objects ─── */
+.help-badge{
+  position:absolute;
+  width:12px;height:12px;border-radius:50%;
+  background:rgba(56,189,248,0.4);
+  color:#bae6fd;font-size:8px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;z-index:70;
+  border:1px solid rgba(125,211,252,0.5);
+  box-shadow:0 0 5px rgba(56,189,248,0.35);
+  pointer-events:auto;
+  line-height:1;
+  font-family:system-ui,sans-serif;
+}
+.help-badge:hover,.help-badge.tour{background:rgba(56,189,248,0.8);color:#fff}
+.help-badge.pulse{animation:helpPulse 1.4s infinite}
+@keyframes helpPulse{
+  0%,100%{box-shadow:0 0 3px rgba(56,189,248,0.35);transform:scale(1)}
+  50%{box-shadow:0 0 10px rgba(56,189,248,0.8);transform:scale(1.25)}
+}
+#helpPop{
+  position:absolute;width:186px;
+  background:rgba(15,23,42,0.92);
+  backdrop-filter:blur(14px);
+  -webkit-backdrop-filter:blur(14px);
+  border:1px solid rgba(125,211,252,0.35);
+  border-radius:10px;
+  padding:8px;
+  z-index:80;
+  font-size:10px;
+  color:#e2e8f0;
+  box-shadow:0 6px 24px rgba(0,0,0,0.55);
+  display:none;
+  pointer-events:auto;
+}
+#helpPop.show{display:block}
+#helpPop .h-title{color:#7dd3fc;font-weight:600;font-size:10px;margin-bottom:3px;letter-spacing:0.3px}
+#helpPop .h-body{color:rgba(226,232,240,0.85);line-height:1.45}
+
+/* ─── Voice-activated avatar name flash ─── */
+#avatarFlash{
+  position:absolute;top:98px;left:48px;
+  transform:translateX(-50%);
+  font-size:9px;
+  color:rgba(255,255,255,0.5);
+  letter-spacing:0.5px;
+  text-transform:uppercase;
+  z-index:6;
+  pointer-events:none;
+  white-space:nowrap;
+  opacity:0;
+  transition:opacity 0.3s;
+}
+#avatarFlash.show{opacity:1}
 </style>
 </head>
 <body>
 <div id="container">
   <canvas id="pupCanvas" width="320" height="240"></canvas>
   <div id="dragHandle"></div>
+  <div id="avatarFlash"></div>
   <div id="avatarName"></div>
   <div id="closeHint">✕</div>
   <div id="chatBubble">
+    <div id="chatHeader">
+      <span id="chatTitle">Chat</span>
+      <button id="closeChatBtn" onclick="closeChat()">✕</button>
+    </div>
     <div id="bubbleTail"></div>
     <div id="bubbleText">Say hi to start talking!</div>
     <div id="bubbleStatus">
@@ -187,7 +367,18 @@ body.expanded{
     <div id="bubbleInput">
       <button class="iconBtn" id="micBtn">🎤</button>
       <input id="chatInput" type="text" placeholder="Message..." autocomplete="off">
+      <button class="iconBtn" id="radarBtn" title="Who's around">📡</button>
       <button class="iconBtn" id="sendBtn">➤</button>
+    </div>
+
+    <div id="radarPanel">
+      <div class="radar-header">
+        <span>🛰 &nbsp;WHO'S AROUND</span>
+        <button id="radarCloseBtn" onclick="closeRadar()">✕</button>
+      </div>
+      <canvas id="radarCanvas" width="220" height="220"></canvas>
+      <div id="radarList"></div>
+      <div id="radarStatus" class="radar-status">Scanning...</div>
     </div>
   </div>
   <div id="pairingSection" style="position:absolute;top:10px;right:10px;z-index:1000;">
@@ -207,9 +398,39 @@ if(!ctx){document.body.innerHTML='<div style="padding:20px;color:#fff">Canvas un
 
 // Auth: load device token from storage (optional — overlay works without it)
 const DEVICE_TOKEN=localStorage.getItem('lilly_device_token')||'';
+// Resolve server URL — try the page origin first, then local Termux servers, then remote
+var _srvUrl=null;
+var _LOCAL_SERVERS=['http://127.0.0.1:8099','http://127.0.0.1:8080','http://127.0.0.1:8098'];
+async function _probeUrl(base){try{var c=new AbortController();var t=setTimeout(function(){c.abort();},1500);var r=await fetch(base+'/api/ui_state',{signal:c.signal});clearTimeout(t);return r.ok;}catch(e){return false;}}
+async function _resolveServer(){
+  var here='';
+  try{here=window.location.origin;}catch(e){}
+  if(here&&(await _probeUrl(here))){_srvUrl=here;return _srvUrl;}
+  for(var i=0;i<_LOCAL_SERVERS.length;i++){if(await _probeUrl(_LOCAL_SERVERS[i])){_srvUrl=_LOCAL_SERVERS[i];return _srvUrl;}}
+  var remote='';
+  if(typeof LillyBridge!=='undefined'&&LillyBridge.getServerUrl)remote=LillyBridge.getServerUrl();
+  if(!remote)remote='https://droolingwithsanity.ca';
+  _srvUrl=remote.replace(/\/$/,'');
+  return _srvUrl;
+}
+async function _getServer(){if(_srvUrl!==null)return _srvUrl;return await _resolveServer();}
+setInterval(function(){_srvUrl=null;_resolveServer();},30000);
 function authFetch(url,opts){
   opts=opts||{};
   opts.headers=opts.headers||{};
+  if(DEVICE_TOKEN)opts.headers['X-Device-Token']=DEVICE_TOKEN;
+  // Prepend resolved server for relative /api/ paths
+  var resolvedUrl=url;
+  if(url.startsWith('/')){
+    resolvedUrl=(_srvUrl||'https://droolingwithsanity.ca')+url;
+  }
+  return fetch(resolvedUrl,opts);
+}
+// Async-aware wrapper used for all API calls
+async function apiFetch(url,opts){
+  var srv=await _getServer();
+  if(url.startsWith('/'))url=srv+url;
+  opts=opts||{};opts.headers=opts.headers||{};
   if(DEVICE_TOKEN)opts.headers['X-Device-Token']=DEVICE_TOKEN;
   return fetch(url,opts);
 }
@@ -708,43 +929,100 @@ async function playAudio(audioId){
   }
 }
 
+// ─── Scrollable message log ───────────────
+let _lastSpokenLog='',_lastHeardLog='',_thinkingEl=null,_lastActivity=Date.now(),_typingSuppress=0;
+function renderRich(t){
+  if(!t)return'';
+  let s=String(t)
+    .replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>').replace(/"/g,'"');
+  // Markdown images: ![alt](https://...)
+  s=s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g,'<img loading="lazy" src="$2" alt="$1">');
+  // Bare image URLs
+  s=s.replace(/(^|\s)(https?:\/\/[^\s<>]+?\.(?:png|jpe?g|gif|webp|bmp|avif)(?:\?[^\s<>]*)?)(?=\s|$)/gi,'$1<img loading="lazy" src="$2">');
+  return s;
+}
+function appendMsg(who,text){
+  var d=document.createElement('div');
+  d.className='msg '+who;
+  d.innerHTML='<span class="who">'+(who==='user'?'You':overlayCharName())+'</span>'+renderRich(text);
+  bubbleText.appendChild(d);
+  bubbleText.scrollTop=bubbleText.scrollHeight;
+  _lastActivity=Date.now();
+  return d;
+}
+function showThinking(){
+  if(!_thinkingEl){
+    _thinkingEl=document.createElement('div');
+    _thinkingEl.className='msg lilly';
+    _thinkingEl.innerHTML='<span class="who">'+overlayCharName()+'</span><i>thinking...</i>';
+    bubbleText.appendChild(_thinkingEl);
+  }
+  bubbleText.scrollTop=bubbleText.scrollHeight;
+  _lastActivity=Date.now();
+}
+function clearThinking(){
+  if(_thinkingEl){_thinkingEl.remove();_thinkingEl=null;}
+}
+function setTyping(on){
+  chatBubble.classList.toggle('typing',on);
+  if(on)bubbleText.scrollTop=bubbleText.scrollHeight;
+}
+// Collapse the chat after idle, but NEVER touch the mic.
+function idleCollapse(){
+  var expanded=document.body.classList.contains('expanded');
+  if(!expanded)return;
+  if(window.LillyBridge&&window.LillyBridge.toggleExpand){
+    window.LillyBridge.toggleExpand();
+  }else{
+    closeChat();
+  }
+}
+setInterval(function(){
+  if(document.body.classList.contains('expanded')&&document.activeElement!==chatInput&&Date.now()-_lastActivity>10000){
+    idleCollapse();
+  }
+},2000);
+chatInput.addEventListener('focus',function(){
+  _lastActivity=Date.now();
+  if(Date.now()>_typingSuppress)setTyping(true);
+});
+chatInput.addEventListener('input',function(){_lastActivity=Date.now();setTyping(true);});
+chatInput.addEventListener('blur',function(){setTimeout(function(){setTyping(false);},250);});
+
 async function sendMessage(){
   const text=chatInput.value.trim();
   if(!text)return;
   chatInput.value='';
-  bubbleText.textContent='You: '+text;
-  chatBubble.classList.add('show');
-
-  // Try local command first (works offline)
-  if(handleLocalCommand(text)){
-    // Update foreground app detection locally
-    const openMatch=text.toLowerCase().match(/^(?:open|launch|start)\s+(.+)/i);
-    if(openMatch){
-      const pkg=_resolvePackage(openMatch[1].trim().toLowerCase());
-      if(pkg){_foregroundPkg=pkg;_foregroundLabel=_appLabels[pkg]||openMatch[1].trim();}
-    }
-    return;
-  }
-
-  // Fall through to server
+  appendMsg('user',text);
+  setTyping(false);
+  _typingSuppress=Date.now()+800;
+  // Check for local commands first (open/launch app)
+  if(handleLocalCommand(text))return;
+  showThinking();
   try{
-    const r=await authFetch('/api/cmd',{
+    const r=await apiFetch('/api/cmd',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text,avatar:avatar||'puppy'})
+      body:JSON.stringify({text,avatar})
     });
     const res=await r.json();
-    bubbleText.textContent='<b>'+overlayCharName()+':</b> '+(res.reply||'');
+    clearThinking();
+    if(res.reply){
+      _lastSpokenLog=res.reply;
+      appendMsg('lilly',res.reply);
+    }
     if(res.audio_id)playAudio(res.audio_id);
     if(res.open_url)handleOpenUrl(res.open_url);
-    // Update foreground from server response
-    if(res.foreground_app){_foregroundLabel=res.foreground_app;_foregroundPkg=res.foreground_package||'';}
   }catch(e){
-    // Server unreachable — try local command as fallback
-    if(!handleLocalCommand(text)){
-      bubbleText.textContent='Offline — command not available locally';
-    }
+    clearThinking();
+    appendMsg('lilly','Connection error');
   }
+  // Return focus to the enter-text area (collapsed state).
+  setTimeout(function(){
+    setTyping(false);
+    try{chatInput.focus();}catch(e){}
+  },400);
+  bubbleText.scrollTop=bubbleText.scrollHeight;
 }
 
 async function toggleOverlayMic(){
@@ -785,6 +1063,14 @@ function collapseOverlay(){
   chatBubble.classList.remove('show');
   chatInput.blur();
   if(typeof stopOverlayMic==='function'&&window.overlayMicActive)stopOverlayMic();
+}
+// Close the chat from the header ✕ button (bridge-aware like the Android version)
+function closeChat(){
+  if(window.LillyBridge&&window.LillyBridge.toggleExpand){
+    window.LillyBridge.toggleExpand();
+  }else{
+    collapseOverlay();
+  }
 }
 
 // ─── Browser vs. Android bridge detection ───
@@ -894,7 +1180,15 @@ function setAvatar(newAvatar){
     avatar=newAvatar;
     avatarName.textContent=overlayCharEmoji()+' '+overlayCharName();
     avatarName.style.display='block';
+    flashAvatarName(overlayCharName(),overlayCharEmoji());
   }
+}
+function flashAvatarName(name,emoji){
+  const el=document.getElementById('avatarFlash');
+  if(!el)return;
+  el.textContent=emoji+' '+name;
+  el.classList.add('show');
+  setTimeout(function(){el.classList.remove('show');},2500);
 }
 
 // Init
@@ -1302,14 +1596,231 @@ function updateForegroundFromState(state){
   }
 }
 
+// ─── Presence Radar (who's around) ──────────────────────────────
+let _radarAnim=null,_radarDevices=[];
+function hashMac(mac){
+  let h=0;if(!mac)return 0;
+  for(let i=0;i<mac.length;i++){h=(h*31+mac.charCodeAt(i))>>>0;}
+  return h;
+}
+function radarRadius(dist){
+  if(dist==null||dist<0)return 0.55;
+  return Math.min(0.92,1-Math.exp(-dist/7));
+}
+function drawRadar(t){
+  const cv=document.getElementById('radarCanvas');if(!cv)return;
+  const c=cv.getContext('2d'),W=cv.width,H=cv.height,cx=W/2,cy=H/2,maxR=Math.min(W,H)/2-8;
+  c.clearRect(0,0,W,H);
+  // Range rings
+  c.strokeStyle='rgba(56,189,248,0.25)';c.lineWidth=1;
+  for(let r=1;r<=4;r++){c.beginPath();c.arc(cx,cy,maxR*r/4,0,Math.PI*2);c.stroke();}
+  // Crosshair
+  c.strokeStyle='rgba(56,189,248,0.15)';
+  c.beginPath();c.moveTo(cx-maxR,cy);c.lineTo(cx+maxR,cy);
+  c.moveTo(cx,cy-maxR);c.lineTo(cx,cy+maxR);c.stroke();
+  // Sweep wedge + beam
+  const sweep=(t/1000)%(Math.PI*2);
+  const grad=c.createRadialGradient(cx,cy,0,cx,cy,maxR);
+  grad.addColorStop(0,'rgba(56,189,248,0.05)');
+  grad.addColorStop(1,'rgba(56,189,248,0.22)');
+  c.fillStyle=grad;
+  c.beginPath();c.moveTo(cx,cy);c.arc(cx,cy,maxR,sweep-Math.PI/7,sweep);c.closePath();c.fill();
+  c.strokeStyle='rgba(125,211,252,0.7)';c.lineWidth=1.5;
+  c.beginPath();c.moveTo(cx,cy);c.lineTo(cx+Math.cos(sweep)*maxR,cy+Math.sin(sweep)*maxR);c.stroke();
+  // Center (Lilly)
+  c.fillStyle='#7dd3fc';
+  c.beginPath();c.arc(cx,cy,3.5,0,Math.PI*2);c.fill();
+  // Pins
+  const COLORS={ios:'#60a5fa',android:'#4ade80',apple:'#c084fc',computer:'#fb923c',audio:'#f472b6',iot:'#fbbf24',other:'#94a3b8',unknown:'#e2e8f0'};
+  const devs=_radarDevices||[];
+  for(let i=0;i<devs.length;i++){
+    const d=devs[i];
+    const ang=radarAngle(d.address||(d.name||'dev')+i);
+    const rad=radarRadius(d.distance_m)*maxR;
+    const px=cx+Math.cos(ang)*rad,py=cy+Math.sin(ang)*rad;
+    const col=COLORS[d.platform]||COLORS.unknown;
+    // Ping ring (fades on the sweep)
+    const tSince=(t/1000)%(Math.PI*2);
+    c.strokeStyle=col;c.globalAlpha=0.35;
+    c.beginPath();c.arc(px,py,5+3*Math.sin(tSince),0,Math.PI*2);c.stroke();
+    c.globalAlpha=1;
+    // Dot
+    c.fillStyle=col;
+    c.beginPath();c.arc(px,py,3.5,0,Math.PI*2);c.fill();
+    c.strokeStyle='rgba(255,255,255,0.75)';c.lineWidth=1;c.stroke();
+    // Label: brand/name + distance
+    const label=(d.label||d.name||'Unknown').slice(0,13);
+    c.font='bold 8px system-ui';c.textAlign='center';
+    c.strokeStyle='rgba(0,0,0,0.6)';c.lineWidth=2;
+    c.strokeText(label,px,py-6);
+    c.fillStyle='rgba(255,255,255,0.92)';
+    c.fillText(label,px,py-6);
+    if(d.distance_m!=null){
+      c.font='7px system-ui';
+      const dist=d.distance_m.toFixed(1)+'m';
+      c.strokeText(dist,px,py+12);
+      c.fillStyle='rgba(125,211,252,0.85)';
+      c.fillText(dist,px,py+12);
+    }
+  }
+}
+function radarAngle(mac){
+  return (hashMac(mac)%360)*Math.PI/180;
+}
+function isRadarIntent(t){
+  return /who'?s\s+(around|near|here)|who\s+is\s+(around|near|here)|anyone\s+(around|near)|is\s+anyone\s+(around|near)|phones?\s+near|what\s+phones?\s+are\s+near|devices\s+near|bluetooth\s+(presence|scan)|radar|how\s+many\s+(iphones|androids|android)|scan\s+for\s+phones/i.test(t||'');
+}
+async function openRadar(){
+  const panel=document.getElementById('radarPanel');
+  if(!panel)return;
+  panel.classList.add('show');
+  setTyping(false);
+  const st=document.getElementById('radarStatus');
+  const list=document.getElementById('radarList');
+  if(st)st.textContent='Scanning nearby devices...';
+  if(list)list.innerHTML='';
+  try{
+    const r=await apiFetch('/api/radar');
+    const d=await r.json();
+    _radarDevices=d.devices||[];
+    if(st)st.textContent=_radarDevices.length+' device(s) found';
+    if(list){
+      const counts=d.counts||{};
+      let h='<div class="radar-item"><span class="r-name">📱 Phones nearby</span><span class="r-meta">'+(counts.ios||0)+' iPhone · '+(counts.android||0)+' Android</span></div>';
+      _radarDevices.slice(0,8).forEach(function(dev){
+        const name=(dev.label||dev.name||'Unknown').slice(0,22);
+        const dist=dev.distance_m!=null?dev.distance_m.toFixed(1)+'m':(dev.distance_desc||'?');
+        const ven=dev.vendor||'unidentified';
+        h+='<div class="radar-item"><span class="r-name">'+name+'</span><span class="r-meta">'+ven+' · '+dist+'</span></div>';
+      });
+      list.innerHTML=h;
+    }
+    if(!_radarAnim){_radarAnim=setInterval(function(){drawRadar(Date.now());},50);}
+    drawRadar(Date.now());
+  }catch(e){
+    if(st)st.textContent='Radar unavailable right now';
+    if(list)list.innerHTML='';
+    if(!_radarAnim){_radarAnim=setInterval(function(){drawRadar(Date.now());},50);}
+    drawRadar(Date.now());
+  }
+}
+function closeRadar(){
+  const panel=document.getElementById('radarPanel');
+  if(panel)panel.classList.remove('show');
+}
+
+// ─── New-user help: ? badges next to UI objects ─────────────────
+const HELP_DEFS={
+  micBtn:{title:'🎤 Voice Input',body:'Tap to talk to Lilly hands-free. Voice replies play here too.'},
+  radarBtn:{title:'📡 Who\'s Around',body:'Scans nearby Bluetooth and opens the radar. Pin points show devices with brand/name and distance — iPhones vs Android by MAC vendor.'},
+  sendBtn:{title:'➤ Send',body:'Sends your message to Lilly. Replies appear as scrollable text, with images when Lilly generates them.'},
+  chatInput:{title:'✏️ Chat',body:'Type here and press Enter. The panel expands while typing so you can read history, then drops back down 10s after you stop.'},
+  dragHandle:{title:'🐶 Lilly',body:'This is Lilly. Drag to move her around the screen, tap to open chat, long-press for quick actions.'},
+};
+let _helpPop=null,_helpTimer=null;
+function helpPopEl(){
+  if(!_helpPop){
+    _helpPop=document.createElement('div');
+    _helpPop.id='helpPop';
+    document.body.appendChild(_helpPop);
+    _helpPop.addEventListener('click',function(){hideHelp();});
+    document.addEventListener('click',function(e){
+      if(_helpPop&&_helpPop.classList.contains('show')&&!e.target.closest('.help-badge')&&!e.target.closest('#helpPop')){
+        hideHelp();
+      }
+    });
+  }
+  return _helpPop;
+}
+function hideHelp(){
+  if(_helpPop)_helpPop.classList.remove('show');
+  if(_helpTimer){clearTimeout(_helpTimer);_helpTimer=null;}
+}
+function showHelp(id,anchor,def){
+  const pop=helpPopEl();
+  pop.innerHTML='<div class="h-title">'+def.title+'</div><div class="h-body">'+def.body+'</div>';
+  pop.classList.add('show');
+  const r=anchor.getBoundingClientRect();
+  let x=r.right+8,y=r.top-4;
+  if(x+186>window.innerWidth){x=r.left-194;}
+  if(y+70>window.innerHeight){y=Math.max(4,r.bottom-70);}
+  pop.style.left=x+'px';pop.style.top=y+'px';
+  if(_helpTimer){clearTimeout(_helpTimer);}
+  _helpTimer=setTimeout(hideHelp,8000);
+}
+function placeHelpBadges(){
+  const order=['dragHandle','micBtn','chatInput','sendBtn','radarBtn'];
+  for(const id of order){
+    const el=document.getElementById(id);
+    if(!el||el.getAttribute('data-help-done'))continue;
+    el.setAttribute('data-help-done','1');
+    const def=HELP_DEFS[id];
+    if(!def)continue;
+    const badge=document.createElement('div');
+    badge.className='help-badge';
+    badge.textContent='?';
+    badge.style.top=(id==='chatInput')?'-5px':'50%';
+    badge.style.left=(id==='chatInput')?'-4px':'auto';
+    badge.style.right=(id==='chatInput')?'auto':'-5px';
+    badge.style.marginTop=(id==='chatInput')?'0':'-6px';
+    badge.addEventListener('click',function(e){
+      e.stopPropagation();
+      showHelp(id,badge,def);
+    });
+    const pos=getComputedStyle(el).position;
+    if(pos==='static'){el.style.position='relative';}
+    el.appendChild(badge);
+  }
+}
+// First-run tour: walk a brand-new user through the objects once.
+function firstRunTour(){
+  const KEY='lilly_help_seen_v1';
+  try{
+    if(localStorage.getItem(KEY))return;
+  }catch(e){}
+  const steps=['dragHandle','micBtn','radarBtn','sendBtn'];
+  let i=0;
+  const tour=function(){
+    if(i>=steps.length){
+      try{localStorage.setItem(KEY,'1');}catch(e){}
+      return;
+    }
+    const id=steps[i];i++;
+    const el=document.getElementById(id);
+    const badge=el?el.querySelector('.help-badge'):null;
+    if(!badge){tour();return;}
+    hideHelp();
+    badge.classList.add('pulse');
+    const pop=helpPopEl();
+    pop.innerHTML='<div class="h-title">'+HELP_DEFS[id].title+'</div><div class="h-body">'+HELP_DEFS[id].body+'</div>';
+    pop.classList.add('show');
+    const r=badge.getBoundingClientRect();
+    let x=r.right+8,y=r.top-4;
+    if(x+186>window.innerWidth){x=r.left-194;}
+    pop.style.left=x+'px';pop.style.top=Math.max(4,y)+'px';
+    setTimeout(function(){
+      badge.classList.remove('pulse');
+      hideHelp();
+      tour();
+    },4200);
+  };
+  setTimeout(tour,1800);
+}
+
 // ─── Input handlers ───
 if (!isAndroidBridge) {
   micBtn.addEventListener('click',toggleOverlayMic);
 }
 sendBtn.addEventListener('click',sendMessage);
 chatInput.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();sendMessage();}});
+(function(){
+  const rb=document.getElementById('radarBtn');
+  if(rb)rb.addEventListener('click',function(){openRadar();});
+  placeHelpBadges();
+  firstRunTour();
+})();
 
-window.LillyOverlay={sendMessage,toggleOverlayMic,pollState,localToast,localNotif,localOpen,localAM};
+window.LillyOverlay={sendMessage,toggleOverlayMic,pollState,localToast,localNotif,localOpen,localAM,openRadar,closeRadar};
 </script>
 </body>
 </html>

@@ -229,35 +229,6 @@ body.expanded{
   background:rgba(168,85,247,0.2);
   color:#c084fc;
 }
-#osintBtn{
-  background:rgba(99,102,241,0.2);
-  color:#818cf8;
-}
-#osintBtn.active{background:rgba(99,102,241,0.35);box-shadow:0 0 6px rgba(99,102,241,0.25)}
-#osintPanel{
-  position:absolute;bottom:50px;right:0;width:220px;max-height:280px;
-  background:rgba(20,20,25,0.95);border:1px solid rgba(99,102,241,0.25);border-radius:10px;
-  padding:8px;display:flex;flex-direction:column;gap:6px;z-index:50;
-  backdrop-filter:blur(12px);overflow-y:auto;
-}
-.osint-header{
-  display:flex;justify-content:space-between;align-items:center;
-  color:#818cf8;font-size:11px;font-weight:600;letter-spacing:0.3px;
-}
-.osint-cats{display:flex;flex-wrap:wrap;gap:3px;}
-.osint-cat{
-  padding:2px 6px;border-radius:8px;font-size:9px;cursor:pointer;
-  background:rgba(99,102,241,0.1);color:#a5b4fc;border:1px solid rgba(99,102,241,0.15);
-  transition:all 0.2s;
-}
-.osint-cat.active,.osint-cat:hover{background:rgba(99,102,241,0.3);border-color:rgba(99,102,241,0.4);color:#fff;}
-.osint-grid{display:grid;grid-template-columns:1fr 1fr;gap:3px;max-height:180px;overflow-y:auto;}
-.osint-tool{
-  padding:5px 6px;border-radius:6px;font-size:9px;cursor:pointer;
-  background:rgba(255,255,255,0.05);color:#c7d2fe;border:1px solid rgba(255,255,255,0.08);
-  transition:all 0.15s;text-align:center;
-}
-.osint-tool:hover{background:rgba(99,102,241,0.2);border-color:rgba(99,102,241,0.3);color:#fff;}
 .iconBtn:active{transform:scale(0.85)}
 
 /* ─── Presence Radar popout (who's around) ─── */
@@ -384,28 +355,6 @@ body.expanded{
       <button class="iconBtn" id="sendBtn">➤</button>
     </div>
 
-    <!-- OSINT Panel -->
-    <div id="osintPanel" style="display:none">
-      <div class="osint-header">
-        <span>OSINT Toolkit</span>
-        <button onclick="toggleOsintPanel()" style="background:none;border:none;color:#fff;font-size:14px;cursor:pointer">✕</button>
-      </div>
-      <input id="osintSearch" type="text" placeholder="Search target..." style="width:100%;padding:6px 8px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);border-radius:6px;color:#fff;font-size:11px;outline:none;margin-bottom:6px;box-sizing:border-box;">
-      <div class="osint-cats">
-        <span class="osint-cat active" onclick="renderOsintTools()">All</span>
-        <span class="osint-cat" onclick="renderOsintTools('people')">People</span>
-        <span class="osint-cat" onclick="renderOsintTools('username')">Username</span>
-        <span class="osint-cat" onclick="renderOsintTools('email')">Email</span>
-        <span class="osint-cat" onclick="renderOsintTools('phone')">Phone</span>
-        <span class="osint-cat" onclick="renderOsintTools('domain')">Domain</span>
-        <span class="osint-cat" onclick="renderOsintTools('security')">Security</span>
-        <span class="osint-cat" onclick="renderOsintTools('social')">Social</span>
-        <span class="osint-cat" onclick="renderOsintTools('crypto')">Crypto</span>
-        <span class="osint-cat" onclick="renderOsintTools('geo')">Geo</span>
-        <span class="osint-cat" onclick="renderOsintTools('info')">Info</span>
-      </div>
-      <div id="osintTools" class="osint-grid"></div>
-    </div>
     <div id="radarPanel">
       <div class="radar-header">
         <span>🛰 &nbsp;WHO'S AROUND</span>
@@ -427,11 +376,14 @@ if(!ctx){document.body.innerHTML='<div style="padding:20px;color:#fff">Canvas un
 
 // Auth: session cookie (auto-sent) + optional device token fallback
 const DEVICE_TOKEN=localStorage.getItem('lilly_device_token')||'';
-// Android APK: resolve server URL — try local servers before remote
+// Resolve server URL — try the page origin first, then local Termux servers, then remote
 var _srvUrl=null;
-var _LOCAL_SERVERS=['http://127.0.0.1:8099','http://127.0.0.1:8080'];
+var _LOCAL_SERVERS=['http://127.0.0.1:8099','http://127.0.0.1:8080','http://127.0.0.1:8098'];
 async function _probeUrl(base){try{var c=new AbortController();var t=setTimeout(function(){c.abort();},1500);var r=await fetch(base+'/api/ui_state',{signal:c.signal});clearTimeout(t);return r.ok;}catch(e){return false;}}
 async function _resolveServer(){
+  var here='';
+  try{here=window.location.origin;}catch(e){}
+  if(here&&(await _probeUrl(here))){_srvUrl=here;updateStatusDot('local');return _srvUrl;}
   for(var i=0;i<_LOCAL_SERVERS.length;i++){if(await _probeUrl(_LOCAL_SERVERS[i])){_srvUrl=_LOCAL_SERVERS[i];updateStatusDot('local');return _srvUrl;}}
   var remote='';
   if(typeof LillyBridge!=='undefined'&&LillyBridge.getServerUrl)remote=LillyBridge.getServerUrl();
@@ -1450,11 +1402,6 @@ function setAvatar(newAvatar){
   }
 }
 
-// Called by Android bridge to toggle OSINT panel visibility
-var _osintEnabled=true;
-var _osintAutoOpen=false;
-function setOsintEnabled(on){_osintEnabled=on;var b=document.getElementById('osintBtn');if(b)b.style.display=on?'flex':'none';}
-function setOsintAutoOpen(on){_osintAutoOpen=on;}
 
 // Init
 drawFrame();
@@ -1563,95 +1510,6 @@ if (!isAndroidBridge) {
 }
 sendBtn.addEventListener('click',sendMessage);
 chatInput.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();sendMessage();}});
-
-// OSINT panel toggle
-var osintBtn=document.getElementById('osintBtn');
-var osintPanel=document.getElementById('osintPanel');
-var osintSearch=document.getElementById('osintSearch');
-var osintTools=document.getElementById('osintTools');
-var _osintVisible=false;
-
-var OSINT_TOOLS=[
-  {name:'People Search',cat:'people',url:'https://www.idcrawl.com/{}'},
-  {name:'Username Check',cat:'username',url:'https://whatsmyname.app/?q={}'},
-  {name:'Email Lookup',cat:'email',url:'https://epieos.com/?q={}'},
-  {name:'Phone Lookup',cat:'phone',url:'https://www.idcrawl.com/{}'},
-  {name:'Domain Recon',cat:'domain',url:'https://www.shodan.io/search?query={}'},
-  {name:'IP Lookup',cat:'domain',url:'https://ipinfo.io/{}'},
-  {name:'Threat Intel',cat:'security',url:'https://www.virustotal.com/gui/search/{}'},
-  {name:'Breach Check',cat:'security',url:'https://haveibeenpwned.com/account/{}'},
-  {name:'Social Profiles',cat:'social',url:'https://www.social-searcher.com/search-users/?q={}'},
-  {name:'Twitter Search',cat:'social',url:'https://nitter.ca/search?q={}'},
-  {name:'Reddit Search',cat:'social',url:'https://camas.unddit.com/'},
-  {name:'Instagram Search',cat:'social',url:'https://bibliogram.art/u/{}'},
-  {name:'LinkedIn Search',cat:'social',url:'https://recruitin.net/'},
-  {name:'YouTube OSINT',cat:'social',url:'https://www.youtube.com/results?search_query={}'},
-  {name:'Telegram Search',cat:'social',url:'https://tgstat.com/search?q={}'},
-  {name:'Archive Page',cat:'info',url:'https://web.archive.org/web/*/{}'},
-  {name:'URL Scan',cat:'security',url:'https://urlscan.io/search/#{}'},
-  {name:'WHOIS Lookup',cat:'domain',url:'https://www.whois.com/whois/{}'},
-  {name:'SSL Cert Check',cat:'domain',url:'https://crt.sh/?q={}'},
-  {name:'Subdomain Enum',cat:'domain',url:'https://www.shodan.io/search?query=hostname:{}'},
-  {name:'Image Search',cat:'info',url:'https://images.google.com/searchbyimage?image_url={}'},
-  {name:'Crypto Lookup',cat:'crypto',url:'https://www.blockchain.com/btc/address/{}'},
-  {name:'Dark Web Search',cat:'security',url:'https://ahmia.fi/search/?q={}'},
-  {name:'Company Lookup',cat:'info',url:'https://opencorporates.com/companies?q={}'},
-  {name:'Geolocation',cat:'geo',url:'https://www.google.com/maps?q={}'},
-  {name:'Weather OSINT',cat:'geo',url:'https://www.wunderground.com/history/daily/{}'},
-  {name:'News Verify',cat:'info',url:'https://www.snopes.com/search/{}'},
-  {name:'Data Decoder',cat:'info',url:'https://gchq.github.io/CyberChef/'},
-  {name:'Temp Email',cat:'info',url:'https://10minutemail.com/'},
-  {name:'Fake Identity',cat:'info',url:'https://www.fakenamegenerator.com/'}
-];
-
-function renderOsintTools(filter){
-  if(!osintTools)return;
-  var html='';
-  var tools=filter?OSINT_TOOLS.filter(function(t){return t.cat===filter||t.name.toLowerCase().indexOf(filter.toLowerCase())>=0;}):OSINT_TOOLS;
-  for(var i=0;i<tools.length;i++){
-    var t=tools[i];
-    html+='<div class="osint-tool" onclick="openOsintTool(\''+t.url+'\')">'+t.name+'</div>';
-  }
-  osintTools.innerHTML=html;
-}
-
-function openOsintTool(urlTemplate){
-  var q=osintSearch?osintSearch.value.trim():'';
-  if(!q){osintSearch&&osintSearch.focus();return;}
-  var url=urlTemplate.replace('{}',encodeURIComponent(q));
-  if(window.LillyBridge&&window.LillyBridge.launchApp){
-    window.LillyBridge.launchApp(url);
-  }else{
-    window.open(url,'_blank');
-  }
-}
-
-function toggleOsintPanel(){
-  _osintVisible=!_osintVisible;
-  if(osintPanel)osintPanel.style.display=_osintVisible?'flex':'none';
-  if(osintBtn)osintBtn.classList.toggle('active',_osintVisible);
-  if(_osintVisible)renderOsintTools();
-}
-
-if(osintBtn){
-  osintBtn.addEventListener('click',toggleOsintPanel);
-}
-if(osintSearch){
-  osintSearch.addEventListener('keydown',function(e){
-    if(e.key==='Enter'){
-      e.preventDefault();
-      var q=osintSearch.value.trim();
-      if(q){
-        var url='https://www.google.com/search?q='+encodeURIComponent('osint '+q);
-        if(window.LillyBridge&&window.LillyBridge.launchApp){
-          window.LillyBridge.launchApp(url);
-        }else{
-          window.open(url,'_blank');
-        }
-      }
-    }
-  });
-}
 
 // ─── Presence Radar (who's around) ──────────────────────────────
 let _radarAnim=null,_radarDevices=[];
@@ -1778,7 +1636,6 @@ const HELP_DEFS={
   radarBtn:{title:'📡 Who\'s Around',body:'Scans nearby Bluetooth and opens the radar. Pin points show devices with brand/name and distance — iPhones vs Android by MAC vendor.'},
   sendBtn:{title:'➤ Send',body:'Sends your message to Lilly. Replies appear as scrollable text, with images when Lilly generates them.'},
   chatInput:{title:'✏️ Chat',body:'Type here and press Enter. The panel expands while typing so you can read history, then drops back down 10s after you stop.'},
-  osintBtn:{title:'🛰 OSINT Tools',body:'Research shortcuts: people, usernames, emails, domains, crypto and geo lookups.'},
   dragHandle:{title:'🐶 Lilly',body:'This is Lilly. Drag to move her around the screen, tap to open chat, long-press for quick actions.'},
 };
 let _helpPop=null,_helpTimer=null;
@@ -1813,7 +1670,7 @@ function showHelp(id,anchor,def){
   _helpTimer=setTimeout(hideHelp,8000);
 }
 function placeHelpBadges(){
-  const order=['dragHandle','micBtn','chatInput','sendBtn','radarBtn','osintBtn'];
+  const order=['dragHandle','micBtn','chatInput','sendBtn','radarBtn'];
   for(const id of order){
     const el=document.getElementById(id);
     if(!el||el.getAttribute('data-help-done'))continue;

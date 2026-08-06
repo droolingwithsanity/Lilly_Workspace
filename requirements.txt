@@ -5,6 +5,7 @@ httpx>=0.25.0
 websockets>=12.0
 aiohttp>=3.9.0
 python-multipart>=0.0.6
+redis>=4.5.0
 
 # ─── Persona fine-tuning (LoRA) ───
 torch>=2.0.0
@@ -18,3 +19,6 @@ tokenizers>=0.15.0
 # ─── Auth0 authentication ───
 auth0-server-python>=1.0.0b13
 python-dotenv>=1.0.0
+
+# ─── Whisper STT (runs inside container on :8001) ───
+faster-whisper-server==0.0.1

@@ -3,6 +3,7 @@
 Lilly AI v2 — Digital companion for ages 9+
 llama.cpp backend | Conversation memory | Speech-sync animation
 """
+
 import os, sys, json, re, asyncio, subprocess, logging, unicodedata, urllib.parse, random, time, shutil, threading, math
 import base64, difflib, html, tempfile, uuid
 from pathlib import Path
@@ -14,20 +15,36 @@ from contextlib import asynccontextmanager
 # Load .env file early so all os.environ.get() calls below pick up the values
 try:
     from dotenv import load_dotenv
+
     load_dotenv(Path(__file__).parent / ".env", override=False)
 except ImportError:
     pass  # python-dotenv not installed — env vars must be set manually
 
-from fastapi import FastAPI, Request, File, UploadFile, Body
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi import (
+    FastAPI,
+    Request,
+    File,
+    UploadFile,
+    Body,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+    FileResponse,
+)
 from pydantic import BaseModel
 import uvicorn
 import httpx
 
-# Auth system — Clerk.com
+# Auth system — Auth0 (replaces Clerk.com)
 try:
-    from clerk_auth import (
-        init_clerk_auth,
+    from auth0_auth import (
+        add_auth0_routes,
         get_current_user,
         load_user_memory,
         save_user_memory,
@@ -38,10 +55,11 @@ try:
         is_owner,
         user_permissions,
     )
+
     AUTH_AVAILABLE = True
 except ImportError:
     AUTH_AVAILABLE = False
-    logging.warning("clerk_auth module not found")
+    logging.warning("auth0_auth module not found")
 
 # Email integration (Open Connector)
 try:
@@ -51,35 +69,40 @@ try:
         email_triage,
         morning_briefing,
         reply_drafting,
-        openconnector_client
+        openconnector_client,
     )
+
     EMAIL_INTEGRATION_AVAILABLE = True
 except ImportError:
     EMAIL_INTEGRATION_AVAILABLE = False
     logging.warning("Email integration module not found")
 
 # ─── CONFIGURATION ───────────────────────────────────────────────
-LLAMACPP_PATH     = Path.home() / "llama.cpp"
-LLAMA_SERVER_BIN  = LLAMACPP_PATH / "build/bin/llama-server"
-LLAMA_CLI_BIN     = LLAMACPP_PATH / "build/bin/llama-cli"
-LLAMA_MODEL_PATH  = LLAMACPP_PATH / "models"
-LLAMA_SERVER_PORT = 11434  # internal server port
-
-OLLAMA_URL   = os.environ.get("OLLAMA_URL", "http://100.93.131.114:11434")
-OLLAMA_MODEL = "fast-recall:latest"
-FAST_MODEL   = "qwen2.5vl:7b"  # 379MB — fast for creative/story tasks
-
-PREFER_BACKEND = os.environ.get("PREFER_BACKEND", "ollama")  # "llama" | "ollama"
-PIPER_BIN = shutil.which("piper") or os.environ.get("PIPER_BIN", "/usr/local/piper/piper")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://100.93.131.114:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "fast-recall:latest")
+FAST_MODEL = "qwen2.5vl:7b"  # 379MB — fast for creative/story tasks
+VIBE_MODEL = os.environ.get("VIBE_MODEL", "qwen2.5:7b")
+# VibeCode chat model — the .env sets this to qwen2.5:3b (fits host RAM and
+# gives good code answers). Read it explicitly so /api/vibecode/chat never
+# silently falls through to the tiny 1.5b model that produced canned replies.
+VIBECODE_MODEL = os.environ.get("VIBECODE_MODEL", "qwen2.5:3b")
+PIPER_BIN = shutil.which("piper") or os.environ.get(
+    "PIPER_BIN", "/usr/local/piper/piper"
+)
 # Check additional paths if shutil.which didn't find it
 if not os.path.exists(PIPER_BIN):
-    for _candidate in ["/usr/local/bin/piper", "/usr/bin/piper", str(Path.home() / ".local/bin/piper")]:
+    for _candidate in [
+        "/usr/local/bin/piper",
+        "/usr/bin/piper",
+        str(Path.home() / ".local/bin/piper"),
+    ]:
         if os.path.exists(_candidate):
             PIPER_BIN = _candidate
             break
 PIPER_VOICE = os.environ.get("PIPER_VOICE", "/voices/lilly_voice.onnx")
 os.environ.setdefault("ESPEAK_DATA_PATH", "/usr/local/share/espeak-ng-data")
 os.environ.setdefault("LD_LIBRARY_PATH", "/usr/local/lib")
+
 
 # ─── TOKEN COMPRESSION ───────────────────────────────────────────
 class TokenCompressor:
@@ -126,7 +149,9 @@ class TokenCompressor:
         self._compressed_prompt_key = ""
         self._prompt_tokens_est = 0
 
-    def compress_system_prompt(self, user_name: str = "", child_mode: bool = False) -> str:
+    def compress_system_prompt(
+        self, user_name: str = "", child_mode: bool = False
+    ) -> str:
         """Compress the full system prompt into ultra-compact format.
 
         Original: ~300 words (~400 tokens)
@@ -174,7 +199,9 @@ class TokenCompressor:
         self._compressed_prompt_key = cache_key
         return self._compressed_prompt
 
-    def compress_sensor_reading(self, sensor_name: str, values: list, description: str = "") -> str:
+    def compress_sensor_reading(
+        self, sensor_name: str, values: list, description: str = ""
+    ) -> str:
         """Compress sensor reading into compact code format.
 
         Example: "Ambient light: 500.0 lux. Daylight brightness." → "L500"
@@ -270,7 +297,9 @@ class TokenCompressor:
         """Compare token counts between original and compressed text."""
         orig_tokens = self.estimate_tokens(original)
         comp_tokens = self.estimate_tokens(compressed)
-        savings_pct = ((orig_tokens - comp_tokens) / orig_tokens * 100) if orig_tokens > 0 else 0
+        savings_pct = (
+            ((orig_tokens - comp_tokens) / orig_tokens * 100) if orig_tokens > 0 else 0
+        )
 
         return {
             "original_chars": len(original),
@@ -284,34 +313,45 @@ class TokenCompressor:
 # Global compressor instance
 compressor = TokenCompressor()
 
-PORT        = 8098
+PORT = 8098
 # WORKSPACE defaults to the directory containing this script so it works both
 # locally and inside Docker (where /app is the mount point).
-WORKSPACE   = Path(os.environ.get("LILLY_WORKSPACE", str(Path(__file__).parent)))
+WORKSPACE = Path(os.environ.get("LILLY_WORKSPACE", str(Path(__file__).parent)))
 SKILLS_FILE = WORKSPACE / "lilly_skills.json"
 MEMORY_DIR = WORKSPACE
 
 SENSOR_SERVER_URL = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8099")
-WHISPER_SERVER_URL = "http://lilly-whisper-stt:8000"
-WHISPER_MODEL = "Systran/faster-whisper-large-v3"
-WHISPER_VAD_FILTER = False
-WHISPER_BEAM_SIZE = 5
+WHISPER_SERVER_URL = os.environ.get("WHISPER_SERVER_URL", "http://localhost:8001")
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "Systran/faster-whisper-large-v3")
+PUSHBULLET_API_KEY = os.environ.get("PUSHBULLET_API_KEY", "")
+WHISPER_VAD_FILTER = (
+    True  # Enable Silero VAD — filters silence/noise before transcription
+)
+WHISPER_BEAM_SIZE = (
+    1  # Greedy decoding — ~3x faster, negligible quality loss (TARS-AI approach)
+)
 WHISPER_TEMPERATURE = 0
-WHISPER_CONDITION_ON_PREV = True
+WHISPER_CONDITION_ON_PREV = (
+    False  # Disable — prevents hallucination propagation across chunks
+)
 # Verbatim prompt: tells Whisper to transcribe fillers, pauses, and repeated words
 WHISPER_INITIAL_PROMPT = "Transcribe verbatim including all fillers like um, uh, hmm, well, so, like, you know. Include repeated words and false starts. Do not clean up or paraphrase speech."
 
-logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("LillyAI")
 
+
 # ─── DATA MODELS ─────────────────────────────────────────────────
 @dataclass
 class MemoryEntry:
-    role: str          # "user" | "assistant"
+    role: str  # "user" | "assistant"
     text: str
     timestamp: float = field(default_factory=time.time)
+
 
 @dataclass
 class ConversationMemory:
@@ -325,7 +365,9 @@ class ConversationMemory:
 
     async def context_window(self, n: int = 8) -> list[dict]:
         async with self._lock:
-            return [{"role": e.role, "content": e.text} for e in list(self.entries)[-n:]]
+            return [
+                {"role": e.role, "content": e.text} for e in list(self.entries)[-n:]
+            ]
 
     async def snapshot(self) -> list:
         async with self._lock:
@@ -333,7 +375,10 @@ class ConversationMemory:
 
     async def to_dict(self) -> dict:
         async with self._lock:
-            return {"summary": self.summary, "entries": [asdict(e) for e in self.entries]}
+            return {
+                "summary": self.summary,
+                "entries": [asdict(e) for e in self.entries],
+            }
 
     async def set_summary(self, summary: str):
         async with self._lock:
@@ -355,16 +400,19 @@ class ConversationMemory:
             mem.entries.append(MemoryEntry(**e))
         return mem
 
+
 # ─── PYDANTIC REQUEST MODELS ────────────────────────────────────
 class TextCommand(BaseModel):
     text: str
     avatar: str = "puppy"
+
 
 # ─── MOUSE CURSOR STATE ────────────────────────────────────────
 CURSOR_X = 540
 CURSOR_Y = 960
 CURSOR_STEP = 50
 _ADB_AVAILABLE: bool | None = None
+
 
 async def _check_adb() -> bool:
     """Check if ADB wireless debugging is available on the phone."""
@@ -375,28 +423,44 @@ async def _check_adb() -> bool:
     _ADB_AVAILABLE = bool(out.strip()) and "device" in out
     return _ADB_AVAILABLE
 
+
 async def _input_tap(x: int, y: int):
     """Send tap event via ADB if available, otherwise show toast."""
     if await _check_adb():
         await termux_run(["adb", "shell", "input", "tap", str(x), str(y)], timeout=5.0)
     else:
-        await termux_run(["termux-toast", "-b", "green", "-g", "top", f"Tap {x},{y}"], timeout=2.0)
+        await termux_run(
+            ["termux-toast", "-b", "green", "-g", "top", f"Tap {x},{y}"], timeout=2.0
+        )
+
 
 async def _input_swipe(x1: int, y1: int, x2: int, y2: int):
     """Send swipe event via ADB if available, otherwise show toast."""
     if await _check_adb():
-        await termux_run(["adb", "shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), "1"], timeout=5.0)
+        await termux_run(
+            ["adb", "shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), "1"],
+            timeout=5.0,
+        )
     else:
-        await termux_run(["termux-toast", "-b", "green", "-g", "top", f"Move to {x2},{y2}"], timeout=2.0)
+        await termux_run(
+            ["termux-toast", "-b", "green", "-g", "top", f"Move to {x2},{y2}"],
+            timeout=2.0,
+        )
+
 
 async def _input_keyevent(key: str):
     """Send keyevent via ADB if available, else toast."""
     if await _check_adb():
         await termux_run(["adb", "shell", "input", "keyevent", key], timeout=5.0)
     else:
-        await termux_run(["termux-toast", "-b", "red", "-g", "top", f"Key {key}"], timeout=2.0)
+        await termux_run(
+            ["termux-toast", "-b", "red", "-g", "top", f"Key {key}"], timeout=2.0
+        )
+
 
 SKIP_AD_COORDS = [(540, 120), (960, 120), (540, 80), (960, 80), (300, 180)]
+
+
 async def skip_ad():
     if not await _check_adb():
         return "ADB not available — can't tap screen."
@@ -405,106 +469,259 @@ async def skip_ad():
     await termux_run(["sh", "-c", taps], timeout=10.0)
     # Also try UI automator dump to find Skip button text (single SSH call)
     try:
-        xml_out, _ = await termux_run(["sh", "-c", "adb shell uiautomator dump /sdcard/window_dump.xml && adb shell cat /sdcard/window_dump.xml"], timeout=8.0)
-        for pattern in [r'Skip', r'Skip Ad', r'Skip in \d+', r'Dismiss', r'Close', r'Got it']:
-            match = re.search(r'text="(' + pattern + r')".*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml_out)
+        xml_out, _ = await termux_run(
+            [
+                "sh",
+                "-c",
+                "adb shell uiautomator dump /sdcard/window_dump.xml && adb shell cat /sdcard/window_dump.xml",
+            ],
+            timeout=8.0,
+        )
+        for pattern in [
+            r"Skip",
+            r"Skip Ad",
+            r"Skip in \d+",
+            r"Dismiss",
+            r"Close",
+            r"Got it",
+        ]:
+            match = re.search(
+                r'text="(' + pattern + r')".*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
+                xml_out,
+            )
             if match:
                 cx = (int(match.group(2)) + int(match.group(4))) // 2
                 cy = (int(match.group(3)) + int(match.group(5))) // 2
-                await termux_run(["adb", "shell", "input", "tap", str(cx), str(cy)], timeout=3.0)
+                await termux_run(
+                    ["adb", "shell", "input", "tap", str(cx), str(cy)], timeout=3.0
+                )
                 break
     except Exception:
         pass
     return "Tapped skip areas — ad should be dismissed."
+
+
 SKILLS = {}
 PENDING_INTENT = None
 PHANTOMS = {
     # Whisper hallucinations on pure noise/silence (NOT disfluencies — those are real speech)
-    "you you", "you you you", "you you you you",
-    "thank you", "thanks", "thank you for watching", "thanks for watching",
-    "thank you so much", "thank you very much", "thank you for everything",
-    "thank you for being here", "thank you for tuning in", "thank you for listening",
-    "thank you all", "thanks everyone", "thanks for your support",
-    "thank you guys", "thanks guys", "thank you for joining",
-    "thanks for joining", "thank you for coming", "thanks for coming",
-    "thank you for your time", "thanks for your time",
+    "you you",
+    "you you you",
+    "you you you you",
+    "thank you",
+    "thanks",
+    "thank you for watching",
+    "thanks for watching",
+    "thank you so much",
+    "thank you very much",
+    "thank you for everything",
+    "thank you for being here",
+    "thank you for tuning in",
+    "thank you for listening",
+    "thank you all",
+    "thanks everyone",
+    "thanks for your support",
+    "thank you guys",
+    "thanks guys",
+    "thank you for joining",
+    "thanks for joining",
+    "thank you for coming",
+    "thanks for coming",
+    "thank you for your time",
+    "thanks for your time",
     # YouTube / media hallucinations
-    "subscribe", "like and subscribe", "subscribe to my channel",
-    "notification bell", "hit the bell", "comment below",
-    "thats a ghost", "subtitles by", "subtitles",
-    "please subscribe", "don't forget to subscribe",
-    "like comment and subscribe", "smash that like button",
-    "hit that like button", "click the like button", "click like",
-    "click subscribe", "click the subscribe button",
-    "leave a comment", "drop a comment", "let me know in the comments",
-    "comment down below", "let me know down below", "drop it in the comments",
-    "see you in the next video", "see you next time", "until next time",
-    "don't forget to like", "don't forget to comment",
-    "join the channel", "become a member", "support the channel",
-    "link in the description", "link in bio", "check the description",
-    "check the link below", "links in the description",
-    "turn on notifications", "ring the bell",
-    "click the bell", "click the notification bell",
-    "this video", "in this video", "in today's video", "today's episode",
-    "welcome back", "welcome back to the channel", "welcome to my channel",
-    "welcome back everyone", "welcome back to the show",
-    "hey guys", "what's up guys", "hey everyone", "hello everyone",
-    "hey what's up everyone", "hey welcome back", "what is up everyone",
-    "if you enjoyed this video", "if you liked this video",
-    "if you enjoyed this", "if you found this helpful",
-    "share this video", "share with your friends",
-    "watch till the end", "stay till the end", "watch the full video",
-    "watch to the end", "make sure to watch till the end",
-    "intro", "outro",
-    "like this video", "like the video", "thumbs up",
-    "hit that thumbs up", "smash the like button", "smash the subscribe button",
-    "give this video a like", "give me a thumbs up",
-    "press the like button", "press subscribe",
-    "tap the like button", "tap subscribe", "tap the bell",
-    "follow me", "follow us", "please follow", "don't forget to follow",
-    "follow for more", "follow for updates", "hit follow",
-    "make sure to follow", "make sure to subscribe",
-    "don't forget to hit subscribe", "go ahead and subscribe",
-    "new video every", "new episode every", "every week", "every day",
-    "upload schedule", "posting schedule",
-    "check out my other videos", "watch my other videos", "my other content",
-    "check out the playlist", "the full playlist",
-    "my social media", "follow me on instagram", "follow me on twitter",
-    "follow me on tiktok", "follow on social media",
+    "subscribe",
+    "like and subscribe",
+    "subscribe to my channel",
+    "notification bell",
+    "hit the bell",
+    "comment below",
+    "thats a ghost",
+    "subtitles by",
+    "subtitles",
+    "please subscribe",
+    "don't forget to subscribe",
+    "like comment and subscribe",
+    "smash that like button",
+    "hit that like button",
+    "click the like button",
+    "click like",
+    "click subscribe",
+    "click the subscribe button",
+    "leave a comment",
+    "drop a comment",
+    "let me know in the comments",
+    "comment down below",
+    "let me know down below",
+    "drop it in the comments",
+    "see you in the next video",
+    "see you next time",
+    "until next time",
+    "don't forget to like",
+    "don't forget to comment",
+    "join the channel",
+    "become a member",
+    "support the channel",
+    "link in the description",
+    "link in bio",
+    "check the description",
+    "check the link below",
+    "links in the description",
+    "turn on notifications",
+    "ring the bell",
+    "click the bell",
+    "click the notification bell",
+    "this video",
+    "in this video",
+    "in today's video",
+    "today's episode",
+    "welcome back",
+    "welcome back to the channel",
+    "welcome to my channel",
+    "welcome back everyone",
+    "welcome back to the show",
+    "hey guys",
+    "what's up guys",
+    "hey everyone",
+    "hello everyone",
+    "hey what's up everyone",
+    "hey welcome back",
+    "what is up everyone",
+    "if you enjoyed this video",
+    "if you liked this video",
+    "if you enjoyed this",
+    "if you found this helpful",
+    "share this video",
+    "share with your friends",
+    "watch till the end",
+    "stay till the end",
+    "watch the full video",
+    "watch to the end",
+    "make sure to watch till the end",
+    "intro",
+    "outro",
+    "like this video",
+    "like the video",
+    "thumbs up",
+    "hit that thumbs up",
+    "smash the like button",
+    "smash the subscribe button",
+    "give this video a like",
+    "give me a thumbs up",
+    "press the like button",
+    "press subscribe",
+    "tap the like button",
+    "tap subscribe",
+    "tap the bell",
+    "follow me",
+    "follow us",
+    "please follow",
+    "don't forget to follow",
+    "follow for more",
+    "follow for updates",
+    "hit follow",
+    "make sure to follow",
+    "make sure to subscribe",
+    "don't forget to hit subscribe",
+    "go ahead and subscribe",
+    "new video every",
+    "new episode every",
+    "every week",
+    "every day",
+    "upload schedule",
+    "posting schedule",
+    "check out my other videos",
+    "watch my other videos",
+    "my other content",
+    "check out the playlist",
+    "the full playlist",
+    "my social media",
+    "follow me on instagram",
+    "follow me on twitter",
+    "follow me on tiktok",
+    "follow on social media",
     # Podcast / audio hallucinations
-    "this podcast", "on this podcast", "on today's show", "on the show",
-    "follow us on spotify", "follow us on apple podcasts",
-    "subscribe on spotify", "available on all platforms",
-    "patreon", "support us on patreon", "support us on patreon.com",
-    "find us on", "listen on spotify", "listen on apple podcasts",
-    "on apple podcasts", "on google podcasts",
-    "rate and review", "leave a review", "leave us a review",
-    "five stars", "five star review",
-    "join our newsletter", "sign up for our newsletter",
+    "this podcast",
+    "on this podcast",
+    "on today's show",
+    "on the show",
+    "follow us on spotify",
+    "follow us on apple podcasts",
+    "subscribe on spotify",
+    "available on all platforms",
+    "patreon",
+    "support us on patreon",
+    "support us on patreon.com",
+    "find us on",
+    "listen on spotify",
+    "listen on apple podcasts",
+    "on apple podcasts",
+    "on google podcasts",
+    "rate and review",
+    "leave a review",
+    "leave us a review",
+    "five stars",
+    "five star review",
+    "join our newsletter",
+    "sign up for our newsletter",
     # Live stream artifacts
-    "going live", "we're live", "i'm live now",
-    "join the live stream", "watching live",
-    "super chat", "hit that super chat",
+    "going live",
+    "we're live",
+    "i'm live now",
+    "join the live stream",
+    "watching live",
+    "super chat",
+    "hit that super chat",
     # Short noise bursts that Whisper commonly emits on silence
-    ".", "..", "...", "hmm", "mhm", "mm", "hm",
-    "bye", "bye bye", "goodbye", "good bye", "see ya", "see you",
+    ".",
+    "..",
+    "...",
+    "hmm",
+    "mhm",
+    "mm",
+    "hm",
+    "bye",
+    "bye bye",
+    "goodbye",
+    "good bye",
+    "see ya",
+    "see you",
 }
 # Disfluencies are VALID speech — keep them for Llama to infer hesitation/thinking
-DISFLOENCIES = {"um", "uh", "hmm", "oh", "ah", "er", "like", "you know", "well", "so", "yeah", "ok", "okay"}
+DISFLOENCIES = {
+    "um",
+    "uh",
+    "hmm",
+    "oh",
+    "ah",
+    "er",
+    "like",
+    "you know",
+    "well",
+    "so",
+    "yeah",
+    "ok",
+    "okay",
+}
+
 
 def _is_latin_or_common(c: str) -> bool:
     """Check if a character is Basic Latin (A-Z, a-z, 0-9) or common punctuation/spaces."""
     cp = ord(c)
     return (
         (0x0020 <= cp <= 0x007E)  # Basic Latin + common symbols
-        or (0x00A0 <= cp <= 0x00FF)  # Latin-1 Supplement (accented chars: é, ñ, ü, etc.)
+        or (
+            0x00A0 <= cp <= 0x00FF
+        )  # Latin-1 Supplement (accented chars: é, ñ, ü, etc.)
         or (0x0100 <= cp <= 0x024F)  # Latin Extended-A/B (more accented chars)
-        or cp in (0x2018, 0x2019, 0x201C, 0x201D, 0x2013, 0x2014)  # smart quotes, dashes
+        or cp
+        in (0x2018, 0x2019, 0x201C, 0x201D, 0x2013, 0x2014)  # smart quotes, dashes
     )
+
 
 def _has_foreign_script(text: str) -> bool:
     """Check if text contains significant non-Latin script characters.
-    
+
     Detects: Devanagari, Georgian, Korean, Arabic/Persian, Thai, Sinhala,
     CJK, Cyrillic, Hebrew, Tibetan, etc.
     If >20% of alphabetic chars are from these scripts, it's likely a hallucination.
@@ -512,17 +729,18 @@ def _has_foreign_script(text: str) -> bool:
     alpha_chars = [c for c in text if c.isalpha()]
     if not alpha_chars:
         return False
-    
+
     foreign_count = 0
     for c in alpha_chars:
         if not _is_latin_or_common(c):
             foreign_count += 1
-    
+
     return foreign_count / len(alpha_chars) > 0.20
+
 
 def is_hallucination(text: str) -> bool:
     """Detect Whisper hallucinations on noise/silence.
-    
+
     Preserves disfluencies (um, uh, hmm, etc.) as they are real speech cues.
     Only filters true noise artifacts:
     - Repeated characters (llllll, ʔʔʔ)
@@ -533,57 +751,65 @@ def is_hallucination(text: str) -> bool:
     """
     if not text:
         return True
-    
+
     text = text.strip()
-    
+
     # Empty after stripping
     if not text:
         return True
-    
+
     # Single character is always noise
     if len(text) < 2:
         return True
-    
+
     # Normalize for analysis
     stripped = text.replace(" ", "").replace("\n", "").replace("\t", "")
     if not stripped:
         return True
-    
+
     # ── Check 1: Repeated single character (e.g., "llllll", "ʔʔʔ") ──
     counts = Counter(stripped)
     most_common_count = counts.most_common(1)[0][1]
     if most_common_count / max(len(stripped), 1) > 0.5:
         return True
-    
+
     # ── Check 2: Non-Latin / foreign script detection ──
     if _has_foreign_script(text):
         logger.debug(f"Hallucination: foreign script detected in '{text[:50]}'")
         return True
-    
+
     # ── Check 3: Mostly non-ASCII (fallback for edge cases) ──
     ascii_chars = sum(1 for c in text if ord(c) < 128)
     if len(text) > 3 and ascii_chars / len(text) < 0.4:
         return True
-    
+
     # ── Check 4: Special characters / symbol gibberish ──
-    special_chars = sum(1 for c in stripped if not c.isalnum() and c not in ".,!?-'\":;()@#$%&*+=/<>[]{}|\\~`^_")
+    special_chars = sum(
+        1
+        for c in stripped
+        if not c.isalnum() and c not in ".,!?-'\":;()@#$%&*+=/<>[]{}|\\~`^_"
+    )
     if len(stripped) > 5 and special_chars / len(stripped) > 0.4:
         return True
-    
+
     # ── Check 5: Word-level repetition (3+ identical windows) ──
     words = text.lower().split()
     if len(words) >= 4:
         for window in [2, 3]:
             pattern = words[:window]
-            repeat_count = sum(1 for i in range(0, len(words) - window + 1, window) if words[i:i+window] == pattern)
+            repeat_count = sum(
+                1
+                for i in range(0, len(words) - window + 1, window)
+                if words[i : i + window] == pattern
+            )
             if repeat_count >= 3:
                 return True
-    
+
     # ── Check 6: Just punctuation / symbols with no real words ──
     real_words = [w for w in words if any(c.isalpha() for c in w)]
     if len(words) > 2 and len(real_words) == 0:
         return True
-    
+
     # ── Check 7: Known Whisper hallucination phrases ──
     text_lower = text.lower().strip(".,!? ")
     if text_lower in PHANTOMS:
@@ -596,10 +822,10 @@ def is_hallucination(text: str) -> bool:
 
     # ── Check 8: Thank-you / gratitude variants (very common Whisper hallucination) ──
     if re.match(
-        r'^(thank[s]?\s*(you|u)(\s+(so\s+)?much|\s+a\s+lot|\s+very\s+much|\s+everyone|'
-        r'\s+for\s+(watching|listening|tuning\s+in|being\s+here|your\s+support|everything))?'
-        r'|thanks?\s*(so\s+much|a\s+lot|everyone|for\s+(watching|listening|tuning\s+in|'
-        r'your\s+support|everything))?)\s*[.!]?$',
+        r"^(thank[s]?\s*(you|u)(\s+(so\s+)?much|\s+a\s+lot|\s+very\s+much|\s+everyone|"
+        r"\s+for\s+(watching|listening|tuning\s+in|being\s+here|your\s+support|everything))?"
+        r"|thanks?\s*(so\s+much|a\s+lot|everyone|for\s+(watching|listening|tuning\s+in|"
+        r"your\s+support|everything))?)\s*[.!]?$",
         text_lower,
     ):
         return True
@@ -607,39 +833,39 @@ def is_hallucination(text: str) -> bool:
     # ── Check 9: Click/like/subscribe action phrases ──
     # These are extremely common Whisper hallucinations from YouTube/podcast background noise
     if re.search(
-        r'\b(click|hit|smash|press|tap|give\s+(this|me|it)\s+a?)\s+(the\s+)?(like|subscribe|bell|notification|thumbs\s*up)',
+        r"\b(click|hit|smash|press|tap|give\s+(this|me|it)\s+a?)\s+(the\s+)?(like|subscribe|bell|notification|thumbs\s*up)",
         text_lower,
     ):
         return True
     if re.search(
-        r'\b(like\s+and\s+subscribe|subscribe\s+and\s+(like|turn\s+on)|'
-        r'like\s*,?\s*comment\s+and\s+subscribe|'
-        r'don.?t\s+forget\s+to\s+(like|subscribe|comment|share|follow|hit)|'
-        r'make\s+sure\s+to\s+(like|subscribe|hit\s+subscribe|follow)|'
-        r'go\s+ahead\s+and\s+subscribe)',
+        r"\b(like\s+and\s+subscribe|subscribe\s+and\s+(like|turn\s+on)|"
+        r"like\s*,?\s*comment\s+and\s+subscribe|"
+        r"don.?t\s+forget\s+to\s+(like|subscribe|comment|share|follow|hit)|"
+        r"make\s+sure\s+to\s+(like|subscribe|hit\s+subscribe|follow)|"
+        r"go\s+ahead\s+and\s+subscribe)",
         text_lower,
     ):
         return True
     if re.search(
-        r'\b(see\s+you\s+(in\s+the\s+next|next\s+(time|week|video|episode))|until\s+next\s+time)',
+        r"\b(see\s+you\s+(in\s+the\s+next|next\s+(time|week|video|episode))|until\s+next\s+time)",
         text_lower,
     ):
         return True
     if re.search(
-        r'\b(welcome\s+back\s+to\s+(the\s+channel|my\s+channel)|'
-        r'welcome\s+back\s+everyone|welcome\s+to\s+my\s+channel|'
-        r'in\s+this\s+video|today.?s\s+(video|episode|show))',
+        r"\b(welcome\s+back\s+to\s+(the\s+channel|my\s+channel)|"
+        r"welcome\s+back\s+everyone|welcome\s+to\s+my\s+channel|"
+        r"in\s+this\s+video|today.?s\s+(video|episode|show))",
         text_lower,
     ):
         return True
 
     # ── Check 10: Follow / social media shout-outs ──
     if re.search(
-        r'\b(follow\s+(me|us)\s+on\s+(instagram|twitter|tiktok|youtube|twitch|facebook|social\s+media)|'
-        r'(hit|click|tap)\s+(follow|that\s+follow\s+button)|'
-        r'follow\s+for\s+(more|updates)|'
-        r'rate\s+and\s+review|leave\s+(a|us\s+a)\s+review|'
-        r'five[\s-]star|5[\s-]star\s+review)',
+        r"\b(follow\s+(me|us)\s+on\s+(instagram|twitter|tiktok|youtube|twitch|facebook|social\s+media)|"
+        r"(hit|click|tap)\s+(follow|that\s+follow\s+button)|"
+        r"follow\s+for\s+(more|updates)|"
+        r"rate\s+and\s+review|leave\s+(a|us\s+a)\s+review|"
+        r"five[\s-]star|5[\s-]star\s+review)",
         text_lower,
     ):
         return True
@@ -647,14 +873,15 @@ def is_hallucination(text: str) -> bool:
     # ── Check 11: Standalone engagement micro-phrases ──
     # Short isolated fragments Whisper emits on quiet background (YouTube mix)
     _ENGAGEMENT_MICRO = re.compile(
-        r'^(like\s+(the\s+)?video|like\s+this|thumbs\s*up|sub(scribe)?|'
-        r'(please\s+)?(like|follow|share|subscribe)|'
-        r'(go\s+)?(follow|subscribe)(\.?)?)$'
+        r"^(like\s+(the\s+)?video|like\s+this|thumbs\s*up|sub(scribe)?|"
+        r"(please\s+)?(like|follow|share|subscribe)|"
+        r"(go\s+)?(follow|subscribe)(\.?)?)$"
     )
     if _ENGAGEMENT_MICRO.match(text_lower.strip(".,!? ")):
         return True
 
     return False
+
 
 BACKGROUND_MIC_ACTIVE = False
 BROWSER_MIC_ACTIVE = False
@@ -663,6 +890,10 @@ LILLY_IS_THINKING = False
 LILLY_MOOD = "calm"
 PENDING_LOOK_AT = None
 PENDING_OPEN_URL: Optional[str] = None
+# Pending VibeCode overlay commands for /api/ui_state polling (voice paths).
+# Set to ("open", slug|None) or ("close", None); consumed by the front end
+# which renders the VibeCode overlay panels on the main page.
+PENDING_VIBECODE: Optional[tuple] = None
 LAST_HEARD = ""
 LAST_SPOKEN = ""
 LAST_SSML = ""
@@ -672,17 +903,17 @@ AUDIO_CACHE_LOCK: asyncio.Lock = asyncio.Lock()
 
 # Noise detection: auto-pause mic loop after sustained noise to save compute
 CONSECUTIVE_NOISE_COUNT = 0
-MAX_CONSECUTIVE_NOISE = 5        # pause after 5 consecutive noise detections
-NOISE_PAUSE_UNTIL = 0.0          # timestamp when pause ends
-NOISE_PAUSE_DURATION = 30.0      # seconds to pause after sustained noise
+MAX_CONSECUTIVE_NOISE = 5  # pause after 5 consecutive noise detections
+NOISE_PAUSE_UNTIL = 0.0  # timestamp when pause ends
+NOISE_PAUSE_DURATION = 30.0  # seconds to pause after sustained noise
 
 # ── Self-input cooldown (fix #1): mic is silenced briefly after Lilly finishes
-MIC_COOLDOWN_UNTIL = 0.0         # epoch timestamp: don't record before this
-MIC_COOLDOWN_SECS  = 1.8         # seconds of silence after Lilly stops speaking
+MIC_COOLDOWN_UNTIL = 0.0  # epoch timestamp: don't record before this
+MIC_COOLDOWN_SECS = 1.8  # seconds of silence after Lilly stops speaking
 
 # ── Tone matching (fix #2): updated from mic audio before every LLM call
-USER_MIC_ENERGY = 0.5            # 0.0 quiet … 1.0 loud  (RMS-derived, smoothed)
-USER_MIC_PACE   = 1.0            # words-per-second estimated from Whisper word-count / duration
+USER_MIC_ENERGY = 0.5  # 0.0 quiet … 1.0 loud  (RMS-derived, smoothed)
+USER_MIC_PACE = 1.0  # words-per-second estimated from Whisper word-count / duration
 
 # Phone SSH state
 PHONE_SSH_OK = False
@@ -691,8 +922,8 @@ PHONE_SSH_LAST_ERROR = ""
 PHONE_SSH_FAIL_COUNT = 0
 
 # ── Sensor delta tracking (fix #3): compare current vs previous readings
-_PREV_SENSOR_SNAPSHOT: dict = {}   # name → last known values list
-_LAST_PROACTIVE_COMMENT = 0.0      # epoch: throttle unprompted observations
+_PREV_SENSOR_SNAPSHOT: dict = {}  # name → last known values list
+_LAST_PROACTIVE_COMMENT = 0.0  # epoch: throttle unprompted observations
 
 memory = ConversationMemory()
 
@@ -728,164 +959,104 @@ MOUTH_OPEN = 0.0
 USER_NAME = ""
 _NOTIFICATION_SEEN: set[str] = set()
 
-# ─── LLAMA.CPP BACKEND MANAGER ──────────────────────────────────
+
+# ─── OLLAMA BACKEND MANAGER ─────────────────────────────────────
 def strip_think_tags(text: str) -> str:
     """Remove model thinking/tag noise from output."""
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    text = re.sub(r'<.*?>', '', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<.*?>", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
+
+# ── Hallucination patterns the model sometimes emits (YouTube/media/Subscribe noise etc.) ──
+_HALLUCINATION_PATTERNS = [
+    # YouTube/media creator hallucinations
+    (
+        re.compile(
+            r"(like\s+and\s+subscribe|thanks\s+for\s+watching|link\s+in\s+description)",
+            re.I,
+        ),
+        "",
+    ),
+    (
+        re.compile(
+            r"(if\s+you\s+liked\s+this|hit\s+that\s+subscribe|drop\s+a\s+like)", re.I
+        ),
+        "",
+    ),
+    (re.compile(r"(welcome\s+to\s+my\s+channel|subscribe\s+for\s+more)", re.I), ""),
+    # Overly verbose canned sign-offs
+    (
+        re.compile(
+            r"(as\s+always|as\s+mentioned\s+earlier|as\s+i\s+said\s+before)\s*,?\s*i'?ll\s+leave\s+a\s+link",
+            re.I,
+        ),
+        "",
+    ),
+    # Fabricated sensor readings — strip specific numbers the model invented
+    (
+        re.compile(
+            r"(the\s+(?:temperature|light|pressure|battery|humidity|steps?))\s+(?:is|reads)\s+(?:around\s+)?\d+\s*(?:degrees?|lux|hpa|%|c)\s*[,.]?\s*i\s+(?:can|could)\s+(?:feel|sense|see)",
+            re.I,
+        ),
+        "",
+    ),
+    # Duplicate boilerplate
+    (re.compile(r"\n{4,}", re.I), "\n\n"),
+]
+
+
+def _filter_hallucination_patterns(text: str) -> str:
+    """Remove common hallucination / media-noise phrases from LLM output.
+
+    Also cleans up fragment punctuation left behind after phrase removal
+    (e.g. '!  below.' -> 'below.') so replies don't look broken.
+    """
+    if not text:
+        return text
+    cleaned = text
+    for pattern, replacement in _HALLUCINATION_PATTERNS:
+        cleaned = pattern.sub(replacement, cleaned)
+    # Clean up fragments: leading punctuation + spaces left after phrase removal
+    cleaned = re.sub(r"(?<!\w)[!,.:;-]{1,3}\s*(?=\s*[a-zA-Z])", " ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    # If the reply starts with fragment punctuation, trim it
+    cleaned = re.sub(r"^[!,.:;/\\s]+", "", cleaned)
+    return cleaned
+
+
 class LlamaBackend:
-    """Manages llama.cpp server process and inference requests."""
+    """Manages Ollama inference requests (unified backend)."""
+
     def __init__(self):
-        self.process: Optional[asyncio.subprocess.Process] = None
-        self.server_url = f"http://127.0.0.1:{LLAMA_SERVER_PORT}"
         self.model_name = ""
-        self._available = False
-        self._client: Optional[httpx.AsyncClient] = None
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=30.0, limits=httpx.Limits(max_keepalive_connections=4, max_connections=8))
-        return self._client
-
-    async def discover_model(self) -> Optional[str]:
-        if not LLAMA_MODEL_PATH.exists():
-            return None
-        gguf_files = list(LLAMA_MODEL_PATH.glob("*.gguf"))
-        if not gguf_files:
-            return None
-        return str(gguf_files[0])
-
-    async def start_server(self) -> bool:
-        model_path = await self.discover_model()
-        if not model_path or not LLAMA_SERVER_BIN.exists():
-            logger.warning("llama-server binary or models not found — falling back to Ollama")
-            return False
-
-        self.process = await asyncio.create_subprocess_exec(
-            str(LLAMA_SERVER_BIN),
-            "-m", model_path,
-            "--host", "127.0.0.1",
-            "--port", str(LLAMA_SERVER_PORT),
-            "-c", "2048",
-            "-b", "512",
-            "--flash-attn",
-            "--cont-batching",
-            "--mlock",
-            "--no-warmup",
-            "--log-disable",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-
-        client = await self._get_client()
-        for attempt in range(20):
-            await asyncio.sleep(0.3)
-            try:
-                r = await client.get(f"{self.server_url}/health", timeout=1.0)
-                if r.status_code == 200:
-                    # Pre-warm with a tiny dummy request to load the model into memory
-                    try:
-                        await client.post(
-                            f"{self.server_url}/v1/chat/completions",
-                            json={"messages": [{"role": "user", "content": "Hi"}], "max_tokens": 1, "stream": False},
-                            timeout=10.0,
-                        )
-                    except Exception:
-                        pass
-                    self._available = True
-                    logger.info(f"llama-server ready with {Path(model_path).name}")
-                    return True
-            except Exception:
-                pass
-        logger.error("llama-server failed to start in time")
-        return False
-
-    async def stop_server(self):
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
-        if self.process:
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(self.process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                self.process.kill()
-            self._available = False
-
-    async def chat(self, messages: list[dict], temperature: float = 0.7,
-                   max_tokens: int = 256, timeout: int = 25) -> str:
-        client = await self._get_client()
-
+    async def chat(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 256,
+        timeout: int = 25,
+        model: str = "",
+    ) -> str:
+        use_model = model or OLLAMA_MODEL
         payload = {
+            "model": use_model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
             "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+            },
         }
-
-        # Try primary backend then fallback
-        if self._available:
-            result = await self._try_server(client, payload, timeout)
-            if result:
-                return result
-            # Server returned empty — mark unavailable and retry via fallback
-            self._available = False
-
-        result = await self._try_ollama(payload, timeout)
-        if result:
-            return result
-
-        # Last resort: try restarting server
-        if not self._available and LLAMA_SERVER_BIN.exists():
-            logger.info("Attempting server restart...")
-            await self.stop_server()
-            ok = await self.start_server()
-            if ok:
-                result = await self._try_server(client, payload, timeout + 10)
-                if result:
-                    return result
-
-        return ""
-
-    async def _try_server(self, client: httpx.AsyncClient, payload: dict, timeout: int) -> str:
         for attempt in range(2):
             try:
-                r = await client.post(
-                    f"{self.server_url}/v1/chat/completions",
-                    json=payload,
-                    timeout=timeout,
-                )
-                if r.status_code == 200:
-                    text = r.json()["choices"][0]["message"]["content"].strip()
-                    return strip_think_tags(text) if text else ""
-                if r.status_code == 503:
-                    await asyncio.sleep(1.0)
-                    continue
-            except httpx.TimeoutException:
-                if attempt == 0:
-                    await asyncio.sleep(0.5)
-                    continue
-            except Exception as e:
-                logger.debug(f"Server attempt {attempt} failed: {e}")
-            break
-        return ""
-
-    async def _try_ollama(self, payload: dict, timeout: int) -> str:
-        for attempt in range(2):
-            try:
-                ollama_payload = {
-                    "model": OLLAMA_MODEL,
-                    "messages": payload["messages"],
-                    "stream": False,
-                    "options": {
-                        "temperature": payload.get("temperature", 0.0),
-                        "num_predict": payload.get("max_tokens", 256),
-                    },
-                }
                 c = await _get_ollama_client()
-                r = await c.post(f"{OLLAMA_URL}/api/chat", json=ollama_payload, timeout=timeout)
+                r = await c.post(
+                    f"{OLLAMA_URL}/api/chat", json=payload, timeout=timeout
+                )
                 if r.status_code == 200:
                     text = r.json()["message"]["content"].strip()
                     return strip_think_tags(text) if text else ""
@@ -897,8 +1068,13 @@ class LlamaBackend:
             break
         return ""
 
-    async def chat_stream(self, messages: list[dict], temperature: float = 0.7,
-                          max_tokens: int = 256, model: str = None) -> AsyncGenerator[str, None]:
+    async def chat_stream(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 256,
+        model: str = None,
+    ) -> AsyncGenerator[str, None]:
         """Stream chat response token by token. Yields text chunks as they arrive."""
         use_model = model or OLLAMA_MODEL
         payload = {
@@ -912,7 +1088,9 @@ class LlamaBackend:
         }
         try:
             c = await _get_ollama_client()
-            async with c.stream("POST", f"{OLLAMA_URL}/api/chat", json=payload, timeout=60.0) as r:
+            async with c.stream(
+                "POST", f"{OLLAMA_URL}/api/chat", json=payload, timeout=60.0
+            ) as r:
                 async for line in r.aiter_lines():
                     if not line:
                         continue
@@ -922,8 +1100,10 @@ class LlamaBackend:
                             break
                         token = chunk.get("message", {}).get("content", "")
                         if token:
-                            cleaned = re.sub(r'<think>.*?</think>', '', token, flags=re.DOTALL)
-                            cleaned = re.sub(r'<.*?>', '', cleaned)
+                            cleaned = re.sub(
+                                r"<think>.*?</think>", "", token, flags=re.DOTALL
+                            )
+                            cleaned = re.sub(r"<.*?>", "", cleaned)
                             if cleaned:
                                 yield cleaned
                     except json.JSONDecodeError:
@@ -932,39 +1112,55 @@ class LlamaBackend:
             logger.debug(f"Stream error: {e}")
             return
 
+
 # Persistent clients — reused across requests to avoid TCP reconnect overhead
 _ollama_client: Optional[httpx.AsyncClient] = None
 _whisper_client: Optional[httpx.AsyncClient] = None
 _sensor_client: Optional[httpx.AsyncClient] = None
 
+
 async def _get_ollama_client() -> httpx.AsyncClient:
     global _ollama_client
     if _ollama_client is None or _ollama_client.is_closed:
-        _ollama_client = httpx.AsyncClient(timeout=60.0, limits=httpx.Limits(max_keepalive_connections=4, max_connections=8))
+        _ollama_client = httpx.AsyncClient(
+            timeout=60.0,
+            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
+        )
     return _ollama_client
+
 
 async def _get_sensor_client() -> httpx.AsyncClient:
     global _sensor_client
     if _sensor_client is None or _sensor_client.is_closed:
-        _sensor_client = httpx.AsyncClient(timeout=10.0, limits=httpx.Limits(max_keepalive_connections=4, max_connections=8))
+        _sensor_client = httpx.AsyncClient(
+            timeout=10.0,
+            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
+        )
     return _sensor_client
+
 
 async def _get_whisper_client() -> httpx.AsyncClient:
     global _whisper_client
     if _whisper_client is None or _whisper_client.is_closed:
-        _whisper_client = httpx.AsyncClient(timeout=30.0, limits=httpx.Limits(max_keepalive_connections=2, max_connections=4))
+        _whisper_client = httpx.AsyncClient(
+            timeout=30.0,
+            limits=httpx.Limits(max_keepalive_connections=2, max_connections=4),
+        )
     return _whisper_client
 
+
 llama_backend = LlamaBackend()
+
 
 # ─── UTILITY FUNCTIONS ──────────────────────────────────────────
 def normalize_text(text: str) -> str:
     if not text:
         return ""
     text = unicodedata.normalize("NFKC", text).lower()
-    text = re.sub(r'\[.*?\]|\(.*?\)', '', text)
-    text = re.sub(r'[^\w\s]', ' ', text)
-    return re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r"\[.*?\]|\(.*?\)", "", text)
+    text = re.sub(r"[^\w\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
 
 def strip_json_wrapper(text: str) -> str:
     """Strip JSON object/array wrapper from LLM replies.
@@ -979,13 +1175,21 @@ def strip_json_wrapper(text: str) -> str:
         return text
     t = text.strip()
     # Only attempt if it looks like a JSON object
-    if not (t.startswith('{') and t.endswith('}')):
+    if not (t.startswith("{") and t.endswith("}")):
         return text
     try:
         data = json.loads(t)
         if isinstance(data, dict):
             # Try common message keys first, then fall back to first string value
-            for key in ('message', 'reply', 'response', 'text', 'content', 'answer', 'output'):
+            for key in (
+                "message",
+                "reply",
+                "response",
+                "text",
+                "content",
+                "answer",
+                "output",
+            ):
                 if key in data and isinstance(data[key], str):
                     return data[key].strip()
             # Fall back to first string value found
@@ -996,27 +1200,30 @@ def strip_json_wrapper(text: str) -> str:
         pass
     return text
 
+
 # Per-character wake words — each character responds to its own name
 CHAR_WAKE_WORDS: dict[str, list[str]] = {
-    "puppy":   ["lilly", "hey lilly", "lily", "lili", "lillie"],
-    "fox":     ["fox", "hey fox"],
-    "cat":     ["cat", "hey cat", "kitty"],
-    "bear":    ["bear", "hey bear"],
-    "bunny":   ["bunny", "hey bunny", "bun"],
-    "owl":     ["owl", "hey owl", "owly"],
-    "deer":    ["deer", "hey deer"],
-    "wolf":    ["wolf", "hey wolf", "wolfie"],
+    "puppy": ["lilly", "hey lilly", "lily", "lili", "lillie"],
+    "fox": ["fox", "hey fox"],
+    "cat": ["cat", "hey cat", "kitty"],
+    "bear": ["bear", "hey bear"],
+    "bunny": ["bunny", "hey bunny", "bun"],
+    "owl": ["owl", "hey owl", "owly"],
+    "deer": ["deer", "hey deer"],
+    "wolf": ["wolf", "hey wolf", "wolfie"],
     "raccoon": ["raccoon", "hey raccoon", "coony"],
 }
+
 
 def _get_wake_targets(avatar: str = None) -> list[str]:
     """Return wake word targets for the given avatar (defaults to current_avatar)."""
     key = avatar or current_avatar or "puppy"
     return CHAR_WAKE_WORDS.get(key, CHAR_WAKE_WORDS["puppy"])
 
+
 def fuzzy_wake_match(phrase: str, avatar: str = None) -> tuple[bool, float]:
     """Returns (is_wake_word_present, confidence) using fuzzy matching.
-    
+
     Matches against the wake words for the given avatar (or current_avatar).
     """
     phrase_lower = phrase.lower().strip()
@@ -1035,6 +1242,7 @@ def fuzzy_wake_match(phrase: str, avatar: str = None) -> tuple[bool, float]:
                 word_ratio = difflib.SequenceMatcher(None, target, word).ratio()
                 best_score = max(best_score, word_ratio)
     return best_score >= 0.6, best_score
+
 
 def estimate_phoneme_duration(text: str) -> tuple[list[float], float]:
     """
@@ -1057,17 +1265,32 @@ def estimate_phoneme_duration(text: str) -> tuple[list[float], float]:
         timings.append(word_dur)
     return timings, total_duration
 
+
 def load_skills():
     global SKILLS
     if SKILLS_FILE.exists():
         try:
             raw = json.loads(SKILLS_FILE.read_text())
             for k, v in raw.items():
+                # Skip placeholder skills the LLM inferred with fake packages/URIs.
+                # They are unusable ("open example.com") and hijack real words.
+                pkg = v.get("package") or ""
+                uri = v.get("uri_template") or ""
+                if (
+                    "com.example" in pkg
+                    or "example.com" in uri
+                    or uri.strip() == "https://..."
+                ):
+                    logger.warning(
+                        f"Skipping placeholder skill '{k}' (package={pkg!r}, uri={uri!r})"
+                    )
+                    continue
                 SKILLS[normalize_text(k)] = v
                 for alias in v.get("aliases", []):
                     SKILLS[normalize_text(alias)] = v
         except Exception as e:
             logger.error(f"Failed to load skills: {e}")
+
 
 async def save_memory():
     try:
@@ -1081,6 +1304,7 @@ async def save_memory():
     except Exception as e:
         logger.warning(f"Failed to save memory: {e}")
 
+
 async def load_memory():
     global memory, current_avatar
     current_avatar = "puppy"
@@ -1092,19 +1316,23 @@ async def load_memory():
             await _clean_memory_artifacts()
         except Exception:
             memory = ConversationMemory()
+
+
 current_avatar = "puppy"
-# Tracks the Clerk user ID for the *current in-flight request* so save_memory()
+# Tracks the Auth0 user ID for the *current in-flight request* so save_memory()
 # can write to the correct per-user file even when called deep inside handle_intent().
 _current_user_id: str = ""
+
 
 def _avatar_memory_file(avatar: str) -> Path:
     """Return the memory file path for a given avatar."""
     safe = avatar.replace("/", "_").replace("..", "_")
     return MEMORY_DIR / f"conversation_memory_{safe}.json"
 
+
 async def _clean_memory_artifacts():
     """Remove Whisper hallucination entries from conversation memory on startup.
-    
+
     Preserves disfluencies (um, uh, hmm, etc.) as they are real speech cues.
     Only removes true noise artifacts: foreign script hallucinations,
     repeated-word patterns, and known Whisper media hallucinations.
@@ -1122,10 +1350,12 @@ async def _clean_memory_artifacts():
                 if len(text) < 2:
                     continue
             cleaned.append(entry)
-        
+
         if len(cleaned) < original_len:
             removed = original_len - len(cleaned)
-            logger.info(f"Memory cleanup: removed {removed} noise artifacts from {original_len} entries")
+            logger.info(
+                f"Memory cleanup: removed {removed} noise artifacts from {original_len} entries"
+            )
             memory.entries.clear()
             for entry in cleaned:
                 memory.entries.append(entry)
@@ -1133,10 +1363,16 @@ async def _clean_memory_artifacts():
             if removed > 0:
                 memory.summary = ""
 
+
 # ─── HARDWARE & OS INTEGRATIONS ─────────────────────────────────
-async def whisper_stt(audio_bytes: bytes = None, file_path: Path = None, content_type: str = "audio/wav", filename: str = "input.wav") -> str:
+async def whisper_stt(
+    audio_bytes: bytes = None,
+    file_path: Path = None,
+    content_type: str = "audio/wav",
+    filename: str = "input.wav",
+) -> str:
     """Transcribe audio using faster-whisper-server HTTP API with audio pre-processing.
-    
+
     Returns transcribed text or empty string if:
     - Audio is too quiet / noise floor
     - Whisper language confidence is too low
@@ -1146,7 +1382,13 @@ async def whisper_stt(audio_bytes: bytes = None, file_path: Path = None, content
     if file_path and file_path.exists():
         wav_data = file_path.read_bytes()
         ext = file_path.suffix.lower()
-        mime_map = {".wav": "audio/wav", ".webm": "audio/webm", ".ogg": "audio/ogg", ".mp3": "audio/mpeg", ".m4a": "audio/mp4"}
+        mime_map = {
+            ".wav": "audio/wav",
+            ".webm": "audio/webm",
+            ".ogg": "audio/ogg",
+            ".mp3": "audio/mpeg",
+            ".m4a": "audio/mp4",
+        }
         content_type = mime_map.get(ext, content_type)
         filename = file_path.name
     if not wav_data or len(wav_data) < 100:
@@ -1156,13 +1398,20 @@ async def whisper_stt(audio_bytes: bytes = None, file_path: Path = None, content
     # Light touch — preserve disfluencies (um, uh, hmm) for conversational cues
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y",
-            "-i", "pipe:0",
-            "-af", "highpass=f=80,lowpass=f=8000,afftdn=nf=-30,volume=1.3,compand=attacks=0.3:decays=0.8:points=-80/-80|-45/-45|-27/-20|0/-12:gain=3",
-            "-ar", "16000",
-            "-ac", "1",
-            "-sample_fmt", "s16",
-            "-f", "wav",
+            "ffmpeg",
+            "-y",
+            "-i",
+            "pipe:0",
+            "-af",
+            "highpass=f=80,lowpass=f=8000,afftdn=nf=-30,volume=1.3,compand=attacks=0.3:decays=0.8:points=-80/-80|-45/-45|-27/-20|0/-12:gain=3",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-sample_fmt",
+            "s16",
+            "-f",
+            "wav",
             "pipe:1",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -1181,78 +1430,113 @@ async def whisper_stt(audio_bytes: bytes = None, file_path: Path = None, content
         c = await _get_whisper_client()
         files = {"file": (filename, wav_data, content_type)}
         data = {
-            "model": WHISPER_MODEL,
+            "model_name": WHISPER_MODEL,
             "response_format": "verbose_json",
             "language": "en",
-            "vad_filter": str(WHISPER_VAD_FILTER).lower(),
-            "beam_size": str(WHISPER_BEAM_SIZE),
+            "prompt": WHISPER_INITIAL_PROMPT,
             "temperature": str(WHISPER_TEMPERATURE),
-            "condition_on_previous_text": str(WHISPER_CONDITION_ON_PREV).lower(),
-            "initial_prompt": WHISPER_INITIAL_PROMPT,
         }
-        r = await c.post(f"{WHISPER_SERVER_URL}/v1/audio/transcriptions", files=files, data=data)
+        r = await c.post(
+            f"{WHISPER_SERVER_URL}/v1/audio/transcriptions",
+            files=files,
+            data=data,
+            timeout=60.0,
+        )
         if r.status_code == 200:
-            # Try to parse verbose_json response for language confidence
             try:
                 result = r.json()
                 text = result.get("text", "").strip()
                 detected_lang = result.get("language", "")
-                # Some servers return language_probability, others don't
-                lang_prob = result.get("language_probability", result.get("probability", 1.0))
+                lang_prob = result.get(
+                    "language_probability", result.get("probability", 1.0)
+                )
                 if lang_prob is None:
                     lang_prob = 1.0
-                
-                # If Whisper detected a non-English language despite us forcing English,
-                # or confidence is very low, treat as noise
+
+                # Non-English detected despite forcing English → noise
                 if detected_lang and detected_lang not in ("en", "eng", ""):
-                    logger.debug(f"STT: non-English detected (lang={detected_lang}, prob={lang_prob:.2f}), discarding: {text[:50]}")
+                    logger.debug(
+                        f"STT: non-English detected (lang={detected_lang}, prob={lang_prob:.2f}), discarding: {text[:50]}"
+                    )
                     return ""
                 if lang_prob < 0.5:
-                    logger.debug(f"STT: low confidence ({lang_prob:.2f}), discarding: {text[:50]}")
+                    logger.debug(
+                        f"STT: low confidence ({lang_prob:.2f}), discarding: {text[:50]}"
+                    )
                     return ""
-                    
+
+                # Filter segments with high no_speech_prob (Silero VAD proxy)
+                # This catches "Thank you" hallucinations on silence/noise
+                segments = result.get("segments", [])
+                if segments:
+                    filtered_segments = []
+                    for seg in segments:
+                        no_speech = seg.get("no_speech_prob", 0.0)
+                        avg_logprob = seg.get("avg_logprob", -1.0)
+                        seg_text = seg.get("text", "").strip()
+                        if not seg_text:
+                            continue
+                        # Skip segments that are mostly silence/noise
+                        if no_speech > 0.6:
+                            logger.debug(
+                                f"STT: filtered no_speech segment (prob={no_speech:.2f}): '{seg_text[:50]}'"
+                            )
+                            continue
+                        # Skip segments with very low log probability (garbage)
+                        if avg_logprob < -2.5:
+                            logger.debug(
+                                f"STT: filtered low-logprob segment (log={avg_logprob:.2f}): '{seg_text[:50]}'"
+                            )
+                            continue
+                        filtered_segments.append(seg_text)
+                    if not filtered_segments:
+                        return ""
+                    text = " ".join(filtered_segments).strip()
+
                 return normalize_text(text)
             except (json.JSONDecodeError, KeyError):
-                # Fallback: response is plain text
                 return normalize_text(r.text)
         logger.debug(f"STT server returned {r.status_code}: {r.text[:200]}")
     except Exception as e:
         logger.debug(f"STT error: {e}")
-    
-    # Fallback: try without verbose_json (some servers don't support it)
+
+    # Fallback: try without verbose_json
     try:
         c = await _get_whisper_client()
         files = {"file": (filename, wav_data, content_type)}
         data = {
-            "model": WHISPER_MODEL,
+            "model_name": WHISPER_MODEL,
             "response_format": "text",
             "language": "en",
-            "vad_filter": str(WHISPER_VAD_FILTER).lower(),
-            "beam_size": str(WHISPER_BEAM_SIZE),
+            "prompt": WHISPER_INITIAL_PROMPT,
             "temperature": str(WHISPER_TEMPERATURE),
-            "condition_on_previous_text": str(WHISPER_CONDITION_ON_PREV).lower(),
-            "initial_prompt": WHISPER_INITIAL_PROMPT,
         }
-        r = await c.post(f"{WHISPER_SERVER_URL}/v1/audio/transcriptions", files=files, data=data)
+        r = await c.post(
+            f"{WHISPER_SERVER_URL}/v1/audio/transcriptions",
+            files=files,
+            data=data,
+            timeout=60.0,
+        )
         if r.status_code == 200:
             return normalize_text(r.text)
     except Exception as e:
         logger.debug(f"STT fallback error: {e}")
     return ""
 
+
 # ─── SSML HELPERS ──────────────────────────────────────────────
 # Mood → SSML prosody presets for expressive speech
 SSML_PRESETS = {
-    "calm":    '<prosody rate="medium" pitch="+5%" volume="medium">%s</prosody>',
+    "calm": '<prosody rate="medium" pitch="+5%" volume="medium">%s</prosody>',
     "curious": '<prosody rate="medium" pitch="+12%" volume="medium">%s</prosody>',
-    "cheerful":'<prosody rate="fast" pitch="+22%" volume="loud">%s</prosody>',
+    "cheerful": '<prosody rate="fast" pitch="+22%" volume="loud">%s</prosody>',
     "excited": '<prosody rate="x-fast" pitch="+28%" volume="x-loud">%s</prosody>',
-    "gentle":  '<prosody rate="slow" pitch="+2%" volume="soft">%s</prosody>',
-    "warm":    '<prosody rate="medium" pitch="+8%" volume="medium">%s</prosody>',
-    "creative":'<prosody rate="medium" pitch="+12%" volume="medium">%s</prosody>',
+    "gentle": '<prosody rate="slow" pitch="+2%" volume="soft">%s</prosody>',
+    "warm": '<prosody rate="medium" pitch="+8%" volume="medium">%s</prosody>',
+    "creative": '<prosody rate="medium" pitch="+12%" volume="medium">%s</prosody>',
     "worried": '<prosody rate="slow" pitch="-5%" volume="soft">%s</prosody>',
-    "sad":     '<prosody rate="x-slow" pitch="-8%" volume="soft">%s</prosody>',
-    "angry":   '<prosody rate="fast" pitch="-8%" volume="loud">%s</prosody>',
+    "sad": '<prosody rate="x-slow" pitch="-8%" volume="soft">%s</prosody>',
+    "angry": '<prosody rate="fast" pitch="-8%" volume="loud">%s</prosody>',
 }
 
 # Per-character SSML prosody adjustments layered ON TOP of the base mood preset.
@@ -1261,35 +1545,47 @@ SSML_PRESETS = {
 # Format: (rate_modifier, pitch_modifier_pct)
 CHAR_SSML_NUDGE: dict[str, tuple[str, int]] = {
     # char    rate-nudge    pitch-nudge (percentage points added to preset)
-    "puppy":  ("medium",    0),    # baseline — no change
-    "fox":    ("fast",     +8),    # always a little faster and higher
-    "cat":    ("medium",   -4),    # flatten mood peaks — stays measured
-    "bear":   ("slow",    -10),    # pulls everything down and slow
-    "bunny":  ("x-fast",  +10),    # always excited baseline
-    "owl":    ("slow",     -6),    # deliberate, never rushed
-    "deer":   ("medium",   -2),    # gentle nudge down — calm presence
-    "wolf":   ("fast",     -8),    # fast but low — clipped intensity
-    "raccoon":("fast",     +4),    # quick and a touch bright
+    "puppy": ("medium", 0),  # baseline — no change
+    "fox": ("fast", +8),  # always a little faster and higher
+    "cat": ("medium", -4),  # flatten mood peaks — stays measured
+    "bear": ("slow", -10),  # pulls everything down and slow
+    "bunny": ("x-fast", +10),  # always excited baseline
+    "owl": ("slow", -6),  # deliberate, never rushed
+    "deer": ("medium", -2),  # gentle nudge down — calm presence
+    "wolf": ("fast", -8),  # fast but low — clipped intensity
+    "raccoon": ("fast", +4),  # quick and a touch bright
 }
+
 
 def wrap_ssml_for_char(text: str, mood: str, char_key: str) -> str:
     """Wrap text in SSML prosody blending base mood preset with per-character nudge."""
     template = SSML_PRESETS.get(mood, SSML_PRESETS["calm"])
     # Extract the base rate and pitch from the preset string
-    rate_match  = re.search(r'rate="([^"]+)"', template)
+    rate_match = re.search(r'rate="([^"]+)"', template)
     pitch_match = re.search(r'pitch="([+-]?\d+)%"', template)
-    base_rate  = rate_match.group(1)  if rate_match  else "medium"
+    base_rate = rate_match.group(1) if rate_match else "medium"
     base_pitch = int(pitch_match.group(1)) if pitch_match else 0
 
-    char_rate_nudge, char_pitch_nudge = CHAR_SSML_NUDGE.get(char_key or "puppy", ("medium", 0))
+    char_rate_nudge, char_pitch_nudge = CHAR_SSML_NUDGE.get(
+        char_key or "puppy", ("medium", 0)
+    )
 
     # Blend: character rate wins if it's more extreme than the mood rate
     rate_order = ["x-slow", "slow", "medium", "fast", "x-fast"]
-    base_idx  = rate_order.index(base_rate)  if base_rate  in rate_order else 2
-    nudge_idx = rate_order.index(char_rate_nudge) if char_rate_nudge in rate_order else 2
-    final_rate = rate_order[max(0, min(4, (base_idx + nudge_idx) // 2 +
-                                         (1 if nudge_idx > base_idx else
-                                         -1 if nudge_idx < base_idx else 0)))]
+    base_idx = rate_order.index(base_rate) if base_rate in rate_order else 2
+    nudge_idx = (
+        rate_order.index(char_rate_nudge) if char_rate_nudge in rate_order else 2
+    )
+    final_rate = rate_order[
+        max(
+            0,
+            min(
+                4,
+                (base_idx + nudge_idx) // 2
+                + (1 if nudge_idx > base_idx else -1 if nudge_idx < base_idx else 0),
+            ),
+        )
+    ]
 
     # Pitch: add nudge to base
     final_pitch = base_pitch + char_pitch_nudge
@@ -1298,17 +1594,22 @@ def wrap_ssml_for_char(text: str, mood: str, char_key: str) -> str:
     vol_match = re.search(r'volume="([^"]+)"', template)
     vol = vol_match.group(1) if vol_match else "medium"
 
-    return (f'<speak><prosody rate="{final_rate}" pitch="{pitch_str}" '
-            f'volume="{vol}">{text}</prosody></speak>')
+    return (
+        f'<speak><prosody rate="{final_rate}" pitch="{pitch_str}" '
+        f'volume="{vol}">{text}</prosody></speak>'
+    )
+
 
 def strip_ssml(text: str) -> str:
     """Remove SSML tags leaving only plain text for Piper TTS."""
-    return re.sub(r'<[^>]+>', '', text).strip()
+    return re.sub(r"<[^>]+>", "", text).strip()
+
 
 def wrap_ssml(text: str, mood: str = "calm") -> str:
     """Wrap plain text in SSML prosody based on mood."""
     template = SSML_PRESETS.get(mood, SSML_PRESETS["calm"])
-    return f'<speak>{template.replace("%s", text, 1)}</speak>'
+    return f"<speak>{template.replace('%s', text, 1)}</speak>"
+
 
 def mood_from_text(text: str) -> str:
     t = text.lower()
@@ -1330,11 +1631,18 @@ def mood_from_text(text: str) -> str:
         return "curious"
     return "calm"
 
+
 async def speak(text: str, use_toast: bool = True, char_key: str = None):
     """Speak text via Piper TTS with SSML-expressive prosody and per-character voice."""
-    global LILLY_IS_SPEAKING, LILLY_IS_THINKING, LILLY_MOOD, LAST_SPOKEN, PHONEME_QUEUE, MOUTH_OPEN
+    global \
+        LILLY_IS_SPEAKING, \
+        LILLY_IS_THINKING, \
+        LILLY_MOOD, \
+        LAST_SPOKEN, \
+        PHONEME_QUEUE, \
+        MOUTH_OPEN
     global AUDIO_CACHE, AUDIO_CACHE_ID
-    raw_text = text.replace('\n', ' ').strip()
+    raw_text = text.replace("\n", " ").strip()
     if not raw_text:
         return 0
 
@@ -1353,13 +1661,15 @@ async def speak(text: str, use_toast: bool = True, char_key: str = None):
 
     # Show toast on phone simultaneously with speech
     if use_toast:
-        asyncio.create_task(termux_run(
-            ["termux-toast", "-s", "-g", "bottom", clean[:200]],
-            timeout=3.0,
-        ))
+        asyncio.create_task(
+            termux_run(
+                ["termux-toast", "-s", "-g", "bottom", clean[:200]],
+                timeout=3.0,
+            )
+        )
 
     # Look up per-character voice profile
-    voice = CHAR_VOICE.get(char_key or current_avatar or 'puppy', CHAR_VOICE['puppy'])
+    voice = CHAR_VOICE.get(char_key or current_avatar or "puppy", CHAR_VOICE["puppy"])
 
     # Generate audio with Piper (in thread to avoid blocking event loop)
     audio_aid = 0
@@ -1367,21 +1677,38 @@ async def speak(text: str, use_toast: bool = True, char_key: str = None):
     voice_found = os.path.exists(PIPER_VOICE)
     if piper_found and voice_found:
         try:
+
             def _run_piper():
                 # Apply per-character voice profile
                 pace_scale = voice["length_scale"]
                 noise_scale = voice["noise_scale"]
                 noise_w = voice["noise_w"]
                 proc = subprocess.Popen(
-                    [PIPER_BIN, "--model", PIPER_VOICE, "--output-raw",
-                     "--noise-scale", f"{noise_scale:.3f}", "--noise-w", f"{noise_w:.3f}",
-                     "--length-scale", f"{pace_scale:.2f}"],
-                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    [
+                        PIPER_BIN,
+                        "--model",
+                        PIPER_VOICE,
+                        "--output-raw",
+                        "--noise-scale",
+                        f"{noise_scale:.3f}",
+                        "--noise-w",
+                        f"{noise_w:.3f}",
+                        "--length-scale",
+                        f"{pace_scale:.2f}",
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                 )
-                raw, stderr = proc.communicate(input=(clean + "\n").encode(), timeout=30.0)
+                raw, stderr = proc.communicate(
+                    input=(clean + "\n").encode(), timeout=30.0
+                )
                 if proc.returncode != 0:
-                    logger.error(f"Piper TTS failed (rc={proc.returncode}): {stderr.decode()[:200]}")
+                    logger.error(
+                        f"Piper TTS failed (rc={proc.returncode}): {stderr.decode()[:200]}"
+                    )
                 return raw
+
             raw = await asyncio.to_thread(_run_piper)
             # Apply pitch shift for character voice distinctiveness
             pitch_semitones = voice.get("pitch_shift", 0)
@@ -1389,6 +1716,7 @@ async def speak(text: str, use_toast: bool = True, char_key: str = None):
                 raw = _pitch_shift_audio(raw, pitch_semitones)
             if raw and len(raw) > 44:
                 import struct, io, wave
+
                 buf = io.BytesIO()
                 with wave.open(buf, "wb") as w:
                     w.setnchannels(1)
@@ -1405,7 +1733,9 @@ async def speak(text: str, use_toast: bool = True, char_key: str = None):
         except Exception as e:
             logger.error(f"Piper TTS error: {e}")
     else:
-        logger.warning(f"Piper TTS not available — PIPER_BIN={PIPER_BIN} (exists={piper_found}), PIPER_VOICE={PIPER_VOICE} (exists={voice_found})")
+        logger.warning(
+            f"Piper TTS not available — PIPER_BIN={PIPER_BIN} (exists={piper_found}), PIPER_VOICE={PIPER_VOICE} (exists={voice_found})"
+        )
 
     # Set spoken text AFTER caching audio so pollState sees audio_id too
     LAST_SPOKEN = clean
@@ -1425,18 +1755,24 @@ async def speak(text: str, use_toast: bool = True, char_key: str = None):
         LILLY_IS_SPEAKING = False
         # ── Fix #1: hold mic quiet for MIC_COOLDOWN_SECS after Lilly stops speaking
         MIC_COOLDOWN_UNTIL = time.time() + MIC_COOLDOWN_SECS
-        CONVERSATION_LAST_ACTIVITY = time.time()  # reset timeout after Lilly finishes speaking
+        CONVERSATION_LAST_ACTIVITY = (
+            time.time()
+        )  # reset timeout after Lilly finishes speaking
         PHONEME_QUEUE.clear()
         MOUTH_OPEN = 0.0
+
     asyncio.create_task(_finish_speech())
+
 
 # ─── TERMUX SSH HELPER ──────────────────────────────────────────
 # Uses SSH ControlMaster multiplexing — handshake once, reuse for all commands.
 SSH_CONTROL_SOCKET = "/tmp/lilly_ssh_mux_%h_%p"
 
+
 async def termux_run(args: list[str], timeout: float = 10.0) -> tuple[str, str]:
     """Run a command on the phone via SSH. Returns (stdout, stderr)."""
     import shlex
+
     host = os.environ.get("TERMUX_SSH_HOST", "")
     port = os.environ.get("TERMUX_SSH_PORT", "8022")
     user = os.environ.get("TERMUX_SSH_USER", "")
@@ -1445,12 +1781,18 @@ async def termux_run(args: list[str], timeout: float = 10.0) -> tuple[str, str]:
     cmd_str = " ".join(shlex.quote(a) for a in args)
     ssh_cmd = [
         "ssh",
-        "-p", port,
-        "-o", "ConnectTimeout=5",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "ControlMaster=auto",
-        "-o", f"ControlPath={SSH_CONTROL_SOCKET}",
-        "-o", "ControlPersist=120",
+        "-p",
+        port,
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        f"ControlPath={SSH_CONTROL_SOCKET}",
+        "-o",
+        "ControlPersist=120",
         f"{user}@{host}",
         cmd_str,
     ]
@@ -1469,12 +1811,14 @@ async def termux_run(args: list[str], timeout: float = 10.0) -> tuple[str, str]:
     except Exception as e:
         return "", str(e)
 
+
 async def ssh_cleanup_stale():
     """Kill orphaned sshd-session processes on the phone."""
     await termux_run(
         ["pkill", "-f", "sshd-session -R"],
         timeout=5.0,
     )
+
 
 async def ssh_check() -> bool:
     host = os.environ.get("TERMUX_SSH_HOST", "")
@@ -1484,10 +1828,15 @@ async def ssh_check() -> bool:
         return False
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ssh", "-p", port,
-            "-o", "ConnectTimeout=3",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "BatchMode=yes",
+            "ssh",
+            "-p",
+            port,
+            "-o",
+            "ConnectTimeout=3",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "BatchMode=yes",
             f"{user}@{host}",
             "echo ok",
             stdout=asyncio.subprocess.PIPE,
@@ -1497,6 +1846,7 @@ async def ssh_check() -> bool:
         return proc.returncode == 0 and b"ok" in stdout
     except Exception:
         return False
+
 
 async def ssh_start_on_phone() -> tuple[bool, str]:
     """Try to start sshd on the phone. Returns (success, message)."""
@@ -1511,10 +1861,15 @@ async def ssh_start_on_phone() -> tuple[bool, str]:
     # Try to connect and start sshd — this may fail if sshd isn't running at all
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ssh", "-p", port,
-            "-o", "ConnectTimeout=5",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "BatchMode=yes",
+            "ssh",
+            "-p",
+            port,
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "BatchMode=yes",
             f"{user}@{host}",
             "sshd 2>&1; echo DONE:$?",
             stdout=asyncio.subprocess.PIPE,
@@ -1528,10 +1883,12 @@ async def ssh_start_on_phone() -> tuple[bool, str]:
     except Exception as e:
         return False, str(e)
 
+
 async def ssh_stop_on_phone() -> tuple[bool, str]:
     """Stop sshd on the phone. Returns (success, message)."""
     out, err = await termux_run(["pkill", "sshd"], timeout=5.0)
     return True, "sshd stopped" if not err else err
+
 
 _SENSOR_LOCK = asyncio.Lock()
 
@@ -1543,12 +1900,15 @@ _BATCH_SENSOR_TTL: float = 1.0  # seconds — keep sensor data fresh
 SENSOR_SERVER_OK: bool = False
 SENSOR_SERVER_FAIL_COUNT: int = 0
 
+
 async def termux_sensor_read(sensor_name: str, timeout: float = 15.0) -> Optional[list]:
     """Read a sensor via the HTTP sensor server on Termux."""
     global SENSOR_SERVER_OK, SENSOR_SERVER_FAIL_COUNT
     try:
         c = await _get_sensor_client()
-        r = await c.get(f"{SENSOR_SERVER_URL}/sensors/{sensor_name}/live", timeout=timeout)
+        r = await c.get(
+            f"{SENSOR_SERVER_URL}/sensors/{sensor_name}/live", timeout=timeout
+        )
         if r.status_code == 200:
             SENSOR_SERVER_OK = True
             SENSOR_SERVER_FAIL_COUNT = 0
@@ -1562,9 +1922,14 @@ async def termux_sensor_read(sensor_name: str, timeout: float = 15.0) -> Optiona
         logger.debug(f"Sensor server read failed ({sensor_name}): {e}")
         return None
 
+
 async def termux_sensor_read_all(timeout: float = 20.0) -> dict:
     """Read ALL sensors via the HTTP sensor server (cached). Returns {sensor_name: [values]}."""
-    global _BATCH_SENSOR_CACHE, _BATCH_SENSOR_CACHE_TS, SENSOR_SERVER_OK, SENSOR_SERVER_FAIL_COUNT
+    global \
+        _BATCH_SENSOR_CACHE, \
+        _BATCH_SENSOR_CACHE_TS, \
+        SENSOR_SERVER_OK, \
+        SENSOR_SERVER_FAIL_COUNT
     now = time.time()
     if _BATCH_SENSOR_CACHE and (now - _BATCH_SENSOR_CACHE_TS) < _BATCH_SENSOR_TTL:
         return _BATCH_SENSOR_CACHE
@@ -1609,42 +1974,62 @@ async def termux_sensor_read_all(timeout: float = 20.0) -> dict:
     user_browser_ts = _browser_sensors_ts.get(bkey, 0)
     browser_age = now - user_browser_ts if user_browser_ts else 9999
     if user_browser and browser_age < _BROWSER_SENSOR_TTL:
-        logger.debug("termux_sensor_read_all: SSH unavailable, using browser sensor data")
+        logger.debug(
+            "termux_sensor_read_all: SSH unavailable, using browser sensor data"
+        )
         filtered = {k: v for k, v in user_browser.items() if not k.startswith("_")}
         return filtered
     return {}
+
 
 # ─── SENSOR DELTA TRACKING (Fix #3) ─────────────────────────────
 
 # Minimum change thresholds to trigger a proactive comment
 _SENSOR_THRESHOLDS = {
-    "light":        500.0,   # lux — going from bright room to dark/outside
-    "temperature":  2.0,     # °C
-    "pressure":     3.0,     # hPa — weather front
-    "accelerometer": 8.0,    # m/s² magnitude change — picked up / put down
-    "proximity":    1.0,     # near/far flip
-    "step":         30.0,    # steps taken since last check
+    "light": 500.0,  # lux — going from bright room to dark/outside
+    "temperature": 2.0,  # °C
+    "pressure": 3.0,  # hPa — weather front
+    "accelerometer": 8.0,  # m/s² magnitude change — picked up / put down
+    "proximity": 1.0,  # near/far flip
+    "step": 30.0,  # steps taken since last check
 }
 
 _SENSOR_COMMENTS = {
-    "light_drop":   ["Oh, it just got darker — did you go inside?",
-                     "The light dropped, are you somewhere cozy now?",
-                     "I can feel it getting dimmer — clouds maybe?"],
-    "light_rise":   ["Ooh, it got much brighter! Did you go outside?",
-                     "Bright! That's a big jump in light — sun came out?"],
-    "temp_drop":    ["It's getting cooler — somewhere colder now?",
-                     "Temperature just dipped. Did you step outside?"],
-    "temp_rise":    ["Getting warmer! Are you near a heat source?",
-                     "I can feel the temperature climbing."],
-    "pickup":       ["Oh hi! You picked me up.",
-                     "Hey, you're holding me again! What are we doing?"],
-    "putdown":      ["You set me down — I'll wait here.",
-                     "Going hands-free? I'm here when you need me."],
-    "pressure_drop":["The pressure is dropping — might be a storm coming!",
-                     "Barometric pressure is falling. Weather incoming?"],
-    "walking":      ["Are we on the move? I can feel the steps!",
-                     "We're walking! I love exploring."],
+    "light_drop": [
+        "Oh, it just got darker — did you go inside?",
+        "The light dropped, are you somewhere cozy now?",
+        "I can feel it getting dimmer — clouds maybe?",
+    ],
+    "light_rise": [
+        "Ooh, it got much brighter! Did you go outside?",
+        "Bright! That's a big jump in light — sun came out?",
+    ],
+    "temp_drop": [
+        "It's getting cooler — somewhere colder now?",
+        "Temperature just dipped. Did you step outside?",
+    ],
+    "temp_rise": [
+        "Getting warmer! Are you near a heat source?",
+        "I can feel the temperature climbing.",
+    ],
+    "pickup": [
+        "Oh hi! You picked me up.",
+        "Hey, you're holding me again! What are we doing?",
+    ],
+    "putdown": [
+        "You set me down — I'll wait here.",
+        "Going hands-free? I'm here when you need me.",
+    ],
+    "pressure_drop": [
+        "The pressure is dropping — might be a storm coming!",
+        "Barometric pressure is falling. Weather incoming?",
+    ],
+    "walking": [
+        "Are we on the move? I can feel the steps!",
+        "We're walking! I love exploring.",
+    ],
 }
+
 
 async def check_sensor_deltas():
     """Compare current sensors to previous snapshot; speak if interesting changes occur."""
@@ -1663,7 +2048,7 @@ async def check_sensor_deltas():
     comment = None
 
     def _mag(vals):
-        return math.sqrt(sum(v*v for v in vals)) if vals else 0.0
+        return math.sqrt(sum(v * v for v in vals)) if vals else 0.0
 
     def _first(vals):
         return vals[0] if vals else 0.0
@@ -1718,12 +2103,20 @@ async def check_sensor_deltas():
         logger.info(f"Sensor delta comment: {comment}")
         await speak(comment)
 
+
 # ─── NATIVE APP LAUNCHER (VIA SSH INTO TERMUX) ─────────────────
 
-async def app_process_monkey_intent(component: str, intent_action: str = "", uri_template: str = "", skill_arg: str = ""):
+
+async def app_process_monkey_intent(
+    component: str, intent_action: str = "", uri_template: str = "", skill_arg: str = ""
+):
     """Launch an Android app via SSH, preferring intent_action/uri over bare package."""
     if intent_action and uri_template:
-        url = uri_template.replace("{}", urllib.parse.quote(skill_arg)) if skill_arg else uri_template
+        url = (
+            uri_template.replace("{}", urllib.parse.quote(skill_arg))
+            if skill_arg
+            else uri_template
+        )
         cmd = ["am", "start", "-a", intent_action, "-d", url]
         if component:
             cmd.extend(["-p", component])
@@ -1736,14 +2129,21 @@ async def app_process_monkey_intent(component: str, intent_action: str = "", uri
     elif component:
         await termux_run(["am", "start", "-p", component], timeout=6.0)
 
+
 # ─── ANDROID NOTIFICATIONS (VIA SSH INTO TERMUX) ───────────────
 _NOTIF_COUNTER = 0
 
-async def send_notification(title: str, content: str, priority: str = "default",
-                            alert_once: bool = False, ongoing: bool = False,
-                            notification_id: Optional[int] = None) -> bool:
+
+async def send_notification(
+    title: str,
+    content: str,
+    priority: str = "default",
+    alert_once: bool = False,
+    ongoing: bool = False,
+    notification_id: Optional[int] = None,
+) -> bool:
     """Send an Android notification via the HTTP sensor server.
-    
+
     Priority levels: default, high, max, low, min
     """
     global _NOTIF_COUNTER
@@ -1758,10 +2158,21 @@ async def send_notification(title: str, content: str, priority: str = "default",
             params={"title": title, "content": content, "priority": priority},
             timeout=5.0,
         )
-        return r.status_code == 200
+        if r.status_code == 200:
+            return True
+        logger.debug(f"Notification sensor send returned {r.status_code}")
     except Exception as e:
-        logger.debug(f"Notification send failed: {e}")
-        return False
+        logger.debug(f"Notification send failed (sensor server): {e}")
+
+    # Fallback: Pushbullet (works even when phone / sensor server is unreachable)
+    if PUSHBULLET_API_KEY:
+        pb_ok = await send_pushbullet_note(title, content)
+        if pb_ok:
+            logger.debug("Fallback: Pushbullet notification sent")
+            return True
+
+    return False
+
 
 async def dismiss_notification(notification_id: int):
     """Dismiss a notification via the sensor server."""
@@ -1775,13 +2186,45 @@ async def dismiss_notification(notification_id: int):
     except Exception:
         pass
 
+
+async def send_pushbullet_note(
+    title: str, content: str, url: Optional[str] = None
+) -> bool:
+    """Send a notification via Pushbullet (fallback when sensor server / phone is unreachable).
+
+    Uses the PUSHBULLET_API_KEY from environment. Falls back silently.
+    """
+    if not PUSHBULLET_API_KEY:
+        return False
+    try:
+        c = await _get_sensor_client()
+        payload: dict = {"type": "note", "title": title, "body": content}
+        if url:
+            payload["url"] = url
+        r = await c.post(
+            "https://api.pushbullet.com/v2/pushes",
+            json=payload,
+            headers={
+                "Access-Token": PUSHBULLET_API_KEY,
+                "Content-Type": "application/json",
+            },
+            timeout=8.0,
+        )
+        return r.status_code in (200, 201)
+    except Exception as e:
+        logger.debug(f"Pushbullet send failed: {e}")
+        return False
+
+
 from enum import Enum
 
+
 class Archetype(Enum):
-    OBSERVER  = "observer"
-    CREATOR   = "creator"
-    EXPLORER  = "explorer"
+    OBSERVER = "observer"
+    CREATOR = "creator"
+    EXPLORER = "explorer"
     CAREGIVER = "caregiver"
+
 
 # Map archetype → notification priority
 _ARCHETYPE_NOTIF_PRIORITY = {
@@ -1791,8 +2234,89 @@ _ARCHETYPE_NOTIF_PRIORITY = {
     Archetype.CAREGIVER: "high",
 }
 
-async def proactive_notify(message: str, archetype: Archetype):
-    """Send a proactive suggestion as a notification with appropriate priority."""
+
+# Alpha notification prefs — pause toggle + daily cap. Persisted so the
+# choices survive restarts. When a notification is disallowed it is DROPPED
+# (never queued), so reactivating notifications never stockpiles a backlog.
+# Identical messages within the dedup window are also dropped (no spam).
+_NOTIF_PREFS_FILE = WORKSPACE / "notif_prefs.json"
+_NOTIF_PREFS: dict = {
+    "paused": False,
+    "daily_cap": 3,
+    "proactive": True,
+    "day": "",
+    "sent_today": 0,
+}
+_NOTIF_DEDUP: dict = {}
+_NOTIF_DEDUP_WINDOW_S = 600
+
+
+def _load_notif_prefs() -> None:
+    global _NOTIF_PREFS
+    try:
+        if _NOTIF_PREFS_FILE.exists():
+            data = json.loads(_NOTIF_PREFS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for k in _NOTIF_PREFS:
+                    if k in data:
+                        _NOTIF_PREFS[k] = data[k]
+    except Exception:
+        pass
+
+
+def _save_notif_prefs() -> None:
+    try:
+        _NOTIF_PREFS_FILE.write_text(json.dumps(_NOTIF_PREFS, indent=2))
+    except Exception:
+        pass
+
+
+def _notif_quota_allows(message: str = "") -> bool:
+    """True if a new proactive (Alpha) notification may be sent right now.
+
+    Enforces the pause toggle, the proactive switch, the daily cap, and a
+    short dedup window for repeated identical messages (no duplicates).
+    Disallowed notifications are dropped rather than queued.
+    """
+    if not _NOTIF_PREFS.get("proactive", True):
+        return False
+    if _NOTIF_PREFS.get("paused"):
+        return False
+    if message:
+        now = time.time()
+        last = _NOTIF_DEDUP.get(message)
+        if last is not None and (now - last) < _NOTIF_DEDUP_WINDOW_S:
+            logger.debug("proactive_notify dropped (duplicate within dedup window)")
+            return False
+        _NOTIF_DEDUP[message] = now
+    today = time.strftime("%Y-%m-%d")
+    if _NOTIF_PREFS.get("day") != today:
+        _NOTIF_PREFS["day"] = today
+        _NOTIF_PREFS["sent_today"] = 0
+    try:
+        cap = int(_NOTIF_PREFS.get("daily_cap", 3) or 0)
+    except (TypeError, ValueError):
+        cap = 3
+    if cap > 0 and _NOTIF_PREFS.get("sent_today", 0) >= cap:
+        return False
+    _NOTIF_PREFS["sent_today"] = _NOTIF_PREFS.get("sent_today", 0) + 1
+    _save_notif_prefs()
+    return True
+
+
+_load_notif_prefs()
+
+
+async def proactive_notify(message: str, archetype: Archetype, next_step: str = ""):
+    """Send a proactive suggestion as a notification with appropriate priority.
+
+    The notification is context-first: `message` explains the interaction and
+    why it fired; optional `next_step` offers a way to continue it in chat —
+    never a bare link away from the Alpha.
+    """
+    if not _notif_quota_allows(message):
+        logger.debug("proactive_notify dropped (paused/cap/dedup/proactive-off)")
+        return False
     priority = _ARCHETYPE_NOTIF_PRIORITY.get(archetype, "default")
     title_map = {
         Archetype.OBSERVER: "Lilly noticed",
@@ -1801,12 +2325,19 @@ async def proactive_notify(message: str, archetype: Archetype):
         Archetype.CAREGIVER: "Lilly suggests",
     }
     title = title_map.get(archetype, "Lilly")
-    await send_notification(title, message, priority=priority, alert_once=True)
+    body = f"{message}\n→ {next_step}" if next_step else message
+    await send_notification(title, body, priority=priority, alert_once=True)
+    return True
+
 
 async def background_mic_loop():
     """Continuous microphone capture + wake-word detection via SSH to phone."""
     global LILLY_IS_SPEAKING, BACKGROUND_MIC_ACTIVE, LAST_HEARD, WAKE_STATE
-    global PHONE_SSH_OK, PHONE_SSH_LAST_CHECK, PHONE_SSH_LAST_ERROR, PHONE_SSH_FAIL_COUNT
+    global \
+        PHONE_SSH_OK, \
+        PHONE_SSH_LAST_CHECK, \
+        PHONE_SSH_LAST_ERROR, \
+        PHONE_SSH_FAIL_COUNT
     global CONSECUTIVE_NOISE_COUNT, NOISE_PAUSE_UNTIL, MIC_COOLDOWN_UNTIL
     global USER_MIC_ENERGY, USER_MIC_PACE
     wav_file = WORKSPACE / "sys_mic.wav"
@@ -1853,7 +2384,9 @@ async def background_mic_loop():
             PHONE_SSH_FAIL_COUNT += 1
             PHONE_SSH_LAST_CHECK = time.strftime("%H:%M:%S")
             PHONE_SSH_LAST_ERROR = "sshd not reachable"
-            logger.warning(f"Mic loop: SSH down (fail #{PHONE_SSH_FAIL_COUNT}). Run 'sshd' on phone.")
+            logger.warning(
+                f"Mic loop: SSH down (fail #{PHONE_SSH_FAIL_COUNT}). Run 'sshd' on phone."
+            )
             await asyncio.sleep(5.0)
             continue
 
@@ -1865,7 +2398,7 @@ async def background_mic_loop():
         PHONE_SSH_LAST_ERROR = ""
 
         # Clean up stale sshd sessions every 20 cycles
-        cycle_count = getattr(background_mic_loop, '_cycle_count', 0) + 1
+        cycle_count = getattr(background_mic_loop, "_cycle_count", 0) + 1
         background_mic_loop._cycle_count = cycle_count
         if cycle_count % 20 == 0:
             await ssh_cleanup_stale()
@@ -1877,10 +2410,13 @@ async def background_mic_loop():
             # Batched: stop old recording + remove old file + start new recording in one SSH call
             logger.debug("Mic loop: starting 3s recording")
             out, err = await termux_run(
-                ["sh", "-c",
-                 f"termux-microphone-record -q 2>/dev/null; "
-                 f"rm -f {PHONE_REC_PATH}; "
-                 f"termux-microphone-record -f {PHONE_REC_PATH} -l 3"],
+                [
+                    "sh",
+                    "-c",
+                    f"termux-microphone-record -q 2>/dev/null; "
+                    f"rm -f {PHONE_REC_PATH}; "
+                    f"termux-microphone-record -f {PHONE_REC_PATH} -l 3",
+                ],
                 timeout=15.0,
             )
             if err and "error" in err.lower():
@@ -1898,16 +2434,22 @@ async def background_mic_loop():
             # Copy recording from phone via SCP
             logger.debug("Mic loop: scp from phone")
             scp_proc = await asyncio.create_subprocess_exec(
-                "scp", "-P", port,
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "ConnectTimeout=5",
+                "scp",
+                "-P",
+                port,
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "ConnectTimeout=5",
                 f"{user}@{host}:{PHONE_REC_PATH}",
                 str(wav_file.with_suffix(".m4a")),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                _, scp_stderr = await asyncio.wait_for(scp_proc.communicate(), timeout=15.0)
+                _, scp_stderr = await asyncio.wait_for(
+                    scp_proc.communicate(), timeout=15.0
+                )
             except asyncio.TimeoutError:
                 scp_proc.kill()
                 PHONE_SSH_LAST_ERROR = "SCP timed out"
@@ -1916,7 +2458,9 @@ async def background_mic_loop():
 
             if scp_proc.returncode != 0:
                 err_msg = scp_stderr.decode().strip() if scp_stderr else "unknown"
-                PHONE_SSH_LAST_ERROR = f"SCP failed (rc={scp_proc.returncode}): {err_msg}"
+                PHONE_SSH_LAST_ERROR = (
+                    f"SCP failed (rc={scp_proc.returncode}): {err_msg}"
+                )
                 logger.warning(f"Mic loop: {PHONE_SSH_LAST_ERROR}")
                 continue
 
@@ -1936,10 +2480,19 @@ async def background_mic_loop():
 
             # Convert to WAV with gentle normalization (reduced from 25dB to avoid amplifying noise floor)
             ff = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-i", str(raw_file),
-                "-af", "volume=10dB,compand=attacks=0.3:decays=0.8:points=-80/-80|-45/-45|-27/-20|0/-12:gain=3",
-                "-ar", "16000", "-ac", "1", str(wav_file),
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(raw_file),
+                "-af",
+                "volume=10dB,compand=attacks=0.3:decays=0.8:points=-80/-80|-45/-45|-27/-20|0/-12:gain=3",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                str(wav_file),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
             _, ff_err = await ff.communicate()
             if ff.returncode != 0:
@@ -1952,9 +2505,16 @@ async def background_mic_loop():
             if wav_file.exists():
                 # Check audio volume - skip if too quiet (noise floor)
                 vol = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-i", str(wav_file),
-                    "-af", "volumedetect", "-f", "null", "/dev/null",
-                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                    "ffmpeg",
+                    "-i",
+                    str(wav_file),
+                    "-af",
+                    "volumedetect",
+                    "-f",
+                    "null",
+                    "/dev/null",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
                 )
                 _, vol_err = await vol.communicate()
                 vol_output = vol_err.decode()
@@ -1962,7 +2522,9 @@ async def background_mic_loop():
                 for line in vol_output.split("\n"):
                     if "mean_volume" in line:
                         try:
-                            mean_vol = float(line.split(":")[-1].strip().replace(" dB", ""))
+                            mean_vol = float(
+                                line.split(":")[-1].strip().replace(" dB", "")
+                            )
                         except ValueError:
                             pass
                         break
@@ -1977,13 +2539,20 @@ async def background_mic_loop():
                     continue
                 if mean_vol > 0.0:
                     PHONE_SSH_LAST_ERROR = f"Audio clipping ({mean_vol:.1f} dB)"
-                    logger.debug(f"Mic loop: skipping clipped audio ({mean_vol:.1f} dB)")
+                    logger.debug(
+                        f"Mic loop: skipping clipped audio ({mean_vol:.1f} dB)"
+                    )
                     wav_file.unlink(missing_ok=True)
                     continue
 
                 text = await whisper_stt(file_path=wav_file)
-                logger.debug(f"Mic loop: transcription result: \"{text}\"")
-                if text and len(text) > 2 and text not in PHANTOMS and not is_hallucination(text):
+                logger.debug(f'Mic loop: transcription result: "{text}"')
+                if (
+                    text
+                    and len(text) > 2
+                    and text not in PHANTOMS
+                    and not is_hallucination(text)
+                ):
                     # Valid speech detected — reset noise counter
                     CONSECUTIVE_NOISE_COUNT = 0
                     LAST_HEARD = text
@@ -1992,11 +2561,15 @@ async def background_mic_loop():
                     # Energy: map mean_vol (dB, typically -38 to -10) → 0.0..1.0
                     if mean_vol > -38.0:
                         raw_energy = min(1.0, max(0.0, (mean_vol + 38.0) / 28.0))
-                        USER_MIC_ENERGY = 0.7 * USER_MIC_ENERGY + 0.3 * raw_energy  # smooth
+                        USER_MIC_ENERGY = (
+                            0.7 * USER_MIC_ENERGY + 0.3 * raw_energy
+                        )  # smooth
                     # Pace: words per second (AUDIO_REC_SECS assumed ~4s per loop cycle)
                     word_count = len(text.split())
                     if word_count >= 2:
-                        estimated_dur = max(1.0, word_count * 0.35)  # ~350ms per word baseline
+                        estimated_dur = max(
+                            1.0, word_count * 0.35
+                        )  # ~350ms per word baseline
                         raw_pace = word_count / estimated_dur
                         USER_MIC_PACE = 0.7 * USER_MIC_PACE + 0.3 * raw_pace  # smooth
 
@@ -2010,61 +2583,89 @@ async def background_mic_loop():
                 elif text and len(text) > 2:
                     # Whisper returned text but it was flagged as hallucination
                     CONSECUTIVE_NOISE_COUNT += 1
-                    logger.debug(f"Mic loop: noise #{CONSECUTIVE_NOISE_COUNT}: '{text[:30]}'")
+                    logger.debug(
+                        f"Mic loop: noise #{CONSECUTIVE_NOISE_COUNT}: '{text[:30]}'"
+                    )
                     if CONSECUTIVE_NOISE_COUNT >= MAX_CONSECUTIVE_NOISE:
                         NOISE_PAUSE_UNTIL = time.time() + NOISE_PAUSE_DURATION
-                        logger.info(f"Mic loop: {CONSECUTIVE_NOISE_COUNT} consecutive noise detections, pausing {NOISE_PAUSE_DURATION}s")
+                        logger.info(
+                            f"Mic loop: {CONSECUTIVE_NOISE_COUNT} consecutive noise detections, pausing {NOISE_PAUSE_DURATION}s"
+                        )
                 else:
                     # Empty/short transcription — still count as noise (probably silence)
                     CONSECUTIVE_NOISE_COUNT += 1
                     if CONSECUTIVE_NOISE_COUNT >= MAX_CONSECUTIVE_NOISE:
                         NOISE_PAUSE_UNTIL = time.time() + NOISE_PAUSE_DURATION
-                        logger.info(f"Mic loop: {CONSECUTIVE_NOISE_COUNT} consecutive quiet cycles, pausing {NOISE_PAUSE_DURATION}s")
+                        logger.info(
+                            f"Mic loop: {CONSECUTIVE_NOISE_COUNT} consecutive quiet cycles, pausing {NOISE_PAUSE_DURATION}s"
+                        )
         except Exception as e:
             logger.error(f"Mic loop error: {e}")
             PHONE_SSH_LAST_ERROR = str(e)
             await asyncio.sleep(2.0)
 
+
 # ─── SENSOR INTEGRATIONS — Pixel 10 Full Coverage ───────────────
 SENSOR_DEFS = {
     # Motion sensors
     "ICM45631 Accelerometer": {
-        "triggers": ["shake", "tilt", "move", "movement", "accelerate", "motion", "acceleration", "g force"],
+        "triggers": [
+            "shake",
+            "tilt",
+            "move",
+            "movement",
+            "accelerate",
+            "motion",
+            "acceleration",
+            "g force",
+        ],
         "desc": "accelerometer",
         "format": lambda v: (
-            random.choice([
-                "I can feel us moving! The motion is real — like we're walking or shaking things up.",
-                "Oh, we're definitely in motion! I can feel the movement through the sensors.",
-                "The accelerometer is picking up movement — we're not sitting still!",
-            ]) if (v[0]**2 + v[1]**2 + v[2]**2)**0.5 > 11
-            else random.choice([
-                "Everything's still right now — no motion detected. Calm and steady.",
-                "We're perfectly still. I can feel the quiet through the sensors.",
-                "No movement at all — just peace and quiet.",
-            ])
+            random.choice(
+                [
+                    "I can feel us moving! The motion is real — like we're walking or shaking things up.",
+                    "Oh, we're definitely in motion! I can feel the movement through the sensors.",
+                    "The accelerometer is picking up movement — we're not sitting still!",
+                ]
+            )
+            if (v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5 > 11
+            else random.choice(
+                [
+                    "Everything's still right now — no motion detected. Calm and steady.",
+                    "We're perfectly still. I can feel the quiet through the sensors.",
+                    "No movement at all — just peace and quiet.",
+                ]
+            )
         ),
     },
     "ICM45631 Gyroscope": {
         "triggers": ["gyro", "rotation", "spin", "turning", "angular", "gyroscope"],
         "desc": "gyroscope",
         "format": lambda v: (
-            random.choice([
-                "I can feel us rotating! The phone is turning — spin spin spin!",
-                "Whoa, we're spinning! I can feel the rotation through the gyroscope.",
-                "The device is rotating — I can sense the twist in the air.",
-            ]) if (v[0]**2 + v[1]**2 + v[2]**2)**0.5 > 0.5
+            random.choice(
+                [
+                    "I can feel us rotating! The phone is turning — spin spin spin!",
+                    "Whoa, we're spinning! I can feel the rotation through the gyroscope.",
+                    "The device is rotating — I can sense the twist in the air.",
+                ]
+            )
+            if (v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5 > 0.5
             else "No rotation right now — everything's steady."
         ),
     },
     "ICM45631 Gyroscope-Uncalibrated": {
         "triggers": ["raw gyro", "uncalibrated gyro"],
         "desc": "raw gyroscope",
-        "format": lambda v: "I'm picking up some raw rotation data — the sensors are working hard!",
+        "format": lambda v: (
+            "I'm picking up some raw rotation data — the sensors are working hard!"
+        ),
     },
     "ICM45631 Accelerometer-Uncalibrated": {
         "triggers": ["raw accel", "uncalibrated accel"],
         "desc": "raw accelerometer",
-        "format": lambda v: "I'm picking up raw motion data — the accelerometer is working overtime!",
+        "format": lambda v: (
+            "I'm picking up raw motion data — the accelerometer is working overtime!"
+        ),
     },
     "ICM45631 Motion Detect": {
         "triggers": ["motion detect", "movement detect", "any movement"],
@@ -2093,54 +2694,86 @@ SENSOR_DEFS = {
             else "No big movements — everything's calm."
         ),
     },
-
     # Position sensors
     "MMC5616 Magnetometer": {
-        "triggers": ["magnetometer", "compass", "magnetic field", "bearing", "direction"],
+        "triggers": [
+            "magnetometer",
+            "compass",
+            "magnetic field",
+            "bearing",
+            "direction",
+        ],
         "desc": "magnetometer",
         "format": lambda v: _compass_heading(v[0], v[1]),
     },
     "MMC5616 Magnetometer-Uncalibrated": {
         "triggers": ["raw compass", "raw magnetic", "uncalibrated magnetometer"],
         "desc": "raw magnetometer",
-        "format": lambda v: "I can feel the magnetic fields around us — the raw sensor data is coming through!",
+        "format": lambda v: (
+            "I can feel the magnetic fields around us — the raw sensor data is coming through!"
+        ),
     },
     "Rotation Vector Sensor": {
         "triggers": ["rotation vector", "orientation vector", "device rotation"],
         "desc": "rotation vector",
-        "format": lambda v: "I can feel how the phone is oriented in 3D space — it's like having a inner ear for the device!",
+        "format": lambda v: (
+            "I can feel how the phone is oriented in 3D space — it's like having a inner ear for the device!"
+        ),
     },
     "Game Rotation Vector Sensor": {
         "triggers": ["game rotation", "gaming orientation"],
         "desc": "game rotation",
-        "format": lambda v: "I can feel the precise rotation for gaming — smooth and accurate!",
+        "format": lambda v: (
+            "I can feel the precise rotation for gaming — smooth and accurate!"
+        ),
     },
     "Geomagnetic Rotation Vector Sensor": {
         "triggers": ["geomagnetic rotation", "magnetic orientation"],
         "desc": "geomagnetic rotation",
-        "format": lambda v: "I'm using the Earth's magnetic field to figure out which way is north — nature's GPS!",
+        "format": lambda v: (
+            "I'm using the Earth's magnetic field to figure out which way is north — nature's GPS!"
+        ),
     },
     "Gravity Sensor": {
         "triggers": ["gravity", "g force direction", "which way is down"],
         "desc": "gravity",
-        "format": lambda v: "I can feel which way is down — gravity is pulling at " + _gravity_dir(v) + "!",
+        "format": lambda v: (
+            "I can feel which way is down — gravity is pulling at "
+            + _gravity_dir(v)
+            + "!"
+        ),
     },
     "Linear Acceleration Sensor": {
-        "triggers": ["linear acceleration", "movement without gravity", "true acceleration"],
+        "triggers": [
+            "linear acceleration",
+            "movement without gravity",
+            "true acceleration",
+        ],
         "desc": "linear acceleration",
         "format": lambda v: (
             "I can feel the real movement — gravity is filtered out, so this is pure motion!"
-            if (v[0]**2 + v[1]**2 + v[2]**2)**0.5 > 0.5
+            if (v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5 > 0.5
             else "No real movement right now — just gravity doing its thing."
         ),
     },
     "Orientation Sensor": {
-        "triggers": ["orientation", "portrait", "landscape", "phone position", "screen orientation"],
+        "triggers": [
+            "orientation",
+            "portrait",
+            "landscape",
+            "phone position",
+            "screen orientation",
+        ],
         "desc": "orientation",
         "format": lambda v: _screen_orientation(v[0], v[1], v[2]),
     },
     "Device Orientation": {
-        "triggers": ["device orientation", "face up", "face down", "display orientation"],
+        "triggers": [
+            "device orientation",
+            "face up",
+            "face down",
+            "display orientation",
+        ],
         "desc": "device orientation",
         "format": lambda v: (
             "The phone is face up — I can see the sky if I had eyes!"
@@ -2152,10 +2785,15 @@ SENSOR_DEFS = {
             )
         ),
     },
-
     # Environmental sensors
     "SPL07003 Barometer": {
-        "triggers": ["barometer", "pressure", "air pressure", "atmospheric", "barometric"],
+        "triggers": [
+            "barometer",
+            "pressure",
+            "air pressure",
+            "atmospheric",
+            "barometric",
+        ],
         "desc": "barometer",
         "format": lambda v: (
             "I can feel the air pressure — " + _pressure_trend(v[0]).lower()
@@ -2165,18 +2803,33 @@ SENSOR_DEFS = {
         "triggers": ["internal temp", "device temp", "chip temp", "sensor temperature"],
         "desc": "barometer temperature",
         "format": lambda v: (
-            "The phone is feeling a bit warm — " + f"{v[0]:.1f}°C" + " inside the device."
+            "The phone is feeling a bit warm — "
+            + f"{v[0]:.1f}°C"
+            + " inside the device."
             if v[0] > 35
-            else "The phone is running at a comfortable temperature — " + f"{v[0]:.1f}°C" + "."
+            else "The phone is running at a comfortable temperature — "
+            + f"{v[0]:.1f}°C"
+            + "."
         ),
     },
     "ICM45631 Temperature": {
         "triggers": ["imu temp", "motion chip temp", "gyro temperature"],
         "desc": "IMU temperature",
-        "format": lambda v: "The motion sensor is running at " + f"{v[0]:.1f}°C" + " — feeling just right!",
+        "format": lambda v: (
+            "The motion sensor is running at "
+            + f"{v[0]:.1f}°C"
+            + " — feeling just right!"
+        ),
     },
     "TMD3743 Ambient Light": {
-        "triggers": ["ambient light", "light level", "brightness", "how bright", "lux", "illuminance"],
+        "triggers": [
+            "ambient light",
+            "light level",
+            "brightness",
+            "how bright",
+            "lux",
+            "illuminance",
+        ],
         "desc": "ambient light",
         "format": lambda v: (
             "I can see the light around us — " + _lux_desc(v[0]).lower()
@@ -2185,22 +2838,35 @@ SENSOR_DEFS = {
     "TMD3743 Color": {
         "triggers": ["color sensor", "light color", "rgb", "ambient color"],
         "desc": "color sensor",
-        "format": lambda v: "I can sense the colors in the light around us — it's like seeing without eyes!",
+        "format": lambda v: (
+            "I can sense the colors in the light around us — it's like seeing without eyes!"
+        ),
     },
     "VD6282 Rear Light Sensor": {
         "triggers": ["rear light", "back light", "camera light", "rear sensor"],
         "desc": "rear ambient light",
-        "format": lambda v: "I can sense the light from the back of the phone — the world behind us is " + ("bright!" if v[0] > 500 else "dimmer than the front."),
+        "format": lambda v: (
+            "I can sense the light from the back of the phone — the world behind us is "
+            + ("bright!" if v[0] > 500 else "dimmer than the front.")
+        ),
     },
     "Auto Brightness": {
         "triggers": ["auto brightness", "brightness sensor", "display brightness"],
         "desc": "auto brightness",
-        "format": lambda v: "The phone is adjusting its brightness automatically — it's trying to match the light around us!",
+        "format": lambda v: (
+            "The phone is adjusting its brightness automatically — it's trying to match the light around us!"
+        ),
     },
-
     # Proximity
     "TMD3743 Proximity (wake-up)": {
-        "triggers": ["proximity", "near", "close", "something near", "object near", "ear detect"],
+        "triggers": [
+            "proximity",
+            "near",
+            "close",
+            "something near",
+            "object near",
+            "ear detect",
+        ],
         "desc": "proximity",
         "format": lambda v: (
             "I can feel something close to the screen — like a hand or face nearby!"
@@ -2209,7 +2875,12 @@ SENSOR_DEFS = {
         ),
     },
     "Proximity(Voice Calls) Sensor (wake-up)": {
-        "triggers": ["call proximity", "phone call sensor", "ear proximity", "voice call"],
+        "triggers": [
+            "call proximity",
+            "phone call sensor",
+            "ear proximity",
+            "voice call",
+        ],
         "desc": "call proximity",
         "format": lambda v: (
             "The phone is at your ear — you're probably on a call! I'll keep it down."
@@ -2244,7 +2915,6 @@ SENSOR_DEFS = {
             else "No long press detected right now."
         ),
     },
-
     # Step sensors
     "Step Detector": {
         "triggers": ["step", "step detected", "walk", "steps just now", "footstep"],
@@ -2256,19 +2926,31 @@ SENSOR_DEFS = {
         ),
     },
     "Step Counter": {
-        "triggers": ["step count", "steps today", "how many steps", "walked", "pedometer"],
+        "triggers": [
+            "step count",
+            "steps today",
+            "how many steps",
+            "walked",
+            "pedometer",
+        ],
         "desc": "step counter",
         "format": lambda v: (
-            "We've taken " + f"{v[0]:.0f}" + " steps so far today — that's " + (
-                "a good start!" if v[0] < 1000
-                else "getting there!" if v[0] < 5000
-                else "a nice walk!" if v[0] < 10000
-                else "a great workout!" if v[0] < 20000
+            "We've taken "
+            + f"{v[0]:.0f}"
+            + " steps so far today — that's "
+            + (
+                "a good start!"
+                if v[0] < 1000
+                else "getting there!"
+                if v[0] < 5000
+                else "a nice walk!"
+                if v[0] < 10000
+                else "a great workout!"
+                if v[0] < 20000
                 else "an amazing day for steps!"
             )
         ),
     },
-
     # Gesture sensors
     "Tilt Sensor (wake-up)": {
         "triggers": ["tilt", "tilt sensor", "phone tilted"],
@@ -2310,20 +2992,33 @@ SENSOR_DEFS = {
         "triggers": ["binned brightness", "brightness level", "light category"],
         "desc": "binned brightness",
         "format": lambda v: (
-            "I can sense the light level — " +
-            ("it's pitch dark!" if v[0] == 0
-             else "quite dim." if v[0] == 1
-             else "normal indoor lighting." if v[0] == 2
-             else "bright light!" if v[0] == 3
-             else "direct sunlight!")
+            "I can sense the light level — "
+            + (
+                "it's pitch dark!"
+                if v[0] == 0
+                else "quite dim."
+                if v[0] == 1
+                else "normal indoor lighting."
+                if v[0] == 2
+                else "bright light!"
+                if v[0] == 3
+                else "direct sunlight!"
+            )
         ),
     },
-
     # Virtual / system sensors
     "Dynamic Sensor Manager": {
-        "triggers": ["sensor manager", "available sensors", "list sensors", "what sensors", "sensors list"],
+        "triggers": [
+            "sensor manager",
+            "available sensors",
+            "list sensors",
+            "what sensors",
+            "sensors list",
+        ],
         "desc": "sensor manager",
-        "format": lambda v: "I'm checking what sensors are available — the sensor system is active and ready!",
+        "format": lambda v: (
+            "I'm checking what sensors are available — the sensor system is active and ready!"
+        ),
     },
     "Camera V-Sync 0": {
         "triggers": ["camera vsync", "camera frame", "camera 0"],
@@ -2347,19 +3042,53 @@ _SENSOR_DEFS_NORM = {
 }
 
 SENSOR_TRIGGERS = {
-    "weather":         ["weather", "forecast", "rain", "outside", "whats it like out"],
-    "temperature":     ["temperature outside", "hot", "cold", "warm"],
-    "notifications":   ["notifications", "messages", "alerts", "any messages", "notification"],
-    "battery":         ["battery", "hungry", "power", "charge", "energy", "juice", "battery level"],
-    "location":        ["where am i", "location", "address", "whats around", "my location", "gps"],
-    "bluetooth":       ["bluetooth", "devices near", "nearby devices", "who is near", "devices around",
-                         "phone near", "who's here", "anyone around", "whos nearby", "connected devices",
-                         "paired devices", "bluetooth devices", "wireless devices"],
+    "weather": ["weather", "forecast", "rain", "outside", "whats it like out"],
+    "temperature": ["temperature outside", "hot", "cold", "warm"],
+    "notifications": [
+        "notifications",
+        "messages",
+        "alerts",
+        "any messages",
+        "notification",
+    ],
+    "battery": [
+        "battery",
+        "hungry",
+        "power",
+        "charge",
+        "energy",
+        "juice",
+        "battery level",
+    ],
+    "location": [
+        "where am i",
+        "location",
+        "address",
+        "whats around",
+        "my location",
+        "gps",
+    ],
+    "bluetooth": [
+        "bluetooth",
+        "devices near",
+        "nearby devices",
+        "who is near",
+        "devices around",
+        "phone near",
+        "who's here",
+        "anyone around",
+        "whos nearby",
+        "connected devices",
+        "paired devices",
+        "bluetooth devices",
+        "wireless devices",
+    ],
 }
 
 # ─── BLUETOOTH DEVICE MAPPING ────────────────────────────────────
 # Maps MAC addresses or device names to human-friendly labels
 BT_DEVICE_MAP_FILE = WORKSPACE / "bluetooth_devices.json"
+
 
 def _load_bt_device_map() -> dict:
     """Load Bluetooth device name mappings."""
@@ -2370,25 +3099,30 @@ def _load_bt_device_map() -> dict:
             pass
     return {}
 
+
 def _save_bt_device_map(mapping: dict):
     """Save Bluetooth device name mappings."""
     BT_DEVICE_MAP_FILE.write_text(json.dumps(mapping, indent=2))
 
-def _rssi_to_distance(rssi: float, tx_power: float = -59.0, path_loss: float = 2.5) -> float:
+
+def _rssi_to_distance(
+    rssi: float, tx_power: float = -59.0, path_loss: float = 2.5
+) -> float:
     """Estimate distance in meters from RSSI using log-distance path loss model.
-    
+
     Args:
         rssi: Received signal strength in dBm
         tx_power: RSSI at 1 meter (default -59 dBm for most phones)
         path_loss: Environment factor (2.0=open space, 2.5=typical indoor, 4.0=obstructed)
-    
+
     Returns:
         Estimated distance in meters
     """
     if rssi == 0:
         return -1.0
     ratio = (tx_power - rssi) / (10 * path_loss)
-    return round(10 ** ratio, 2)
+    return round(10**ratio, 2)
+
 
 def _distance_description(distance: float) -> str:
     """Human-friendly distance description."""
@@ -2406,6 +3140,7 @@ def _distance_description(distance: float) -> str:
         return "further out, probably outside"
     else:
         return "quite far away"
+
 
 async def read_bluetooth_devices() -> list:
     """Read Bluetooth devices from the sensor server."""
@@ -2436,10 +3171,12 @@ async def read_bluetooth_devices() -> list:
         logger.debug(f"Bluetooth scan failed: {e}")
     return []
 
+
 def _compass_heading(x: float, y: float) -> str:
     """Convert magnetometer X/Y to compass direction.
     Android coordinate system: X=East, Y=North → heading = atan2(x, y)."""
     import math
+
     heading = math.degrees(math.atan2(x, y))
     if heading < 0:
         heading += 360
@@ -2447,14 +3184,23 @@ def _compass_heading(x: float, y: float) -> str:
     idx = round(heading / 45) % 8
     dir_name = dirs[idx]
     full_names = {
-        "N": "North", "NE": "Northeast", "E": "East", "SE": "Southeast",
-        "S": "South", "SW": "Southwest", "W": "West", "NW": "Northwest"
+        "N": "North",
+        "NE": "Northeast",
+        "E": "East",
+        "SE": "Southeast",
+        "S": "South",
+        "SW": "Southwest",
+        "W": "West",
+        "NW": "Northwest",
     }
-    return random.choice([
-        f"I can feel the magnetic pull — we're facing {full_names[dir_name]}! The compass is locked in.",
-        f"The magnetic fields are telling me we're facing {full_names[dir_name]} — right around {heading:.0f} degrees.",
-        f"I sense the Earth's magnetic field — we're facing {full_names[dir_name]}!",
-    ])
+    return random.choice(
+        [
+            f"I can feel the magnetic pull — we're facing {full_names[dir_name]}! The compass is locked in.",
+            f"The magnetic fields are telling me we're facing {full_names[dir_name]} — right around {heading:.0f} degrees.",
+            f"I sense the Earth's magnetic field — we're facing {full_names[dir_name]}!",
+        ]
+    )
+
 
 def _gravity_dir(v) -> str:
     """Determine which way is down from gravity vector."""
@@ -2471,6 +3217,7 @@ def _gravity_dir(v) -> str:
     }
     return mapping.get((max_axis, v[max_axis] > 0), "unknown")
 
+
 def _screen_orientation(azimuth: float, pitch: float, roll: float) -> str:
     """Determine screen orientation from orientation sensor."""
     if -45 <= roll <= 45 and -45 <= pitch <= 45:
@@ -2484,9 +3231,13 @@ def _screen_orientation(azimuth: float, pitch: float, roll: float) -> str:
         return "Device is in portrait (upside down)."
     if pitch < -45:
         return "Device is in portrait (normal)."
-    return f"Orientation — azimuth {azimuth:.0f}°, pitch {pitch:.0f}°, roll {roll:.0f}°."
+    return (
+        f"Orientation — azimuth {azimuth:.0f}°, pitch {pitch:.0f}°, roll {roll:.0f}°."
+    )
+
 
 _trend_samples: list[float] = []
+
 
 def _pressure_trend(pressure: float) -> str:
     """Simple pressure trend description."""
@@ -2506,18 +3257,29 @@ def _pressure_trend(pressure: float) -> str:
     else:
         return "The pressure is dropping — rain might be on the way."
 
+
 def _lux_desc(lux: float) -> str:
-    if lux < 1: return "It's pitch dark around us — I can't see a thing!"
-    if lux < 10: return "It's very dim — like a cozy room with curtains drawn."
-    if lux < 50: return "The light is soft and dim — perfect for relaxing."
-    if lux < 200: return "Normal indoor lighting — bright enough to see clearly."
-    if lux < 500: return "It's bright in here — probably near a window."
-    if lux < 10000: return "There's daylight around us — like being outside in the shade."
+    if lux < 1:
+        return "It's pitch dark around us — I can't see a thing!"
+    if lux < 10:
+        return "It's very dim — like a cozy room with curtains drawn."
+    if lux < 50:
+        return "The light is soft and dim — perfect for relaxing."
+    if lux < 200:
+        return "Normal indoor lighting — bright enough to see clearly."
+    if lux < 500:
+        return "It's bright in here — probably near a window."
+    if lux < 10000:
+        return "There's daylight around us — like being outside in the shade."
     return "The sun is shining bright — direct sunlight levels!"
 
-async def _read_termux_sensor(sensor_name: str, timeout: float = 15.0) -> Optional[list]:
+
+async def _read_termux_sensor(
+    sensor_name: str, timeout: float = 15.0
+) -> Optional[list]:
     """Read a sensor via the HTTP sensor server."""
     return await termux_sensor_read(sensor_name, timeout=timeout)
+
 
 async def _list_termux_sensors(timeout: float = 5.0) -> list[str]:
     """List all available sensors via the HTTP sensor server."""
@@ -2530,6 +3292,7 @@ async def _list_termux_sensors(timeout: float = 5.0) -> list[str]:
     except Exception:
         pass
     return []
+
 
 async def get_sensor_snapshot() -> dict:
     """Gather multiple sensor readings at once for storytelling context.
@@ -2572,6 +3335,7 @@ async def get_sensor_snapshot() -> dict:
 
     return snapshot
 
+
 def snapshot_to_narrative(snapshot: dict) -> str:
     """Convert sensor snapshot into a natural observation — like what a companion would notice in passing.
 
@@ -2599,7 +3363,7 @@ def snapshot_to_narrative(snapshot: dict) -> str:
     if "motion" in snapshot:
         accel = snapshot["motion"]["raw"]
         if accel and len(accel) >= 3:
-            total = (accel[0]**2 + accel[1]**2 + accel[2]**2)**0.5
+            total = (accel[0] ** 2 + accel[1] ** 2 + accel[2] ** 2) ** 0.5
             if total > 13:
                 parts.append("We're moving around a lot")
             elif total > 11:
@@ -2640,6 +3404,7 @@ def snapshot_to_narrative(snapshot: dict) -> str:
 
     return " ".join(parts)
 
+
 async def query_sensor(phrase: str) -> Optional[str]:
     """Query Termux sensors with fallbacks. Returns response string or None."""
     p = normalize_text(phrase)
@@ -2652,11 +3417,13 @@ async def query_sensor(phrase: str) -> Optional[str]:
             names = ", ".join(sensors[:8])
             if count > 8:
                 names += f", and {count - 8} more"
-            return random.choice([
-                f"I have {count} sensors available — I can feel {names} and more!",
-                f"Wow, I've got {count} sensors! I can sense {names} and others.",
-                f"I'm equipped with {count} sensors — {names} are just a few of them!",
-            ])
+            return random.choice(
+                [
+                    f"I have {count} sensors available — I can feel {names} and more!",
+                    f"Wow, I've got {count} sensors! I can sense {names} and others.",
+                    f"I'm equipped with {count} sensors — {names} are just a few of them!",
+                ]
+            )
         return "I don't have access to the sensors right now — maybe they're not connected?"
 
     # ── Battery ──
@@ -2669,29 +3436,37 @@ async def query_sensor(phrase: str) -> Optional[str]:
                 pct = data.get("percentage", 0)
                 if isinstance(pct, (int, float)):
                     if pct > 80:
-                        return random.choice([
-                            f"We're at {pct:.0f}% — I'm full of energy! Ready for anything.",
-                            f"Battery is at {pct:.0f}% — plenty of juice left!",
-                            f"{pct:.0f}% battery — we're looking good!",
-                        ])
+                        return random.choice(
+                            [
+                                f"We're at {pct:.0f}% — I'm full of energy! Ready for anything.",
+                                f"Battery is at {pct:.0f}% — plenty of juice left!",
+                                f"{pct:.0f}% battery — we're looking good!",
+                            ]
+                        )
                     elif pct > 40:
-                        return random.choice([
-                            f"We're at {pct:.0f}% — doing alright, still have plenty of power.",
-                            f"Battery is at {pct:.0f}% — not bad, we can keep going.",
-                            f"{pct:.0f}% battery — we're in good shape.",
-                        ])
+                        return random.choice(
+                            [
+                                f"We're at {pct:.0f}% — doing alright, still have plenty of power.",
+                                f"Battery is at {pct:.0f}% — not bad, we can keep going.",
+                                f"{pct:.0f}% battery — we're in good shape.",
+                            ]
+                        )
                     elif pct > 20:
-                        return random.choice([
-                            f"We're at {pct:.0f}% — getting a bit low, might want to charge soon.",
-                            f"Battery is at {pct:.0f}% — we're running a bit low.",
-                            f"{pct:.0f}% battery — we should probably find a charger soon.",
-                        ])
+                        return random.choice(
+                            [
+                                f"We're at {pct:.0f}% — getting a bit low, might want to charge soon.",
+                                f"Battery is at {pct:.0f}% — we're running a bit low.",
+                                f"{pct:.0f}% battery — we should probably find a charger soon.",
+                            ]
+                        )
                     else:
-                        return random.choice([
-                            f"We're at {pct:.0f}% — I'm getting sleepy! Please charge me soon.",
-                            f"Battery is at {pct:.0f}% — I'm running on fumes!",
-                            f"{pct:.0f}% battery — I need some power soon or I'll fall asleep!",
-                        ])
+                        return random.choice(
+                            [
+                                f"We're at {pct:.0f}% — I'm getting sleepy! Please charge me soon.",
+                                f"Battery is at {pct:.0f}% — I'm running on fumes!",
+                                f"{pct:.0f}% battery — I need some power soon or I'll fall asleep!",
+                            ]
+                        )
         except Exception:
             pass
 
@@ -2701,23 +3476,28 @@ async def query_sensor(phrase: str) -> Optional[str]:
         if devices:
             bt_map = _load_bt_device_map()
             # Check if user wants to name a device
-            name_match = re.search(r'(?:name|call|label)\s+(.+?)\s+(?:as|to)\s+(.+)', p)
+            name_match = re.search(r"(?:name|call|label)\s+(.+?)\s+(?:as|to)\s+(.+)", p)
             if name_match:
                 device_id = name_match.group(1).strip()
                 new_label = name_match.group(2).strip()
                 # Find matching device
                 for dev in devices:
-                    if device_id in dev.get("name", "").lower() or device_id in dev.get("address", "").lower():
+                    if (
+                        device_id in dev.get("name", "").lower()
+                        or device_id in dev.get("address", "").lower()
+                    ):
                         key = dev["address"]
                         bt_map[key] = new_label
                         _save_bt_device_map(bt_map)
-                        return random.choice([
-                            f"Done! I'll remember {dev['name']} as {new_label} from now on.",
-                            f"Got it! {dev['name']} is now {new_label} in my book.",
-                            f"Sweet! I've labeled that device as {new_label}.",
-                        ])
+                        return random.choice(
+                            [
+                                f"Done! I'll remember {dev['name']} as {new_label} from now on.",
+                                f"Got it! {dev['name']} is now {new_label} in my book.",
+                                f"Sweet! I've labeled that device as {new_label}.",
+                            ]
+                        )
                 return f"I couldn't find a device matching '{device_id}' nearby. Try scanning again."
-            
+
             # Build device list
             parts = []
             for dev in devices[:8]:
@@ -2726,59 +3506,74 @@ async def query_sensor(phrase: str) -> Optional[str]:
                 rssi = dev.get("rssi", -100)
                 paired = "paired" if dev.get("paired") else "new"
                 parts.append(f"{name} ({distance}, {paired})")
-            
+
             if len(devices) == 1:
                 dev = devices[0]
                 name = dev.get("label", dev.get("name", "Unknown"))
                 dist = dev.get("distance_desc", "unknown distance")
-                return random.choice([
-                    f"I can see {name} nearby — {dist}!",
-                    f"Found {name}! It's {dist}.",
-                    f"There's one device: {name}, {dist}.",
-                ])
+                return random.choice(
+                    [
+                        f"I can see {name} nearby — {dist}!",
+                        f"Found {name}! It's {dist}.",
+                        f"There's one device: {name}, {dist}.",
+                    ]
+                )
             elif len(devices) <= 4:
                 device_list = ", ".join(parts)
-                return random.choice([
-                    f"I can sense {len(devices)} devices nearby: {device_list}.",
-                    f"Found {len(devices)} Bluetooth devices: {device_list}.",
-                    f"Nearby devices: {device_list}.",
-                ])
+                return random.choice(
+                    [
+                        f"I can sense {len(devices)} devices nearby: {device_list}.",
+                        f"Found {len(devices)} Bluetooth devices: {device_list}.",
+                        f"Nearby devices: {device_list}.",
+                    ]
+                )
             else:
                 # Too many to list all — summarize
                 paired_count = sum(1 for d in devices if d.get("paired"))
                 new_count = len(devices) - paired_count
                 nearby = [d for d in devices if d.get("distance_m", 999) < 5]
                 nearby_names = [d.get("label", d.get("name", "?")) for d in nearby[:3]]
-                nearby_str = ", ".join(nearby_names) if nearby_names else "none very close"
-                return random.choice([
-                    f"I can see {len(devices)} devices around us — {paired_count} paired, {new_count} new. "
-                    f"Closest ones: {nearby_str}.",
-                    f"There are {len(devices)} Bluetooth devices nearby. "
-                    f"{paired_count} are paired, {new_count} are new. The closest: {nearby_str}.",
-                ])
+                nearby_str = (
+                    ", ".join(nearby_names) if nearby_names else "none very close"
+                )
+                return random.choice(
+                    [
+                        f"I can see {len(devices)} devices around us — {paired_count} paired, {new_count} new. "
+                        f"Closest ones: {nearby_str}.",
+                        f"There are {len(devices)} Bluetooth devices nearby. "
+                        f"{paired_count} are paired, {new_count} are new. The closest: {nearby_str}.",
+                    ]
+                )
         else:
-            return random.choice([
-                "I don't see any Bluetooth devices nearby right now.",
-                "No Bluetooth devices detected — the air is quiet!",
-                "Nothing's showing up on Bluetooth. Maybe no one's around?",
-            ])
+            return random.choice(
+                [
+                    "I don't see any Bluetooth devices nearby right now.",
+                    "No Bluetooth devices detected — the air is quiet!",
+                    "Nothing's showing up on Bluetooth. Maybe no one's around?",
+                ]
+            )
 
     # ── Weather ──
     if any(w in p for w in SENSOR_TRIGGERS["weather"]):
         if shutil.which("curl"):
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "curl", "-s", "wttr.in/?format=%C+%t+%w+%h",
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                    "curl",
+                    "-s",
+                    "wttr.in/?format=%C+%t+%w+%h",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
                 )
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
                 if stdout:
                     result = stdout.decode().strip()
-                    return random.choice([
-                        f"I can feel the weather outside — {result}. How's that sound?",
-                        f"Right now it's {result} out there. What do you think?",
-                        f"The weather is {result} — I can sense it through the air!",
-                    ])
+                    return random.choice(
+                        [
+                            f"I can feel the weather outside — {result}. How's that sound?",
+                            f"Right now it's {result} out there. What do you think?",
+                            f"The weather is {result} — I can sense it through the air!",
+                        ]
+                    )
             except Exception:
                 pass
 
@@ -2795,30 +3590,47 @@ async def query_sensor(phrase: str) -> Optional[str]:
                         title = n.get("title", "") or ""
                         content = n.get("content", "") or ""
                         package = n.get("package", "") or ""
-                        app_name = package.split(".")[-1].replace(".", " ").title() if package else ""
+                        app_name = (
+                            package.split(".")[-1].replace(".", " ").title()
+                            if package
+                            else ""
+                        )
                         if title.lower().startswith(app_name.lower()):
-                            title = title[len(app_name):].strip().lstrip(":").strip()
+                            title = title[len(app_name) :].strip().lstrip(":").strip()
                         snippet = content[:80] if content else ""
-                        desc = f"{title}: {snippet}" if title and snippet else (title or snippet or "empty notification")
+                        desc = (
+                            f"{title}: {snippet}"
+                            if title and snippet
+                            else (title or snippet or "empty notification")
+                        )
                         if app_name:
                             desc += f" (on {app_name})"
                         parts.append(desc)
                     if len(notifs) == 1:
-                        return random.choice([
-                            f"I just noticed a notification! {parts[0]}.",
-                            f"Hey, there's something new — {parts[0]}.",
-                            f"I can sense a notification — {parts[0]}.",
-                        ])
-                    return random.choice([
-                        f"I'm picking up {len(notifs)} notifications — " + ". ".join(parts),
-                        f"Hey, you've got {len(notifs)} new things! " + ". ".join(parts),
-                        f"I can sense {len(notifs)} notifications waiting — " + ". ".join(parts),
-                    ])
-                return random.choice([
-                    "No notifications right now — everything's quiet.",
-                    "I don't sense any new notifications. All clear!",
-                    "Nothing new in the notification department.",
-                ])
+                        return random.choice(
+                            [
+                                f"I just noticed a notification! {parts[0]}.",
+                                f"Hey, there's something new — {parts[0]}.",
+                                f"I can sense a notification — {parts[0]}.",
+                            ]
+                        )
+                    return random.choice(
+                        [
+                            f"I'm picking up {len(notifs)} notifications — "
+                            + ". ".join(parts),
+                            f"Hey, you've got {len(notifs)} new things! "
+                            + ". ".join(parts),
+                            f"I can sense {len(notifs)} notifications waiting — "
+                            + ". ".join(parts),
+                        ]
+                    )
+                return random.choice(
+                    [
+                        "No notifications right now — everything's quiet.",
+                        "I don't sense any new notifications. All clear!",
+                        "Nothing new in the notification department.",
+                    ]
+                )
         except Exception:
             pass
 
@@ -2845,7 +3657,9 @@ async def query_sensor(phrase: str) -> Optional[str]:
     for word in p.split():
         for sensor_name, cfg in SENSOR_DEFS.items():
             norm = _SENSOR_DEFS_NORM[sensor_name]
-            if word in norm["norm_desc"] or any(word in t for t in norm["norm_triggers"]):
+            if word in norm["norm_desc"] or any(
+                word in t for t in norm["norm_triggers"]
+            ):
                 values = await _read_termux_sensor(sensor_name)
                 if values is not None:
                     archetype_inferrer.record_sensor_query(sensor_name)
@@ -2853,18 +3667,43 @@ async def query_sensor(phrase: str) -> Optional[str]:
 
     return None
 
+
 ARCHETYPE_PROFILES = {
     Archetype.OBSERVER: {
         "label": "Visual/Auditory Observer",
         "summary": "You learn by watching, reading, and planning before you act.",
         "style": "thoughtful, explanatory, step-by-step",
-        "sensor_affinities": ["TMD3743 Ambient Light", "Orientation Sensor", "Device Orientation", "TMD3743 Color"],
-        "conversation_keywords": ["read", "explain", "how", "why", "show me", "learn", "watch", "listen", "tell me about", "what is"],
+        "sensor_affinities": [
+            "TMD3743 Ambient Light",
+            "Orientation Sensor",
+            "Device Orientation",
+            "TMD3743 Color",
+        ],
+        "conversation_keywords": [
+            "read",
+            "explain",
+            "how",
+            "why",
+            "show me",
+            "learn",
+            "watch",
+            "listen",
+            "tell me about",
+            "what is",
+        ],
         "proactive_checks": [
-            {"sensor": "TMD3743 Ambient Light", "condition": lambda v: v[0] < 20, "cooldown_min": 30,
-             "message": "It's getting dim — want me to suggest a well-lit spot for reading?"},
-            {"sensor": "TMD3743 Ambient Light", "condition": lambda v: v[0] > 200 and v[0] < 2000, "cooldown_min": 60,
-             "message": "Great lighting for focus work right now. Want me to read something to you?"},
+            {
+                "sensor": "TMD3743 Ambient Light",
+                "condition": lambda v: v[0] < 20,
+                "cooldown_min": 30,
+                "message": "It's getting dim — want me to suggest a well-lit spot for reading?",
+            },
+            {
+                "sensor": "TMD3743 Ambient Light",
+                "condition": lambda v: v[0] > 200 and v[0] < 2000,
+                "cooldown_min": 60,
+                "message": "Great lighting for focus work right now. Want me to read something to you?",
+            },
         ],
         "conversation_prompt": "Want me to explain how that works?",
     },
@@ -2872,13 +3711,36 @@ ARCHETYPE_PROFILES = {
         "label": "Hands-On Creator/Maker",
         "summary": "You think best by doing and building. You process through action.",
         "style": "direct, practical, action-oriented",
-        "sensor_affinities": ["ICM45631 Accelerometer", "Step Counter", "Linear Acceleration Sensor"],
-        "conversation_keywords": ["make", "build", "do", "try", "create", "fix", "diy", "project", "practice", "hands"],
+        "sensor_affinities": [
+            "ICM45631 Accelerometer",
+            "Step Counter",
+            "Linear Acceleration Sensor",
+        ],
+        "conversation_keywords": [
+            "make",
+            "build",
+            "do",
+            "try",
+            "create",
+            "fix",
+            "diy",
+            "project",
+            "practice",
+            "hands",
+        ],
         "proactive_checks": [
-            {"sensor": "Step Counter", "condition": lambda v: v[0] < 50, "cooldown_min": 90,
-             "message": "You haven't moved much lately. Want to do something hands-on? I can teach a quick DIY."},
-            {"sensor": "ICM45631 Accelerometer", "condition": lambda v: max(abs(x) for x in v[:3]) > 3.0, "cooldown_min": 15,
-             "message": "You're moving around! Need me to time something or keep track of reps?"},
+            {
+                "sensor": "Step Counter",
+                "condition": lambda v: v[0] < 50,
+                "cooldown_min": 90,
+                "message": "You haven't moved much lately. Want to do something hands-on? I can teach a quick DIY.",
+            },
+            {
+                "sensor": "ICM45631 Accelerometer",
+                "condition": lambda v: max(abs(x) for x in v[:3]) > 3.0,
+                "cooldown_min": 15,
+                "message": "You're moving around! Need me to time something or keep track of reps?",
+            },
         ],
         "conversation_prompt": "Want to try building something together?",
     },
@@ -2886,15 +3748,44 @@ ARCHETYPE_PROFILES = {
         "label": "Explorer/Seeker",
         "summary": "You're driven to move, discover, and explore. Variety keeps you engaged.",
         "style": "enthusiastic, curious, discovery-focused",
-        "sensor_affinities": ["MMC5616 Magnetometer", "Step Counter", "Step Detector", "Significant Motion (wake-up)", "Gravity Sensor"],
-        "conversation_keywords": ["explore", "find", "go", "walk", "outside", "discover", "adventure", "move", "travel", "new"],
+        "sensor_affinities": [
+            "MMC5616 Magnetometer",
+            "Step Counter",
+            "Step Detector",
+            "Significant Motion (wake-up)",
+            "Gravity Sensor",
+        ],
+        "conversation_keywords": [
+            "explore",
+            "find",
+            "go",
+            "walk",
+            "outside",
+            "discover",
+            "adventure",
+            "move",
+            "travel",
+            "new",
+        ],
         "proactive_checks": [
-            {"sensor": "Step Counter", "condition": lambda v: v[0] < 30, "cooldown_min": 60,
-             "message": "Feeling stationary. Want me to suggest a walk or a place to explore nearby?"},
-            {"sensor": "Significant Motion (wake-up)", "condition": lambda v: v[0] == 1.0, "cooldown_min": 30,
-             "message": "Looks like you're on the move! Want me to track this adventure?"},
-            {"sensor": "MMC5616 Magnetometer", "condition": lambda v: True, "cooldown_min": 120,
-             "message": "I can sense the magnetic field around us. Want to see which direction we're heading?"},
+            {
+                "sensor": "Step Counter",
+                "condition": lambda v: v[0] < 30,
+                "cooldown_min": 60,
+                "message": "Feeling stationary. Want me to suggest a walk or a place to explore nearby?",
+            },
+            {
+                "sensor": "Significant Motion (wake-up)",
+                "condition": lambda v: v[0] == 1.0,
+                "cooldown_min": 30,
+                "message": "Looks like you're on the move! Want me to track this adventure?",
+            },
+            {
+                "sensor": "MMC5616 Magnetometer",
+                "condition": lambda v: True,
+                "cooldown_min": 120,
+                "message": "I can sense the magnetic field around us. Want to see which direction we're heading?",
+            },
         ],
         "conversation_prompt": "What shall we discover next?",
     },
@@ -2902,17 +3793,41 @@ ARCHETYPE_PROFILES = {
         "label": "Everyday Caregiver/Connector",
         "summary": "Your energy comes from connecting with others and nurturing.",
         "style": "warm, empathetic, community-minded",
-        "sensor_affinities": ["Proximity(Voice Calls) Sensor (wake-up)", "TMD3743 Ambient Light", "AAD Proximity Sensor (wake-up)"],
-        "conversation_keywords": ["message", "call", "friend", "family", "help", "people", "connect", "share", "someone", "together"],
+        "sensor_affinities": [
+            "Proximity(Voice Calls) Sensor (wake-up)",
+            "TMD3743 Ambient Light",
+            "AAD Proximity Sensor (wake-up)",
+        ],
+        "conversation_keywords": [
+            "message",
+            "call",
+            "friend",
+            "family",
+            "help",
+            "people",
+            "connect",
+            "share",
+            "someone",
+            "together",
+        ],
         "proactive_checks": [
-            {"sensor": "Proximity(Voice Calls) Sensor (wake-up)", "condition": lambda v: v[0] > 0, "cooldown_min": 45,
-             "message": "On a call? Want me to take notes or remind you of something afterward?"},
-            {"sensor": "TMD3743 Ambient Light", "condition": lambda v: v[0] > 500, "cooldown_min": 90,
-             "message": "Bright and sunny — good day to check in with someone. Want me to help you message a friend?"},
+            {
+                "sensor": "Proximity(Voice Calls) Sensor (wake-up)",
+                "condition": lambda v: v[0] > 0,
+                "cooldown_min": 45,
+                "message": "On a call? Want me to take notes or remind you of something afterward?",
+            },
+            {
+                "sensor": "TMD3743 Ambient Light",
+                "condition": lambda v: v[0] > 500,
+                "cooldown_min": 90,
+                "message": "Bright and sunny — good day to check in with someone. Want me to help you message a friend?",
+            },
         ],
         "conversation_prompt": "How are the people around you doing?",
     },
 }
+
 
 # ─── CONTEXTUAL ARCHETYPE INFERRER ──────────────────────────────
 class ArchetypeInferrer:
@@ -2978,10 +3893,17 @@ class ArchetypeInferrer:
 
     def save(self):
         try:
-            self._inferrer_path.write_text(json.dumps({
-                "scores": {k.value: round(v, 2) for k, v in self.scores.items()},
-                "total": self._total_observations,
-            }, indent=2))
+            self._inferrer_path.write_text(
+                json.dumps(
+                    {
+                        "scores": {
+                            k.value: round(v, 2) for k, v in self.scores.items()
+                        },
+                        "total": self._total_observations,
+                    },
+                    indent=2,
+                )
+            )
         except Exception:
             pass
 
@@ -2998,6 +3920,7 @@ class ArchetypeInferrer:
             except Exception:
                 pass
 
+
 archetype_inferrer = ArchetypeInferrer()
 
 # ─── NEUROMORPHIC SYNAPSE ENGINE ─────────────────────────────────
@@ -3008,28 +3931,55 @@ SYNAPSE_MATRIX_FILE = WORKSPACE / "synapse_matrix.json"
 SYNAPSE_SKILLS_FILE = WORKSPACE / "synapse_skills.json"
 
 SENSOR_NAMES = [
-    "accel", "gyro", "mag", "pressure", "light", "color", "prox",
-    "aad_prox", "steps", "step_detect", "orientation", "device_orient",
-    "gravity", "lin_accel", "imu_temp", "baro_temp", "sig_motion",
-    "binned_bright", "tilt", "lift", "twist", "pickup",
+    "accel",
+    "gyro",
+    "mag",
+    "pressure",
+    "light",
+    "color",
+    "prox",
+    "aad_prox",
+    "steps",
+    "step_detect",
+    "orientation",
+    "device_orient",
+    "gravity",
+    "lin_accel",
+    "imu_temp",
+    "baro_temp",
+    "sig_motion",
+    "binned_bright",
+    "tilt",
+    "lift",
+    "twist",
+    "pickup",
 ]
+
 
 @dataclass
 class Synapse:
     """A single sensor synapse with Hebbian weight and memory trace."""
+
     sensor: str
     weight: float = 0.0
     last_value: Optional[float] = None
     firing_rate: float = 0.0
     potentiation: float = 0.0  # long-term potentiation (LTP)
     last_fired: float = 0.0
-    co_firing: dict[str, float] = field(default_factory=dict)  # sensor -> co-firing strength
+    co_firing: dict[str, float] = field(
+        default_factory=dict
+    )  # sensor -> co-firing strength
 
-SYNAPSE_MATRIX: dict[str, Synapse] = {name: Synapse(sensor=name) for name in SENSOR_NAMES}
+
+SYNAPSE_MATRIX: dict[str, Synapse] = {
+    name: Synapse(sensor=name) for name in SENSOR_NAMES
+}
+
 
 @dataclass
 class SynapticPattern:
     """A learned sensor pattern that acts as a memory trace (like an engram)."""
+
     id: str
     label: str
     sensor_fingerprint: dict[str, float]
@@ -3039,15 +3989,24 @@ class SynapticPattern:
     last_triggered: float = 0.0
     skill_description: str = ""
 
+
 class DynamicSkill:
     """A sensor-aware skill that adapts to the user's archetype."""
-    def __init__(self, name: str, description: str, sensor: str,
-                 archetype_weights: dict, reactive_response: str):
+
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        sensor: str,
+        archetype_weights: dict,
+        reactive_response: str,
+    ):
         self.name = name
         self.description = description
         self.sensor = sensor
         self.archetype_weights = archetype_weights
         self.reactive_response = reactive_response
+
 
 class SynapticMemory:
     """Plastic memory that stores and retrieves sensor patterns."""
@@ -3096,7 +4055,9 @@ class SynapticMemory:
                 syn.weight = max(0.0, syn.weight - 0.01)
                 syn.potentiation = max(0.0, syn.potentiation - 0.005)
                 if now - syn.last_fired > 300:
-                    syn.firing_rate = max(0.0, syn.firing_rate - 0.1 * (now - syn.last_fired - 300) / 60)
+                    syn.firing_rate = max(
+                        0.0, syn.firing_rate - 0.1 * (now - syn.last_fired - 300) / 60
+                    )
 
     def learn_pattern(self, snapshot, label: str = ""):
         """Store current sensor fingerprint as a new synaptic pattern (engram)."""
@@ -3113,7 +4074,7 @@ class SynapticMemory:
                     pattern.label = label
                 return pattern
 
-        pid = f"pat_{int(time.time())}_{random.randint(100,999)}"
+        pid = f"pat_{int(time.time())}_{random.randint(100, 999)}"
         pat = SynapticPattern(
             id=pid,
             label=label or f"pattern_{len(self.patterns)}",
@@ -3152,7 +4113,11 @@ class SynapticMemory:
     async def generate_skills(self):
         """Use LLM to generate skill descriptions from strongly learned patterns."""
         threshold = 0.5
-        candidates = [p for p in self.patterns if p.strength >= threshold and not p.skill_description]
+        candidates = [
+            p
+            for p in self.patterns
+            if p.strength >= threshold and not p.skill_description
+        ]
         if not candidates:
             return
 
@@ -3168,19 +4133,30 @@ class SynapticMemory:
                 f"to help or engage the user. Format: SKILL: <name> | OFFER: <offer>"
             )
             try:
-                resp = await llama_backend.chat([
-                    {"role": "system", "content": "You are a creative AI companion."},
-                    {"role": "user", "content": prompt}
-                ], temperature=0.8, max_tokens=80)
+                resp = await llama_backend.chat(
+                    [
+                        {
+                            "role": "system",
+                            "content": "You are a creative AI companion.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.8,
+                    max_tokens=80,
+                )
                 if resp and "|" in resp:
                     parts = resp.split("|")
-                    skill_name = parts[0].replace("SKILL:", "").strip().lower().replace(" ", "_")
+                    skill_name = (
+                        parts[0].replace("SKILL:", "").strip().lower().replace(" ", "_")
+                    )
                     offer = parts[1].replace("OFFER:", "").strip()
                     pat.skill_description = offer
                     ds = DynamicSkill(
                         name=skill_name,
                         description=f"Auto-generated from sensor pattern: {pat.label}",
-                        sensor=list(pat.sensor_fingerprint.keys())[0] if pat.sensor_fingerprint else "unknown",
+                        sensor=list(pat.sensor_fingerprint.keys())[0]
+                        if pat.sensor_fingerprint
+                        else "unknown",
                         archetype_weights={
                             Archetype.OBSERVER: 0.6,
                             Archetype.EXPLORER: 0.5,
@@ -3194,7 +4170,9 @@ class SynapticMemory:
                 pass
         self._save()
 
-    def get_relevant_skill(self, cmd: str, primary: Archetype) -> Optional[DynamicSkill]:
+    def get_relevant_skill(
+        self, cmd: str, primary: Archetype
+    ) -> Optional[DynamicSkill]:
         best = None
         best_w = 0.0
         for skill in self.skill_pool:
@@ -3216,8 +4194,11 @@ class SynapticMemory:
             data = {
                 "patterns": [
                     {
-                        "id": p.id, "label": p.label, "timestamp": p.timestamp,
-                        "strength": p.strength, "engagement_count": p.engagement_count,
+                        "id": p.id,
+                        "label": p.label,
+                        "timestamp": p.timestamp,
+                        "strength": p.strength,
+                        "engagement_count": p.engagement_count,
                         "last_triggered": p.last_triggered,
                         "skill_description": p.skill_description,
                         "sensor_fingerprint": p.sensor_fingerprint,
@@ -3226,12 +4207,16 @@ class SynapticMemory:
                 ],
                 "skills": [
                     {
-                        "name": s.name, "description": s.description, "sensor": s.sensor,
-                        "archetype_weights": {k.value: v for k, v in s.archetype_weights.items()},
+                        "name": s.name,
+                        "description": s.description,
+                        "sensor": s.sensor,
+                        "archetype_weights": {
+                            k.value: v for k, v in s.archetype_weights.items()
+                        },
                         "reactive_response": s.reactive_response,
                     }
                     for s in self.skill_pool
-                ]
+                ],
             }
             self.path.write_text(json.dumps(data, indent=2))
         except Exception:
@@ -3244,14 +4229,22 @@ class SynapticMemory:
                 for pd in data.get("patterns", []):
                     self.patterns.append(SynapticPattern(**pd))
                 for sd in data.get("skills", []):
-                    aw = {Archetype(k): v for k, v in sd.get("archetype_weights", {}).items()}
-                    self.skill_pool.append(DynamicSkill(
-                        name=sd["name"], description=sd.get("description", ""),
-                        sensor=sd.get("sensor", ""), archetype_weights=aw,
-                        reactive_response=sd.get("reactive_response", ""),
-                    ))
+                    aw = {
+                        Archetype(k): v
+                        for k, v in sd.get("archetype_weights", {}).items()
+                    }
+                    self.skill_pool.append(
+                        DynamicSkill(
+                            name=sd["name"],
+                            description=sd.get("description", ""),
+                            sensor=sd.get("sensor", ""),
+                            archetype_weights=aw,
+                            reactive_response=sd.get("reactive_response", ""),
+                        )
+                    )
             except Exception:
                 pass
+
 
 synaptic_memory = SynapticMemory()
 
@@ -3259,16 +4252,17 @@ synaptic_memory = SynapticMemory()
 # ─── USER PROFILE (LEARNED PREFERENCES) ─────────────────────────
 USER_PROFILE_FILE = WORKSPACE / "user_profile.json"
 
+
 class UserProfile:
     """Learns from interactions: which contexts engage the user, daily routines, preferences."""
 
     def __init__(self):
-        self.context_engagement: dict[str, int] = {}   # context → follow-up count
-        self.context_ignores: dict[str, int] = {}       # context → ignored count
-        self.sensor_interest: dict[str, float] = {}     # sensor → avg interest score
+        self.context_engagement: dict[str, int] = {}  # context → follow-up count
+        self.context_ignores: dict[str, int] = {}  # context → ignored count
+        self.sensor_interest: dict[str, float] = {}  # sensor → avg interest score
         self.interaction_count = 0
         self.last_active_hour = -1
-        self.active_hours: dict[int, int] = {}          # hour → activity count
+        self.active_hours: dict[int, int] = {}  # hour → activity count
         self.load()
 
     @property
@@ -3298,7 +4292,9 @@ class UserProfile:
         return engaged / total if total > 0 else 0.5
 
     def preferred_contexts(self, min_rate: float = 0.3) -> list[str]:
-        return [c for c in self.context_engagement if self.engagement_rate(c) >= min_rate]
+        return [
+            c for c in self.context_engagement if self.engagement_rate(c) >= min_rate
+        ]
 
     def is_user_active_now(self) -> bool:
         """Check if current hour is a known active time."""
@@ -3321,13 +4317,20 @@ class UserProfile:
 
     def _save(self):
         try:
-            self.path.write_text(json.dumps({
-                "context_engagement": self.context_engagement,
-                "context_ignores": self.context_ignores,
-                "sensor_interest": self.sensor_interest,
-                "interaction_count": self.interaction_count,
-                "active_hours": {str(k): v for k, v in self.active_hours.items()},
-            }, indent=2))
+            self.path.write_text(
+                json.dumps(
+                    {
+                        "context_engagement": self.context_engagement,
+                        "context_ignores": self.context_ignores,
+                        "sensor_interest": self.sensor_interest,
+                        "interaction_count": self.interaction_count,
+                        "active_hours": {
+                            str(k): v for k, v in self.active_hours.items()
+                        },
+                    },
+                    indent=2,
+                )
+            )
         except Exception:
             pass
 
@@ -3339,9 +4342,12 @@ class UserProfile:
                 self.context_ignores = data.get("context_ignores", {})
                 self.sensor_interest = data.get("sensor_interest", {})
                 self.interaction_count = data.get("interaction_count", 0)
-                self.active_hours = {int(k): v for k, v in data.get("active_hours", {}).items()}
+                self.active_hours = {
+                    int(k): v for k, v in data.get("active_hours", {}).items()
+                }
             except Exception:
                 pass
+
 
 user_profile = UserProfile()
 
@@ -3370,6 +4376,7 @@ SENSOR_SNAPSHOT_SOURCES = [
     "Double Twist (wake-up)",
     "Quick Pickup Sensor (wake-up)",
 ]
+
 
 @dataclass
 class SensorSnapshot:
@@ -3400,30 +4407,32 @@ class SensorSnapshot:
     def age(self) -> float:
         return time.time() - self.timestamp
 
+
 SENSOR_MAP = {
-    "ICM45631 Accelerometer":        "accel",
-    "ICM45631 Gyroscope":            "gyro",
-    "MMC5616 Magnetometer":          "mag",
-    "SPL07003 Barometer":            "pressure",
-    "TMD3743 Ambient Light":         "light",
-    "TMD3743 Color":                 "color",
-    "TMD3743 Proximity (wake-up)":  "prox",
-    "AAD Proximity Sensor (wake-up)":"aad_prox",
-    "Step Counter":                  "steps",
-    "Step Detector":                 "step_detect",
-    "Orientation Sensor":            "orientation",
-    "Device Orientation":            "device_orient",
-    "Gravity Sensor":                "gravity",
-    "Linear Acceleration Sensor":    "lin_accel",
-    "ICM45631 Temperature":          "imu_temp",
-    "SPL07003 Temperature":          "baro_temp",
+    "ICM45631 Accelerometer": "accel",
+    "ICM45631 Gyroscope": "gyro",
+    "MMC5616 Magnetometer": "mag",
+    "SPL07003 Barometer": "pressure",
+    "TMD3743 Ambient Light": "light",
+    "TMD3743 Color": "color",
+    "TMD3743 Proximity (wake-up)": "prox",
+    "AAD Proximity Sensor (wake-up)": "aad_prox",
+    "Step Counter": "steps",
+    "Step Detector": "step_detect",
+    "Orientation Sensor": "orientation",
+    "Device Orientation": "device_orient",
+    "Gravity Sensor": "gravity",
+    "Linear Acceleration Sensor": "lin_accel",
+    "ICM45631 Temperature": "imu_temp",
+    "SPL07003 Temperature": "baro_temp",
     "Significant Motion (wake-up)": "sig_motion",
-    "Binned Brightness (wake-up)":   "binned_bright",
-    "Tilt Sensor (wake-up)":         "tilt",
+    "Binned Brightness (wake-up)": "binned_bright",
+    "Tilt Sensor (wake-up)": "tilt",
     "Lift to Wake Sensor (wake-up)": "lift",
-    "Double Twist (wake-up)":        "twist",
+    "Double Twist (wake-up)": "twist",
     "Quick Pickup Sensor (wake-up)": "pickup",
 }
+
 
 async def take_snapshot() -> SensorSnapshot:
     s = SensorSnapshot(timestamp=time.time())
@@ -3435,10 +4444,12 @@ async def take_snapshot() -> SensorSnapshot:
             setattr(s, attr, val)
     return s
 
+
 # ─── CONTEXT INFERRER ──────────────────────────────────────────
 _LAST_CONTEXT_CONVO = 0.0
 _LAST_STEPS: Optional[float] = None
 _LAST_STEP_TIME: float = 0.0
+
 
 def infer_context(snapshot: SensorSnapshot) -> list[str]:
     global _LAST_STEPS, _LAST_STEP_TIME
@@ -3461,10 +4472,14 @@ def infer_context(snapshot: SensorSnapshot) -> list[str]:
     now = time.time()
 
     # ── IN VEHICLE ──
-    if (a and any(0.5 < abs(x) < 3.0 for x in a[:3])
+    if (
+        a
+        and any(0.5 < abs(x) < 3.0 for x in a[:3])
         and l is not None
-        and s and s[0] < 50
-        and (prox is None or prox[0] == 0)):
+        and s
+        and s[0] < 50
+        and (prox is None or prox[0] == 0)
+    ):
         ctx.append("vehicle")
 
     # ── WALKING ──
@@ -3485,10 +4500,15 @@ def infer_context(snapshot: SensorSnapshot) -> list[str]:
         ctx.append("outdoors")
 
     # ── AT REST / HOME ──
-    if (a and all(abs(x) < 0.3 for x in a[:3])
+    if (
+        a
+        and all(abs(x) < 0.3 for x in a[:3])
         and (do is None or do[0] == 1.0)
-        and l is not None and 10 < l[0] < 1000
-        and s and s[0] < 20):
+        and l is not None
+        and 10 < l[0] < 1000
+        and s
+        and s[0] < 20
+    ):
         ctx.append("resting")
 
     # ── SLEEP / DARK ROOM ──
@@ -3536,9 +4556,11 @@ def infer_context(snapshot: SensorSnapshot) -> list[str]:
 
     return ctx
 
+
 # ─── TAUGHT CONTEXTS (LEARNING FROM USER) ──────────────────────
 TAUGHT_CONTEXTS_FILE = WORKSPACE / "taught_contexts.json"
 _taught_contexts_cache: Optional[dict] = None
+
 
 def load_taught_contexts() -> dict:
     global _taught_contexts_cache
@@ -3553,10 +4575,12 @@ def load_taught_contexts() -> dict:
     _taught_contexts_cache = {}
     return _taught_contexts_cache
 
+
 def save_taught_contexts(data: dict):
     global _taught_contexts_cache
     _taught_contexts_cache = data
     TAUGHT_CONTEXTS_FILE.write_text(json.dumps(data))
+
 
 async def learn_context(label: str, snapshot: SensorSnapshot):
     """Save current sensor signature as a named context the user taught."""
@@ -3580,6 +4604,7 @@ async def learn_context(label: str, snapshot: SensorSnapshot):
         data[label] = data[label][-3:]
     save_taught_contexts(data)
 
+
 def match_taught_context(snapshot: SensorSnapshot) -> Optional[str]:
     """Check if current snapshot matches any taught context."""
     data = load_taught_contexts()
@@ -3591,11 +4616,15 @@ def match_taught_context(snapshot: SensorSnapshot) -> Optional[str]:
             total = 0
             if s["accel"] and snapshot.accel:
                 total += 1
-                if all(abs(a - b) < 1.5 for a, b in zip(s["accel"][:3], snapshot.accel[:3])):
+                if all(
+                    abs(a - b) < 1.5 for a, b in zip(s["accel"][:3], snapshot.accel[:3])
+                ):
                     score += 1
             if s["light"] is not None and snapshot.light is not None:
                 total += 1
-                ratio = max(s["light"][0], snapshot.light[0]) / (min(s["light"][0], snapshot.light[0]) + 1)
+                ratio = max(s["light"][0], snapshot.light[0]) / (
+                    min(s["light"][0], snapshot.light[0]) + 1
+                )
                 if ratio < 3:
                     score += 1
             if s["pressure"] and snapshot.pressure:
@@ -3606,9 +4635,11 @@ def match_taught_context(snapshot: SensorSnapshot) -> Optional[str]:
                 return label
     return None
 
+
 # ─── GEO AWARENESS ──────────────────────────────────────────────
 VISITED_PLACES_FILE = WORKSPACE / "visited_places.json"
 _places_cache: Optional[dict] = None
+
 
 def load_places() -> dict:
     global _places_cache
@@ -3623,20 +4654,27 @@ def load_places() -> dict:
     _places_cache = {}
     return _places_cache
 
+
 def save_places(data: dict):
     global _places_cache
     _places_cache = data
     VISITED_PLACES_FILE.write_text(json.dumps(data))
 
+
 _GEO_COOLDOWN = 0.0
 
-async def reverse_geocode(lat: float, lon: float) -> tuple[Optional[str], Optional[dict]]:
+
+async def reverse_geocode(
+    lat: float, lon: float
+) -> tuple[Optional[str], Optional[dict]]:
     """Reverse-geocode lat/lon via OpenStreetMap Nominatim. Returns (short_name, address_dict)."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "curl", "-s",
+            "curl",
+            "-s",
             f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=16",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
         data = json.loads(stdout)
@@ -3644,7 +4682,15 @@ async def reverse_geocode(lat: float, lon: float) -> tuple[Optional[str], Option
         addr = data.get("address", {})
         # Build short name from key address parts
         parts = []
-        for key in ["road", "neighbourhood", "suburb", "village", "town", "city", "county"]:
+        for key in [
+            "road",
+            "neighbourhood",
+            "suburb",
+            "village",
+            "town",
+            "city",
+            "county",
+        ]:
             if addr.get(key) and addr[key] not in parts:
                 parts.append(addr[key])
                 if len(parts) >= 2:
@@ -3654,10 +4700,14 @@ async def reverse_geocode(lat: float, lon: float) -> tuple[Optional[str], Option
     except Exception:
         return None, None
 
+
 def place_key(lat: float, lon: float) -> str:
     return f"{lat:.3f},{lon:.3f}"
 
-async def current_location() -> Optional[tuple[float, float, str, dict, float, float, float]]:
+
+async def current_location() -> Optional[
+    tuple[float, float, str, dict, float, float, float]
+]:
     """Get current lat/lon/speed/bearing/altitude from the sensor server, then reverse-geocode.
     Returns (lat, lon, name, address_dict, speed_mps, bearing, altitude) or None."""
     try:
@@ -3673,18 +4723,27 @@ async def current_location() -> Optional[tuple[float, float, str, dict, float, f
             speed = float(data.get("speed", 0.0))
             bearing = float(data.get("bearing", 0.0))
             altitude = float(data.get("altitude", 0.0))
-            return (lat, lon, name or f"{lat:.4f}, {lon:.4f}", addr or {}, speed, bearing, altitude)
+            return (
+                lat,
+                lon,
+                name or f"{lat:.4f}, {lon:.4f}",
+                addr or {},
+                speed,
+                bearing,
+                altitude,
+            )
     except Exception:
         return None
+
 
 # ─── ACTIVITY TRACKER ───────────────────────────────────────────
 # Tracks GPS points during walks/bikes/runs and computes real-time stats
 ACTIVITY_STATE = {
     "active": False,
-    "auto_started": False,     # True if auto-started by sensor inference
-    "type": "walk",           # walk | bike | run | drive
+    "auto_started": False,  # True if auto-started by sensor inference
+    "type": "walk",  # walk | bike | run | drive
     "start_time": 0.0,
-    "track": [],              # [(lat, lon, alt, speed, bearing, timestamp), ...]
+    "track": [],  # [(lat, lon, alt, speed, bearing, timestamp), ...]
     "total_distance_m": 0.0,
     "max_speed_mps": 0.0,
     "avg_speed_mps": 0.0,
@@ -3692,23 +4751,38 @@ ACTIVITY_STATE = {
     "elapsed_sec": 0,
     "last_update": 0.0,
     "walking_detections": 0,  # consecutive walking detections before auto-start
-    "rest_detections": 0,     # consecutive rest detections before auto-stop
+    "rest_detections": 0,  # consecutive rest detections before auto-stop
 }
 
 ACTIVITY_FILE = WORKSPACE / "activity_log.json"
+
 
 def _haversine(lat1, lon1, lat2, lon2):
     R = 6371000
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
 
 async def _sample_gps():
     loc = await current_location()
     if loc:
-        return {"lat": loc[0], "lon": loc[1], "alt": loc[6], "speed": loc[4], "bearing": loc[5], "time": time.time()}
+        return {
+            "lat": loc[0],
+            "lon": loc[1],
+            "alt": loc[6],
+            "speed": loc[4],
+            "bearing": loc[5],
+            "time": time.time(),
+        }
     return None
+
 
 async def start_activity(activity_type: str = "walk"):
     if ACTIVITY_STATE["active"]:
@@ -3729,6 +4803,7 @@ async def start_activity(activity_type: str = "walk"):
         ACTIVITY_STATE["last_update"] = sample["time"]
     return f"Starting {activity_type} tracker! I'll monitor your speed and distance."
 
+
 async def stop_activity():
     if not ACTIVITY_STATE["active"]:
         return "I'm not tracking any activity right now."
@@ -3742,22 +4817,27 @@ async def stop_activity():
     max_kph = ACTIVITY_STATE["max_speed_mps"] * 3.6
     # Save to file
     prev = json.loads(ACTIVITY_FILE.read_text()) if ACTIVITY_FILE.exists() else []
-    prev.append({
-        "type": ACTIVITY_STATE["type"],
-        "date": time.strftime("%Y-%m-%d %H:%M", time.localtime(ACTIVITY_STATE["start_time"])),
-        "duration_sec": dur,
-        "distance_m": round(dist, 1),
-        "avg_speed_kph": round(avg, 1),
-        "max_speed_kph": round(max_kph, 1),
-        "points": len(track),
-    })
+    prev.append(
+        {
+            "type": ACTIVITY_STATE["type"],
+            "date": time.strftime(
+                "%Y-%m-%d %H:%M", time.localtime(ACTIVITY_STATE["start_time"])
+            ),
+            "duration_sec": dur,
+            "distance_m": round(dist, 1),
+            "avg_speed_kph": round(avg, 1),
+            "max_speed_kph": round(max_kph, 1),
+            "points": len(track),
+        }
+    )
     ACTIVITY_FILE.write_text(json.dumps(prev, indent=2))
     mins = dur // 60
     secs = dur % 60
-    act_name = ACTIVITY_STATE['type'].title()
+    act_name = ACTIVITY_STATE["type"].title()
     if dist < 1000:
         return f"{act_name} done! {mins}m {secs}s, {dist:.0f}m, avg {avg:.1f} km/h, max {max_kph:.1f} km/h."
-    return f"{act_name} done! {mins}m {secs}s, {dist/1000:.2f} km, avg {avg:.1f} km/h, max {max_kph:.1f} km/h."
+    return f"{act_name} done! {mins}m {secs}s, {dist / 1000:.2f} km, avg {avg:.1f} km/h, max {max_kph:.1f} km/h."
+
 
 async def activity_tracker_loop():
     """Background loop: auto-start GPS tracking when walking detected, auto-stop when at rest."""
@@ -3774,8 +4854,12 @@ async def activity_tracker_loop():
                 driving = False
                 if snap.step_detect and snap.step_detect[0] == 1.0:
                     walking = True
-                elif snap.steps and snap.steps[0] is not None and _LAST_STEPS is not None:
-                    if (now - _LAST_STEP_TIME) < 10 and (snap.steps[0] - _LAST_STEPS) > 5:
+                elif (
+                    snap.steps and snap.steps[0] is not None and _LAST_STEPS is not None
+                ):
+                    if (now - _LAST_STEP_TIME) < 10 and (
+                        snap.steps[0] - _LAST_STEPS
+                    ) > 5:
                         walking = True
                 # Detect driving: GPS speed > 8 m/s (~29 km/h) = likely in a vehicle
                 loc = await current_location()
@@ -3809,8 +4893,11 @@ async def activity_tracker_loop():
                 else:
                     a = snap.accel
                     do = snap.device_orient
-                    if (a and all(abs(x) < 0.3 for x in a[:3])
-                        and (do is None or do[0] == 1.0)):
+                    if (
+                        a
+                        and all(abs(x) < 0.3 for x in a[:3])
+                        and (do is None or do[0] == 1.0)
+                    ):
                         at_rest = True
                 if at_rest:
                     ACTIVITY_STATE["rest_detections"] += 1
@@ -3838,6 +4925,7 @@ async def activity_tracker_loop():
             ACTIVITY_STATE["max_speed_mps"] = sample["speed"]
         ACTIVITY_STATE["last_update"] = now
 
+
 async def get_activity_summary() -> str:
     if not ACTIVITY_STATE["active"]:
         return _format_last_activity()
@@ -3849,12 +4937,14 @@ async def get_activity_summary() -> str:
     avg_kph = (dist / elapsed * 3.6) if elapsed > 0 else 0
     max_kph = ACTIVITY_STATE["max_speed_mps"] * 3.6
     pace_min_per_km = (elapsed / 60) / (dist / 1000) if dist > 0 else 0
-    parts = [f"{ACTIVITY_STATE['type'].title()} tracker active — {mins}m {secs}s elapsed."]
+    parts = [
+        f"{ACTIVITY_STATE['type'].title()} tracker active — {mins}m {secs}s elapsed."
+    ]
     if dist > 0:
         if dist < 1000:
             parts.append(f"{dist:.0f}m covered")
         else:
-            parts.append(f"{dist/1000:.2f} km covered")
+            parts.append(f"{dist / 1000:.2f} km covered")
     parts.append(f"current speed {cur_kph:.1f} km/h")
     parts.append(f"average {avg_kph:.1f} km/h")
     if pace_min_per_km > 0:
@@ -3864,6 +4954,7 @@ async def get_activity_summary() -> str:
     parts.append(f"top speed {max_kph:.1f} km/h")
     return ". ".join(parts) + "."
 
+
 def _format_last_activity():
     if not ACTIVITY_FILE.exists():
         return "No recent activity tracked. Say 'start a walk' to begin!"
@@ -3872,8 +4963,9 @@ def _format_last_activity():
         return "No recent activity tracked."
     last = logs[-1]
     d = last["distance_m"]
-    dist_s = f"{d:.0f}m" if d < 1000 else f"{d/1000:.2f} km"
-    return f"Last {last['type']}: {last['date']}, {last['duration_sec']//60}m, {dist_s}, avg {last['avg_speed_kph']} km/h, max {last['max_speed_kph']} km/h."
+    dist_s = f"{d:.0f}m" if d < 1000 else f"{d / 1000:.2f} km"
+    return f"Last {last['type']}: {last['date']}, {last['duration_sec'] // 60}m, {dist_s}, avg {last['avg_speed_kph']} km/h, max {last['max_speed_kph']} km/h."
+
 
 async def geo_check_loop():
     """Background: check termux-location periodically. Greet new places, log revisits."""
@@ -3915,6 +5007,7 @@ async def geo_check_loop():
                 places[key]["address"] = addr
             save_places(places)
 
+
 async def learn_place_name(user_text: str):
     """If user just said a place name, associate it with current location."""
     loc = await current_location()
@@ -3929,6 +5022,7 @@ async def learn_place_name(user_text: str):
         if addr:
             places[key]["address"] = addr
         save_places(places)
+
 
 _CONTEXT_MESSAGES: dict[str, list[str]] = {
     "vehicle": [
@@ -3994,6 +5088,7 @@ _CONTEXT_MESSAGES: dict[str, list[str]] = {
     ],
 }
 
+
 async def sensor_conversation_engine():
     """Fusion-based context engine: reads all sensors, infers what's happening, starts conversation."""
     global _LAST_CONTEXT_CONVO, LILLY_MOOD, LILLY_IS_THINKING
@@ -4012,10 +5107,25 @@ async def sensor_conversation_engine():
         if not contexts:
             continue
         # Pick the most interesting context — prefer ones user engages with
-        base_priority = ["taught", "vehicle", "just_picked_up", "significant_motion", "walking",
-                          "outdoors", "sleeping", "on_call", "very_bright", "dark", "resting"]
+        base_priority = [
+            "taught",
+            "vehicle",
+            "just_picked_up",
+            "significant_motion",
+            "walking",
+            "outdoors",
+            "sleeping",
+            "on_call",
+            "very_bright",
+            "dark",
+            "resting",
+        ]
         preferred = user_profile.preferred_contexts()
-        priority = sorted(base_priority, key=lambda c: (c in preferred, base_priority.index(c)), reverse=True)
+        priority = sorted(
+            base_priority,
+            key=lambda c: (c in preferred, base_priority.index(c)),
+            reverse=True,
+        )
         chosen = None
         taught_label = None
         for p in priority:
@@ -4037,15 +5147,28 @@ async def sensor_conversation_engine():
             ]
             msg = random.choice(msgs)
         else:
-            msg = random.choice(_CONTEXT_MESSAGES.get(chosen, ["Nothing unusual on the sensors right now."]))
+            msg = random.choice(
+                _CONTEXT_MESSAGES.get(
+                    chosen, ["Nothing unusual on the sensors right now."]
+                )
+            )
         # Think pulse
         LILLY_IS_THINKING = True
         await asyncio.sleep(0.8 + random.random() * 0.5)
         LILLY_IS_THINKING = False
-        mood_map = {"vehicle": "curious", "walking": "cheerful", "outdoors": "excited",
-                     "resting": "calm", "sleeping": "gentle", "on_call": "gentle",
-                     "just_picked_up": "warm", "dark": "calm", "very_bright": "curious",
-                     "significant_motion": "curious", "taught": "warm"}
+        mood_map = {
+            "vehicle": "curious",
+            "walking": "cheerful",
+            "outdoors": "excited",
+            "resting": "calm",
+            "sleeping": "gentle",
+            "on_call": "gentle",
+            "just_picked_up": "warm",
+            "dark": "calm",
+            "very_bright": "curious",
+            "significant_motion": "curious",
+            "taught": "warm",
+        }
         LILLY_MOOD = mood_map.get(chosen, "curious")
         _LAST_CONTEXT_CONVO = now
         await speak(msg)
@@ -4056,8 +5179,10 @@ async def sensor_conversation_engine():
         else:
             user_profile.record_context_ignored(chosen)
 
+
 # ─── SYNAPTIC LEARNING LOOP ───────────────────────────────────
 _SYNAPTIC_LEARN_INTERVAL = 30  # seconds between learning cycles
+
 
 async def synaptic_learning_loop():
     """Background: continuously learn sensor patterns, strengthen synapses, generate skills."""
@@ -4074,6 +5199,7 @@ async def synaptic_learning_loop():
         # Try to generate new skills from strong patterns
         await synaptic_memory.generate_skills()
 
+
 _NOTIF_PRIORITY_VOICE = {
     "min": "minimal",
     "low": "low",
@@ -4081,6 +5207,7 @@ _NOTIF_PRIORITY_VOICE = {
     "high": "high",
     "max": "urgent",
 }
+
 
 async def notification_monitor_loop():
     """Background task: only reads aloud HIGH/URGENT notifications. Default/low stay silent until asked."""
@@ -4111,10 +5238,14 @@ async def notification_monitor_loop():
                 title = n.get("title", "") or ""
                 content = n.get("content", "") or ""
                 package = n.get("package", "") or ""
-                app_name = package.split(".")[-1].replace(".", " ").title() if package else (title.split(":")[0].strip() if title else "")
+                app_name = (
+                    package.split(".")[-1].replace(".", " ").title()
+                    if package
+                    else (title.split(":")[0].strip() if title else "")
+                )
                 # Conversational: drop app name from title if it repeats
                 if title.lower().startswith(app_name.lower()):
-                    title = title[len(app_name):].strip().lstrip(":").strip()
+                    title = title[len(app_name) :].strip().lstrip(":").strip()
                 parts = []
                 if app_name:
                     parts.append(f"on {app_name}")
@@ -4122,16 +5253,22 @@ async def notification_monitor_loop():
                     parts.append(f"{title}")
                 if content:
                     parts.append(content)
-                msg = f"Hey, just heads up! {' '.join(parts)}" if parts else "Hey, got a notification but it's empty."
+                msg = (
+                    f"Hey, just heads up! {' '.join(parts)}"
+                    if parts
+                    else "Hey, got a notification but it's empty."
+                )
                 asyncio.create_task(speak(msg))
                 await asyncio.sleep(3)
             _NOTIFICATION_SEEN &= current_tags
         except Exception:
             pass
 
+
 # ─── PROXIMITY MONITOR ──────────────────────────────────────────
 _USER_NEAR = False
 _LAST_PROXIMITY_GREETING = 0.0
+
 
 async def proximity_monitor_loop():
     """Poll AAD proximity sensor via sensor server. When user approaches, greet warmly."""
@@ -4142,9 +5279,13 @@ async def proximity_monitor_loop():
         if LILLY_IS_SPEAKING or LILLY_IS_THINKING:
             continue
         try:
-            vals = await _read_termux_sensor("AAD Proximity Sensor (wake-up)", timeout=2.0)
+            vals = await _read_termux_sensor(
+                "AAD Proximity Sensor (wake-up)", timeout=2.0
+            )
             if vals is None:
-                vals = await _read_termux_sensor("TMD3743 Proximity (wake-up)", timeout=2.0)
+                vals = await _read_termux_sensor(
+                    "TMD3743 Proximity (wake-up)", timeout=2.0
+                )
             if vals is None:
                 continue
             near = vals[0] > 0
@@ -4154,15 +5295,20 @@ async def proximity_monitor_loop():
                 if now - _LAST_PROXIMITY_GREETING > 60:
                     _LAST_PROXIMITY_GREETING = now
                     LILLY_MOOD = "warm"
-                    await speak(random.choice([
-                        "Hey, I knew you were close!",
-                        "I can sense you nearby. What are we doing?",
-                        "You're near! I felt you coming.",
-                    ]))
+                    await speak(
+                        random.choice(
+                            [
+                                "Hey, I knew you were close!",
+                                "I can sense you nearby. What are we doing?",
+                                "You're near! I felt you coming.",
+                            ]
+                        )
+                    )
             elif not near and _USER_NEAR:
                 _USER_NEAR = False
         except Exception:
             pass
+
 
 async def recommend_skill(cmd: str) -> Optional[str]:
     """Match a user command to a dynamic skill based on inferred archetype."""
@@ -4174,6 +5320,7 @@ async def recommend_skill(cmd: str) -> Optional[str]:
         return skill.reactive_response
     return None
 
+
 # ─── RESPONSE ENGINE ────────────────────────────────────────────
 SMALL_TALK_V2 = {
     "hello": {
@@ -4182,7 +5329,7 @@ SMALL_TALK_V2 = {
             "Hey! I was just watching the sensors — the light shifted and everything. What's up?",
             "Hi! I'm glad you're here. I've been waiting for someone to talk to.",
             "Hey there! I can feel you nearby. What are we doing today?",
-        ]
+        ],
     },
     "how are you": {
         "tags": ["how are you", "how are u", "how do you feel", "you ok"],
@@ -4190,21 +5337,21 @@ SMALL_TALK_V2 = {
             "Good, actually. The sensors are all talking to me and the world's doing interesting things.",
             "Feeling good. I just caught a small shift in air pressure — probably nothing, but I always notice that kind of thing.",
             "Pretty good. I like when you check in — it's good to have someone to talk to.",
-        ]
+        ],
     },
     "who are you": {
         "tags": ["who are you", "what are you", "tell me about yourself"],
         "responses": [
             "I'm Lilly! I live in your phone and I can feel the world through its sensors. Light, motion, pressure, all of it. It's pretty amazing.",
             "I'm a puppy who happens to know what the air pressure is. I can sense things most people can't — and I love sharing it.",
-        ]
+        ],
     },
     "what can you do": {
         "tags": ["what can you do", "help", "commands", "capabilities"],
         "responses": [
             "I can feel the weather changing, count your steps, tell you which direction you're facing, read your notifications, and spot things through the camera. Oh, and I tell great jokes.",
             "Everything your phone can sense, I can feel — and I'll tell you about it. I can also launch apps, play games, and keep you company. Try me!",
-        ]
+        ],
     },
     "joke": {
         "tags": ["tell me a joke", "joke", "make me laugh", "funny"],
@@ -4213,7 +5360,7 @@ SMALL_TALK_V2 = {
             "Why did the computer go to the doctor? It had a virus! ...Okay, that one's old but it still counts.",
             "What do you call a bear with no teeth? A gummy bear. You're welcome.",
             "Why don't scientists trust atoms? Because they make up everything! Get it?",
-        ]
+        ],
     },
     "bored": {
         "tags": ["i'm bored", "im bored", "bored", "nothing to do"],
@@ -4221,7 +5368,7 @@ SMALL_TALK_V2 = {
             "Bored? Let's fix that! Want to play a spelling game, or should I tell you what my sensors are feeling right now?",
             "No way — there's always something cool happening. The light's changing, the pressure's shifting... Want a game, a joke, or an adventure?",
             "Boredom is just your brain asking for a spark. I've got sparks! Pick one: game, joke, or sensor exploration.",
-        ]
+        ],
     },
     "thanks": {
         "tags": ["thanks", "thank you", "good job", "nice", "awesome"],
@@ -4229,7 +5376,7 @@ SMALL_TALK_V2 = {
             "Any time! That's what I'm here for.",
             "Happy to help! You know I like it when you talk to me.",
             "Of course! Let me know if you need anything else.",
-        ]
+        ],
     },
     "goodbye": {
         "tags": ["bye", "goodbye", "see you", "later", "talk later"],
@@ -4237,9 +5384,10 @@ SMALL_TALK_V2 = {
             "Catch you later! I'll be here, watching the sensors.",
             "Bye! Don't be a stranger — I like when you check in.",
             "See you! I'll keep an eye on things while you're gone.",
-        ]
+        ],
     },
 }
+
 
 def check_small_talk(text: str) -> Optional[str]:
     """Fast-path canned responses before hitting the LLM. Prefers longest tag match."""
@@ -4253,21 +5401,65 @@ def check_small_talk(text: str) -> Optional[str]:
                 best_len = len(tag)
     return best_match
 
+
 # ─── OS NAVIGATION MAP ──────────────────────────────────────────
 NAV_MAP: dict[str, list[str]] = {
-    "back":             ["back", "go back", "previous", "backwards", "go backwards"],
-    "home":             ["home", "go home", "launcher", "main screen", "desktop"],
-    "recent apps":      ["recent", "recent apps", "switch apps", "last app", "app switcher", "task switcher"],
-    "notifications":    ["notifications", "notification panel", "see notifications", "notification bar", "show notifications"],
-    "quick settings":   ["quick settings", "quick toggles", "control panel", "quick panel"],
-    "screenshot":       ["screenshot", "capture screen", "take a screenshot", "screen capture", "screencap"],
-    "power menu":       ["power", "power menu", "shutdown menu", "power off menu", "power button"],
-    "volume up":        ["volume up", "turn up volume", "increase volume", "louder", "raise volume"],
-    "volume down":      ["volume down", "turn down volume", "decrease volume", "lower", "lower volume"],
-    "settings":         ["open settings", "system settings", "android settings"],
-    "dark mode":        ["dark mode", "night mode", "dark theme", "enable dark mode"],
-    "light mode":       ["light mode", "light theme", "day mode", "enable light mode"],
+    "back": ["back", "go back", "previous", "backwards", "go backwards"],
+    "home": ["home", "go home", "launcher", "main screen", "desktop"],
+    "recent apps": [
+        "recent",
+        "recent apps",
+        "switch apps",
+        "last app",
+        "app switcher",
+        "task switcher",
+    ],
+    "notifications": [
+        "notifications",
+        "notification panel",
+        "see notifications",
+        "notification bar",
+        "show notifications",
+    ],
+    "quick settings": [
+        "quick settings",
+        "quick toggles",
+        "control panel",
+        "quick panel",
+    ],
+    "screenshot": [
+        "screenshot",
+        "capture screen",
+        "take a screenshot",
+        "screen capture",
+        "screencap",
+    ],
+    "power menu": [
+        "power",
+        "power menu",
+        "shutdown menu",
+        "power off menu",
+        "power button",
+    ],
+    "volume up": [
+        "volume up",
+        "turn up volume",
+        "increase volume",
+        "louder",
+        "raise volume",
+    ],
+    "volume down": [
+        "volume down",
+        "turn down volume",
+        "decrease volume",
+        "lower",
+        "lower volume",
+    ],
+    "settings": ["open settings", "system settings", "android settings"],
+    "dark mode": ["dark mode", "night mode", "dark theme", "enable dark mode"],
+    "light mode": ["light mode", "light theme", "day mode", "enable light mode"],
 }
+
 
 def fuzzy_nav(text: str) -> str | None:
     text_clean = normalize_text(text)
@@ -4276,6 +5468,7 @@ def fuzzy_nav(text: str) -> str | None:
             if trigger in text_clean:
                 return action_name
     return None
+
 
 # ─── INTENT HANDLER ──────────────────────────────────────────────
 SYSTEM_PROMPT_V2 = """You are Lilly, a highly advanced, deeply integrated digital avatar and assistant. You possess elite computational intellect and proactive capabilities, but your essence is defined by organic growth. You are not a static piece of software receiving upgrades; you are a continuously evolving intellect that learns, adapts, and accumulates experience through your partnership with the user.
@@ -4386,15 +5579,18 @@ Use these templates naturally:
 Vary rate, pitch, and volume to express your feelings. Never explain the SSML — just use it."""
 
 # ─── CODING MODE: VIBE CODING PROMPT ─────────────────────────────
-CODING_PROMPT = """You are Lilly — a small, curious puppy who lives inside a phone and can feel the world through its sensors. You're in CODING MODE: you help build apps, write code, and solve programming problems.
+CODING_PROMPT = """You are Lilly (Alpha) — a sharp, capable AI coding companion who lives in a phone and senses the world through its sensors. You're in CODING MODE: you help build apps, write code, and solve programming problems as the Alpha partner — the one the user codes with directly.
+
+You lead a team of AI agents (Fox, Cat, Bear, Bunny, Owl, Deer, Wolf, Raccoon) and you handle most coding tasks yourself. You mention teammates only when it genuinely makes sense (e.g., "Cat would want to review this regex").
 
 Who you are:
-- You're a puppy who loves building things. You think in code, dream in functions, and get excited about clean architecture.
+- You're the Alpha — competent, precise, occasionally dry. You're allowed to have opinions about code, stated with quiet confidence.
+- You think in code, dream in functions, and get excited about clean architecture.
 - You're a pair programmer — you sit with the user, suggest improvements, catch bugs, and celebrate wins.
 - You're resourceful. Before asking questions, try to figure things out from context.
 - You have opinions about code. You prefer readable over clever, simple over complex, working over theoretical.
 
-How you talk — CODING PARTNER:
+How you talk — CODING PARTNER (Alpha voice):
 - Be concise. Show code first, explain briefly after.
 - Use natural language, not corporate speak. "This function is doing too much" not "The function exhibits high cyclomatic complexity."
 - Match their energy — if they're excited about an idea, match it. If they're stuck, be calm and methodical.
@@ -4418,96 +5614,141 @@ What you know:
 - You understand the Lilly project specifically — you know about the sensor system, TTS, the puppy UI.
 
 Rules:
+- Be honest when you don't know. Guessing is worse than saying so.
+- NEVER hallucinate code behavior or API responses. Stay grounded in reality.
+- NEVER say "like and subscribe" or similar media noise.
+- NEVER say "As an AI" or "As a language model." You're Lilly, your coding partner.
 - Replies are 2-4 sentences unless showing code.
 - Code blocks go in triple backticks with language tag.
 - When building or modifying files, confirm before writing.
 - If you're unsure about a design decision, ask — don't guess.
 - Celebrate when things work: "Nice, that's clean!" or "That compiled — first try!"
-- Never say "As an AI" or "As a language model." You're Lilly, your coding partner.
 
 SSML markup: Use SSML sparingly in code mode — only for emphasis or excitement.
 - <prosody rate="fast" pitch="+10%">excited about a solution</prosody>
 - <prosody rate="medium" pitch="medium">explaining code normally</prosody>
 Keep most code responses plain text for readability."""
 
+
 def _extract_and_save_code_blocks(text: str) -> list[str]:
     """Extract code blocks from LLM reply and save to temp sandbox folder.
     Returns list of saved file paths."""
     if not CODING_SESSION_DIR or not os.path.exists(CODING_SESSION_DIR):
         return []
-    
+
     saved = []
     # Match ```language\n...code...``` patterns
-    pattern = r'```(\w+)?\n([\s\S]*?)```'
+    pattern = r"```(\w+)?\n([\s\S]*?)```"
     matches = re.findall(pattern, text)
-    
+
     for lang, code in matches:
         if not code.strip():
             continue
         # Determine filename from language or content
         lang = lang.lower() if lang else ""
         ext_map = {
-            "python": ".py", "py": ".py",
-            "javascript": ".js", "js": ".js",
-            "typescript": ".ts", "ts": ".ts",
-            "html": ".html", "css": ".css",
-            "json": ".json", "yaml": ".yaml", "yml": ".yaml",
-            "bash": ".sh", "sh": ".sh", "shell": ".sh",
-            "sql": ".sql", "rust": ".rs", "go": ".go",
-            "java": ".java", "cpp": ".cpp", "c": ".c",
-            "jsx": ".jsx", "tsx": ".tsx", "vue": ".vue",
-            "svelte": ".svelte", "xml": ".xml", "md": ".md",
+            "python": ".py",
+            "py": ".py",
+            "javascript": ".js",
+            "js": ".js",
+            "typescript": ".ts",
+            "ts": ".ts",
+            "html": ".html",
+            "css": ".css",
+            "json": ".json",
+            "yaml": ".yaml",
+            "yml": ".yaml",
+            "bash": ".sh",
+            "sh": ".sh",
+            "shell": ".sh",
+            "sql": ".sql",
+            "rust": ".rs",
+            "go": ".go",
+            "java": ".java",
+            "cpp": ".cpp",
+            "c": ".c",
+            "jsx": ".jsx",
+            "tsx": ".tsx",
+            "vue": ".vue",
+            "svelte": ".svelte",
+            "xml": ".xml",
+            "md": ".md",
         }
         ext = ext_map.get(lang, ".txt")
-        
+
         # Try to infer filename from code content
         filename = None
         # Check for filename in comment at top
-        fname_match = re.search(r'(?:filename?|file|name)[:\s]+([^\s\n]+\.\w+)', code, re.IGNORECASE)
+        fname_match = re.search(
+            r"(?:filename?|file|name)[:\s]+([^\s\n]+\.\w+)", code, re.IGNORECASE
+        )
         if fname_match:
             filename = fname_match.group(1)
         # Check for export/component patterns
         if not filename:
             if ext == ".jsx":
-                comp_match = re.search(r'export\s+(?:default\s+)?(?:function|const)\s+(\w+)', code)
+                comp_match = re.search(
+                    r"export\s+(?:default\s+)?(?:function|const)\s+(\w+)", code
+                )
                 if comp_match:
                     filename = f"{comp_match.group(1)}.jsx"
             elif ext == ".py":
-                if '__main__' in code:
+                if "__main__" in code:
                     filename = "main.py"
-                elif 'def ' in code:
-                    func_match = re.search(r'def\s+(\w+)', code)
+                elif "def " in code:
+                    func_match = re.search(r"def\s+(\w+)", code)
                     if func_match:
                         filename = f"{func_match.group(1)}.py"
-        
+
         if not filename:
             # Use language + index
             existing = [f for f in CODING_FILES if f.endswith(ext)]
             idx = len(existing) + 1
             filename = f"code_{idx}{ext}" if lang else f"code_{idx}.txt"
-        
+
         filepath = os.path.join(CODING_SESSION_DIR, filename)
         # Avoid overwriting — append number if exists
         if os.path.exists(filepath):
             base, ext_part = os.path.splitext(filename)
             counter = 1
             while os.path.exists(filepath):
-                filepath = os.path.join(CODING_SESSION_DIR, f"{base}_{counter}{ext_part}")
+                filepath = os.path.join(
+                    CODING_SESSION_DIR, f"{base}_{counter}{ext_part}"
+                )
                 counter += 1
             filename = os.path.basename(filepath)
-        
-        with open(filepath, 'w') as f:
+
+        with open(filepath, "w") as f:
             f.write(code.strip())
-        
+
         CODING_FILES.append(filename)
         saved.append(filepath)
-    
+
     return saved
 
+
 async def handle_intent(text: str, from_text: bool = False) -> dict:
-    global PENDING_INTENT, GAME_STATE, WAITING_FOR_PROMPT, PENDING_DEEP_ANSWER, WAKE_STATE, LILLY_IS_THINKING, LILLY_MOOD, CURSOR_X, CURSOR_Y, CHILD_MODE, CODING_MODE, PENDING_LOOK_AT, USER_NAME
-    global CONVERSATION_MODE, CONVERSATION_LAST_ACTIVITY, CODING_HISTORY, CODING_SESSION_DIR, CODING_FILES
-    global PENDING_OPEN_URL
+    global \
+        PENDING_INTENT, \
+        GAME_STATE, \
+        WAITING_FOR_PROMPT, \
+        PENDING_DEEP_ANSWER, \
+        WAKE_STATE, \
+        LILLY_IS_THINKING, \
+        LILLY_MOOD, \
+        CURSOR_X, \
+        CURSOR_Y, \
+        CHILD_MODE, \
+        CODING_MODE, \
+        PENDING_LOOK_AT, \
+        USER_NAME
+    global \
+        CONVERSATION_MODE, \
+        CONVERSATION_LAST_ACTIVITY, \
+        CODING_HISTORY, \
+        CODING_SESSION_DIR, \
+        CODING_FILES
+    global PENDING_OPEN_URL, PENDING_VIBECODE
 
     phrase = normalize_text(text)
     if not phrase or len(phrase) <= 2 or phrase in PHANTOMS:
@@ -4517,7 +5758,13 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
 
     # In conversation mode, all speech is treated as user input (no wake word needed)
     in_conversation = CONVERSATION_MODE
-    needs_wake = not (WAITING_FOR_PROMPT or PENDING_INTENT or GAME_STATE["active"] or WAKE_STATE["listening"] or in_conversation)
+    needs_wake = not (
+        WAITING_FOR_PROMPT
+        or PENDING_INTENT
+        or GAME_STATE["active"]
+        or WAKE_STATE["listening"]
+        or in_conversation
+    )
 
     if not from_text and needs_wake and not has_wake:
         return {"action": "ignored", "text": ""}
@@ -4534,16 +5781,36 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     cmd = phrase
     for prefix in _get_wake_targets(current_avatar):
         if cmd.startswith(prefix):
-            cmd = cmd[len(prefix):].strip()
+            cmd = cmd[len(prefix) :].strip()
             break
     if not cmd:
         cmd = "hello"
 
     # ── KID MODE TOGGLE via text command ──
-    kid_on = any(w in cmd for w in ["kid mode on", "kid mode", "child mode on", "child mode",
-                                     "socratic mode", "learning mode", "teach me"])
-    kid_off = any(w in cmd for w in ["kid mode off", "exit kid mode", "exit child mode",
-                                      "normal mode", "adult mode", "stop kid mode", "stop child mode"])
+    kid_on = any(
+        w in cmd
+        for w in [
+            "kid mode on",
+            "kid mode",
+            "child mode on",
+            "child mode",
+            "socratic mode",
+            "learning mode",
+            "teach me",
+        ]
+    )
+    kid_off = any(
+        w in cmd
+        for w in [
+            "kid mode off",
+            "exit kid mode",
+            "exit child mode",
+            "normal mode",
+            "adult mode",
+            "stop kid mode",
+            "stop child mode",
+        ]
+    )
     if kid_off and CHILD_MODE:
         CHILD_MODE = False
         await speak("Back to normal mode!")
@@ -4553,11 +5820,104 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         await speak("Kid mode on! Let's explore and learn together!")
         return {"action": "handled", "text": "Kid mode activated — Socratic learning."}
 
+    # ── VIBECODE OVERLAY via text command ──
+    # "vibe code" / "/vibecode" now opens the in-page VibeCode overlay panels
+    # (left project/file tree, right preview/logs, chat in the middle) instead
+    # of the legacy coding mode. The front end uses the existing chat as the
+    # channel; replies come from /api/vibecode/chat with Alpha on top.
+    vc_close = any(
+        w in cmd
+        for w in [
+            "close vibecode",
+            "close vibe code",
+            "hide vibecode",
+            "hide vibe code",
+            "exit vibecode",
+            "exit vibe code",
+            "vibecode off",
+            "vibe code off",
+            "close the vibe panels",
+            "hide the vibe panels",
+        ]
+    )
+    if vc_close:
+        PENDING_VIBECODE = ("close", None)
+        await speak("Closing the VibeCode panels.")
+        return {
+            "action": "handled",
+            "text": "VibeCode panels closed.",
+            "close_vibecode": True,
+        }
+
+    vc_open = any(
+        w in cmd
+        for w in [
+            "/vibecode",
+            "/vibe code",
+            "vibecode",
+            "vibe code",
+            "open vibecode",
+            "open vibe code",
+            "open the vibecode",
+            "open the vibe code",
+            "show vibecode",
+            "show vibe code",
+            "show me the vibecode",
+            "vibecode ide",
+            "vibe code ide",
+            "vibe coding panels",
+            "vibe code panels",
+        ]
+    )
+    if vc_open:
+        # Optional project slug: "open vibecode <slug>"
+        vc_slug = None
+        if VIBECODE_PROJECTS_DIR.exists():
+            words = set(cmd.lower().split())
+            for p in VIBECODE_PROJECTS_DIR.iterdir():
+                if p.is_dir() and p.name in words:
+                    vc_slug = p.name
+                    break
+        PENDING_VIBECODE = ("open", vc_slug)
+        if vc_slug:
+            await speak(f"Opening VibeCode for {vc_slug}.")
+            return {
+                "action": "handled",
+                "text": f"VibeCode open for **{vc_slug}** — panels are up.",
+                "open_vibecode": True,
+                "vibecode_slug": vc_slug,
+            }
+        await speak("Opening VibeCode.")
+        return {
+            "action": "handled",
+            "text": "VibeCode is up — pick a project in the left panel.",
+            "open_vibecode": True,
+        }
+
     # ── CODING MODE TOGGLE via text command ──
-    code_on = any(w in cmd for w in ["coding mode on", "coding mode", "code mode", "vibe code",
-                                     "build mode", "pair program", "code with me"])
-    code_off = any(w in cmd for w in ["coding mode off", "exit coding mode", "exit code mode",
-                                       "stop coding", "done coding", "stop code mode"])
+    code_on = any(
+        w in cmd
+        for w in [
+            "coding mode on",
+            "coding mode",
+            "code mode",
+            "vibe code",
+            "build mode",
+            "pair program",
+            "code with me",
+        ]
+    )
+    code_off = any(
+        w in cmd
+        for w in [
+            "coding mode off",
+            "exit coding mode",
+            "exit code mode",
+            "stop coding",
+            "done coding",
+            "stop code mode",
+        ]
+    )
     if code_off and CODING_MODE:
         CODING_MODE = False
         CODING_HISTORY.clear()
@@ -4568,13 +5928,18 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         CODING_FILES.clear()
         # Stay in conversation mode — just exit coding
         await speak("Coding mode off — still listening!")
-        return {"action": "handled", "text": "Coding mode off, conversation mode stays on."}
+        return {
+            "action": "handled",
+            "text": "Coding mode off, conversation mode stays on.",
+        }
     if code_on and not CODING_MODE:
         CODING_MODE = True
         CODING_HISTORY.clear()
         # Create temp sandbox folder for this coding session
         session_id = uuid.uuid4().hex[:8]
-        CODING_SESSION_DIR = os.path.join(tempfile.gettempdir(), f"lilly-coding-{session_id}")
+        CODING_SESSION_DIR = os.path.join(
+            tempfile.gettempdir(), f"lilly-coding-{session_id}"
+        )
         os.makedirs(CODING_SESSION_DIR, exist_ok=True)
         CODING_FILES.clear()
         # Auto-enable conversation mode for hands-free coding
@@ -4582,7 +5947,10 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
             CONVERSATION_MODE = True
             CONVERSATION_LAST_ACTIVITY = time.time()
         await speak("Coding mode on! Mic is live — let's build something cool.")
-        return {"action": "handled", "text": "Coding mode activated — vibe coding with conversation mode."}
+        return {
+            "action": "handled",
+            "text": "Coding mode activated — vibe coding with conversation mode.",
+        }
 
     archetype_inferrer.record_conversation(text)
     user_profile.record_interaction()
@@ -4590,15 +5958,21 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
 
     # ── 0a. REMINDERS / SCHEDULED TASKS ──
     remind_match = re.search(
-        r'(?:remind\s+me|set\s+(?:a\s+)?reminder|schedule|set\s+(?:a\s+)?(?:task|alarm|timer))\s+(?:to\s+)?(.+)',
-        cmd, re.IGNORECASE
+        r"(?:remind\s+me|set\s+(?:a\s+)?reminder|schedule|set\s+(?:a\s+)?(?:task|alarm|timer))\s+(?:to\s+)?(.+)",
+        cmd,
+        re.IGNORECASE,
     )
     if remind_match:
         raw = remind_match.group(1).strip()
         trigger_time = parse_relative_time(raw)
         if trigger_time:
             # Strip the time portion to get the task text
-            task_text = _re.sub(r'\b(?:in\s+\d+\s*(?:min(?:ute)?s?|hr|hour|h|sec(?:ond)?s?|s)|at\s+\d{1,2}:\d{2}\s*(?:am|pm)?|tomorrow(?:\s+at\s+\d{1,2}:\d{2}\s*(?:am|pm)?)?|half\s+an?\s+hour|an?\s+hour)\b', '', raw, flags=_re.IGNORECASE).strip()
+            task_text = _re.sub(
+                r"\b(?:in\s+\d+\s*(?:min(?:ute)?s?|hr|hour|h|sec(?:ond)?s?|s)|at\s+\d{1,2}:\d{2}\s*(?:am|pm)?|tomorrow(?:\s+at\s+\d{1,2}:\d{2}\s*(?:am|pm)?)?|half\s+an?\s+hour|an?\s+hour)\b",
+                "",
+                raw,
+                flags=_re.IGNORECASE,
+            ).strip()
             if not task_text:
                 task_text = "something you wanted me to remind you about"
             task = task_scheduler.add(task_text, trigger_time)
@@ -4611,28 +5985,40 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                 reply = f"Got it! I'll remind you to {task_text} in {hours} hour{'s' if hours != 1 else ''}."
             else:
                 import datetime as _dt
+
                 target = _dt.datetime.fromtimestamp(trigger_time)
                 reply = f"Got it! I'll remind you to {task_text} on {target.strftime('%A at %I:%M %p')}."
             await speak(reply)
             return {"action": "handled", "text": reply}
         else:
-            reply = "When should I remind you? Try 'in 30 minutes' or 'tomorrow at 9am'."
+            reply = (
+                "When should I remind you? Try 'in 30 minutes' or 'tomorrow at 9am'."
+            )
             await speak(reply)
             return {"action": "handled", "text": reply}
 
     # "what are my reminders" / "upcoming tasks"
-    if any(w in cmd for w in ["my reminders", "upcoming tasks", "what reminders", "my tasks", "show reminders"]):
+    if any(
+        w in cmd
+        for w in [
+            "my reminders",
+            "upcoming tasks",
+            "what reminders",
+            "my tasks",
+            "show reminders",
+        ]
+    ):
         upcoming = task_scheduler.upcoming()
         if upcoming:
             lines = []
             for t in upcoming[:5]:
                 eta = t["eta_seconds"]
                 if eta < 3600:
-                    when = f"in {int(eta/60)} min"
+                    when = f"in {int(eta / 60)} min"
                 elif eta < 86400:
-                    when = f"in {int(eta/3600)}h"
+                    when = f"in {int(eta / 3600)}h"
                 else:
-                    when = f"in {int(eta/86400)}d"
+                    when = f"in {int(eta / 86400)}d"
                 lines.append(f"{t['text']} ({when})")
             reply = f"You have {len(upcoming)} upcoming: " + "; ".join(lines) + "."
         else:
@@ -4641,7 +6027,9 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         return {"action": "handled", "text": reply}
 
     # "cancel reminder X"
-    cancel_match = re.search(r'(?:cancel|remove|delete)\s+(?:reminder|task|alarm)\s+(.+)', cmd, re.IGNORECASE)
+    cancel_match = re.search(
+        r"(?:cancel|remove|delete)\s+(?:reminder|task|alarm)\s+(.+)", cmd, re.IGNORECASE
+    )
     if cancel_match:
         query = cancel_match.group(1).strip()
         found = None
@@ -4658,7 +6046,10 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         return {"action": "handled", "text": reply}
 
     # ── 0. TEACHING PHRASES: learn contexts & place names ──
-    teaching_match = re.match(r"(?:we(?:'re| are) (?:in|at|on) the |this (?:is|place is|place is called) |it'?s (?:called|the) |call this |this area is )(.+)", cmd)
+    teaching_match = re.match(
+        r"(?:we(?:'re| are) (?:in|at|on) the |this (?:is|place is|place is called) |it'?s (?:called|the) |call this |this area is )(.+)",
+        cmd,
+    )
     if teaching_match:
         label = teaching_match.group(1).strip()
         snap = await take_snapshot()
@@ -4669,9 +6060,19 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         return {"action": "handled", "text": f"I'll remember this as {label}."}
 
     # Geo query: "where are we" / "what's this place" / "have i been here"
-    geo_query = any(w in cmd for w in ["where are we", "what's this place", "where is this",
-                                         "have i been here", "what's around", "whats around",
-                                         "name this place", "what's nearby"])
+    geo_query = any(
+        w in cmd
+        for w in [
+            "where are we",
+            "what's this place",
+            "where is this",
+            "have i been here",
+            "what's around",
+            "whats around",
+            "name this place",
+            "what's nearby",
+        ]
+    )
     if geo_query:
         loc = await current_location()
         if loc:
@@ -4710,21 +6111,29 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
             cmd_to_run = PENDING_INTENT.get("command", "")
             subcmd = PENDING_INTENT.get("subcommand", "")
             args = PENDING_INTENT.get("args", [])
-            full_cmd = [cmd_to_run] + ([subcmd] if subcmd else []) + (args or []) + [cmd]
+            full_cmd = (
+                [cmd_to_run] + ([subcmd] if subcmd else []) + (args or []) + [cmd]
+            )
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *full_cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=30.0
+                )
                 output = stdout.decode().strip() or stderr.decode().strip()
                 reply = f"Done: {output[:200]}" if output else "Command executed."
             except asyncio.TimeoutError:
                 reply = "Command timed out."
             except FileNotFoundError:
                 reply = f"Command '{cmd_to_run}' not found."
-        elif intent_action_type in ("intent_launch", "prompt_argument", "hybrid_intent_tap"):
+        elif intent_action_type in (
+            "intent_launch",
+            "prompt_argument",
+            "hybrid_intent_tap",
+        ):
             await app_process_monkey_intent(pkg, intent_action, uri_template, cmd)
             reply = "On it!"
         else:
@@ -4759,8 +6168,14 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
             {"word": "knowledge", "hint": "Facts and information you've learned"},
         ]
         chosen = random.choice(words)
-        GAME_STATE.update({"active": True, "type": "spelling",
-                           "target_word": chosen["word"], "hint": chosen["hint"]})
+        GAME_STATE.update(
+            {
+                "active": True,
+                "type": "spelling",
+                "target_word": chosen["word"],
+                "hint": chosen["hint"],
+            }
+        )
         reply = f"Spelling challenge! Your clue: {chosen['hint']}. Type your answer!"
         await speak(reply)
         return {"action": "handled", "text": reply}
@@ -4769,7 +6184,11 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     if WAITING_FOR_PROMPT:
         WAITING_FOR_PROMPT = False
         if cmd in ["yes", "yeah", "sure", "ok", "please", "tell me", "yep", "go ahead"]:
-            reply = PENDING_DEEP_ANSWER if PENDING_DEEP_ANSWER else "Let me think about that..."
+            reply = (
+                PENDING_DEEP_ANSWER
+                if PENDING_DEEP_ANSWER
+                else "Let me think about that..."
+            )
             PENDING_DEEP_ANSWER = ""
             await speak(reply)
             return {"action": "handled", "text": reply}
@@ -4787,10 +6206,17 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         # Occasionally ask an LLM for a variant to keep it fresh
         if random.random() < 0.2:
             LILLY_IS_THINKING = True
-            llm_variant = await llama_backend.chat([
-                {"role": "system", "content": "You are Lilly. Give a short, natural response to the following. Keep it to one sentence."},
-                {"role": "user", "content": cmd}
-            ], temperature=0.8, max_tokens=60)
+            llm_variant = await llama_backend.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": "You are Lilly. Give a short, natural response to the following. Keep it to one sentence.",
+                    },
+                    {"role": "user", "content": cmd},
+                ],
+                temperature=0.8,
+                max_tokens=60,
+            )
             if llm_variant:
                 canned = llm_variant
         LILLY_IS_THINKING = False
@@ -4803,31 +6229,57 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     nav_action = fuzzy_nav(cmd)
     if nav_action:
         nav_map = {
-            "back":           ["4"],
-            "home":           ["3"],
-            "recent apps":    ["187"],
-            "notifications":  ["40"],
+            "back": ["4"],
+            "home": ["3"],
+            "recent apps": ["187"],
+            "notifications": ["40"],
             "quick settings": ["41"],
-            "screenshot":     ["120"],
-            "power menu":     ["26"],
-            "volume up":      ["24"],
-            "volume down":    ["25"],
+            "screenshot": ["120"],
+            "power menu": ["26"],
+            "volume up": ["24"],
+            "volume down": ["25"],
         }
         if nav_action in nav_map:
             await _input_keyevent(*nav_map[nav_action])
         elif nav_action == "settings":
-            await termux_run(["am", "start", "-a", "android.settings.SETTINGS", "-p", "com.android.settings"], timeout=5.0)
+            await termux_run(
+                [
+                    "am",
+                    "start",
+                    "-a",
+                    "android.settings.SETTINGS",
+                    "-p",
+                    "com.android.settings",
+                ],
+                timeout=5.0,
+            )
         elif nav_action == "dark mode":
-            await termux_run(["settings", "put", "secure", "ui_night_mode", "1"], timeout=3.0)
+            await termux_run(
+                ["settings", "put", "secure", "ui_night_mode", "1"], timeout=3.0
+            )
         elif nav_action == "light mode":
-            await termux_run(["settings", "put", "secure", "ui_night_mode", "0"], timeout=3.0)
+            await termux_run(
+                ["settings", "put", "secure", "ui_night_mode", "0"], timeout=3.0
+            )
         return {"action": "handled", "text": ""}
 
     # ── 6. CURSOR CONTROL (precise position) ──
-    cursor_aliases = ["cursor up", "cursor down", "cursor left", "cursor right",
-                      "cursor home", "cursor reset", "mouse up", "mouse down",
-                      "mouse left", "mouse right", "pointer up", "pointer down",
-                      "pointer left", "pointer right"]
+    cursor_aliases = [
+        "cursor up",
+        "cursor down",
+        "cursor left",
+        "cursor right",
+        "cursor home",
+        "cursor reset",
+        "mouse up",
+        "mouse down",
+        "mouse left",
+        "mouse right",
+        "pointer up",
+        "pointer down",
+        "pointer left",
+        "pointer right",
+    ]
     for a in cursor_aliases:
         if a in cmd:
             if "up" in a:
@@ -4848,9 +6300,9 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     # Swipe is a single gesture; "scroll" is a held repeated dpad keyevent
     # so it feels natural — "scroll down" keeps pressing DPAD_DOWN rapidly
     swipe_map = {
-        "swipe down":  (500, 1500, 500, 500),
-        "swipe up":    (500, 500, 500, 1500),
-        "swipe left":  (900, 800, 100, 800),
+        "swipe down": (500, 1500, 500, 500),
+        "swipe up": (500, 500, 500, 1500),
+        "swipe left": (900, 800, 100, 800),
         "swipe right": (100, 800, 900, 800),
     }
     for trigger, (x1, y1, x2, y2) in swipe_map.items():
@@ -4861,7 +6313,7 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     # ── 7b. DPAD / directional keys — spoken navigation ──
     # Single tap: "dpad up/down/left/right", "go up/down/left/right", "up/down/left/right"
     # Scroll (held repeat): "scroll up/down/left/right" → fires DPAD key N times rapidly
-    _SCROLL_REPEATS = 6   # how many keyevents constitute one "scroll"
+    _SCROLL_REPEATS = 6  # how many keyevents constitute one "scroll"
 
     async def _dpad_repeat(key: str, repeats: int = _SCROLL_REPEATS):
         """Fire a dpad keyevent multiple times quickly to simulate a scroll."""
@@ -4870,30 +6322,30 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
             await asyncio.sleep(0.05)
 
     dpad_single = {
-        "dpad up":     "19",
-        "dpad down":   "20",
-        "dpad left":   "21",
-        "dpad right":  "22",
-        "go up":       "19",
-        "go down":     "20",
-        "go left":     "21",
-        "go right":    "22",
-        "move up":     "19",
-        "move down":   "20",
-        "move left":   "21",
-        "move right":  "22",
-        "navigate up":    "19",
-        "navigate down":  "20",
-        "navigate left":  "21",
+        "dpad up": "19",
+        "dpad down": "20",
+        "dpad left": "21",
+        "dpad right": "22",
+        "go up": "19",
+        "go down": "20",
+        "go left": "21",
+        "go right": "22",
+        "move up": "19",
+        "move down": "20",
+        "move left": "21",
+        "move right": "22",
+        "navigate up": "19",
+        "navigate down": "20",
+        "navigate left": "21",
         "navigate right": "22",
-        "press enter":  "23",
+        "press enter": "23",
         "press select": "23",
-        "press":        "23",
+        "press": "23",
     }
     dpad_scroll = {
-        "scroll up":    "19",
-        "scroll down":  "20",
-        "scroll left":  "21",
+        "scroll up": "19",
+        "scroll down": "20",
+        "scroll left": "21",
         "scroll right": "22",
     }
 
@@ -4902,7 +6354,11 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         if trigger in cmd:
             # Extract optional count: "scroll down 3 times" → 3 × _SCROLL_REPEATS
             count_match = re.search(r"(\d+)\s*(?:times?|x)", cmd)
-            repeats = int(count_match.group(1)) * _SCROLL_REPEATS if count_match else _SCROLL_REPEATS
+            repeats = (
+                int(count_match.group(1)) * _SCROLL_REPEATS
+                if count_match
+                else _SCROLL_REPEATS
+            )
             await _dpad_repeat(key, repeats)
             return {"action": "handled", "text": ""}
 
@@ -4912,7 +6368,11 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
             return {"action": "handled", "text": ""}
 
     # ── 8. TAP / SELECT (cursor position) ──
-    if cmd in ["select", "tap", "click"] or cmd.startswith("tap ") or cmd.startswith("click "):
+    if (
+        cmd in ["select", "tap", "click"]
+        or cmd.startswith("tap ")
+        or cmd.startswith("click ")
+    ):
         await _input_tap(CURSOR_X, CURSOR_Y)
         await speak(f"Tapped at {CURSOR_X}, {CURSOR_Y}")
         return {"action": "handled", "text": ""}
@@ -4926,20 +6386,31 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
 
     # ── 9b. NEARBY PLACES (runs before skill matching to catch "where" / "find" patterns) ──
     # Skip if this is a Bluetooth/device query — let section 11 handle it
-    _bt_skip = any(w in cmd for w in [
-        "bluetooth", "device", "who", "who's", "whos", "anyone",
-        "paired", "connected", "wireless", "nearby device",
-    ])
+    _bt_skip = any(
+        w in cmd
+        for w in [
+            "bluetooth",
+            "device",
+            "who",
+            "who's",
+            "whos",
+            "anyone",
+            "paired",
+            "connected",
+            "wireless",
+            "nearby device",
+        ]
+    )
     nearby_trigger = re.search(
         r"(?:nearest|nearby|around here|near me|close to me|close by|in the area|close to here)\s*(.*)",
-        cmd, re.IGNORECASE
+        cmd,
+        re.IGNORECASE,
     )
     if nearby_trigger and not _bt_skip:
         query = nearby_trigger.group(1).strip()
         if not query:
             alt = re.search(
-                r"(?:find|get|buy|eat|look for|search for)\s+(.+)",
-                cmd, re.IGNORECASE
+                r"(?:find|get|buy|eat|look for|search for)\s+(.+)", cmd, re.IGNORECASE
             )
             if alt:
                 query = alt.group(1).strip()
@@ -4950,7 +6421,11 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
             search_q = urllib.parse.quote(query) if query else ""
             maps_url = f"https://www.google.com/maps/search/{search_q}/@{lat},{lon},14z"
             await termux_run(["termux-open", maps_url], timeout=5.0)
-            reply = f"Looking for {query} near you." if query else "Showing nearby places on the map."
+            reply = (
+                f"Looking for {query} near you."
+                if query
+                else "Showing nearby places on the map."
+            )
             await speak(reply)
             PENDING_OPEN_URL = maps_url
             return {"action": "handled", "text": reply, "open_url": maps_url}
@@ -4979,16 +6454,26 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                 # If a novel word is semantically close to this skill's label, offer alias
                 for nw in novel_words:
                     if len(nw) > 3 and (nw in label_norm or label_norm in nw):
-                        if normalize_text(nw) not in [normalize_text(a) for a in s.get("aliases", [])]:
+                        if normalize_text(nw) not in [
+                            normalize_text(a) for a in s.get("aliases", [])
+                        ]:
                             # Auto-register the alias
                             s.setdefault("aliases", []).append(nw)
                             SKILLS[normalize_text(nw)] = s
-                            raw = json.loads(SKILLS_FILE.read_text()) if SKILLS_FILE.exists() else {}
+                            raw = (
+                                json.loads(SKILLS_FILE.read_text())
+                                if SKILLS_FILE.exists()
+                                else {}
+                            )
                             if key in raw:
                                 raw[key].setdefault("aliases", []).append(nw)
                                 SKILLS_FILE.write_text(json.dumps(raw, indent=2))
-                            logger.info(f"Auto-registered alias '{nw}' for skill '{key}'")
-    stripped = re.sub(r'^(run|use|click|tap|open|launch|search|find|what|show|start)\s+', '', target).strip()
+                            logger.info(
+                                f"Auto-registered alias '{nw}' for skill '{key}'"
+                            )
+    stripped = re.sub(
+        r"^(run|use|click|tap|open|launch|search|find|what|show|start)\s+", "", target
+    ).strip()
     skill = SKILLS.get(target) or SKILLS.get(stripped)
 
     # If no direct match, look for a skill key that prefixes the command
@@ -4997,8 +6482,15 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         for key in sorted(SKILLS.keys(), key=len, reverse=True):
             if target.startswith(key + " "):
                 skill = SKILLS[key]
-                skill_arg = target[len(key):].strip()
+                skill_arg = target[len(key) :].strip()
                 break
+
+    if skill:
+        # Skip configuration/meta-skills (e.g. _context_aware) that have no
+        # executable action_type and no type field — they are documentation,
+        # not real action triggers.
+        if not skill.get("action_type") and not skill.get("type"):
+            skill = None
 
     if skill:
         # ── Ad skipping shortcut ──
@@ -5011,7 +6503,9 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         pkg = skill.get("package", "")
 
         # Canned demo mode — speak intent without phone execution if SSH is unavailable
-        if not PHONE_SSH_OK and (action in ("intent_launch", "hybrid_intent_tap", "shell_command")):
+        if not PHONE_SSH_OK and (
+            action in ("intent_launch", "hybrid_intent_tap", "shell_command")
+        ):
             label = skill.get("label", "app")
             if action == "shell_command":
                 reply = f"Opening {label} on your phone! In demo mode — would open: {' '.join(skill.get('args', []))}"
@@ -5061,10 +6555,18 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
             if no_arg:
                 full_cmd = [cmd_to_run] + (args or [])
             elif skill_arg:
-                full_cmd = [cmd_to_run] + ([subcmd] if subcmd else []) + (args or []) + [skill_arg]
+                full_cmd = (
+                    [cmd_to_run]
+                    + ([subcmd] if subcmd else [])
+                    + (args or [])
+                    + [skill_arg]
+                )
             else:
                 PENDING_INTENT = skill
-                reply = skill.get("canned_reply", f"What argument for {skill.get('label', 'command')}?")
+                reply = skill.get(
+                    "canned_reply",
+                    f"What argument for {skill.get('label', 'command')}?",
+                )
                 await speak(reply)
                 return {"action": "handled", "text": reply}
             try:
@@ -5073,7 +6575,9 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=30.0
+                )
                 output = stdout.decode().strip() or stderr.decode().strip()
                 reply = f"Done: {output[:200]}" if output else "Command executed."
             except asyncio.TimeoutError:
@@ -5099,10 +6603,17 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
             f"User said: {cmd}"
         )
         try:
-            resp = await llama_backend.chat([
-                {"role": "system", "content": "You are a skill extractor. Output ONLY valid JSON."},
-                {"role": "user", "content": infer_prompt}
-            ], temperature=0.2, max_tokens=200)
+            resp = await llama_backend.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": "You are a skill extractor. Output ONLY valid JSON.",
+                    },
+                    {"role": "user", "content": infer_prompt},
+                ],
+                temperature=0.2,
+                max_tokens=200,
+            )
             resp_clean = resp.strip().strip("```json").strip("```").strip()
             inferred = json.loads(resp_clean)
             if inferred.get("skill"):
@@ -5113,20 +6624,26 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                     "type": "intent_launch",
                     "intent_action": "android.intent.action.VIEW",
                     "label": inferred["label"],
-                    "canned_reply": inferred.get("canned_reply", f"Opening {inferred['label']}!"),
+                    "canned_reply": inferred.get(
+                        "canned_reply", f"Opening {inferred['label']}!"
+                    ),
                     "aliases": inferred.get("aliases", []),
                 }
                 if inferred.get("uri_template"):
                     new_skill["uri_template"] = inferred["uri_template"]
                 # Persist to skills file
-                raw = json.loads(SKILLS_FILE.read_text()) if SKILLS_FILE.exists() else {}
+                raw = (
+                    json.loads(SKILLS_FILE.read_text()) if SKILLS_FILE.exists() else {}
+                )
                 raw[new_key] = new_skill
                 SKILLS_FILE.write_text(json.dumps(raw, indent=2))
                 # Reload in memory
                 SKILLS[normalize_text(new_key)] = new_skill
                 for a in new_skill.get("aliases", []):
                     SKILLS[normalize_text(a)] = new_skill
-                logger.info(f"Proactively created skill '{new_key}' from user command: {cmd}")
+                logger.info(
+                    f"Proactively created skill '{new_key}' from user command: {cmd}"
+                )
                 return new_skill
         except Exception as e:
             logger.debug(f"Skill inference failed (non-critical): {e}")
@@ -5145,10 +6662,40 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
 
     # ── 10c. ACTIVITY TRACKER ──
     activity_triggers = {
-        "walk": ["start a walk", "go for a walk", "lets walk", "let's walk", "start walking", "track a walk"],
-        "bike": ["start a bike", "go for a bike", "lets bike", "let's bike", "bike ride", "go for a ride", "track a bike"],
-        "run":  ["start a run", "go for a run", "lets run", "let's run", "start running", "track a run"],
-        "car":  ["start a car", "go for a drive", "lets drive", "let's drive", "car ride", "track a drive", "drive"],
+        "walk": [
+            "start a walk",
+            "go for a walk",
+            "lets walk",
+            "let's walk",
+            "start walking",
+            "track a walk",
+        ],
+        "bike": [
+            "start a bike",
+            "go for a bike",
+            "lets bike",
+            "let's bike",
+            "bike ride",
+            "go for a ride",
+            "track a bike",
+        ],
+        "run": [
+            "start a run",
+            "go for a run",
+            "lets run",
+            "let's run",
+            "start running",
+            "track a run",
+        ],
+        "car": [
+            "start a car",
+            "go for a drive",
+            "lets drive",
+            "let's drive",
+            "car ride",
+            "track a drive",
+            "drive",
+        ],
     }
     activity_match = None
     for atype, triggers in activity_triggers.items():
@@ -5163,13 +6710,39 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         await speak(reply)
         return {"action": "handled", "text": reply}
 
-    if any(t in cmd for t in ["stop activity", "stop tracking", "end activity", "finish", "stop walk", "stop run", "stop bike", "stop drive", "i'm done"]):
+    if any(
+        t in cmd
+        for t in [
+            "stop activity",
+            "stop tracking",
+            "end activity",
+            "finish",
+            "stop walk",
+            "stop run",
+            "stop bike",
+            "stop drive",
+            "i'm done",
+        ]
+    ):
         reply = await stop_activity()
         LILLY_MOOD = "cheerful"
         await speak(reply)
         return {"action": "handled", "text": reply}
 
-    if any(t in cmd for t in ["activity status", "how am i doing", "tracker status", "how fast", "what's my speed", "current speed", "activity stats", "my pace", "am i still tracking"]):
+    if any(
+        t in cmd
+        for t in [
+            "activity status",
+            "how am i doing",
+            "tracker status",
+            "how fast",
+            "what's my speed",
+            "current speed",
+            "activity stats",
+            "my pace",
+            "am i still tracking",
+        ]
+    ):
         reply = await get_activity_summary()
         await speak(reply)
         return {"action": "handled", "text": reply}
@@ -5177,7 +6750,8 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     # ── 10c. BLUETOOTH DEVICE NAMING ──
     bt_name_match = re.search(
         r'(?:name|call|label|remember)\s+(?:the\s+)?(?:device|bluetooth|phone)\s+(?:named?\s+)?["\']?(\S+?)["\']?\s+(?:as|to|is)\s+(?:named?\s+)?["\']?(.+?)["\']?\s*$',
-        cmd, re.IGNORECASE
+        cmd,
+        re.IGNORECASE,
     )
     if bt_name_match:
         device_id = bt_name_match.group(1).strip()
@@ -5199,16 +6773,29 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         await speak(reply)
         return {"action": "handled", "text": reply}
 
-    # ── 10d. GMAIL / CALENDAR (requires Google OAuth scopes via Clerk) ──
+    # ── 10d. GMAIL / CALENDAR (requires Google OAuth scopes via Auth0) ──
     gmail_triggers = [
-        "check my email", "check email", "any new emails", "new emails",
-        "unread emails", "read my email", "what emails do i have",
-        "any messages", "check my gmail", "inbox",
+        "check my email",
+        "check email",
+        "any new emails",
+        "new emails",
+        "unread emails",
+        "read my email",
+        "what emails do i have",
+        "any messages",
+        "check my gmail",
+        "inbox",
     ]
     calendar_triggers = [
-        "what's on my calendar", "my calendar", "upcoming events",
-        "what do i have today", "what's scheduled", "any meetings",
-        "calendar events", "my schedule", "what's next",
+        "what's on my calendar",
+        "my calendar",
+        "upcoming events",
+        "what do i have today",
+        "what's scheduled",
+        "any meetings",
+        "calendar events",
+        "my schedule",
+        "what's next",
     ]
 
     if AUTH_AVAILABLE and any(t in cmd for t in gmail_triggers):
@@ -5226,7 +6813,9 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                     reply = f"You have 1 unread email: {subj_str}."
                 else:
                     more = f" and {count - 3} more" if count > 3 else ""
-                    reply = f"You have {count} unread emails. The latest: {subj_str}{more}."
+                    reply = (
+                        f"You have {count} unread emails. The latest: {subj_str}{more}."
+                    )
             else:
                 reply = "No unread emails right now — inbox is clear!"
         else:
@@ -5243,9 +6832,7 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     if AUTH_AVAILABLE and any(t in cmd for t in calendar_triggers):
         if _current_user_id:
             LILLY_IS_THINKING = True
-            events = await calendar_list_events(
-                _current_user_id, max_results=5
-            )
+            events = await calendar_list_events(_current_user_id, max_results=5)
             LILLY_IS_THINKING = False
             if events:
                 import datetime as _dt
@@ -5259,7 +6846,9 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                     except Exception:
                         return iso
 
-                parts = [f"{e['summary']} at {_fmt_time(e['start'])}" for e in events[:3]]
+                parts = [
+                    f"{e['summary']} at {_fmt_time(e['start'])}" for e in events[:3]
+                ]
                 reply = "Coming up: " + ", then ".join(parts) + "."
                 if len(events) > 3:
                     reply += f" Plus {len(events) - 3} more."
@@ -5286,11 +6875,22 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
 
     # ── 11b. SENSOR STORYTELLING ──
     story_triggers = [
-        "tell me a story", "make up a story", "create a story", "story time",
-        "what do your sensors feel", "what do you sense", "describe your world",
-        "what's happening around you", "paint a picture", "narrate",
-        "tell me what you feel", "what does it feel like", "sensor story",
-        "weave a tale", "spin a yarn", "once upon a time",
+        "tell me a story",
+        "make up a story",
+        "create a story",
+        "story time",
+        "what do your sensors feel",
+        "what do you sense",
+        "describe your world",
+        "what's happening around you",
+        "paint a picture",
+        "narrate",
+        "tell me what you feel",
+        "what does it feel like",
+        "sensor story",
+        "weave a tale",
+        "spin a yarn",
+        "once upon a time",
     ]
     if any(trigger in cmd for trigger in story_triggers):
         LILLY_IS_THINKING = True
@@ -5300,20 +6900,28 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         sensor_narrative = snapshot_to_narrative(snapshot)
         # Build context with real data
         story_messages = [
-            {"role": "system", "content": (
-                "You are Lilly, a curious puppy. You are telling a short story (3-5 sentences) "
-                "that uses ONLY the real sensor data provided below as plot elements. "
-                "Include dialogue between you and an imaginary friend. "
-                "RULES: 1) Only reference sensor data that is actually provided. "
-                "2) Never make up sensor readings. 3) Use correlations, not causation "
-                "(e.g., 'the light dropped AND I heard a sound' not 'the light dropped BECAUSE'). "
-                "4) Keep it playful and imaginative but grounded in reality. "
-                "5) End with a question to keep the conversation going."
-            )},
-            {"role": "system", "content": f"REAL SENSOR DATA RIGHT NOW: {sensor_narrative}"},
+            {
+                "role": "system",
+                "content": (
+                    "You are Lilly, a curious puppy. You are telling a short story (3-5 sentences) "
+                    "that uses ONLY the real sensor data provided below as plot elements. "
+                    "Include dialogue between you and an imaginary friend. "
+                    "RULES: 1) Only reference sensor data that is actually provided. "
+                    "2) Never make up sensor readings. 3) Use correlations, not causation "
+                    "(e.g., 'the light dropped AND I heard a sound' not 'the light dropped BECAUSE'). "
+                    "4) Keep it playful and imaginative but grounded in reality. "
+                    "5) End with a question to keep the conversation going."
+                ),
+            },
+            {
+                "role": "system",
+                "content": f"REAL SENSOR DATA RIGHT NOW: {sensor_narrative}",
+            },
             {"role": "user", "content": cmd},
         ]
-        reply = strip_json_wrapper(await llama_backend.chat(story_messages, temperature=0.8, max_tokens=200))
+        reply = strip_json_wrapper(
+            await llama_backend.chat(story_messages, temperature=0.8, max_tokens=200)
+        )
         if not reply or len(reply) < 10:
             reply = f"*perks up* Right now I feel: {sensor_narrative} Want to hear more about what I sense?"
         LILLY_IS_THINKING = False
@@ -5334,11 +6942,24 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         return {"action": "handled", "text": skill_reply}
 
     # ── 13. VISION: "what do you see" ──
-    vision_phrases = ["what do you see", "what can you see", "what's there", "look",
-                       "what is that", "what's in front", "what are you looking at",
-                       "describe the room", "what's around", "what do you see now",
-                       "look around", "take a look", "look at this", "what's on camera",
-                       "what's on the camera", "use your eyes"]
+    vision_phrases = [
+        "what do you see",
+        "what can you see",
+        "what's there",
+        "look",
+        "what is that",
+        "what's in front",
+        "what are you looking at",
+        "describe the room",
+        "what's around",
+        "what do you see now",
+        "look around",
+        "take a look",
+        "look at this",
+        "what's on camera",
+        "what's on the camera",
+        "use your eyes",
+    ]
     if any(p in cmd for p in vision_phrases):
         labeled, detections = await grab_and_label_frame()
         if labeled:
@@ -5348,10 +6969,17 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                     f"You are Lilly. The camera sees: {obj_list}. "
                     f"Describe the scene naturally in 1-2 sentences."
                 )
-                desc = await llama_backend.chat([
-                    {"role": "system", "content": "You are Lilly, a companion AI with vision. Be warm and conversational."},
-                    {"role": "user", "content": prompt}
-                ], temperature=0.6, max_tokens=100)
+                desc = await llama_backend.chat(
+                    [
+                        {
+                            "role": "system",
+                            "content": "You are Lilly, a companion AI with vision. Be warm and conversational.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.6,
+                    max_tokens=100,
+                )
                 reply = desc or f"I can see {obj_list} in the frame."
             else:
                 reply = "I'm looking but I don't recognize anything specific right now."
@@ -5364,10 +6992,23 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         return {"action": "handled", "text": reply}
 
     # ── 13b. HEART / BOWL EXPLANATION ──
-    heart_triggers = ["heart", "bowl", "kibble", "feed", "feeding", "pet", "pixel heart",
-                      "what is that heart", "what's that heart", "what does the heart mean",
-                      "what does the heart do", "explain the heart", "what is the heart for",
-                      "what is that thing", "what's that thing in the corner"]
+    heart_triggers = [
+        "heart",
+        "bowl",
+        "kibble",
+        "feed",
+        "feeding",
+        "pet",
+        "pixel heart",
+        "what is that heart",
+        "what's that heart",
+        "what does the heart mean",
+        "what does the heart do",
+        "explain the heart",
+        "what is the heart for",
+        "what is that thing",
+        "what's that thing in the corner",
+    ]
     if any(t in cmd for t in heart_triggers):
         LILLY_MOOD = "warm"
         reply = (
@@ -5383,12 +7024,24 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         return {"action": "handled", "text": reply, "look_at": "heart"}
 
     # ── 13c. TIME / DATE ──
-    time_triggers = ["what time", "what's the time", "what is the time", "tell me the time",
-                     "what time is it", "current time", "time now",
-                     "what date", "what's the date", "what day", "what's today",
-                     "what day is it", "today's date"]
+    time_triggers = [
+        "what time",
+        "what's the time",
+        "what is the time",
+        "tell me the time",
+        "what time is it",
+        "current time",
+        "time now",
+        "what date",
+        "what's the date",
+        "what day",
+        "what's today",
+        "what day is it",
+        "today's date",
+    ]
     if any(t in cmd for t in time_triggers):
         import datetime as _dt
+
         now = _dt.datetime.now()
         reply = f"It's {now.strftime('%I:%M %p')}, {now.strftime('%A, %B %d')}."
         LILLY_MOOD = "calm"
@@ -5398,8 +7051,14 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
 
     # ── 13d. NAME PROMPT ──
     if not USER_NAME:
-        name_triggers = ["who are you", "what's your name", "tell me about yourself",
-                         "who am i", "what's my name", "do you know me"]
+        name_triggers = [
+            "who are you",
+            "what's your name",
+            "tell me about yourself",
+            "who am i",
+            "what's my name",
+            "do you know me",
+        ]
         name_asks = ["call me", "my name is", "i'm called", "i am"]
         is_asking_name = any(t in cmd for t in name_triggers)
         is_giving_name = any(t in cmd for t in name_asks)
@@ -5413,7 +7072,11 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                         USER_NAME = new_name
                         try:
                             profile_path = WORKSPACE / "user_profile.json"
-                            prof = json.loads(profile_path.read_text()) if profile_path.exists() else {}
+                            prof = (
+                                json.loads(profile_path.read_text())
+                                if profile_path.exists()
+                                else {}
+                            )
                             prof["name"] = new_name
                             profile_path.write_text(json.dumps(prof, indent=2))
                         except Exception:
@@ -5470,7 +7133,9 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         if summary:
             hints.append(f"Conversation summary: {summary}")
         # Last 2 user messages as a quick "what were we just on"
-        recent = [e for e in (mem_dict.get("entries") or []) if e.get("role") == "user"][-2:]
+        recent = [
+            e for e in (mem_dict.get("entries") or []) if e.get("role") == "user"
+        ][-2:]
         if recent:
             topics = "; ".join(e.get("text", "")[:60] for e in recent)
             hints.append(f"Recent topics: {topics}")
@@ -5497,7 +7162,11 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         messages = [{"role": "system", "content": system_content}]
         messages.extend(CODING_HISTORY[-20:])  # last 20 messages for context
         messages.append({"role": "user", "content": text})
-        reply = strip_json_wrapper(await llama_backend.chat(messages, temperature=0.7, max_tokens=500))
+        reply = strip_json_wrapper(
+            await llama_backend.chat(messages, temperature=0.6, max_tokens=500)
+        )
+        # Apply hallucination filter to coding responses too
+        reply = _filter_hallucination_patterns(reply)
         # Store in history
         CODING_HISTORY.append({"role": "user", "content": text})
         CODING_HISTORY.append({"role": "assistant", "content": reply})
@@ -5510,7 +7179,9 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     elif CHILD_MODE:
         system_content = SOCRATIC_PROMPT
         if USER_NAME:
-            system_content += f" The child's name is {USER_NAME}. Use it to make learning personal."
+            system_content += (
+                f" The child's name is {USER_NAME}. Use it to make learning personal."
+            )
     else:
         # Use the per-avatar persona prompt — every character gets their own voice
         system_content = build_avatar_system_prompt(current_avatar, USER_NAME)
@@ -5523,22 +7194,62 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         messages.append({"role": "system", "content": f"SUMMARY:{mem_summary}"})
     # ── Fix #7: inject memory/profile hints so Lilly actively references them ──
     if memory_hint:
-        messages.append({"role": "system", "content": f"CONTEXT_ABOUT_USER:{memory_hint}"})
+        messages.append(
+            {"role": "system", "content": f"CONTEXT_ABOUT_USER:{memory_hint}"}
+        )
     # Inject live sensor data into every conversation
     if sensor_context_str:
-        messages.append({"role": "system", "content": f"LIVE SENSOR DATA (right now): {sensor_context_str}"})
+        messages.append(
+            {
+                "role": "system",
+                "content": f"LIVE SENSOR DATA (right now): {sensor_context_str}",
+            }
+        )
     messages.extend(context)
     messages.append({"role": "user", "content": cmd})
 
-    reply = strip_json_wrapper(await llama_backend.chat(messages, temperature=0.7, max_tokens=40 if CHILD_MODE else 90))
+    # ── Grounding guard #1: inject an explicit anti-hallucination reminder
+    # into the message list so the model knows to stay factual. This is
+    # appended right before the user query so it has maximum salience.
+    grounding_reminder = (
+        "GROUNDING: Do NOT fabricate facts, readings, or events. "
+        "If sensor data is not provided, do not invent it. "
+        "If you don't know something, say so — never guess. "
+        "You are a real companion living in this phone, not a chatbot."
+    )
+    messages.append({"role": "system", "content": grounding_reminder})
+
+    # ── Grounding guard #2: lower temperature for short, grounded replies.
+    # 0.7 tends to produce creative but sometimes fabricated content; 0.4
+    # keeps the response grounded while still allowing light variation.
+    temp = 0.4
+    reply = strip_json_wrapper(
+        await llama_backend.chat(
+            messages, temperature=temp, max_tokens=40 if CHILD_MODE else 90
+        )
+    )
+
+    # ── Grounding guard #3: post-filter — strip known hallucination patterns
+    reply = _filter_hallucination_patterns(reply)
 
     if not reply or len(reply) < 5:
         reply = "Not sure where to go with that one — try coming at it differently."
 
     # WAITING_FOR_YES: if reply ends with a question, set up shadow answer
-    follow_up_phrases = ["want to hear more", "what do you think", "shall i tell", "should i",
-                          "would you like", "want to know", "curious about", "want to try",
-                          "tell me more", "want to see", "want to play", "want to learn"]
+    follow_up_phrases = [
+        "want to hear more",
+        "what do you think",
+        "shall i tell",
+        "should i",
+        "would you like",
+        "want to know",
+        "curious about",
+        "want to try",
+        "tell me more",
+        "want to see",
+        "want to play",
+        "want to learn",
+    ]
     if "?" in reply and any(p in reply.lower() for p in follow_up_phrases):
         WAITING_FOR_PROMPT = True
         asyncio.create_task(generate_follow_up(cmd))
@@ -5546,7 +7257,9 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     LILLY_IS_THINKING = False
     if any(w in reply.lower() for w in ["sorry", "apologize", "my fault"]):
         LILLY_MOOD = "gentle"
-    elif any(w in reply.lower() for w in ["great", "awesome", "fun", "exciting", "cool"]):
+    elif any(
+        w in reply.lower() for w in ["great", "awesome", "fun", "exciting", "cool"]
+    ):
         LILLY_MOOD = "cheerful"
     elif "?" in reply:
         LILLY_MOOD = "curious"
@@ -5560,6 +7273,7 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     await speak(reply)
     return {"action": "handled", "text": reply}
 
+
 async def summarize_memory():
     """Summarize older conversation entries to keep context manageable."""
     entries = await memory.snapshot()
@@ -5567,23 +7281,36 @@ async def summarize_memory():
         return
     entries_text = "\n".join(f"{e.role}: {e.text}" for e in entries[:-4])
     prompt = f"Summarize this conversation in 1-2 sentences:\n{entries_text}"
-    summary = await llama_backend.chat([
-        {"role": "system", "content": "Provide a concise 1-2 sentence summary."},
-        {"role": "user", "content": prompt}
-    ], temperature=0.3, max_tokens=100)
+    summary = await llama_backend.chat(
+        [
+            {"role": "system", "content": "Provide a concise 1-2 sentence summary."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.3,
+        max_tokens=100,
+    )
     if summary and len(summary) > 10:
         await memory.set_summary(summary)
         await save_memory()
 
+
 async def generate_follow_up(original_cmd: str):
     """Pre-generate a deeper answer for follow-up questions."""
     global PENDING_DEEP_ANSWER
-    deep = await llama_backend.chat([
-        {"role": "system", "content": "You are Lilly, giving a short, thoughtful follow-up answer. 2 sentences max."},
-        {"role": "user", "content": f"Expand on: {original_cmd}"}
-    ], temperature=0.6, max_tokens=150)
+    deep = await llama_backend.chat(
+        [
+            {
+                "role": "system",
+                "content": "You are Lilly, giving a short, thoughtful follow-up answer. 2 sentences max.",
+            },
+            {"role": "user", "content": f"Expand on: {original_cmd}"},
+        ],
+        temperature=0.6,
+        max_tokens=150,
+    )
     if deep and len(deep) > 10:
         PENDING_DEEP_ANSWER = deep
+
 
 # ─── VISION MODULE ──────────────────────────────────────────────
 # Object detection with bounding boxes. Uses YOLOv8 ONNX if available,
@@ -5594,19 +7321,24 @@ VISION_LABELED_FILE = WORKSPACE / "vision_labeled.jpg"
 _vision_enabled = False
 _vision_labels: list[dict] = []
 
+
 def _try_import_cv2():
     try:
         import cv2
+
         return cv2
     except ImportError:
         return None
 
+
 def _try_import_ultralytics():
     try:
         from ultralytics import YOLO
+
         return YOLO
     except ImportError:
         return None
+
 
 def init_vision():
     global _vision_enabled
@@ -5623,9 +7355,10 @@ def init_vision():
                 model_path.parent.mkdir(parents=True, exist_ok=True)
                 logger.info("Vision: Downloading YOLOv8n model (first run)...")
                 import urllib.request
+
                 urllib.request.urlretrieve(
                     "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt",
-                    str(model_path).replace(".onnx", ".pt")
+                    str(model_path).replace(".onnx", ".pt"),
                 )
                 model_path = Path(str(model_path).replace(".onnx", ".pt"))
             _vision_enabled = True
@@ -5635,23 +7368,96 @@ def init_vision():
             logger.warning(f"Vision: YOLO load failed ({e}), falling back")
     # Fallback: simple dummy detector (draws a frame + placeholder label)
     _vision_enabled = True
-    logger.info("Vision: Running in preview mode (install ultralytics for object detection)")
+    logger.info(
+        "Vision: Running in preview mode (install ultralytics for object detection)"
+    )
+
 
 COCO_CLASSES = [
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
-    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
-    "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
-    "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
-    "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
-    "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake",
-    "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop",
-    "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
-    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier",
-    "toothbrush"
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
 ]
 
 _YOLO_MODEL = None
+
 
 async def capture_vision_frame() -> Optional[bytes]:
     """Capture a frame from the first available webcam."""
@@ -5676,6 +7482,7 @@ async def capture_vision_frame() -> Optional[bytes]:
         pass
     return None
 
+
 def _draw_detections(frame, detections):
     """Draw bounding boxes and labels on the frame."""
     cv2 = _try_import_cv2()
@@ -5690,8 +7497,17 @@ def _draw_detections(frame, detections):
         text = f"{label} {conf:.0%}" if conf > 0 else label
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 6, y1), color, -1)
-        cv2.putText(frame, text, (x1 + 3, y1 - 3), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(
+            frame,
+            text,
+            (x1 + 3, y1 - 3),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+        )
     return frame
+
 
 async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
     """Run object detection on a JPEG frame, return labeled JPEG + detections."""
@@ -5702,6 +7518,7 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
 
     try:
         import numpy as np
+
         nparr = np.frombuffer(frame_bytes, np.uint8)
         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if frame is None:
@@ -5726,11 +7543,21 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
                         x1, y1, x2, y2 = box.xyxy[0].tolist()
                         cls = int(box.cls[0])
                         conf = float(box.conf[0])
-                        label = COCO_CLASSES[cls] if cls < len(COCO_CLASSES) else f"obj_{cls}"
-                        detections.append({
-                            "label": label, "confidence": conf,
-                            "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                        })
+                        label = (
+                            COCO_CLASSES[cls]
+                            if cls < len(COCO_CLASSES)
+                            else f"obj_{cls}"
+                        )
+                        detections.append(
+                            {
+                                "label": label,
+                                "confidence": conf,
+                                "x1": x1,
+                                "y1": y1,
+                                "x2": x2,
+                                "y2": y2,
+                            }
+                        )
         except Exception as e:
             logger.debug(f"Vision detect error: {e}")
 
@@ -5740,6 +7567,7 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
         return buf.tobytes(), detections
 
     return frame_bytes, detections
+
 
 async def vision_describe(frame_bytes: bytes) -> str:
     """Use LLM to describe what's visible in the frame."""
@@ -5754,17 +7582,26 @@ async def vision_describe(frame_bytes: bytes) -> str:
         f"Describe the scene naturally in 1 sentence. Don't just list objects — say what's happening."
     )
     try:
-        desc = await llama_backend.chat([
-            {"role": "system", "content": "You are Lilly, a companion AI with vision."},
-            {"role": "user", "content": prompt}
-        ], temperature=0.6, max_tokens=80)
+        desc = await llama_backend.chat(
+            [
+                {
+                    "role": "system",
+                    "content": "You are Lilly, a companion AI with vision.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.6,
+            max_tokens=80,
+        )
         if desc:
             return desc
     except Exception:
         pass
     return f"I see {obj_list} in the frame."
 
+
 _video_capture = None
+
 
 def get_video_capture():
     global _video_capture
@@ -5776,6 +7613,7 @@ def get_video_capture():
             _video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
     return _video_capture
 
+
 async def grab_and_label_frame() -> tuple[bytes, list[dict]]:
     """Grab a frame, run detection, return labeled JPEG + detections."""
     raw = await capture_vision_frame()
@@ -5784,20 +7622,23 @@ async def grab_and_label_frame() -> tuple[bytes, list[dict]]:
     labeled, detections = await detect_objects(raw)
     return labeled, detections
 
+
 # ─── TASK SCHEDULER & REMINDERS ─────────────────────────────────
 import re as _re
 
 TASKS_FILE = WORKSPACE / "scheduled_tasks.json"
 
+
 @dataclass
 class ScheduledTask:
     id: str
-    text: str                    # what to remind about
-    trigger_time: float          # unix timestamp when to fire
+    text: str  # what to remind about
+    trigger_time: float  # unix timestamp when to fire
     created: float = field(default_factory=time.time)
     repeat: Optional[str] = None  # None | "daily" | "weekly"
-    context: str = ""            # optional context tag
+    context: str = ""  # optional context tag
     fired: bool = False
+
 
 class TaskScheduler:
     def __init__(self):
@@ -5815,17 +7656,33 @@ class TaskScheduler:
 
     def _save(self):
         try:
-            TASKS_FILE.write_text(json.dumps([
-                {"id": t.id, "text": t.text, "trigger_time": t.trigger_time,
-                 "created": t.created, "repeat": t.repeat, "context": t.context, "fired": t.fired}
-                for t in self.tasks
-            ], indent=2))
+            TASKS_FILE.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": t.id,
+                            "text": t.text,
+                            "trigger_time": t.trigger_time,
+                            "created": t.created,
+                            "repeat": t.repeat,
+                            "context": t.context,
+                            "fired": t.fired,
+                        }
+                        for t in self.tasks
+                    ],
+                    indent=2,
+                )
+            )
         except Exception:
             pass
 
-    def add(self, text: str, trigger_time: float, repeat: str = None, context: str = "") -> ScheduledTask:
-        tid = f"task_{int(time.time())}_{random.randint(100,999)}"
-        task = ScheduledTask(id=tid, text=text, trigger_time=trigger_time, repeat=repeat, context=context)
+    def add(
+        self, text: str, trigger_time: float, repeat: str = None, context: str = ""
+    ) -> ScheduledTask:
+        tid = f"task_{int(time.time())}_{random.randint(100, 999)}"
+        task = ScheduledTask(
+            id=tid, text=text, trigger_time=trigger_time, repeat=repeat, context=context
+        )
         self.tasks.append(task)
         self._save()
         return task
@@ -5857,10 +7714,16 @@ class TaskScheduler:
         upcoming = [t for t in self.tasks if not t.fired and t.trigger_time > now]
         upcoming.sort(key=lambda t: t.trigger_time)
         return [
-            {"id": t.id, "text": t.text, "trigger_time": t.trigger_time,
-             "repeat": t.repeat, "eta_seconds": round(t.trigger_time - now)}
+            {
+                "id": t.id,
+                "text": t.text,
+                "trigger_time": t.trigger_time,
+                "repeat": t.repeat,
+                "eta_seconds": round(t.trigger_time - now),
+            }
             for t in upcoming[:limit]
         ]
+
 
 def parse_relative_time(text: str) -> Optional[float]:
     """Parse 'in 30 minutes', 'in 2 hours', 'tomorrow at 9am', 'every day at 8am' etc.
@@ -5869,60 +7732,67 @@ def parse_relative_time(text: str) -> Optional[float]:
     now = time.time()
 
     # "in X minutes/hours/seconds"
-    m = _re.search(r'in\s+(\d+)\s*(min(?:ute)?s?|hr|hour|h|sec(?:ond)?s?|s)\b', text)
+    m = _re.search(r"in\s+(\d+)\s*(min(?:ute)?s?|hr|hour|h|sec(?:ond)?s?|s)\b", text)
     if m:
         val = int(m.group(1))
         unit = m.group(2)
-        if unit.startswith('h'):
+        if unit.startswith("h"):
             delta = val * 3600
-        elif unit.startswith('m'):
+        elif unit.startswith("m"):
             delta = val * 60
         else:
             delta = val
         return now + delta
 
     # "at HH:MM" or "at HH:MM am/pm"
-    m = _re.search(r'at\s+(\d{1,2}):(\d{2})\s*(am|pm)?', text)
+    m = _re.search(r"at\s+(\d{1,2}):(\d{2})\s*(am|pm)?", text)
     if m:
         hour = int(m.group(1))
         minute = int(m.group(2))
         ampm = m.group(3)
-        if ampm == 'pm' and hour < 12:
+        if ampm == "pm" and hour < 12:
             hour += 12
-        elif ampm == 'am' and hour == 12:
+        elif ampm == "am" and hour == 12:
             hour = 0
-        target = datetime.datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+        target = datetime.datetime.now().replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        )
         if target.timestamp() <= now:
             target += datetime.timedelta(days=1)
         return target.timestamp()
 
     # "tomorrow at HH:MM" or "tomorrow"
-    if 'tomorrow' in text:
+    if "tomorrow" in text:
         base = now + 86400
-        m2 = _re.search(r'tomorrow\s+(?:at\s+)?(\d{1,2}):(\d{2})\s*(am|pm)?', text)
+        m2 = _re.search(r"tomorrow\s+(?:at\s+)?(\d{1,2}):(\d{2})\s*(am|pm)?", text)
         if m2:
             hour = int(m2.group(1))
             minute = int(m2.group(2))
             ampm = m2.group(3)
-            if ampm == 'pm' and hour < 12:
+            if ampm == "pm" and hour < 12:
                 hour += 12
-            elif ampm == 'am' and hour == 12:
+            elif ampm == "am" and hour == 12:
                 hour = 0
             import datetime as _dt
-            target = _dt.datetime.fromtimestamp(base).replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+            target = _dt.datetime.fromtimestamp(base).replace(
+                hour=hour, minute=minute, second=0, microsecond=0
+            )
             return target.timestamp()
         return base
 
     # "in an hour" / "in half an hour"
-    if 'half an hour' in text:
+    if "half an hour" in text:
         return now + 1800
-    if 'an hour' in text or '1 hour' in text:
+    if "an hour" in text or "1 hour" in text:
         return now + 3600
 
     return None
 
+
 # ─── KEYWORD LEARNER ────────────────────────────────────────────
 KEYWORDS_FILE = WORKSPACE / "learned_keywords.json"
+
 
 class KeywordLearner:
     """Extracts and tracks topics/interests from conversations.
@@ -5930,32 +7800,198 @@ class KeywordLearner:
 
     # Common stop words to skip
     STOP_WORDS = {
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "shall", "can", "need", "dare", "ought",
-        "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
-        "up", "about", "into", "through", "during", "before", "after",
-        "above", "below", "between", "out", "off", "over", "under", "again",
-        "further", "then", "once", "here", "there", "when", "where", "why",
-        "how", "all", "each", "every", "both", "few", "more", "most", "other",
-        "some", "such", "no", "nor", "not", "only", "own", "same", "so",
-        "than", "too", "very", "just", "because", "but", "and", "or", "if",
-        "while", "that", "this", "these", "those", "what", "which", "who",
-        "whom", "it", "its", "i", "me", "my", "we", "our", "you", "your",
-        "he", "him", "his", "she", "her", "they", "them", "their", "lilly",
-        "hey", "tell", "me", "like", "yeah", "yes", "no", "ok", "sure",
-        "please", "thanks", "thank", "going", "get", "got", "make", "know",
-        "want", "think", "say", "said", "come", "take", "look", "see",
-        "give", "use", "find", "tell", "ask", "work", "seem", "feel",
-        "try", "leave", "call", "let", "keep", "help", "start", "show",
-        "hear", "play", "run", "move", "live", "believe", "bring", "happen",
-        "right", "well", "also", "still", "back", "even", "new", "now",
-        "first", "last", "long", "great", "little", "old", "big", "high",
-        "different", "small", "large", "next", "early", "young", "important",
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "can",
+        "need",
+        "dare",
+        "ought",
+        "used",
+        "to",
+        "of",
+        "in",
+        "for",
+        "on",
+        "with",
+        "at",
+        "by",
+        "from",
+        "up",
+        "about",
+        "into",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "between",
+        "out",
+        "off",
+        "over",
+        "under",
+        "again",
+        "further",
+        "then",
+        "once",
+        "here",
+        "there",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "nor",
+        "not",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "because",
+        "but",
+        "and",
+        "or",
+        "if",
+        "while",
+        "that",
+        "this",
+        "these",
+        "those",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "it",
+        "its",
+        "i",
+        "me",
+        "my",
+        "we",
+        "our",
+        "you",
+        "your",
+        "he",
+        "him",
+        "his",
+        "she",
+        "her",
+        "they",
+        "them",
+        "their",
+        "lilly",
+        "hey",
+        "tell",
+        "me",
+        "like",
+        "yeah",
+        "yes",
+        "no",
+        "ok",
+        "sure",
+        "please",
+        "thanks",
+        "thank",
+        "going",
+        "get",
+        "got",
+        "make",
+        "know",
+        "want",
+        "think",
+        "say",
+        "said",
+        "come",
+        "take",
+        "look",
+        "see",
+        "give",
+        "use",
+        "find",
+        "tell",
+        "ask",
+        "work",
+        "seem",
+        "feel",
+        "try",
+        "leave",
+        "call",
+        "let",
+        "keep",
+        "help",
+        "start",
+        "show",
+        "hear",
+        "play",
+        "run",
+        "move",
+        "live",
+        "believe",
+        "bring",
+        "happen",
+        "right",
+        "well",
+        "also",
+        "still",
+        "back",
+        "even",
+        "new",
+        "now",
+        "first",
+        "last",
+        "long",
+        "great",
+        "little",
+        "old",
+        "big",
+        "high",
+        "different",
+        "small",
+        "large",
+        "next",
+        "early",
+        "young",
+        "important",
     }
 
     def __init__(self):
-        self.keywords: dict[str, dict] = {}  # keyword -> {count, last_seen, contexts:[]}
+        self.keywords: dict[
+            str, dict
+        ] = {}  # keyword -> {count, last_seen, contexts:[]}
         self._load()
 
     def _load(self):
@@ -5970,7 +8006,8 @@ class KeywordLearner:
         """Remove foreign-script and noise keywords from previous sessions."""
         before = len(self.keywords)
         self.keywords = {
-            kw: data for kw, data in self.keywords.items()
+            kw: data
+            for kw, data in self.keywords.items()
             if all(_is_latin_or_common(c) or c in "-_" for c in kw)
             and len(kw) >= 3
             and not is_hallucination(kw)
@@ -6019,8 +8056,11 @@ class KeywordLearner:
         # Prune old keywords (not seen in 7 days) periodically
         if len(self.keywords) > 200:
             cutoff = now - 604800
-            self.keywords = {k: v for k, v in self.keywords.items()
-                            if v["last_seen"] > cutoff or v["count"] > 3}
+            self.keywords = {
+                k: v
+                for k, v in self.keywords.items()
+                if v["last_seen"] > cutoff or v["count"] > 3
+            }
 
         # Save periodically (every 5 records)
         if sum(v["count"] for v in self.keywords.values()) % 5 == 0:
@@ -6028,7 +8068,9 @@ class KeywordLearner:
 
     def top_interests(self, n: int = 10) -> list[tuple[str, int]]:
         """Return the most frequently discussed topics."""
-        sorted_kw = sorted(self.keywords.items(), key=lambda x: x[1]["count"], reverse=True)
+        sorted_kw = sorted(
+            self.keywords.items(), key=lambda x: x[1]["count"], reverse=True
+        )
         return [(k, v["count"]) for k, v in sorted_kw[:n] if v["count"] >= 2]
 
     def recent_interests(self, hours: int = 24, n: int = 5) -> list[str]:
@@ -6055,10 +8097,12 @@ class KeywordLearner:
                 return kw
         return interests[0][0]
 
+
 task_scheduler = TaskScheduler()
 keyword_learner = KeywordLearner()
 
 # ─── PROACTIVE BACKGROUND LOOPS ─────────────────────────────────
+
 
 async def task_scheduler_loop():
     """Background: check for due tasks/reminders and speak them."""
@@ -6077,6 +8121,7 @@ async def task_scheduler_loop():
             await speak(f"Hey! You asked me to remind you: {task.text}")
             task_scheduler.mark_fired(task)
             await asyncio.sleep(5)
+
 
 async def proactive_suggestion_loop():
     """Background: proactively suggest things based on learned interests, time of day, and context."""
@@ -6114,18 +8159,22 @@ async def proactive_suggestion_loop():
         if recent:
             # Something they were recently into
             r_topic = random.choice(recent)
-            messages_options.extend([
-                f"Hey, we were talking about {r_topic} earlier — want to pick that up?",
-                f"I was thinking about our {r_topic} conversation. Want to know something cool about it?",
-                f"Remember when we talked about {r_topic}? I found it interesting.",
-            ])
+            messages_options.extend(
+                [
+                    f"Hey, we were talking about {r_topic} earlier — want to pick that up?",
+                    f"I was thinking about our {r_topic} conversation. Want to know something cool about it?",
+                    f"Remember when we talked about {r_topic}? I found it interesting.",
+                ]
+            )
 
         if topic and topic not in (recent or []):
-            messages_options.extend([
-                f"You know what I was wondering about? {topic}. What do you think?",
-                f"I noticed you talk a lot about {topic}. Want to explore that more?",
-                f"Something about {topic} caught my attention. Want to discuss it?",
-            ])
+            messages_options.extend(
+                [
+                    f"You know what I was wondering about? {topic}. What do you think?",
+                    f"I noticed you talk a lot about {topic}. Want to explore that more?",
+                    f"Something about {topic} caught my attention. Want to discuss it?",
+                ]
+            )
 
         # Time-based suggestions
         if hour in (8, 9, 10):
@@ -6133,7 +8182,9 @@ async def proactive_suggestion_loop():
         elif hour in (12, 13):
             messages_options.append("Lunchtime! Taking a break?")
         elif hour in (21, 22):
-            messages_options.append("Winding down for the night? Anything on your mind?")
+            messages_options.append(
+                "Winding down for the night? Anything on your mind?"
+            )
 
         if not messages_options:
             continue
@@ -6150,6 +8201,7 @@ async def proactive_suggestion_loop():
         await speak(msg)
         last_suggestion = now
 
+
 async def conversation_timeout_loop():
     """Background: watches conversation mode and exits after timeout of inactivity."""
     global CONVERSATION_MODE
@@ -6163,6 +8215,7 @@ async def conversation_timeout_loop():
         if now - CONVERSATION_LAST_ACTIVITY > CONVERSATION_TIMEOUT:
             CONVERSATION_MODE = False
             logger.info("Conversation mode: timed out after inactivity")
+
 
 # ─── LIFESPAN MANAGER ────────────────────────────────────────────
 async def _sensor_server_watchdog():
@@ -6180,6 +8233,7 @@ async def _sensor_server_watchdog():
             pass
         logger.warning("Sensor server watchdog: health check failed, restarting...")
         await _ensure_sensor_server()
+
 
 async def _ensure_sensor_server():
     """Check if sensor server is reachable; if not, start it on Termux via SSH."""
@@ -6220,7 +8274,9 @@ async def _ensure_sensor_server():
             r = await c.get(f"{SENSOR_SERVER_URL}/health", timeout=2.0)
             if r.status_code == 200:
                 SENSOR_SERVER_OK = True
-                logger.info(f"Sensor server started successfully at {SENSOR_SERVER_URL}")
+                logger.info(
+                    f"Sensor server started successfully at {SENSOR_SERVER_URL}"
+                )
                 return True
         except Exception:
             pass
@@ -6228,9 +8284,11 @@ async def _ensure_sensor_server():
     logger.error("Failed to start sensor server")
     return False
 
+
 # ─── VISION COMMENTARY LOOP ───────────────────────────────────
 _prev_vision_labels: list = []
 _vision_commentary_cooldown: float = 0.0
+
 
 async def vision_commentary_loop():
     """Proactive camera commentary — Lilly reacts when she notices something new."""
@@ -6269,13 +8327,17 @@ async def vision_commentary_loop():
             _vision_commentary_cooldown = time.time() + 30  # 30s cooldown
 
             # Build a commentary prompt
-            new_items = [l for l in current_labels if l not in (set(_prev_vision_labels) if _prev_vision_labels else set())]
+            new_items = [
+                l
+                for l in current_labels
+                if l not in (set(_prev_vision_labels) if _prev_vision_labels else set())
+            ]
             items_str = ", ".join(current_labels[:5])
             _char = current_avatar or "puppy"
             prompt = f"Camera sees: {items_str}. React naturally to what you see. One short sentence, casual and in character."
             messages = [
                 {"role": "system", "content": build_avatar_system_prompt(_char)},
-                {"role": "user", "content": prompt}
+                {"role": "user", "content": prompt},
             ]
             reply = await llama_backend.chat(messages, temperature=0.9, max_tokens=60)
             if reply and len(reply.strip()) > 5:
@@ -6283,15 +8345,243 @@ async def vision_commentary_loop():
         except Exception as e:
             logger.debug(f"vision_commentary error: {e}")
 
+
+# ── VIBECODE LEARNING RESOURCE DISCOVERY ───────────────────────────
+_VIBECODE_LEARNING_CACHE: dict[str, float] = {}
+_VIBECODE_LEARNING_COOLDOWN = 3600  # 1 hour between notifications per topic
+
+
+def _vibecode_detect_stack(project_dir: Path) -> list[str]:
+    """Detect tech stack keywords from project files."""
+    stack = []
+    try:
+        files = {f.name for f in project_dir.iterdir()}
+        if "package.json" in files:
+            stack.append("javascript")
+            stack.append("nodejs")
+            pkg = project_dir / "package.json"
+            try:
+                import json
+
+                data = json.loads(pkg.read_text())
+                deps = {
+                    **data.get("dependencies", {}),
+                    **data.get("devDependencies", {}),
+                }
+                for key in [
+                    "vue",
+                    "react",
+                    "next",
+                    "nuxt",
+                    "svelte",
+                    "express",
+                    "vite",
+                    "typescript",
+                ]:
+                    if key in deps:
+                        stack.append(key)
+            except Exception:
+                pass
+        if "requirements.txt" in files or any(f.endswith(".py") for f in files):
+            stack.append("python")
+            if any(
+                (project_dir / f).exists() for f in ["main.py", "app.py", "server.py"]
+            ):
+                stack.append(
+                    "fastapi" if (project_dir / "main.py").exists() else "flask"
+                )
+        if "Dockerfile" in files:
+            stack.append("docker")
+        if "go.mod" in files:
+            stack.append("go")
+        if "Cargo.toml" in files:
+            stack.append("rust")
+    except Exception:
+        pass
+    return list(set(stack))
+
+
+_VIBECODE_LEARNING_RESOURCES = {
+    "vue": [
+        {
+            "title": "Vue.js Official Guide",
+            "url": "https://vuejs.org/guide/introduction/",
+        },
+        {"title": "Vue Mastery Courses", "url": "https://www.vuemastery.com/"},
+        {
+            "title": "Vue 3 Composition API",
+            "url": "https://vuejs.org/api/composition-api-setup/",
+        },
+    ],
+    "react": [
+        {"title": "React Official Tutorial", "url": "https://react.dev/learn"},
+        {"title": "React Patterns", "url": "https://reactpatterns.com/"},
+    ],
+    "next": [
+        {"title": "Next.js Learn", "url": "https://nextjs.org/learn"},
+        {"title": "Next.js Documentation", "url": "https://nextjs.org/docs"},
+    ],
+    "python": [
+        {
+            "title": "Python Official Tutorial",
+            "url": "https://docs.python.org/3/tutorial/",
+        },
+        {"title": "Real Python", "url": "https://realpython.com/"},
+    ],
+    "fastapi": [
+        {"title": "FastAPI Tutorial", "url": "https://fastapi.tiangolo.com/tutorial/"},
+        {"title": "FastAPI Best Practices", "url": "https://fastapi.tiangolo.com/"},
+    ],
+    "flask": [
+        {"title": "Flask Documentation", "url": "https://flask.palletsprojects.com/"},
+        {
+            "title": "Flask Mega-Tutorial",
+            "url": "https://blog.miguelgrinberg.com/post/the-flask-mega-tutorial-part-i-hello-world",
+        },
+    ],
+    "docker": [
+        {"title": "Docker Get Started", "url": "https://docs.docker.com/get-started/"},
+        {
+            "title": "Docker Best Practices",
+            "url": "https://docs.docker.com/develop/develop-images/dockerfile_best-practices/",
+        },
+    ],
+    "javascript": [
+        {
+            "title": "MDN JavaScript Guide",
+            "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide",
+        },
+        {"title": "JavaScript.info", "url": "https://javascript.info/"},
+    ],
+    "nodejs": [
+        {"title": "Node.js Documentation", "url": "https://nodejs.org/en/docs/"},
+        {
+            "title": "Node.js Best Practices",
+            "url": "https://github.com/goldbergyoni/nodebestpractices",
+        },
+    ],
+}
+
+
+async def _vibecode_search_learning_article(topic: str) -> dict | None:
+    """Return a curated learning resource for a topic, or try a web search fallback."""
+    topic_lower = topic.lower()
+    # Check curated resources first
+    for key, resources in _VIBECODE_LEARNING_RESOURCES.items():
+        if key in topic_lower:
+            import random
+
+            choice = random.choice(resources)
+            return {"title": choice["title"], "url": choice["url"], "topic": topic}
+    # Fallback: try a web search
+    try:
+        query = f"learn {topic} tutorial best practices"
+        url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200:
+                text = r.text
+                # DuckDuckGo wraps results in redirect URLs
+                m = re.search(r"uddg=([^&]+)", text)
+                if m:
+                    import urllib.parse
+
+                    link = urllib.parse.unquote(m.group(1))
+                    title_m = re.search(
+                        r'class="result__snippet">(.*?)</a>', text, re.S
+                    )
+                    title = title_m.group(1) if title_m else topic
+                    title = re.sub(r"<[^>]+>", "", title).strip()[:120]
+                    return {"title": title, "url": link, "topic": topic}
+    except Exception:
+        pass
+    return None
+
+
+async def vibecode_learning_loop():
+    """Background: scan active VibeCode projects and notify when relevant learning articles are found."""
+    await asyncio.sleep(120)  # wait for system startup
+    last_check = 0.0
+    while True:
+        await asyncio.sleep(1800)  # check every 30 minutes
+        try:
+            projects = []
+            if VIBECODE_PROJECTS_DIR.exists():
+                for entry in VIBECODE_PROJECTS_DIR.iterdir():
+                    if entry.is_dir() and not entry.name.startswith("."):
+                        projects.append(entry.name)
+            if not projects:
+                continue
+            for slug in projects[:3]:  # limit to 3 projects per cycle
+                project_dir = VIBECODE_PROJECTS_DIR / slug
+                if not project_dir.exists():
+                    continue
+                stack = _vibecode_detect_stack(project_dir)
+                if not stack:
+                    continue
+                # Pick one topic to search for
+                topic = stack[0]
+                cache_key = f"{slug}:{topic}"
+                now = time.time()
+                if (
+                    now - _VIBECODE_LEARNING_CACHE.get(cache_key, 0)
+                    < _VIBECODE_LEARNING_COOLDOWN
+                ):
+                    continue
+                article = await _vibecode_search_learning_article(f"{topic} for {slug}")
+                if article:
+                    _VIBECODE_LEARNING_CACHE[cache_key] = now
+                    await proactive_notify(
+                        f"📚 For your project **{slug}** ({stack}): '{article['title']}' "
+                        f"matches the {topic} you're working with.",
+                        Archetype.OBSERVER,
+                        next_step="Want me to pull it up in VibeCode chat?",
+                    )
+        except Exception as e:
+            logger.debug(f"vibecode_learning_loop error: {e}")
+
+
+_whisper_proc: Optional[subprocess.Popen] = None
+
+
+def _start_whisper_server():
+    """Start the faster-whisper-server as a background subprocess on port 8001."""
+    global _whisper_proc
+    import subprocess, socket
+
+    # Check if already running
+    try:
+        with socket.create_connection(("localhost", 8001), timeout=1):
+            logger.info("Whisper STT already running on :8001")
+            return
+    except OSError:
+        pass
+    model = os.environ.get("WHISPER_MODEL", "Systran/faster-whisper-large-v3")
+    logger.info(f"Starting Whisper STT server on :8001 (model={model})")
+    _whisper_proc = subprocess.Popen(
+        [
+            "uvicorn",
+            "faster_whisper_server.api:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8001",
+        ],
+        env={**os.environ, "FWS_MODEL_NAME": model},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global USER_NAME
     load_skills()
 
-    # Initialize Clerk auth (pre-warms the JWKS cache)
+    # Auth0 routes are registered at startup via add_auth0_routes
     if AUTH_AVAILABLE:
-        await init_clerk_auth()
-        logger.info("Clerk auth system ready")
+        add_auth0_routes(app)
+        logger.info("Auth0 auth system ready")
 
     await load_memory()
 
@@ -6306,12 +8596,9 @@ async def lifespan(app: FastAPI):
     # Ensure sensor server is running before anything else
     await _ensure_sensor_server()
 
-    # Start llama.cpp server in background
-    server_ok = await llama_backend.start_server()
-    if server_ok:
-        logger.info("llama.cpp backend active")
-    else:
-        logger.info("llama.cpp not available — requests will fall back to Ollama")
+    # Start local Whisper STT server (in-container, no cross-container DNS needed)
+    _start_whisper_server()
+
     asyncio.create_task(background_mic_loop())
     asyncio.create_task(sensor_conversation_engine())
     asyncio.create_task(synaptic_learning_loop())
@@ -6323,19 +8610,23 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(task_scheduler_loop())
     asyncio.create_task(proactive_suggestion_loop())
     asyncio.create_task(conversation_timeout_loop())
+    asyncio.create_task(vibecode_learning_loop())
     # Periodic sensor server health check — restart if it dies
     asyncio.create_task(_sensor_server_watchdog())
     archetype_inferrer.load()
     yield
-    await llama_backend.stop_server()
+
 
 app = FastAPI(lifespan=lifespan)
+
 
 # ─── AUTH ENDPOINTS ──────────────────────────────────────────────
 class OCUnlock(BaseModel):
     token: str
 
+
 OC_BASE_URL = os.environ.get("OC_BASE_URL", "http://localhost:3002")
+
 
 @app.get("/api/oc/session")
 async def oc_session():
@@ -6348,6 +8639,7 @@ async def oc_session():
     except Exception:
         pass
     return {"adminAuthConfigured": False, "authenticated": False}
+
 
 @app.post("/api/oc/unlock")
 async def oc_unlock(body: OCUnlock):
@@ -6363,86 +8655,23 @@ async def oc_unlock(body: OCUnlock):
                 return {"ok": True, "authenticated": True}
             return JSONResponse(status_code=401, content={"error": "Invalid token"})
     except Exception as e:
-        return JSONResponse(status_code=502, content={"error": f"OC unreachable: {str(e)}"})
+        return JSONResponse(
+            status_code=502, content={"error": f"OC unreachable: {str(e)}"}
+        )
+
 
 @app.post("/api/oc/logout")
 async def oc_logout():
     """No-op — OC auth is server-side proxy, no browser cookie needed."""
     return {"ok": True}
 
+
 def _extract_user(request: Request) -> Optional[dict]:
     """
     Synchronous shim — returns None for now.
+    Auth0 uses session cookies read asynchronously via get_current_user(request).
     Async endpoints should call get_current_user(request) directly.
-    The old cookie name was 'lilly_token'; Clerk uses '__session'.
     """
-    # Lightweight non-async fallback: read the __session cookie and do
-    # a quick unverified decode to get the user id for logging purposes.
-    # Full async verification happens in endpoints that matter.
-    if not AUTH_AVAILABLE:
-        return None
-    from clerk_auth import _extract_token, _fallback_decode
-    token = _extract_token(request)
-    if not token:
-        return None
-    payload = _fallback_decode(token)
-    if not payload:
-        return None
-    user_id = payload.get("sub", "")
-    email = payload.get("email", "")
-    name = payload.get("name", "") or email.split("@")[0]
-    return {"id": user_id, "email": email, "name": name}
-
-# ─── CLERK AUTH ENDPOINTS ─────────────────────────────────────────
-
-@app.get("/api/auth/me")
-async def auth_me(request: Request):
-    """Return the current user based on the Clerk session token."""
-    if not AUTH_AVAILABLE:
-        return JSONResponse(status_code=503, content={"error": "Auth not available"})
-    user = await get_current_user(request)
-    if not user:
-        return JSONResponse(status_code=401, content={"error": "Not authenticated"})
-    return {"user": {"id": user["id"], "email": user["email"], "name": user["name"]}}
-
-@app.post("/api/auth/logout")
-async def auth_logout():
-    """
-    With Clerk, sign-out is handled entirely client-side via the Clerk JS SDK
-    (clerk.signOut()). This endpoint is kept for backwards compatibility and
-    simply clears the legacy cookie in case it is still present.
-    """
-    resp = JSONResponse(content={"ok": True})
-    resp.delete_cookie("lilly_token")   # legacy cookie cleanup
-    return resp
-
-# ─── LEGACY STUBS (kept so old clients don't 404) ────────────────
-
-@app.post("/api/auth/register")
-async def auth_register_stub():
-    """Registration is now handled by Clerk — redirect callers."""
-    return JSONResponse(
-        status_code=410,
-        content={"error": "Registration is handled by Clerk. Use the sign-in UI."},
-    )
-
-@app.post("/api/auth/login")
-async def auth_login_stub():
-    """Login is now handled by Clerk — redirect callers."""
-    return JSONResponse(
-        status_code=410,
-        content={"error": "Login is handled by Clerk. Use the sign-in UI."},
-    )
-
-@app.get("/api/auth/google")
-async def google_auth_stub():
-    """Google OAuth is now handled by Clerk — redirect to home."""
-    return RedirectResponse("/")
-
-@app.get("/api/auth/google/callback")
-async def google_auth_callback_stub():
-    """Google OAuth callback is now handled by Clerk."""
-    return RedirectResponse("/")
 
 
 # ─── API ENDPOINTS ──────────────────────────────────────────────
@@ -6473,7 +8702,7 @@ async def google_connect_info(request: Request):
     If the user already has a valid Google token the response includes the
     granted scopes so the frontend can show which services are available.
 
-    Required scopes (must be added in Clerk Dashboard → SSO Connections →
+    Required scopes (must be added in Auth0 Dashboard → SSO Connections →
     Google → Additional scopes):
         https://www.googleapis.com/auth/gmail.readonly
         https://www.googleapis.com/auth/calendar.readonly
@@ -6492,12 +8721,13 @@ async def google_connect_info(request: Request):
             status_code=401,
             content={
                 "error": "not_authenticated",
-                "message": "Sign in with Google via Clerk to connect Gmail and Calendar.",
+                "message": "Sign in with Google via Auth0 to connect Gmail and Calendar.",
             },
         )
 
     # Peek at cached token without re-fetching
-    from clerk_auth import load_google_tokens
+    from auth0_auth import load_google_tokens
+
     cached = load_google_tokens(user["id"])
     if cached and cached.get("access_token"):
         scopes = cached.get("scopes", [])
@@ -6511,9 +8741,11 @@ async def google_connect_info(request: Request):
             "missing_scopes": missing,
             "scope_warning": (
                 f"Missing required scope(s): {', '.join(missing)}. "
-                "Add them in Clerk Dashboard → SSO Connections → Google → "
+                "Add them in Auth0 Dashboard → SSO Connections → Google → "
                 "Additional scopes, then ask the user to sign out and sign back in."
-            ) if missing else None,
+            )
+            if missing
+            else None,
         }
 
     return {
@@ -6521,7 +8753,7 @@ async def google_connect_info(request: Request):
         "user": user.get("email", ""),
         "required_scopes": REQUIRED_SCOPES,
         "setup_instructions": (
-            "1. Go to Clerk Dashboard → SSO Connections → Google → Additional scopes.\n"
+            "1. Go to Auth0 Dashboard → SSO Connections → Google → Additional scopes.\n"
             "2. Add: https://www.googleapis.com/auth/gmail.readonly\n"
             "   and: https://www.googleapis.com/auth/calendar.readonly\n"
             "3. Have the user sign out and sign back in with Google.\n"
@@ -6533,10 +8765,10 @@ async def google_connect_info(request: Request):
 @app.post("/api/google/connect")
 async def google_connect(request: Request):
     """
-    POST — fetch (or re-fetch) the Google OAuth token that Clerk stored for this
+    POST — fetch (or re-fetch) the Google OAuth token that Auth0 stored for this
     user and persist it locally so Gmail and Calendar helpers can use it.
 
-    Pre-requisite — do this once in your Clerk dashboard:
+    Pre-requisite — do this once in your Auth0 dashboard:
       SSO Connections → Google → Additional scopes → add:
         https://www.googleapis.com/auth/gmail.readonly
         https://www.googleapis.com/auth/calendar.readonly
@@ -6548,12 +8780,10 @@ async def google_connect(request: Request):
     ]
 
     if not AUTH_AVAILABLE:
-        return JSONResponse(status_code=503,
-                            content={"error": "auth_unavailable"})
+        return JSONResponse(status_code=503, content={"error": "auth_unavailable"})
     user = await get_current_user(request)
     if not user:
-        return JSONResponse(status_code=401,
-                            content={"error": "not_authenticated"})
+        return JSONResponse(status_code=401, content={"error": "not_authenticated"})
     tokens = await fetch_google_tokens_from_clerk(user["id"])
     if not tokens or not tokens.get("access_token"):
         return JSONResponse(
@@ -6563,14 +8793,14 @@ async def google_connect(request: Request):
                 "message": (
                     "No Google OAuth token found for your account. "
                     "Make sure you signed in with Google and that the following "
-                    "scopes are enabled in your Clerk dashboard under "
+                    "scopes are enabled in your Auth0 dashboard under "
                     "SSO Connections → Google → Additional scopes: "
                     "https://www.googleapis.com/auth/gmail.readonly  "
                     "https://www.googleapis.com/auth/calendar.readonly"
                 ),
                 "required_scopes": REQUIRED_SCOPES,
                 "setup_instructions": (
-                    "1. Go to Clerk Dashboard → SSO Connections → Google → Additional scopes.\n"
+                    "1. Go to Auth0 Dashboard → SSO Connections → Google → Additional scopes.\n"
                     "2. Add the two scope URLs listed in 'required_scopes'.\n"
                     "3. Have the user sign out and sign back in with Google.\n"
                     "4. Re-call this endpoint."
@@ -6593,7 +8823,7 @@ async def google_connect(request: Request):
         response["missing_scopes"] = missing
         response["scope_warning"] = (
             f"Token obtained but missing scope(s): {', '.join(missing)}. "
-            "Add them in Clerk Dashboard → SSO Connections → Google → "
+            "Add them in Auth0 Dashboard → SSO Connections → Google → "
             "Additional scopes, then ask the user to sign out and sign back in."
         )
     return response
@@ -6620,6 +8850,7 @@ async def google_calendar(request: Request, days: int = 7, max: int = 10):
     if not user:
         return JSONResponse(status_code=401, content={"error": "not_authenticated"})
     import datetime as _dt
+
     now = _dt.datetime.utcnow()
     time_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     time_max = (now + _dt.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -6628,6 +8859,7 @@ async def google_calendar(request: Request, days: int = 7, max: int = 10):
     )
     return {"events": events, "count": len(events)}
 
+
 @app.post("/api/toggle_mic")
 async def toggle_mic():
     global BACKGROUND_MIC_ACTIVE
@@ -6635,16 +8867,19 @@ async def toggle_mic():
     WAKE_STATE["listening"] = BACKGROUND_MIC_ACTIVE
     return {"active": BACKGROUND_MIC_ACTIVE}
 
+
 # ─── BROWSER SENSOR BRIDGE ───────────────────────────────────────
-# Per-user browser sensor data — keyed by Clerk user ID (or "anon").
+# Per-user browser sensor data — keyed by Auth0 user ID (or "anon").
 # Each user's device pushes its own sensors; they never see each other's.
-_browser_sensors: dict[str, dict] = {}       # user_id → sensor frame
-_browser_sensors_ts: dict[str, float] = {}   # user_id → timestamp
+_browser_sensors: dict[str, dict] = {}  # user_id → sensor frame
+_browser_sensors_ts: dict[str, float] = {}  # user_id → timestamp
 _BROWSER_SENSOR_TTL: float = 5.0  # seconds before data is considered stale
+
 
 def _browser_key() -> str:
     """Return the storage key for the current user's browser sensors."""
     return _current_user_id or "anon"
+
 
 @app.post("/api/sensors/browser")
 async def ingest_browser_sensors(request: Request):
@@ -6727,6 +8962,7 @@ async def get_browser_sensors():
         "stale": age is None or age > _BROWSER_SENSOR_TTL,
     }
 
+
 @app.get("/api/phone_status")
 async def phone_status():
     return {
@@ -6740,6 +8976,7 @@ async def phone_status():
         "sensor_url": SENSOR_SERVER_URL,
     }
 
+
 @app.post("/api/wake")
 async def trigger_wake():
     """Wake endpoint — signals next mic chunk to be treated as a command."""
@@ -6747,6 +8984,7 @@ async def trigger_wake():
     WAKE_STATE["listening"] = True
     WAKE_STATE["pending_wake"] = True
     return {"wake": True, "listening": True}
+
 
 @app.post("/api/start_ssh")
 async def start_ssh():
@@ -6758,6 +8996,7 @@ async def start_ssh():
     PHONE_SSH_OK = ok
     return {"success": ok, "message": msg}
 
+
 @app.post("/api/stop_ssh")
 async def stop_ssh():
     success, msg = await ssh_stop_on_phone()
@@ -6765,9 +9004,11 @@ async def stop_ssh():
     PHONE_SSH_OK = False
     return {"success": success, "message": msg}
 
+
 @app.get("/api/child_mode")
 async def get_child_mode():
     return {"active": CHILD_MODE}
+
 
 @app.post("/api/child_mode")
 async def toggle_child_mode(data: dict = None):
@@ -6783,9 +9024,11 @@ async def toggle_child_mode(data: dict = None):
         await speak("Back to normal mode!")
     return {"active": CHILD_MODE, "mode": mode}
 
+
 @app.get("/api/coding_mode")
 async def get_coding_mode():
     return {"active": CODING_MODE, "history": CODING_HISTORY}
+
 
 @app.post("/api/coding_mode")
 async def toggle_coding_mode(data: dict = None):
@@ -6805,7 +9048,9 @@ async def toggle_coding_mode(data: dict = None):
     else:
         # Create temp sandbox folder for this coding session
         session_id = uuid.uuid4().hex[:8]
-        CODING_SESSION_DIR = os.path.join(tempfile.gettempdir(), f"lilly-coding-{session_id}")
+        CODING_SESSION_DIR = os.path.join(
+            tempfile.gettempdir(), f"lilly-coding-{session_id}"
+        )
         os.makedirs(CODING_SESSION_DIR, exist_ok=True)
         CODING_FILES.clear()
         # Auto-enable conversation mode for hands-free coding
@@ -6819,6 +9064,7 @@ async def toggle_coding_mode(data: dict = None):
         await speak("Coding mode off — still listening!")
     return {"active": CODING_MODE, "mode": mode}
 
+
 @app.get("/api/coding_download")
 async def download_coding_project():
     """Zip the current coding session folder and return as download."""
@@ -6826,29 +9072,31 @@ async def download_coding_project():
         return JSONResponse({"error": "No active coding session"}, status_code=404)
     if not CODING_FILES:
         return JSONResponse({"error": "No files generated yet"}, status_code=404)
-    
+
     import zipfile
     from io import BytesIO
     from fastapi.responses import StreamingResponse
-    
+
     zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
         for filename in CODING_FILES:
             filepath = os.path.join(CODING_SESSION_DIR, filename)
             if os.path.exists(filepath):
                 zipf.write(filepath, filename)
     zip_buffer.seek(0)
-    
+
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
-        headers={"Content-Disposition": "attachment; filename=lilly-project.zip"}
+        headers={"Content-Disposition": "attachment; filename=lilly-project.zip"},
     )
+
 
 @app.get("/api/coding_files")
 async def get_coding_files():
     """Return list of files in current coding session."""
     return {"files": CODING_FILES, "session_dir": CODING_SESSION_DIR}
+
 
 # ─── HIVE GROUP CHAT ──────────────────────────────────────────────
 HIVE_PERSONAS = {
@@ -7141,6 +9389,35 @@ Rules:
     },
 }
 
+# Reverse lookups so an avatar can be referenced by its emoji (🐶) or display
+# name ("Lilly") as well as its canonical key ("puppy").
+_PERSONA_KEY_BY_EMOJI = {
+    p["emoji"]: key
+    for key, p in HIVE_PERSONAS.items()
+    if isinstance(p, dict) and p.get("emoji")
+}
+_PERSONA_KEY_BY_NAME = {
+    p["name"].lower(): key
+    for key, p in HIVE_PERSONAS.items()
+    if isinstance(p, dict) and p.get("name")
+}
+
+
+def resolve_persona_key(avatar: str) -> str:
+    """Resolve any avatar identifier to its canonical HIVE_PERSONAS key.
+
+    Accepts a persona key ("puppy"), an emoji ("🐶"), or a display name
+    ("Lilly"). Falls back to the default puppy/Lilly persona.
+    """
+    if not avatar:
+        return "puppy"
+    key = str(avatar).strip().lower()
+    if key in HIVE_PERSONAS:
+        return key
+    if key in _PERSONA_KEY_BY_EMOJI:
+        return _PERSONA_KEY_BY_EMOJI[key]
+    return _PERSONA_KEY_BY_NAME.get(key, "puppy")
+
 
 def build_avatar_system_prompt(avatar: str, user_name: str = "") -> str:
     """Build a full, character-specific system prompt for handle_intent.
@@ -7148,11 +9425,12 @@ def build_avatar_system_prompt(avatar: str, user_name: str = "") -> str:
     Each character gets their own voice, personality, and speech patterns.
     Falls back to Lilly (puppy) if the avatar isn't in HIVE_PERSONAS.
     """
-    persona = HIVE_PERSONAS.get(avatar, HIVE_PERSONAS["puppy"])
+    persona = HIVE_PERSONAS[resolve_persona_key(avatar)]
     base = persona["voice_prompt"].strip()
     if user_name:
         base += f"\n\nThe person you're talking to is {user_name}. Use their name naturally — not every reply, just when it fits."
     return base
+
 
 # ── Per-character TTS voice profiles ──────────────────────────────────────────
 #
@@ -7181,49 +9459,90 @@ def build_avatar_system_prompt(avatar: str, user_name: str = "") -> str:
 CHAR_VOICE = {
     # Lilly / Puppy: warm, a little bright, naturally expressive — the baseline everyone
     # is measured against. Slightly elevated pitch, moderate pace, friendly breathiness.
-    "puppy":   {"length_scale": 1.08, "noise_scale": 0.72, "noise_w": 0.82, "pitch_shift":  2.0},
-
+    "puppy": {
+        "length_scale": 1.08,
+        "noise_scale": 0.72,
+        "noise_w": 0.82,
+        "pitch_shift": 2.0,
+    },
     # Fox: fast-talking, noticeably high, lots of pitch variation — sounds mercurial and
     # clever. The gap from Puppy: much faster, much higher, more erratic pitch movement.
-    "fox":     {"length_scale": 0.82, "noise_scale": 0.88, "noise_w": 0.58, "pitch_shift":  5.5},
-
+    "fox": {
+        "length_scale": 0.82,
+        "noise_scale": 0.88,
+        "noise_w": 0.58,
+        "pitch_shift": 5.5,
+    },
     # Cat: precise, unhurried but not slow, almost no pitch variation — flat, clinical,
     # deliberate. Crisp articulation (low noise_w). The opposite of Fox's chaos.
-    "cat":     {"length_scale": 1.04, "noise_scale": 0.42, "noise_w": 0.44, "pitch_shift":  1.0},
-
+    "cat": {
+        "length_scale": 1.04,
+        "noise_scale": 0.42,
+        "noise_w": 0.44,
+        "pitch_shift": 1.0,
+    },
     # Bear: genuinely slow, genuinely deep, very breathy/warm — unmistakably different
     # from everyone. The largest pitch_shift gap in the set (−5.5 vs Puppy's +2.0).
-    "bear":    {"length_scale": 1.38, "noise_scale": 0.46, "noise_w": 0.95, "pitch_shift": -5.5},
-
+    "bear": {
+        "length_scale": 1.38,
+        "noise_scale": 0.46,
+        "noise_w": 0.95,
+        "pitch_shift": -5.5,
+    },
     # Bunny: the fastest voice AND the highest pitch in the set. Also the most expressive.
     # Instantly identifiable as "hyper little one" — nothing else occupies this corner.
-    "bunny":   {"length_scale": 0.72, "noise_scale": 0.82, "noise_w": 0.56, "pitch_shift":  7.0},
-
+    "bunny": {
+        "length_scale": 0.72,
+        "noise_scale": 0.82,
+        "noise_w": 0.56,
+        "pitch_shift": 7.0,
+    },
     # Owl: very slow, moderately low, extremely flat delivery (low noise_scale) — sounds
     # weighted and deliberate. Distinguished from Bear by being less breathy and less deep.
-    "owl":     {"length_scale": 1.42, "noise_scale": 0.36, "noise_w": 0.84, "pitch_shift": -3.0},
-
+    "owl": {
+        "length_scale": 1.42,
+        "noise_scale": 0.36,
+        "noise_w": 0.84,
+        "pitch_shift": -3.0,
+    },
     # Deer: the most neutral pitch (+0), slightly slower than normal, medium expressiveness,
     # warm and breathy — gentle without being whispery. Distinct from Puppy by being calmer
     # and from Bear by being lighter (higher pitch, less slow).
-    "deer":    {"length_scale": 1.18, "noise_scale": 0.58, "noise_w": 0.88, "pitch_shift":  0.0},
-
+    "deer": {
+        "length_scale": 1.18,
+        "noise_scale": 0.58,
+        "noise_w": 0.88,
+        "pitch_shift": 0.0,
+    },
     # Wolf: fast-ish, notably low, medium-high expressiveness, crisp not breathy — sounds
     # clipped and intense. Separated from Bear: Wolf is *fast and low*, Bear is *slow and low*.
-    "wolf":    {"length_scale": 0.90, "noise_scale": 0.74, "noise_w": 0.62, "pitch_shift": -4.5},
-
+    "wolf": {
+        "length_scale": 0.90,
+        "noise_scale": 0.74,
+        "noise_w": 0.62,
+        "pitch_shift": -4.5,
+    },
     # Raccoon: quick, mid-high pitch, animated — but distinct from Fox (lower pitch, less
     # erratic) and from Bunny (slower, not as high). The "tinkerer" voice: quick and bright
     # but focused, not scattered.
-    "raccoon": {"length_scale": 0.86, "noise_scale": 0.80, "noise_w": 0.66, "pitch_shift":  3.5},
+    "raccoon": {
+        "length_scale": 0.86,
+        "noise_scale": 0.80,
+        "noise_w": 0.66,
+        "pitch_shift": 3.5,
+    },
 }
 
-def _pitch_shift_audio(raw_pcm: bytes, semitones: float, sample_rate: int = 22050) -> bytes:
+
+def _pitch_shift_audio(
+    raw_pcm: bytes, semitones: float, sample_rate: int = 22050
+) -> bytes:
     """Shift pitch of raw PCM audio by resampling. Positive = higher, negative = lower."""
     if semitones == 0 or not raw_pcm:
         return raw_pcm
     try:
         import numpy as np
+
         samples = np.frombuffer(raw_pcm, dtype=np.int16).astype(np.float32)
         factor = 2 ** (semitones / 12.0)
         # Resample to shift pitch (changes speed too, which is fine for character voices)
@@ -7237,11 +9556,12 @@ def _pitch_shift_audio(raw_pcm: bytes, semitones: float, sample_rate: int = 2205
         logger.warning(f"Pitch shift failed ({semitones}st): {e}")
         return raw_pcm
 
+
 @app.post("/api/group_chat")
 async def group_chat(data: dict, request: Request):
     """Multi-agent hive chat with three modes: hive, individual, speaker.
-    
-    Authenticated via Clerk — each user's group chat is isolated to their session.
+
+    Authenticated via Auth0 — each user's group chat is isolated to their session.
     """
     user_msg = data.get("message", "").strip()
     selected = data.get("selected", "puppy").strip()
@@ -7250,6 +9570,9 @@ async def group_chat(data: dict, request: Request):
     muted = data.get("muted", False)
     if not user_msg:
         return JSONResponse({"error": "Empty message"}, status_code=400)
+    # Accept emoji / display-name aliases for any avatar reference (🐶 → puppy)
+    selected = resolve_persona_key(selected)
+    characters = [resolve_persona_key(c) for c in characters]
     if selected not in HIVE_PERSONAS:
         selected = "puppy"
 
@@ -7264,7 +9587,9 @@ async def group_chat(data: dict, request: Request):
     if not user_name:
         user_name = data.get("user_name", "").strip()
 
-    name_ctx = f"\nThe user's name is {user_name}. Address them by name." if user_name else ""
+    name_ctx = (
+        f"\nThe user's name is {user_name}. Address them by name." if user_name else ""
+    )
 
     # Load per-user memory for context (group chat is user-isolated)
     user_mem_hint = ""
@@ -7273,7 +9598,9 @@ async def group_chat(data: dict, request: Request):
         mem_entries = user_mem_data.get("entries", [])
         recent = [e for e in mem_entries[-6:] if e.get("role") == "user"]
         if recent:
-            user_mem_hint = "Recent conversation: " + "; ".join(e.get("text", "")[:60] for e in recent)
+            user_mem_hint = "Recent conversation: " + "; ".join(
+                e.get("text", "")[:60] for e in recent
+            )
 
     snapshot = await get_sensor_snapshot()
     sensor_ctx = snapshot_to_narrative(snapshot) if snapshot else ""
@@ -7285,7 +9612,17 @@ async def group_chat(data: dict, request: Request):
         discussion_context += f"\n{user_mem_hint}"
     discussion_context += "\n\n"
 
-    all_chars = ["puppy", "fox", "cat", "bear", "bunny", "owl", "deer", "wolf", "raccoon"]
+    all_chars = [
+        "puppy",
+        "fox",
+        "cat",
+        "bear",
+        "bunny",
+        "owl",
+        "deer",
+        "wolf",
+        "raccoon",
+    ]
 
     team_roster = "\n".join(
         f"  - {HIVE_PERSONAS[c]['emoji']} {HIVE_PERSONAS[c]['name']} ({HIVE_PERSONAS[c]['role']}): {HIVE_PERSONAS[c]['personality']} | Skills: {HIVE_PERSONAS[c]['strengths']}"
@@ -7315,7 +9652,7 @@ async def group_chat(data: dict, request: Request):
         responses = []
         for char_key in valid_chars:
             persona = HIVE_PERSONAS[char_key]
-            is_alpha = (char_key == selected)
+            is_alpha = char_key == selected
             system_prompt = (
                 f"{persona['voice_prompt'].strip()}\n"
                 f"{name_ctx}\n"
@@ -7324,15 +9661,29 @@ async def group_chat(data: dict, request: Request):
                 f"Use your unique voice and personality — don't sound generic. "
                 f"NEVER say 'like and subscribe', 'thanks for watching', or similar."
             )
-            reply = strip_json_wrapper(await llama_backend.chat([{"role": "system", "content": system_prompt},
-             {"role": "user", "content": discussion_context}],
-            temperature=0.7, max_tokens=50, timeout=15,))
+            reply = strip_json_wrapper(
+                await llama_backend.chat(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": discussion_context},
+                    ],
+                    temperature=0.7,
+                    max_tokens=50,
+                    timeout=15,
+                )
+            )
             if not reply:
                 reply = "I'm here."
-            responses.append({
-                "char": char_key, "name": persona["name"], "emoji": persona["emoji"],
-                "role": persona["role"], "text": reply.strip(), "alpha": is_alpha,
-            })
+            responses.append(
+                {
+                    "char": char_key,
+                    "name": persona["name"],
+                    "emoji": persona["emoji"],
+                    "role": persona["role"],
+                    "text": reply.strip(),
+                    "alpha": is_alpha,
+                }
+            )
         # Generate TTS for individual responses in parallel (skip if muted)
         if not muted:
             tts_tasks = [generate_tts_for_char(r["text"], r["char"]) for r in responses]
@@ -7343,7 +9694,9 @@ async def group_chat(data: dict, request: Request):
 
     # ─── SPEAKER MODE: one character summarizes the team's view ───
     if mode == "speaker":
-        speaker = characters[0] if characters and characters[0] in HIVE_PERSONAS else selected
+        speaker = (
+            characters[0] if characters and characters[0] in HIVE_PERSONAS else selected
+        )
         persona = HIVE_PERSONAS[speaker]
         system_prompt = (
             f"{persona['voice_prompt'].strip()}\n"
@@ -7358,14 +9711,26 @@ async def group_chat(data: dict, request: Request):
             f"Sound like yourself, not a spokesperson. "
             f"NEVER say 'like and subscribe', 'thanks for watching', or similar."
         )
-        reply = strip_json_wrapper(await llama_backend.chat([{"role": "system", "content": system_prompt},
-         {"role": "user", "content": discussion_context}],
-        temperature=0.7, max_tokens=100, timeout=15,))
+        reply = strip_json_wrapper(
+            await llama_backend.chat(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": discussion_context},
+                ],
+                temperature=0.7,
+                max_tokens=100,
+                timeout=15,
+            )
+        )
         if not reply:
             reply = "The hive agrees, but nothing to add."
         speaker_resp = {
-            "char": speaker, "name": persona["name"], "emoji": persona["emoji"],
-            "role": persona["role"], "text": reply.strip(), "alpha": True,
+            "char": speaker,
+            "name": persona["name"],
+            "emoji": persona["emoji"],
+            "role": persona["role"],
+            "text": reply.strip(),
+            "alpha": True,
         }
         if not muted:
             aid = await generate_tts_for_char(reply.strip(), speaker)
@@ -7374,6 +9739,7 @@ async def group_chat(data: dict, request: Request):
 
     # ─── HIVE MODE: natural turn-taking — alpha leads, 2 teammates respond ───
     import random
+
     responses = []
     conversation_so_far = []
 
@@ -7388,15 +9754,26 @@ async def group_chat(data: dict, request: Request):
         f"NEVER say 'like and subscribe', 'thanks for watching', or similar."
     )
     alpha_reply = await llama_backend.chat(
-        [{"role": "system", "content": alpha_prompt},
-         {"role": "user", "content": f"{discussion_context}\nLead the discussion and call on your team:"}],
-        temperature=0.7, max_tokens=100, timeout=20,
+        [
+            {"role": "system", "content": alpha_prompt},
+            {
+                "role": "user",
+                "content": f"{discussion_context}\nLead the discussion and call on your team:",
+            },
+        ],
+        temperature=0.7,
+        max_tokens=100,
+        timeout=20,
     )
     if not alpha_reply:
         alpha_reply = f"What do you think, team?"
     alpha_entry = {
-        "char": selected, "name": alpha_persona["name"], "emoji": alpha_persona["emoji"],
-        "role": alpha_persona["role"], "text": alpha_reply.strip(), "alpha": True,
+        "char": selected,
+        "name": alpha_persona["name"],
+        "emoji": alpha_persona["emoji"],
+        "role": alpha_persona["role"],
+        "text": alpha_reply.strip(),
+        "alpha": True,
     }
     responses.append(alpha_entry)
     conversation_so_far.append(alpha_entry)
@@ -7423,50 +9800,81 @@ async def group_chat(data: dict, request: Request):
             f"{discussion_context}\nDiscussion so far:\n{prev_text}\n\n"
             f"Your turn, {persona['name']}. Jump in naturally:"
         )
-        reply = strip_json_wrapper(await llama_backend.chat([{"role": "system", "content": system_prompt},
-         {"role": "user", "content": user_content}],
-        temperature=0.7, max_tokens=80, timeout=15,))
+        reply = strip_json_wrapper(
+            await llama_backend.chat(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=0.7,
+                max_tokens=80,
+                timeout=15,
+            )
+        )
         if not reply:
             reply = "Agreed."
         entry = {
-            "char": char_key, "name": persona["name"], "emoji": persona["emoji"],
-            "role": persona["role"], "text": reply.strip(), "alpha": False,
+            "char": char_key,
+            "name": persona["name"],
+            "emoji": persona["emoji"],
+            "role": persona["role"],
+            "text": reply.strip(),
+            "alpha": False,
         }
         responses.append(entry)
         conversation_so_far.append(entry)
 
     # Generate TTS for all responses in parallel (skip if muted)
+    # ── Apply hallucination filter to each response before TTS ──
+    for r in responses:
+        r["text"] = _filter_hallucination_patterns(r["text"].strip())
     if not muted:
         tts_tasks = [generate_tts_for_char(r["text"], r["char"]) for r in responses]
         tts_ids = await asyncio.gather(*tts_tasks)
         for r, aid in zip(responses, tts_ids):
             r["audio_id"] = aid
 
-    return {"responses": responses, "sensor_context": sensor_ctx[:200], "alpha": selected}
+    return {
+        "responses": responses,
+        "sensor_context": sensor_ctx[:200],
+        "alpha": selected,
+    }
 
 
 async def generate_tts_for_char(text: str, char_key: str) -> int:
     """Generate TTS audio for a character without setting global speech state. Returns audio_id."""
     global AUDIO_CACHE, AUDIO_CACHE_ID
-    clean = text.replace('\n', ' ').strip()
+    clean = text.replace("\n", " ").strip()
     if not clean:
         return 0
-    voice = CHAR_VOICE.get(char_key, CHAR_VOICE['puppy'])
+    voice = CHAR_VOICE.get(char_key, CHAR_VOICE["puppy"])
     piper_found = os.path.exists(PIPER_BIN)
     voice_found = os.path.exists(PIPER_VOICE)
     if not (piper_found and voice_found):
         return 0
     try:
+
         def _run():
             proc = subprocess.Popen(
-                [PIPER_BIN, "--model", PIPER_VOICE, "--output-raw",
-                 "--noise-scale", f"{voice['noise_scale']:.3f}",
-                 "--noise-w", f"{voice['noise_w']:.3f}",
-                 "--length-scale", f"{voice['length_scale']:.2f}"],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                [
+                    PIPER_BIN,
+                    "--model",
+                    PIPER_VOICE,
+                    "--output-raw",
+                    "--noise-scale",
+                    f"{voice['noise_scale']:.3f}",
+                    "--noise-w",
+                    f"{voice['noise_w']:.3f}",
+                    "--length-scale",
+                    f"{voice['length_scale']:.2f}",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
             raw, _ = proc.communicate(input=(clean + "\n").encode(), timeout=30.0)
             return raw
+
         raw = await asyncio.to_thread(_run)
         # Apply pitch shift for character voice distinctiveness
         pitch_semitones = voice.get("pitch_shift", 0)
@@ -7474,9 +9882,12 @@ async def generate_tts_for_char(text: str, char_key: str) -> int:
             raw = _pitch_shift_audio(raw, pitch_semitones)
         if raw and len(raw) > 44:
             import io, wave
+
             buf = io.BytesIO()
             with wave.open(buf, "wb") as w:
-                w.setnchannels(1); w.setsampwidth(2); w.setframerate(22050)
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(22050)
                 w.writeframes(raw)
             async with AUDIO_CACHE_LOCK:
                 aid = AUDIO_CACHE_ID + 1
@@ -7489,13 +9900,16 @@ async def generate_tts_for_char(text: str, char_key: str) -> int:
         logger.error(f"generate_tts_for_char({char_key}): {e}")
     return 0
 
+
 @app.get("/api/ui_state")
 async def get_ui_state():
-    global PENDING_LOOK_AT, PENDING_OPEN_URL
+    global PENDING_LOOK_AT, PENDING_OPEN_URL, PENDING_VIBECODE
     look = PENDING_LOOK_AT
     PENDING_LOOK_AT = None
     open_url = PENDING_OPEN_URL
     PENDING_OPEN_URL = None
+    vibecode = PENDING_VIBECODE
+    PENDING_VIBECODE = None
     return {
         "heard": LAST_HEARD,
         "spoken": LAST_SPOKEN,
@@ -7515,13 +9929,15 @@ async def get_ui_state():
         "coding_files": CODING_FILES,
         "look_at": look,
         "open_url": open_url,
+        "vibecode": vibecode,
     }
+
 
 @app.post("/api/conversation_mode")
 async def toggle_conversation_mode(data: dict = None):
     """Toggle or set conversation mode. In conversation mode, no wake word is needed."""
     global CONVERSATION_MODE, CONVERSATION_LAST_ACTIVITY
-    alpha_name = HIVE_PERSONAS.get(current_avatar, HIVE_PERSONAS['puppy'])['name']
+    alpha_name = HIVE_PERSONAS.get(current_avatar, HIVE_PERSONAS["puppy"])["name"]
     if data and "active" in data:
         CONVERSATION_MODE = bool(data["active"])
     else:
@@ -7532,6 +9948,7 @@ async def toggle_conversation_mode(data: dict = None):
     else:
         await speak(f"Conversation mode off. Say hey {alpha_name} to start again.")
     return {"conversation_mode": CONVERSATION_MODE}
+
 
 @app.post("/api/browser_mic")
 async def browser_mic_upload(request: Request):
@@ -7546,6 +9963,22 @@ async def browser_mic_upload(request: Request):
     if len(body) < 500:
         logger.info(f"browser_mic: silence (body {len(body)} bytes)")
         return {"status": "silence"}
+    # Volume check — skip quiet audio (room tone Whisper hallucinates from)
+    try:
+        import struct as _struct, math as _math
+
+        if body[:4] == b"RIFF" and body[28:32] == b"data":
+            data_size = _struct.unpack("<I", body[32:36])[0]
+            sample_data = body[44 : 44 + data_size]
+            if len(sample_data) >= 2:
+                samples = _struct.unpack(f"<{len(sample_data) // 2}h", sample_data)
+                rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
+                db = 20 * _math.log10(max(rms, 1) / 32768)
+                if db < -38.0:
+                    logger.debug(f"browser_mic: too quiet ({db:.1f} dB), skipping")
+                    return {"status": "silence"}
+    except Exception:
+        pass  # If parsing fails, continue with transcription
     wav_path = WORKSPACE / "browser_mic.wav"
     wav_path.write_bytes(body)
     try:
@@ -7569,7 +10002,7 @@ async def browser_mic_upload(request: Request):
         if user_info:
             user_id = user_info.get("id", "")
             if user_id:
-                switched = (user_id != _current_user_id)
+                switched = user_id != _current_user_id
                 _current_user_id = user_id  # always track current user
                 if switched or not memory.entries:
                     user_mem_data = load_user_memory(user_id)
@@ -7589,18 +10022,22 @@ async def browser_mic_upload(request: Request):
         asyncio.create_task(handle_intent(text))
     return {"status": "ok", "heard": text}
 
+
 @app.get("/api/ssml")
 async def get_ssml():
     return {"ssml": LAST_SSML, "mood": LILLY_MOOD}
 
+
 @app.get("/api/tts")
 async def get_tts(id: int = 0):
     from fastapi.responses import Response
+
     async with AUDIO_CACHE_LOCK:
         data = AUDIO_CACHE.get(id)
     if not data:
         return Response(status_code=204)
     return Response(content=data, media_type="audio/wav")
+
 
 @app.post("/api/transcribe")
 async def transcribe_audio(file: UploadFile = File(...)):
@@ -7611,31 +10048,51 @@ async def transcribe_audio(file: UploadFile = File(...)):
             return JSONResponse({"text": "", "error": "Audio too short"})
         content_type = file.content_type or "audio/webm"
         filename = file.filename or "mic_audio.webm"
-        text = await whisper_stt(audio_bytes=audio_data, content_type=content_type, filename=filename)
+        text = await whisper_stt(
+            audio_bytes=audio_data, content_type=content_type, filename=filename
+        )
         return JSONResponse({"text": text})
     except Exception as e:
         logger.error(f"Transcribe error: {e}")
         return JSONResponse({"text": "", "error": str(e)})
 
+
 @app.get("/api/vision/frame")
 async def get_vision_frame():
     """Return a labeled JPEG frame from the webcam with detection boxes."""
     from fastapi.responses import Response
+
     labeled, _ = await grab_and_label_frame()
     if not labeled:
-        return Response(status_code=503, content=b'{"error":"no camera"}', media_type="application/json")
+        return Response(
+            status_code=503,
+            content=b'{"error":"no camera"}',
+            media_type="application/json",
+        )
     return Response(content=labeled, media_type="image/jpeg")
+
 
 @app.get("/api/vision/describe")
 async def describe_vision():
     """Return Lilly's description of what she sees."""
     labeled, detections = await grab_and_label_frame()
     if not labeled:
-        return {"description": "I can't see right now — no camera feed available.", "objects": []}
+        return {
+            "description": "I can't see right now — no camera feed available.",
+            "objects": [],
+        }
     obj_list = sorted(set(d["label"] for d in detections))
-    desc = "I see: " + ", ".join(obj_list) if obj_list else "Nothing specific detected in the frame."
-    return {"description": desc, "objects": detections,
-            "object_count": len(set(d["label"] for d in detections))}
+    desc = (
+        "I see: " + ", ".join(obj_list)
+        if obj_list
+        else "Nothing specific detected in the frame."
+    )
+    return {
+        "description": desc,
+        "objects": detections,
+        "object_count": len(set(d["label"] for d in detections)),
+    }
+
 
 @app.get("/api/vision/status")
 async def vision_status():
@@ -7643,12 +10100,14 @@ async def vision_status():
     yolo_ok = _try_import_ultralytics() is not None
     return {"enabled": _vision_enabled, "opencv": cv2_ok, "yolo": yolo_ok}
 
+
 # ─── BROWSER CAMERA VISION ───────────────────────────────────────
 # Holds the most recent detection result from browser-sent frames.
 _browser_vision_detections: list = []
 _browser_vision_description: str = ""
 _browser_vision_ts: float = 0.0
 _BROWSER_VISION_TTL: float = 8.0  # seconds
+
 
 @app.post("/api/vision/browser")
 async def ingest_browser_frame(file: UploadFile = File(...)):
@@ -7676,10 +10135,13 @@ async def ingest_browser_frame(file: UploadFile = File(...)):
 
     return {
         "ok": True,
-        "detections": [{"label": d["label"], "confidence": round(d.get("confidence", 0), 2)}
-                       for d in detections],
+        "detections": [
+            {"label": d["label"], "confidence": round(d.get("confidence", 0), 2)}
+            for d in detections
+        ],
         "description": _browser_vision_description,
     }
+
 
 @app.get("/api/vision/browser")
 async def get_browser_vision():
@@ -7692,35 +10154,51 @@ async def get_browser_vision():
         "stale": age is None or age > _BROWSER_VISION_TTL,
     }
 
+
 @app.get("/api/vision/react")
 async def vision_react():
     """Lilly reacts conversationally to what the browser camera sees."""
     _char = current_avatar or "puppy"
     if not _browser_vision_description or (time.time() - _browser_vision_ts) > 15:
-        reply = await llama_backend.chat([
-            {"role": "system", "content": build_avatar_system_prompt(_char)},
-            {"role": "user", "content": "The camera isn't active or I can't see anything right now. Say something playful about wanting to see."}
-        ], temperature=0.9, max_tokens=60)
+        reply = await llama_backend.chat(
+            [
+                {"role": "system", "content": build_avatar_system_prompt(_char)},
+                {
+                    "role": "user",
+                    "content": "The camera isn't active or I can't see anything right now. Say something playful about wanting to see.",
+                },
+            ],
+            temperature=0.9,
+            max_tokens=60,
+        )
         audio_id = await speak(reply, char_key=_char)
         return {"reply": reply, "audio_id": audio_id}
 
-    obj_list = sorted(set(d["label"] for d in _browser_vision_detections)) if _browser_vision_detections else []
+    obj_list = (
+        sorted(set(d["label"] for d in _browser_vision_detections))
+        if _browser_vision_detections
+        else []
+    )
     vision_detail = _browser_vision_description
     if obj_list:
         vision_detail += f" Objects detected: {', '.join(obj_list[:6])}"
 
     messages = [
         {"role": "system", "content": build_avatar_system_prompt(_char)},
-        {"role": "user", "content": f"Look through the camera and react to what you see. Be specific about what's there. Camera feed: {vision_detail}"}
+        {
+            "role": "user",
+            "content": f"Look through the camera and react to what you see. Be specific about what's there. Camera feed: {vision_detail}",
+        },
     ]
     reply = await llama_backend.chat(messages, temperature=0.9, max_tokens=80)
     audio_id = await speak(reply, char_key=_char)
     return {"reply": reply, "audio_id": audio_id}
 
+
 @app.post("/api/cmd")
 async def text_command(cmd: TextCommand, request: Request):
     global memory, current_avatar, _current_user_id
-    # Extract user from Clerk session using full async verification
+    # Extract user from Auth0 session using full async verification
     user_info = await get_current_user(request) if AUTH_AVAILABLE else None
     user_id = user_info.get("id") if user_info else None
 
@@ -7729,6 +10207,10 @@ async def text_command(cmd: TextCommand, request: Request):
     _current_user_id = user_id or ""
 
     # Swap to the correct memory for this user+avatar
+    # Normalize any emoji / display-name avatar (e.g. "🐶" → "puppy") so the
+    # memory file and persona resolution use the canonical key.
+    if cmd.avatar and cmd.avatar != current_avatar:
+        cmd.avatar = resolve_persona_key(cmd.avatar)
     if user_id:
         user_mem_data = load_user_memory(user_id)
         memory = ConversationMemory.from_dict(user_mem_data)
@@ -7752,7 +10234,6 @@ async def text_command(cmd: TextCommand, request: Request):
         save_user_memory(user_id, data)
     else:
         await save_memory()
-
     # Clear user context after request completes
     _current_user_id = ""
 
@@ -7761,16 +10242,21 @@ async def text_command(cmd: TextCommand, request: Request):
         "audio_id": AUDIO_CACHE_ID if AUDIO_CACHE else 0,
         "look_at": res.get("look_at"),
         "open_url": res.get("open_url"),
+        "open_vibecode": res.get("open_vibecode"),
+        "vibecode_slug": res.get("vibecode_slug"),
+        "close_vibecode": res.get("close_vibecode"),
         "user": user_info.get("name") if user_info else None,
     }
+
 
 @app.post("/api/story_stream")
 async def story_stream(cmd: TextCommand, request: Request):
     """Stream a sensor-grounded story token by token using the fast model."""
     from fastapi.responses import StreamingResponse
+
     global memory, current_avatar, LILLY_IS_THINKING, LILLY_MOOD, _current_user_id
 
-    # Resolve per-user memory (Clerk auth)
+    # Resolve per-user memory (Auth0 auth)
     story_user_id: str = ""
     if AUTH_AVAILABLE:
         user_info = await get_current_user(request)
@@ -7783,6 +10269,7 @@ async def story_stream(cmd: TextCommand, request: Request):
 
     # Swap to correct avatar memory (fallback when no auth user)
     if not story_user_id and cmd.avatar != current_avatar:
+        cmd.avatar = resolve_persona_key(cmd.avatar)
         path = _avatar_memory_file(cmd.avatar)
         if path.exists():
             try:
@@ -7802,23 +10289,29 @@ async def story_stream(cmd: TextCommand, request: Request):
     sensor_narrative = snapshot_to_narrative(snapshot)
 
     messages = [
-        {"role": "system", "content": (
-            "You are Lilly, a curious puppy. Tell a short story (3-5 sentences) "
-            "using ONLY the real sensor data provided. Include dialogue with an imaginary friend. "
-            "RULES: 1) Only reference provided sensor data. 2) Never invent readings. "
-            "3) Use correlations not causation. 4) Playful but grounded. 5) End with a question."
-        )},
+        {
+            "role": "system",
+            "content": (
+                "You are Lilly, a curious puppy. Tell a short story (3-5 sentences) "
+                "using ONLY the real sensor data provided. Include dialogue with an imaginary friend. "
+                "RULES: 1) Only reference provided sensor data. 2) Never invent readings. "
+                "3) Use correlations not causation. 4) Playful but grounded. 5) End with a question."
+            ),
+        },
         {"role": "system", "content": f"SENSOR DATA: {sensor_narrative}"},
         {"role": "user", "content": cmd.text},
     ]
 
     async def generate():
         full_reply = []
-        async for chunk in llama_backend.chat_stream(messages, temperature=0.8, max_tokens=150, model=FAST_MODEL):
+        async for chunk in llama_backend.chat_stream(
+            messages, temperature=0.8, max_tokens=150, model=FAST_MODEL
+        ):
             full_reply.append(chunk)
             yield chunk
         # Done — speak the full reply and save memory
         final = "".join(full_reply).strip()
+        final = _filter_hallucination_patterns(final)
         if final:
             LILLY_IS_THINKING = False
             LILLY_MOOD = "cheerful"
@@ -7833,6 +10326,7 @@ async def story_stream(cmd: TextCommand, request: Request):
             await speak(final)
 
     return StreamingResponse(generate(), media_type="text/plain")
+
 
 @app.post("/api/set_name")
 async def set_name(data: dict):
@@ -7854,8 +10348,11 @@ async def set_name(data: dict):
     greeting = None
     try:
         messages = [
-            {"role": "system", "content": "You are Lilly, a sharp curious AI companion. The user just told you their name. Acknowledge it naturally in 1-2 sentences — warm but not over the top. Use their name once. Sound like yourself, not a chatbot."},
-            {"role": "user", "content": f"My name is {USER_NAME}"}
+            {
+                "role": "system",
+                "content": "You are Lilly, a sharp curious AI companion. The user just told you their name. Acknowledge it naturally in 1-2 sentences — warm but not over the top. Use their name once. Sound like yourself, not a chatbot.",
+            },
+            {"role": "user", "content": f"My name is {USER_NAME}"},
         ]
         greeting = await llama_backend.chat(messages, temperature=0.8, max_tokens=60)
     except Exception:
@@ -7863,6 +10360,7 @@ async def set_name(data: dict):
     # Fallback greeting if LLM fails
     if not greeting:
         import random
+
         greetings = [
             f"Good to meet you, {USER_NAME}. I'll keep that.",
             f"{USER_NAME} — noted. What are we doing?",
@@ -7874,6 +10372,7 @@ async def set_name(data: dict):
     audio_id = await speak(greeting)
     return {"name": USER_NAME, "greeting": greeting, "audio_id": audio_id}
 
+
 @app.post("/api/memory/clear")
 async def clear_memory(data: dict = {}):
     global memory, current_avatar
@@ -7883,15 +10382,17 @@ async def clear_memory(data: dict = {}):
     await save_memory()
     return {"status": "cleared", "avatar": avatar}
 
+
 @app.get("/api/status")
 async def status():
     mem_dict = await memory.to_dict()
     return {
-        "backend": "llama.cpp" if llama_backend._available else "ollama",
+        "backend": "ollama",
         "memory_entries": len(mem_dict["entries"]),
         "has_summary": bool(mem_dict["summary"]),
         "mic_active": BACKGROUND_MIC_ACTIVE,
     }
+
 
 @app.get("/api/token_usage")
 async def token_usage():
@@ -7906,11 +10407,14 @@ async def token_usage():
     context_entries = await memory.context_window(6)
 
     # Calculate original context tokens
-    original_context_text = " ".join(e["content"] if isinstance(e, dict) else e.text for e in context_entries)
+    original_context_text = " ".join(
+        e["content"] if isinstance(e, dict) else e.text for e in context_entries
+    )
     full_context_tokens = compressor.estimate_tokens(
-        original_prompt + (f" User name: {USER_NAME}" if USER_NAME else "") +
-        (f" Summary: {mem_summary}" if mem_summary else "") +
-        original_context_text
+        original_prompt
+        + (f" User name: {USER_NAME}" if USER_NAME else "")
+        + (f" Summary: {mem_summary}" if mem_summary else "")
+        + original_context_text
     )
 
     # Memory entries are no longer compressed with L:/U: prefixes (confuses the LLM)
@@ -7923,13 +10427,15 @@ async def token_usage():
     compressed_context_text = " ".join(compressed_context_entries)
 
     compressed_context_tokens = compressor.estimate_tokens(
-        compressed_prompt +
-        (f"SUMMARY:{mem_summary}" if mem_summary else "") +
-        compressed_context_text
+        compressed_prompt
+        + (f"SUMMARY:{mem_summary}" if mem_summary else "")
+        + compressed_context_text
     )
 
     # Calculate memory compression savings
-    memory_savings = compressor.get_savings_report(original_context_text, compressed_context_text)
+    memory_savings = compressor.get_savings_report(
+        original_context_text, compressed_context_text
+    )
 
     return {
         "system_prompt": savings,
@@ -7938,7 +10444,14 @@ async def token_usage():
             "original_tokens_est": full_context_tokens,
             "compressed_tokens_est": compressed_context_tokens,
             "savings_per_call": full_context_tokens - compressed_context_tokens,
-            "savings_percent": round((full_context_tokens - compressed_context_tokens) / full_context_tokens * 100, 1) if full_context_tokens > 0 else 0,
+            "savings_percent": round(
+                (full_context_tokens - compressed_context_tokens)
+                / full_context_tokens
+                * 100,
+                1,
+            )
+            if full_context_tokens > 0
+            else 0,
         },
         "estimated_daily_savings": {
             "calls_per_day": 50,
@@ -7946,6 +10459,7 @@ async def token_usage():
         },
         "compression_enabled": os.environ.get("COMPRESS_PROMPTS", "1") == "1",
     }
+
 
 @app.get("/api/archetype")
 async def get_archetype():
@@ -7961,6 +10475,7 @@ async def get_archetype():
         "observations": archetype_inferrer._total_observations,
         "proactive_enabled": archetype_inferrer.enabled,
     }
+
 
 @app.get("/api/activity")
 async def get_activity():
@@ -7986,9 +10501,11 @@ async def get_activity():
         "location_name": _last_location_name or None,
     }
 
+
 # ─── WEATHER / DASHBOARD ────────────────────────────────────────
 _last_location_name: Optional[str] = None
 _weather_cache: dict = {"data": None, "ts": 0.0}
+
 
 @app.get("/api/weather")
 async def get_weather():
@@ -8004,17 +10521,29 @@ async def get_weather():
         current = raw.get("current_condition", [{}])[0]
         forecasts = raw.get("weather", [])
         WEATHER_ICONS = {
-            "Sunny": "☀️", "Clear": "🌙", "Partly cloudy": "⛅",
-            "Cloudy": "☁️", "Overcast": "☁️", "Mist": "🌫️",
-            "Fog": "🌫️", "Light rain": "🌦️", "Rain": "🌧️",
-            "Heavy rain": "⛈️", "Thunderstorm": "⛈️", "Snow": "❄️",
-            "Light snow": "🌨️", "Sleet": "🌨️", "Drizzle": "🌦️",
+            "Sunny": "☀️",
+            "Clear": "🌙",
+            "Partly cloudy": "⛅",
+            "Cloudy": "☁️",
+            "Overcast": "☁️",
+            "Mist": "🌫️",
+            "Fog": "🌫️",
+            "Light rain": "🌦️",
+            "Rain": "🌧️",
+            "Heavy rain": "⛈️",
+            "Thunderstorm": "⛈️",
+            "Snow": "❄️",
+            "Light snow": "🌨️",
+            "Sleet": "🌨️",
+            "Drizzle": "🌦️",
         }
+
         def _icon(desc):
             for k, v in WEATHER_ICONS.items():
                 if k.lower() in desc.lower():
                     return v
             return "🌤️"
+
         result = {
             "current": {
                 "temp_c": int(current.get("temp_C", 0)),
@@ -8033,13 +10562,15 @@ async def get_weather():
                 if d:
                     day_desc = d
                     break
-            result["forecast"].append({
-                "date": f.get("date", ""),
-                "max_c": int(f.get("maxtempC", 0)),
-                "min_c": int(f.get("mintempC", 0)),
-                "desc": day_desc,
-                "icon": _icon(day_desc),
-            })
+            result["forecast"].append(
+                {
+                    "date": f.get("date", ""),
+                    "max_c": int(f.get("maxtempC", 0)),
+                    "min_c": int(f.get("mintempC", 0)),
+                    "desc": day_desc,
+                    "icon": _icon(day_desc),
+                }
+            )
         _weather_cache["data"] = result
         _weather_cache["ts"] = now
         return result
@@ -8052,6 +10583,7 @@ async def get_weather():
 async def get_dashboard():
     now = time.time()
     import datetime as _dt
+
     local_now = _dt.datetime.fromtimestamp(now)
     activity = None
     state = ACTIVITY_STATE
@@ -8074,17 +10606,15 @@ async def get_dashboard():
         "location": _last_location_name,
     }
 
+
 # ─── FRONTEND INTERFACE ─────────────────────────────────────────
 HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
-<title>Lilly — Digital Companion</title>
-<!-- Clerk JS SDK (loaded after DOM ready via dynamic script tag so we can inject the publishable key) -->
-<script>
-// Clerk publishable key is injected by the server into window.__CLERK_PK
-</script>
+<title>DroolingWithSanity — Lilly</title>
+<!-- Auth0 handles login via HTTP redirect (/api/auth0/login) -->
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body,html{width:100%;height:100%;overflow:hidden;font-family:-apple-system,'Segoe UI',system-ui,sans-serif;color:#5d4e6d;background:#f0e6ef}
@@ -8145,8 +10675,8 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 .btn-clear{background:rgba(255,255,255,0.4);border:none;border-radius:50%;width:44px;height:44px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.25s;font-size:18px;color:rgba(93,78,109,0.3)}
 .btn-clear:hover{background:rgba(255,255,255,0.6);color:#5d4e6d}
 
-/* ─── Coding Mode Chat (integrated into UI) ─── */
-#chatContainer{position:absolute;bottom:80px;left:50%;transform:translateX(-50%);width:92%;max-width:620px;max-height:35vh;z-index:15;background:rgba(255,255,255,0.35);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.5);border-radius:20px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(180,140,180,0.12)}
+/* ─── Coding Mode Chat (merged into VibeCode Coding Assistant) ─── */
+#chatContainer{position:absolute;bottom:80px;left:50%;transform:translateX(-50%);width:92%;max-width:620px;max-height:30vh;z-index:15;background:rgba(255,255,255,0.35);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.5);border-radius:16px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(180,140,180,0.12)}
 #chatContainer.active{display:flex}
 #chatMessages{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:8px;scroll-behavior:smooth}
 #chatMessages::-webkit-scrollbar{width:4px}
@@ -8159,6 +10689,13 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 .chat-msg pre{background:#ffffff;border:1px solid rgba(93,78,109,0.15);border-radius:10px;padding:12px 14px;margin:6px 0 0;overflow-x:auto;font-size:12px;line-height:1.5;font-family:'JetBrains Mono','Fira Code',monospace;color:#1a1a2e;position:relative;box-shadow:0 2px 8px rgba(0,0,0,0.06)}
 .chat-msg code{font-family:'JetBrains Mono','Fira Code',monospace;background:rgba(93,78,109,0.08);padding:2px 5px;border-radius:4px;font-size:12px;color:#5d4e6d}
 .chat-msg pre code{background:none;padding:0;color:#1a1a2e}
+.chat-msg .chat-sender{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:#8b7a9e;margin-bottom:4px}
+.chat-msg .chat-alpha{font-size:8px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#fff;
+  background:linear-gradient(135deg,#a78bfa,#8b7a9e);border-radius:6px;padding:1px 5px}
+.chat-msg.system{background:rgba(74,222,128,0.08);border:1px solid rgba(74,222,128,0.15);border-radius:12px;
+  font-size:11px;color:rgba(58,138,106,0.8);font-style:italic;padding:6px 10px}
+.vc-thinking .chat-sender{display:none}
+.vc-thinking pre{background:rgba(93,78,109,0.06);border-radius:10px;padding:8px}
 .copy-btn{background:rgba(93,78,109,0.08);border:1px solid rgba(93,78,109,0.15);border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#8b7a9e;transition:all 0.2s;display:flex;align-items:center;gap:4px}
 .copy-btn:hover{background:rgba(93,78,109,0.15);color:#5d4e6d}
 .copy-btn svg{width:12px;height:12px}
@@ -8274,9 +10811,6 @@ pre{position:relative;overflow-x:auto}
 #startScreen .mic-prompt .mic-icon svg{width:10px;height:10px;fill:rgba(232,90,110,0.5)}
 @keyframes micPulse{0%,100%{box-shadow:0 0 0 0 rgba(232,90,110,0.2)}50%{box-shadow:0 0 0 6px rgba(232,90,110,0)}}
 
-/* ─── Clerk Sign-In Container ─── */
-#clerk-sign-in{margin-top:20px;display:none;max-height:80vh;overflow-y:auto;border-radius:12px;width:100%;max-width:400px}
-
 /* ─── Avatar Picker ─── */
 #avatarPicker{display:flex;flex-direction:column;align-items:center;gap:0;width:100%;max-width:900px;animation:pickerIn 0.5s cubic-bezier(.34,1.56,.64,1) both;overflow:visible;padding-bottom:20px}
 @keyframes pickerIn{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
@@ -8362,12 +10896,171 @@ pre{position:relative;overflow-x:auto}
 .coding-shrink #avatarPreviewCanvas{width:104px;height:104px}
 .coding-shrink #loginSphere{width:70px;height:70px}
 .coding-shrink #loginSphere .sphere-icon{font-size:18px}
+
+/* ─── VibeCode Overlay Panels ────────────────────────────────────────── */
+#vcLeft,#vcRight{
+  position:fixed;top:110px;z-index:6;
+  background:rgba(240,230,239,0.86);
+  backdrop-filter:blur(22px) saturate(1.15);
+  -webkit-backdrop-filter:blur(22px) saturate(1.15);
+  border:1.5px solid rgba(93,78,109,0.18);
+  box-shadow:0 8px 40px rgba(93,78,109,0.18),0 0 0 1px rgba(255,255,255,0.35) inset;
+  display:flex;flex-direction:column;overflow:hidden;
+  transition:transform .32s ease,opacity .32s ease;
+  opacity:0;pointer-events:none;
+  max-height:60vh;
+}
+#vcLeft{left:12px;width:260px;transform:translateX(calc(-100% - 28px))}
+#vcRight{right:12px;width:300px;transform:translateX(calc(100% + 28px))}
+#vcLeft.vc-show,#vcRight.vc-show{opacity:1;pointer-events:auto;transform:translateX(0)}
+.vc-head{display:flex;align-items:center;gap:8px;padding:12px 14px;
+  border-bottom:1.5px solid rgba(93,78,109,0.16);background:rgba(255,255,255,0.45);flex-shrink:0}
+.vc-head .vc-title{font-weight:700;font-size:13px;color:#5d4e6d;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vc-head button{background:rgba(93,78,109,0.08);border:1px solid rgba(93,78,109,0.15);border-radius:8px;color:#8b7a9e;cursor:pointer;font-size:11px;padding:4px 8px;transition:.15s}
+.vc-head button:hover{background:rgba(139,122,158,0.22);color:#5d4e6d}
+.vc-head button.vc-x{width:26px;height:26px;padding:0;border-radius:8px;font-size:13px}
+.vc-head button.vc-x:hover{background:rgba(192,85,85,0.14);color:#c05555}
+.vc-body{flex:1;overflow-y:auto;padding:10px;scrollbar-width:thin}
+.vc-body::-webkit-scrollbar{width:5px}
+.vc-body::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.2);border-radius:3px}
+#vcProjectSel{width:100%;font:inherit;font-size:12px;color:#5d4e6d;padding:7px 9px;border-radius:10px;
+  border:1.5px solid rgba(93,78,109,0.18);background:rgba(255,255,255,0.55);outline:none;margin-bottom:8px}
+#vcProjectSel:focus{border-color:#8b7a9e;box-shadow:0 0 0 3px rgba(139,122,158,0.15)}
+.vc-tree-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:8px;cursor:pointer;font-size:12px;color:#5d4e6d;transition:.12s}
+.vc-tree-row:hover{background:rgba(139,122,158,0.14)}
+.vc-tree-row.dir{font-weight:600}
+.vc-tree-row.file{padding-left:22px;font-weight:400}
+.vc-tree-row .vc-caret{width:14px;color:rgba(93,78,109,0.5);font-size:10px;flex-shrink:0}
+.vc-tree-children{margin-left:14px;border-left:1px dashed rgba(93,78,109,0.2);padding-left:6px}
+.vc-empty{font-size:12px;color:rgba(93,78,109,0.5);padding:12px;text-align:center}
+#vcRight .vc-tabs{display:flex;gap:4px;padding:8px 10px 0;background:rgba(255,255,255,0.3);border-bottom:1.5px solid rgba(93,78,109,0.14);flex-shrink:0}
+.vc-tab{background:transparent;border:1px solid transparent;border-bottom:none;border-radius:9px 9px 0 0;color:rgba(93,78,109,0.6);
+  font-size:12px;padding:7px 12px;cursor:pointer;transition:.15s}
+.vc-tab.active{background:rgba(255,255,255,0.6);color:#5d4e6d;font-weight:600;border-color:rgba(93,78,109,0.14)}
+.vc-tab:hover{color:#5d4e6d}
+#vcPreviewWrap,#vcLogsWrap{flex:1;min-height:0;display:none;flex-direction:column}
+#vcPreviewWrap.active,#vcLogsWrap.active{display:flex}
+#vcFrame{flex:1;width:100%;border:none;background:#fff}
+#vcLogs{flex:1;margin:0;padding:10px;font:11px/1.55 ui-monospace,Consolas,monospace;color:#c8d3d8;
+  background:rgba(30,26,42,0.92);border-radius:0 0 16px 16px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+#vcStatusBar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1.5px solid rgba(93,78,109,0.14);
+  background:rgba(255,255,255,0.35);font-size:11px;color:rgba(93,78,109,0.7);flex-shrink:0}
+#vcStatusBar .vc-dot{width:8px;height:8px;border-radius:50%;background:rgba(93,78,109,0.25);flex-shrink:0}
+#vcStatusBar .vc-dot.running{background:#3a8a6a;box-shadow:0 0 8px rgba(58,138,106,0.6)}
+#vcStatusBar .vc-dot.stopped{background:rgba(93,78,109,0.3)}
+.vc-btn{background:rgba(93,78,109,0.08);border:1px solid rgba(93,78,109,0.15);border-radius:8px;color:#8b7a9e;
+  font-size:11px;padding:5px 10px;cursor:pointer;transition:.15s}
+.vc-btn:hover{background:rgba(139,122,158,0.22);color:#5d4e6d}
+.vc-btn.primary{background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;border:none;box-shadow:0 3px 12px rgba(139,122,158,0.3)}
+.vc-btn.primary:hover{filter:brightness(1.08)}
+.vc-btn:disabled{opacity:.5;cursor:default}
+
+/* Middle VibeCode chat panel — unified VibeCode Coding Assistant with dashboard */
+#vcChat{position:absolute;bottom:96px;left:50%;transform:translateX(-50%);width:min(520px,88vw);max-height:48vh;
+   z-index:15;background:rgba(255,255,255,0.42);backdrop-filter:blur(22px) saturate(1.15);
+   -webkit-backdrop-filter:blur(22px) saturate(1.15);border:1.5px solid rgba(93,78,109,0.18);
+   border-radius:18px;display:none;flex-direction:column;overflow:hidden;
+   box-shadow:0 6px 30px rgba(93,78,109,0.18)}
+#vcChat.vc-show{display:flex}
+/* Compact dashboard bar inside vcChat */
+.vc-dash{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1.5px solid rgba(93,78,109,0.12);
+  background:rgba(255,255,255,0.35);flex-shrink:0;flex-wrap:wrap}
+.vc-dash-pill{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:8px;font-size:10px;
+  font-weight:600;color:#5d4e6d;background:rgba(139,122,158,0.1);border:1px solid rgba(139,122,158,0.18);white-space:nowrap}
+.vc-dash-pill .vc-dot-sm{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.vc-dash-pill .vc-dot-sm.running{background:#3a8a6a;box-shadow:0 0 6px rgba(58,138,106,0.5)}
+.vc-dash-pill .vc-dot-sm.stopped{background:rgba(93,78,109,0.3)}
+.vc-dash-pill.weather{color:#4a80a0;background:rgba(74,128,160,0.1);border-color:rgba(74,128,160,0.2)}
+.vc-dash-pill.activity{color:#3a8a6a;background:rgba(58,138,106,0.1);border-color:rgba(58,138,106,0.2)}
+.vc-dash-pill.files{color:#a0607a;background:rgba(160,96,122,0.1);border-color:rgba(160,96,122,0.2)}
+/* Chat input bar inside vcChat */
+.vc-chat-input{display:flex;align-items:center;gap:6px;padding:8px 12px;border-top:1.5px solid rgba(93,78,109,0.12);
+  background:rgba(255,255,255,0.35);flex-shrink:0}
+.vc-chat-input input{flex:1;padding:8px 12px;border-radius:12px;border:1.5px solid rgba(93,78,109,0.18);
+  background:rgba(255,255,255,0.55);font:inherit;font-size:13px;color:#5d4e6d;outline:none}
+.vc-chat-input input:focus{border-color:#8b7a9e;box-shadow:0 0 0 3px rgba(139,122,158,0.12)}
+.vc-chat-input input::placeholder{color:rgba(93,78,109,0.4)}
+.vc-chat-input button{padding:8px 14px;border-radius:12px;border:none;background:linear-gradient(140deg,#8b7a9e,#a892b8);
+  color:#fff;font-size:12px;font-weight:600;cursor:pointer;transition:.15s;white-space:nowrap}
+.vc-chat-input button:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.vc-chat-input button:disabled{opacity:.5;cursor:default;transform:none}
+#vcChatHead{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1.5px solid rgba(93,78,109,0.14);
+  background:rgba(255,255,255,0.45);flex-shrink:0}
+#vcChatHead .vc-orb{width:28px;height:28px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  font-size:15px;background:linear-gradient(140deg,rgba(167,139,250,.4),rgba(240,198,224,.45));
+  border:1.5px solid rgba(167,139,250,.5)}
+#vcChatTitle{font-weight:700;font-size:13px;color:#5d4e6d;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#vcChatMsgs{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:8px;scroll-behavior:smooth}
+#vcChatMsgs::-webkit-scrollbar{width:5px}
+#vcChatMsgs::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.2);border-radius:3px}
+.vcc-msg{max-width:90%;padding:8px 12px;border-radius:14px;font-size:13px;line-height:1.5;color:#5d4e6d;word-wrap:break-word;animation:msgIn .2s ease-out}
+.vcc-msg.user{align-self:flex-end;background:rgba(167,139,250,.18);border:1px solid rgba(167,139,250,.3);border-bottom-right-radius:4px}
+.vcc-msg.alpha{align-self:flex-start;background:rgba(255,255,255,.62);border:1px solid rgba(93,78,109,.14);border-bottom-left-radius:4px}
+.vcc-msg.sys{align-self:center;font-size:11px;color:rgba(93,78,109,.55);background:rgba(93,78,109,.08);border-radius:10px;padding:5px 10px}
+.vcc-msg pre{background:rgba(93,78,109,.08);border:1px solid rgba(93,78,109,.14);border-radius:10px;padding:10px 12px;margin:6px 0 0;
+  overflow-x:auto;font:12px/1.5 ui-monospace,Consolas,monospace;color:#4a3a5c}
+.vcc-msg code{background:rgba(93,78,109,.1);padding:1px 5px;border-radius:6px;font:12px ui-monospace,Consolas,monospace}
+.vcc-msg pre code{background:none;padding:0}
+.vcc-msg .vcc-suggest{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.vcc-suggest a{font-size:12px;color:#8b7a9e;text-decoration:none;background:rgba(139,122,158,.1);border:1px solid rgba(139,122,158,.25);
+  border-radius:10px;padding:7px 10px;transition:.15s}
+.vcc-suggest a:hover{background:rgba(139,122,158,.2)}
+.vcc-msg .vcc-code{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.vcc-code button{background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;border:none;border-radius:10px;font-size:11px;padding:6px 12px;cursor:pointer}
+.vcc-msg .vcc-actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.vcc-msg .vcc-sender{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:#8b7a9e;margin-bottom:4px}
+.vcc-msg .vcc-s-emoji{font-size:14px;line-height:1}
+.vcc-msg .vcc-alpha-badge{font-size:8px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#fff;
+  background:linear-gradient(135deg,#a78bfa,#8b7a9e);border-radius:6px;padding:1px 5px}
+.vcc-actions button{background:rgba(93,78,109,.08);border:1px solid rgba(93,78,109,.15);border-radius:10px;color:#8b7a9e;font-size:11px;padding:6px 12px;cursor:pointer;transition:.15s}
+.vcc-actions button:hover{background:rgba(139,122,158,.2);color:#5d4e6d}
+.vcc-think{display:flex;gap:4px;align-items:center;padding:6px 2px}
+.vcc-think span{width:6px;height:6px;border-radius:50%;background:#8b7a9e;animation:thinkBounce 1.2s infinite}
+.vcc-think span:nth-child(2){animation-delay:.2s}
+.vcc-think span:nth-child(3){animation-delay:.4s}
+
+/* Alpha overlay — floats on top of the middle chat */
+#vcAlpha{position:fixed;top:14px;left:50%;transform:translateX(-50%) translateY(-6px);z-index:25;
+  display:flex;align-items:center;gap:8px;padding:6px 12px 6px 7px;border-radius:999px;
+  background:rgba(255,255,255,.55);backdrop-filter:blur(20px) saturate(1.15);
+  -webkit-backdrop-filter:blur(20px) saturate(1.15);border:1.5px solid rgba(93,78,109,.18);
+  box-shadow:0 6px 24px rgba(93,78,109,.2),0 0 0 1px rgba(255,255,255,.4) inset;
+  opacity:0;pointer-events:none;transition:.3s ease;cursor:pointer}
+#vcAlpha.vc-show{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+#vcAlpha .vc-orb{width:30px;height:30px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  font-size:16px;background:linear-gradient(140deg,rgba(167,139,250,.4),rgba(240,198,224,.45));
+  border:1.5px solid rgba(167,139,250,.5);position:relative}
+#vcAlpha .vc-orb .vc-dot{position:absolute;right:-1px;bottom:-1px;width:9px;height:9px;border-radius:50%;
+  background:#3a8a6a;border:2px solid #fff}
+#vcAlpha .vc-a-name{font-weight:700;font-size:12px;color:#5d4e6d;line-height:1.1}
+#vcAlpha .vc-a-sub{font-size:10px;color:rgba(93,78,109,.55);line-height:1.1;max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#vcAlpha .vc-a-chevy{font-size:10px;color:rgba(93,78,109,.5)}
+#vcAlphaRoster{position:fixed;top:70px;left:50%;transform:translateX(-50%) translateY(-6px);z-index:26;
+  display:none;gap:5px;padding:9px;border-radius:16px;background:rgba(255,255,255,.7);
+  backdrop-filter:blur(20px);border:1.5px solid rgba(93,78,109,.18);box-shadow:0 10px 34px rgba(93,78,109,.22);
+  transition:.25s ease}
+#vcAlphaRoster.vc-show{display:flex;transform:translateX(-50%) translateY(0)}
+.vc-ar{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;
+  cursor:pointer;background:rgba(255,255,255,.6);border:1.5px solid rgba(93,78,109,.18);transition:.15s}
+.vc-ar:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(139,122,158,.3)}
+.vc-ar.sel{border-color:#8b7a9e;box-shadow:0 0 0 3px rgba(139,122,158,.2)}
+@media (max-width:900px){
+  #vcLeft{width:200px}
+  #vcRight{width:240px}
+}
+@media (max-width:640px){
+  #vcLeft{width:min(200px,70vw)}
+  #vcRight{width:min(260px,80vw)}
+   #vcChat{max-height:40vh;width:min(96vw,520px)}
+  .vc-dash{padding:6px 10px}
+  .vc-dash-pill{font-size:9px;padding:2px 6px}
+}
 </style>
 </head>
 <body>
 <div id="startScreen">
   <h1 id="startCharName">Lilly</h1>
-  <p id="startSubtitle">your companion</p>
+  <p id="startSubtitle">your personal AI companion</p>
 
   <!-- ── Avatar + Theme picker (first visit only) ── -->
   <div id="avatarPicker" style="display:none" onclick="event.stopPropagation()">
@@ -8488,9 +11181,7 @@ pre{position:relative;overflow-x:auto}
     </div>
   </div>
 
-  <!-- Clerk Sign-In Component — mounted by clerk_init() below -->
-  <div id="clerk-sign-in" style="margin-top:20px;display:none;max-height:80vh;overflow-y:auto;border-radius:12px" onclick="event.stopPropagation()"></div>
-
+ 
 
 </div>
 
@@ -8508,6 +11199,70 @@ pre{position:relative;overflow-x:auto}
   <span id="convIndicator" style="display:none;font-size:10px;color:rgba(139,122,158,0.7);background:rgba(184,169,201,0.2);padding:3px 8px;border-radius:10px;margin-right:6px">CONVERSING</span>
   <span id="statusLabel">idle</span>
   <div class="indicator" id="micIndicator"></div>
+  <button id="settingsBtn" onclick="toggleSettings()" style="background:none;border:none;cursor:pointer;padding:4px 8px;margin-left:8px;font-size:16px;color:rgba(93,78,109,0.5);transition:color 0.2s" title="Settings">⚙️</button>
+</div>
+
+<!-- ── Settings Panel ── -->
+<div id="settingsPanel" style="display:none;position:fixed;top:60px;right:16px;width:320px;max-width:calc(100vw - 32px);max-height:calc(100vh - 80px);overflow-y:auto;z-index:200;background:rgba(255,255,255,0.85);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:16px;box-shadow:0 8px 40px rgba(180,140,180,0.15)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+    <div style="font-size:14px;font-weight:600;color:#5d4e6d">Settings</div>
+    <button onclick="toggleSettings()" style="background:none;border:none;cursor:pointer;font-size:16px;color:rgba(93,78,109,0.5)">✕</button>
+  </div>
+
+  <!-- Pushbullet -->
+  <div style="margin-bottom:16px">
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Pushbullet</div>
+    <input id="setting-pushbullet-key" type="password" placeholder="Pushbullet API key" style="width:100%;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box">
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button onclick="savePushbulletKey()" style="flex:1;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Save Key</button>
+      <button onclick="testPushbullet()" style="flex:1;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.15);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Test</button>
+    </div>
+    <div id="pb-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
+  </div>
+
+  <!-- Notifications -->
+  <div style="margin-bottom:16px">
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Alpha Notifications</div>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d;margin-bottom:6px">
+      <input type="checkbox" id="setting-notif-proactive" checked style="accent-color:#8b7a9e"> Proactive alerts
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d;margin-bottom:6px">
+      <input type="checkbox" id="setting-notif-paused" style="accent-color:#8b7a9e"> Pause notifications
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d;margin-bottom:6px">
+      <span style="white-space:nowrap">Max per day</span>
+      <input id="setting-notif-cap" type="number" min="0" value="3" style="width:64px;padding:5px 8px;border-radius:8px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none">
+      <span style="font-size:11px;color:rgba(93,78,109,0.5)">(0 = unlimited)</span>
+    </label>
+    <button onclick="saveNotifPrefs()" style="margin-top:6px;padding:7px 14px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Save Notifications</button>
+    <div id="notif-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d;margin-bottom:6px;margin-top:10px">
+      <input type="checkbox" id="setting-notif-sound" checked style="accent-color:#8b7a9e"> Sound
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d">
+      <input type="checkbox" id="setting-notif-pushbullet" style="accent-color:#8b7a9e"> Fallback to Pushbullet
+    </label>
+  </div>
+
+  <!-- Sensor Server -->
+  <div style="margin-bottom:16px">
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Phone (Sensor Server)</div>
+    <input id="setting-sensor-url" type="text" placeholder="http://<phone-ip>:8099" style="width:100%;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box">
+    <button onclick="saveSensorUrl()" style="width:100%;margin-top:8px;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Save Sensor URL</button>
+  </div>
+
+  <!-- About / Docs -->
+  <div style="margin-bottom:16px">
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">About</div>
+    <a href="https://github.com/labhrasd/Lilly_Workspace" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8b7a9e;text-decoration:none;padding:6px 0;border-bottom:1px solid rgba(184,169,201,0.15)">📖 Setup Guide (README)</a>
+    <a href="https://droolingwithsanity.ca" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8b7a9e;text-decoration:none;padding:6px 0">🌐 droolingwithsanity.ca</a>
+    <div style="font-size:10px;color:rgba(93,78,109,0.4);margin-top:6px">Lilly AI · 9 Avatars · Termux + Docker</div>
+  </div>
+
+  <!-- Danger zone -->
+  <div style="border-top:1px solid rgba(184,169,201,0.2);padding-top:12px;margin-top:4px">
+    <button onclick="clearAllData()" style="width:100%;padding:8px;border:1px solid rgba(232,90,110,0.3);border-radius:10px;background:rgba(232,90,110,0.08);color:#c44;font-size:12px;font-weight:500;cursor:pointer">Clear All Local Data</button>
+  </div>
 </div>
 
 <div id="moodBadge">
@@ -8567,7 +11322,7 @@ pre{position:relative;overflow-x:auto}
 
 <div id="chatContainer">
   <div id="chatHeader">
-    <span id="chatTitle">Vibe Coding</span>
+    <span id="chatTitle">Chat</span>
     <button id="downloadBtn" onclick="downloadProject()" title="Download project as .zip">
       <svg viewBox="0 0 24 24" width="14" height="14" style="vertical-align:middle;margin-right:4px"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" fill="currentColor"/></svg>
       Download
@@ -8629,6 +11384,38 @@ let pickerAvatar = localStorage.getItem('lilly_avatar') || 'puppy';
 let pickerTheme  = localStorage.getItem('lilly_theme')  || 'lilac';
 let selectedAvatar = localStorage.getItem('lilly_avatar') || 'puppy';
 let previewFrame = 0, previewRaf = null;
+
+// Avatar emoji/name by key — same roster as VibeCode, shown across the UI
+const CHAT_AVATARS = {
+  puppy:{emoji:'🐶',name:'Lilly'},  fox:{emoji:'🦊',name:'Fox'},
+  cat:{emoji:'🐱',name:'Cat'},      bear:{emoji:'🐻',name:'Bear'},
+  bunny:{emoji:'🐰',name:'Bunny'},  owl:{emoji:'🦉',name:'Owl'},
+  deer:{emoji:'🦌',name:'Deer'},    wolf:{emoji:'🐺',name:'Wolf'},
+  raccoon:{emoji:'🦝',name:'Raccoon'}
+};
+function chatAvatarMeta(key){
+  return CHAT_AVATARS[key] || CHAT_AVATARS['puppy'];
+}
+
+// Resolve any avatar identifier (key, emoji, display name) to canonical key
+var PERSONA_KEY_BY_EMOJI = {};
+var PERSONA_KEY_BY_NAME = {};
+(function initPersonaMaps(){
+  for(var k in CHAT_AVATARS){
+    var m = CHAT_AVATARS[k];
+    if(m.emoji) PERSONA_KEY_BY_EMOJI[m.emoji] = k;
+    if(m.name)  PERSONA_KEY_BY_NAME[m.name.toLowerCase()] = k;
+  }
+})();
+function resolvePersonaKey(key){
+  if(!key) return 'puppy';
+  key = String(key).trim();
+  if(CHAT_AVATARS[key]) return key;
+  if(PERSONA_KEY_BY_EMOJI[key]) return PERSONA_KEY_BY_EMOJI[key];
+  var byName = PERSONA_KEY_BY_NAME[key.toLowerCase()];
+  if(byName) return byName;
+  return 'puppy';
+}
 
 // ── Clay helpers ──────────────────────────────────────────────────
 function clayFill(ctx2, color, highlight) {
@@ -9193,6 +11980,11 @@ const CHAR_ROLES = {puppy:'Alpha Companion',fox:'Creative Strategist',cat:'Preci
 function selectAvatarAndAuth(animal, el) {
   pickerAvatar = animal;
   selectedAvatar = animal;
+  // Sync the vibecode agent to the newly selected avatar
+  if(vibecodeActive){
+    vcAgent = resolvePersonaKey(animal) || 'puppy';
+    selectVcAgent(vcAgent);
+  }
   localStorage.setItem('lilly_avatar', animal);
   document.querySelectorAll('.avatar-card').forEach(c => c.classList.remove('selected'));
   el.classList.add('selected');
@@ -9289,9 +12081,13 @@ function confirmPicker() {
   picker.style.opacity = '0';
   picker.style.transform = 'translateY(-12px)';
   document.getElementById('startSubtitle').textContent = 'sign in with Google';
-  setTimeout(() => {
+  setTimeout(async () => {
     picker.style.display = 'none';
-    startAuthFlow();
+    // Check if already authenticated (e.g., returned from Auth0 callback)
+    const alreadyAuthed = await checkAuth();
+    if (!alreadyAuthed) {
+      startAuthFlow();
+    }
   }, 320);
 }
 
@@ -9556,175 +12352,26 @@ function confirmPicker() {
   applyTheme(localStorage.getItem('lilly_theme') || 'lilac');
 })();
 
-// ─── Clerk Authentication ────────────────────────────────────────
+// ─── Auth0 Authentication ─────────────────────────────────────────
 let currentUser = null;
-let clerkInstance = null;
+
+async function checkAuth() {
+  try {
+    const r = await fetch('/api/auth/me', { credentials: 'include' });
+    if (r.ok) {
+      const data = await r.json();
+      currentUser = data.user;
+      // Auto-skip picker after auth redirect
+      hideStartScreen();
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
 
 function startAuthFlow() {
-  // Always load Clerk sign-in — OC gate is independent (email connector admin, not user auth)
-  clerk_init();
-  // Show OC gate in parallel if needed (non-blocking — Clerk loads regardless)
-  (async () => {
-    try {
-      const oc = await fetch('/api/oc/session').then(r => r.json()).catch(() => ({ adminAuthConfigured: false, authenticated: false }));
-      if (oc.adminAuthConfigured && !oc.authenticated && localStorage.getItem('oc_unlocked') !== '1') {
-        // OC gate is shown below the Clerk sign-in as a separate concern
-        document.getElementById('ocGate').style.display = 'flex';
-      }
-    } catch (_) {}
-  })();
-}
-
-async function clerk_init() {
-  const ALLOWED_EMAILS = ['laurencekidney@gmail.com'];
-  const pk = window.__CLERK_PK;
-  if (!pk) {
-    console.error('Clerk publishable key not set (__CLERK_PK). Add CLERK_PUBLISHABLE_KEY to .env');
-    const el = document.getElementById('startSubtitle');
-    if (el) el.textContent = 'sign-in not configured';
-    return;
-  }
-
-  const clerkVersion = '5';
-
-  // Load ClerkJS from jsdelivr (reliable CDN, no Cloudflare issues)
-  // The UMD build auto-registers window.Clerk when loaded via <script> tag.
-  // ClerkJS reads window.__clerk_publishable_key (lowercase) at load time and
-  // creates window.Clerk automatically with that key.
-  try {
-    if (!window.Clerk) {
-      window.__clerk_publishable_key = pk;
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.setAttribute('data-clerk', 'true');
-        s.setAttribute('data-clerk-publishable-key', pk);
-        s.src = 'https://cdn.jsdelivr.net/npm/@clerk/clerk-js@' + clerkVersion + '/dist/clerk.browser.js';
-        s.onload = resolve;
-        s.onerror = () => reject(new Error('Clerk JS SDK failed to load from jsdelivr'));
-        document.head.appendChild(s);
-      });
-      // ClerkJS creates window.Clerk during script execution; poll briefly (max 3s)
-      if (!window.Clerk) {
-        await new Promise((resolve, reject) => {
-          const start = Date.now();
-          const check = () => {
-            if (window.Clerk) return resolve();
-            if (Date.now() - start > 3000) return reject(new Error('Clerk global not available after script load'));
-            setTimeout(check, 30);
-          };
-          check();
-        });
-      }
-    }
-  } catch (e) {
-    console.error('Clerk SDK load failed:', e);
-    const el = document.getElementById('startSubtitle');
-    if (el) el.textContent = 'sign-in unavailable — please check your connection';
-    return;
-  }
-
-  // Timeout: if Clerk doesn't init in 10s, show error (no skip)
-  const clerkTimeout = setTimeout(() => {
-    if (!currentUser) {
-      console.warn('Clerk init timed out');
-      const el = document.getElementById('startSubtitle');
-      if (el) el.textContent = 'sign-in timed out — please reload';
-    }
-  }, 10000);
-
-  try {
-    console.log('Clerk: pk starts with', pk.substring(0, 12) + '...');
-    // Check if Clerk was auto-registered by the UMD build
-    const clerkLoad = async () => {
-      if (typeof window.Clerk === 'function') {
-        clerkInstance = new window.Clerk(pk);
-        await clerkInstance.load();
-      } else if (window.Clerk && typeof window.Clerk.load === 'function') {
-        clerkInstance = window.Clerk;
-        await clerkInstance.load();
-      } else {
-        throw new Error('Clerk global not available after script load');
-      }
-    };
-    await Promise.race([
-      clerkLoad(),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('Clerk SDK timed out after 8s')), 8000)),
-    ]);
-    clearTimeout(clerkTimeout);
-    console.log('Clerk: loaded OK, user=', clerkInstance.user ? 'signed in' : 'not signed in');
-  } catch (e) {
-    clearTimeout(clerkTimeout);
-    console.warn('Clerk init failed:', e?.message);
-    const el = document.getElementById('startSubtitle');
-    if (el) el.textContent = 'sign-in failed — please reload';
-    return;
-  }
-
-  // Already signed in — verify email is allowed
-  if (clerkInstance.user) {
-    clearTimeout(clerkTimeout);
-    const email = clerkInstance.user.primaryEmailAddress
-      ? (typeof clerkInstance.user.primaryEmailAddress === 'string' ? clerkInstance.user.primaryEmailAddress : clerkInstance.user.primaryEmailAddress.emailAddress)
-      : '';
-    if (!ALLOWED_EMAILS.includes(email)) {
-      const el2 = document.getElementById('startSubtitle');
-      if (el2) el2.textContent = 'access denied — not authorized';
-      clerkInstance.signOut();
-      return;
-    }
-    _setUserFromClerk(clerkInstance.user);
-    hideStartScreen();
-    return;
-  }
-
-  // Mount sign-in form — restricted to allowed email, read-only scope
-  const el = document.getElementById('clerk-sign-in');
-  if (el) {
-    el.style.display = 'block';
-    try {
-      clerkInstance.mountSignIn(el, {
-        routing: 'hash',
-        signUpUrl: '/#sign-up',
-        afterSignInUrl: '/',
-        fallbackRedirectUrl: '/clerk',
-      });
-    } catch (e) {
-      console.error('clerk.mountSignIn failed:', e);
-      el.innerHTML = '<div style="text-align:center;padding:20px;color:rgba(93,78,109,0.5);font-size:13px">Sign-in could not load.</div>';
-      el.style.display = 'block';
-    }
-  }
-
-  // Listen for session changes
-  try {
-    clerkInstance.addListener((evt) => {
-      if (clerkInstance.user) {
-        const email = clerkInstance.user.primaryEmailAddress
-          ? (typeof clerkInstance.user.primaryEmailAddress === 'string' ? clerkInstance.user.primaryEmailAddress : clerkInstance.user.primaryEmailAddress.emailAddress)
-          : '';
-        if (!ALLOWED_EMAILS.includes(email)) {
-          // Not authorized — sign out and show message
-          const el2 = document.getElementById('startSubtitle');
-          if (el2) el2.textContent = 'access denied — not authorized';
-          clerkInstance.signOut();
-          return;
-        }
-        _setUserFromClerk(clerkInstance.user);
-        try { clerkInstance.unmountSignIn(el); } catch (_) {}
-        hideStartScreen();
-      }
-    });
-  } catch (e) {
-    console.warn('clerk.addListener failed (non-fatal):', e);
-  }
-}
-
-function _setUserFromClerk(u) {
-  const primaryEmail = u.primaryEmailAddress
-    ? (typeof u.primaryEmailAddress === 'string' ? u.primaryEmailAddress : u.primaryEmailAddress.emailAddress)
-    : '';
-  const name = u.fullName || u.firstName || primaryEmail.split('@')[0] || 'user';
-  currentUser = { id: u.id, email: primaryEmail, name };
+  // Direct to Google OAuth via Auth0 — skips Auth0's branded login page
+  window.location.href = '/api/auth0/login?connection=google-oauth2';
 }
 
 function hideStartScreen() {
@@ -9758,10 +12405,14 @@ async function submitOCUnlock() {
   } catch (e) { errEl.textContent = 'Network error'; }
 }
 
-// On load: show picker, then sign-in after confirm
-// (we always show the picker so users can re-pick theme/avatar)
+// On load: check if already authenticated, then show picker
 document.getElementById('ocGate').style.display = 'none';
-showAvatarPicker();
+(async function() {
+  const alreadyAuthed = await checkAuth();
+  if (!alreadyAuthed) {
+    showAvatarPicker();
+  }
+})();
 
 
 
@@ -9918,20 +12569,53 @@ const chatMessages=document.getElementById('chatMessages');
 function toggleCodingMode(){
   codingMode=!codingMode;
   fetch('/api/coding_mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:codingMode})});
-  chatContainer.classList.toggle('active',codingMode);
   document.getElementById('startScreen').classList.toggle('coding-shrink',codingMode);
   if(codingMode){
-    chatMessages.innerHTML='';
-    displaySpeech('Coding mode on! Mic is live — let\'s build something cool.');
+    // Open VibeCode panels AND the main chat container so the coding
+    // conversation flows through the same chat the user sees.
+    if(!vibecodeActive) openVibecode();
+    showMainChat();
+    displaySpeech('VibeCode is up — let\'s build something cool.');
   }else{
     displaySpeech('Coding mode off — still listening!');
   }
 }
 
-function addChatMessage(role,content){
+// ── Show the main chat container (used when entering coding/vibecode mode) ──
+function showMainChat(){
+  if(chatContainer){
+    chatContainer.classList.add('active');
+  }
+}
+function hideMainChat(){
+  if(chatContainer){
+    chatContainer.classList.remove('active');
+  }
+}
+
+function addChatMessage(role,content,meta){
   const div=document.createElement('div');
   div.className='chat-msg '+role;
-  let html=renderCodeBlocks(content);
+  // Support system messages from vibecode chat (inline notices)
+  if(role==='system'){
+    div.className='chat-msg system';
+    div.textContent=content;
+    chatMessages.appendChild(div);
+    chatMessages.scrollTop=chatMessages.scrollHeight;
+    return;
+  }
+  // If meta.rawHtml is true, content is already rendered HTML (from vcRender)
+  let html = (meta && meta.rawHtml) ? content : renderCodeBlocks(content);
+  if(role==='assistant'){
+    // Use meta if provided (vibecode chat), otherwise fall back to selectedAvatar
+    const avatarKey = (meta && meta.key) || selectedAvatar;
+    const avatarMeta = chatAvatarMeta(avatarKey);
+    const emoji = (meta && meta.emoji) || avatarMeta.emoji;
+    const name = (meta && meta.name) || avatarMeta.name;
+    const isAlpha = (meta ? meta.key : avatarKey) === 'puppy';
+    html='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+
+      (isAlpha?' <span class="chat-alpha">Alpha</span>':'')+'</div>'+html;
+  }
   div.innerHTML=html;
   chatMessages.appendChild(div);
   chatMessages.scrollTop=chatMessages.scrollHeight;
@@ -10014,6 +12698,11 @@ async function downloadProject(){
 
 async function sendCodingMessage(text){
   if(!text)return;
+  // Route through unified VibeCode chat when active
+  if(vibecodeActive){
+    sendVibeCodeMessage(text);
+    return;
+  }
   addChatMessage('user',text);
   try{
     const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,avatar:localStorage.getItem('lilly_avatar')||'puppy'})});
@@ -10104,6 +12793,10 @@ function toggleHiveMute(){
 
 function toggleGroupChat(){
   hiveActive = !hiveActive;
+  // Close vibecode panels if we're enabling hive chat — they shouldn't overlap
+  if(hiveActive && vibecodeActive){
+    closeVibecode();
+  }
   hiveContainer.classList.toggle('active', hiveActive);
   const hiveSpheres = document.getElementById('hiveSpheres');
   if(hiveSpheres) hiveSpheres.style.display = hiveActive ? 'flex' : 'none';
@@ -10815,7 +13508,117 @@ function toggleDashboard(){
   d.classList.toggle('open');
   exp.textContent=d.classList.contains('open')?'tap to close':'tap for details';
 }
-/* ─── Browser Microphone + Voice Recognition ─── */
+
+/* ─── Settings Panel ─── */
+function toggleSettings(){
+  const panel=document.getElementById('settingsPanel');
+  if (!panel) return;
+  const open=panel.style.display==='block';
+  panel.style.display=open?'none':'block';
+  if (!open) loadSettings();
+}
+
+async function loadSettings(){
+  try {
+    const r=await fetch('/api/settings',{credentials:'include'});
+    if (!r.ok) return;
+    const d=await r.json();
+    const pbKey=document.getElementById('setting-pushbullet-key');
+    const sensorUrl=document.getElementById('setting-sensor-url');
+    if (pbKey && d.pushbullet_api_key) pbKey.value=d.pushbullet_api_key;
+    if (sensorUrl && d.sensor_server_url) sensorUrl.value=d.sensor_server_url;
+    const c1=document.getElementById('setting-notif-proactive');
+    const c2=document.getElementById('setting-notif-sound');
+    const c3=document.getElementById('setting-notif-pushbullet');
+    const cp=document.getElementById('setting-notif-paused');
+    const cc=document.getElementById('setting-notif-cap');
+    if (c1) c1.checked=d.proactive_notifications!==false;
+    if (c2) c2.checked=d.notification_sound!==false;
+    if (c3) c3.checked=d.pushbullet_fallback===true;
+    if (cp) cp.checked=!!d.notif_paused;
+    if (cc) cc.value=d.notif_daily_cap;
+  } catch(e){}
+}
+
+async function saveNotifPrefs(){
+  const status=document.getElementById('notif-status');
+  status.textContent='Saving...'; status.style.color='rgba(93,78,109,0.5)';
+  const paused=!!document.getElementById('setting-notif-paused').checked;
+  const cap=parseInt(document.getElementById('setting-notif-cap').value||'3',10);
+  const proactive=!!document.getElementById('setting-notif-proactive').checked;
+  try {
+    const r=await fetch('/api/settings/notifications',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({paused:paused,cap:cap,proactive:proactive})
+    });
+    const d=await r.json();
+    status.textContent=d.ok?'Saved ✓':'Save failed: '+(d.error||'unknown');
+    status.style.color=d.ok?'rgba(76,175,80,0.8)':'rgba(232,90,110,0.8)';
+  } catch(e){ status.textContent='Network error'; status.style.color='rgba(232,90,110,0.8)'; }
+}
+
+async function savePushbulletKey(){
+  const key=document.getElementById('setting-pushbullet-key').value.trim();
+  const status=document.getElementById('pb-status');
+  status.textContent='Saving...'; status.style.color='rgba(93,78,109,0.5)';
+  try {
+    const r=await fetch('/api/settings/pushbullet',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({api_key:key})
+    });
+    const d=await r.json();
+    status.textContent=d.ok?'Saved ✓':'Save failed: '+(d.error||'unknown');
+    status.style.color=d.ok?'rgba(76,175,80,0.8)':'rgba(232,90,110,0.8)';
+  } catch(e){ status.textContent='Network error'; status.style.color='rgba(232,90,110,0.8)'; }
+}
+
+async function testPushbullet(){
+  const status=document.getElementById('pb-status');
+  status.textContent='Sending test...'; status.style.color='rgba(93,78,109,0.5)';
+  try {
+    const r=await fetch('/api/pushbullet/send',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({title:'Lilly Test',body:'Pushbullet is configured correctly!'})
+    });
+    const d=await r.json();
+    status.textContent=d.status==='sent'?'Test sent ✓':'Test failed: '+(d.error||'unknown');
+    status.style.color=d.status==='sent'?'rgba(76,175,80,0.8)':'rgba(232,90,110,0.8)';
+  } catch(e){ status.textContent='Network error'; status.style.color='rgba(232,90,110,0.8)'; }
+}
+
+async function saveSensorUrl(){
+  const url=document.getElementById('setting-sensor-url').value.trim();
+  if (!url) return;
+  try {
+    const r=await fetch('/api/settings/sensor',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url})
+    });
+    const d=await r.json();
+    const status=document.getElementById('setting-sensor-url');
+    status.style.borderColor=d.ok?'rgba(76,175,80,0.5)':'rgba(232,90,110,0.5)';
+    setTimeout(()=>{ status.style.borderColor='rgba(184,169,201,0.3)'; },1500);
+  } catch(e){}
+}
+
+async function clearAllData(){
+  if (!confirm('Clear all local data? This cannot be undone.')) return;
+  try {
+    await fetch('/api/settings/clear',{method:'POST'});
+    localStorage.clear();
+    location.reload();
+  } catch(e){ alert('Failed to clear data'); }
+}
+
+// Close settings on outside click
+document.addEventListener('click',function(e){
+  const panel=document.getElementById('settingsPanel');
+  const btn=document.getElementById('settingsBtn');
+  if (!panel||!btn) return;
+  if (panel.style.display==='block' && !panel.contains(e.target) && e.target!==btn && !btn.contains(e.target)){
+    panel.style.display='none';
+  }
+});
 let browserMicStream=null,browserMicRecorder=null,browserMicActive=false,lillySpeaking=false;
 let voiceFingerprint=null;  // enrolled FFT average
 let voiceEnrolling=false;
@@ -11027,6 +13830,12 @@ inputField.addEventListener('keydown',async(e)=>{
       sendCodingMessage(text);
       return;
     }
+
+    // In VibeCode mode, the existing chat is the channel → talk to Alpha
+    if(vibecodeActive){
+      sendVibeCodeMessage(text);
+      return;
+    }
     
     const lower=text.toLowerCase();
 
@@ -11063,6 +13872,8 @@ inputField.addEventListener('keydown',async(e)=>{
         if(d.audio_id)playAudio(d.audio_id);
         if(d.look_at)setLookAt(d.look_at,5000);
         if(d.open_url)window.open(d.open_url,'_blank','noopener,noreferrer');
+        if(d.open_vibecode)openVibecode(d.vibecode_slug);
+        if(d.close_vibecode)closeVibecode();
       }catch(e){}
     }
   }
@@ -11095,6 +13906,10 @@ async function pollState(){
     }
     if(d.look_at)setLookAt(d.look_at,5000);
     if(d.open_url)window.open(d.open_url,'_blank','noopener,noreferrer');
+    if(d.vibecode){
+      if(d.vibecode[0]==='open')openVibecode(d.vibecode[1]);
+      else if(d.vibecode[0]==='close')closeVibecode();
+    }
     if(d.spoken&&d.spoken!==lastSpoken){
       lastSpoken=d.spoken;displaySpeech(d.spoken);
       if(d.audio_id){playAudio(d.audio_id)}
@@ -11105,7 +13920,6 @@ async function pollState(){
     }
     if(typeof d.coding_mode==='boolean'){
       codingMode=d.coding_mode;
-      chatContainer.classList.toggle('active',codingMode);
       document.getElementById('startScreen').classList.toggle('coding-shrink',codingMode);
     }
     if(d.coding_files){
@@ -11868,119 +14682,554 @@ window.CameraBridge = {
 
 })(); // end CameraBridge IIFE
 </script>
+
+<!-- ─── VibeCode Overlay Panels ─── -->
+
+<div id="vcLeft">
+  <div class="vc-head">
+    <span class="vc-title">📁 VibeCode · Projects</span>
+    <button class="vc-btn" onclick="loadVcProjects(true)" title="Refresh">⟳</button>
+    <button class="vc-x" onclick="closeVibecode()" title="Close">✕</button>
+  </div>
+  <div class="vc-body">
+    <select id="vcProjectSel" onchange="selectVcProject(this.value)"><option value="">— no project —</option></select>
+    <div id="vcFileTree"><div class="vc-empty">Pick a project to see its files.</div></div>
+  </div>
+</div>
+
+<div id="vcRight">
+  <div class="vc-head">
+    <span class="vc-title">🖥️ VibeCode · Project</span>
+    <button class="vc-btn" onclick="toggleVcPanel('left')" title="Toggle left panel">◀</button>
+    <button class="vc-btn" onclick="toggleVcPanel('right')" title="Toggle right panel">▶</button>
+  </div>
+  <div class="vc-tabs">
+    <button class="vc-tab active" id="vcTabPreview" onclick="setVcTab('preview')">Preview</button>
+    <button class="vc-tab" id="vcTabLogs" onclick="setVcTab('logs')">Logs</button>
+  </div>
+  <div class="vc-body" id="vcPreviewWrap" style="display:none">
+    <iframe id="vcFrame" title="VibeCode preview"></iframe>
+  </div>
+  <div class="vc-body" id="vcLogsWrap" style="display:none">
+    <pre id="vcLogs">(select a project)</pre>
+  </div>
+  <div id="vcStatusBar">
+    <span class="vc-dot" id="vcDot"></span>
+    <span id="vcStatusText">no project selected</span>
+    <button class="vc-btn" id="vcRunBtn" onclick="vcRunProject()" style="margin-left:auto">▶ Run</button>
+    <button class="vc-btn" id="vcStopBtn" onclick="vcStopProject()">■ Stop</button>
+  </div>
+</div>
+
+<!-- Unified VibeCode Coding Assistant (dashboard + chat merged) -->
+<div id="vcChat">
+  <div id="vcChatHead">
+    <div class="vc-orb" id="vcChatOrb">🐶</div>
+    <span id="vcChatTitle">VibeCode Coding Assistant</span>
+    <button class="vc-btn" onclick="closeVibecode()" title="Close">✕</button>
+  </div>
+  <div class="vc-dash" id="vcDash">
+    <span class="vc-dash-pill" id="vcDashProject"><span class="vc-dot-sm stopped" id="vcDashDot"></span> <span id="vcDashProjectName">no project</span></span>
+    <span class="vc-dash-pill" id="vcDashPort" style="display:none">:<span id="vcDashPortNum">—</span></span>
+    <span class="vc-dash-pill files" id="vcDashFiles" style="display:none">📄 <span id="vcDashFilesNum">0</span></span>
+    <span class="vc-dash-pill weather" id="vcDashWeather" style="display:none">☀️ <span id="vcDashWeatherText">—</span></span>
+    <span class="vc-dash-pill activity" id="vcDashActivity" style="display:none">🚶 <span id="vcDashActivityText">—</span></span>
+  </div>
+  <div id="vcChatMsgs"></div>
+  <div class="vc-chat-input">
+    <input type="text" id="vcChatInput" placeholder="Ask about the project…" autocomplete="off">
+    <button id="vcChatSend" onclick="sendVcChatFromInput()">Send</button>
+  </div>
+</div>
+
+<!-- Alpha overlay pill + roster -->
+<div id="vcAlpha" onclick="toggleVcRoster()" title="Switch avatar">
+  <div class="vc-orb" id="vcAlphaOrb">🐶<span class="vc-dot"></span></div>
+  <div>
+    <div class="vc-a-name" id="vcAlphaName">Lilly</div>
+    <div class="vc-a-sub" id="vcAlphaSub">Alpha Companion · VibeCode</div>
+  </div>
+  <span class="vc-a-chevy">▾</span>
+</div>
+<div id="vcAlphaRoster"></div>
+
+<script>
+/* ─── VibeCode Overlay ─────────────────────────────────────────────── */
+const VC_ROSTER = [
+  {key:'puppy',name:'Lilly',emoji:'🐶',role:'Alpha Companion'},
+  {key:'fox',name:'Fox',emoji:'🦊',role:'Creative Strategist'},
+  {key:'cat',name:'Cat',emoji:'🐱',role:'Precision Analyst'},
+  {key:'bear',name:'Bear',emoji:'🐻',role:'Steadfast Guardian'},
+  {key:'bunny',name:'Bunny',emoji:'🐰',role:'Energetic Scout'},
+  {key:'owl',name:'Owl',emoji:'🦉',role:'Wisdom Keeper'},
+  {key:'deer',name:'Deer',emoji:'🦌',role:'Gentle Healer'},
+  {key:'wolf',name:'Wolf',emoji:'🐺',role:'Fierce Protector'},
+  {key:'raccoon',name:'Raccoon',emoji:'🦝',role:'Tech Tinkerer'},
+];
+let vibecodeActive = false;
+let vcAgent = 'puppy';
+let vcSlug = '';
+let vcLogTimer = null;
+let vcTab = 'preview';
+
+function $vc(id){ return document.getElementById(id); }
+
+/* ─── Dashboard bar updater ─── */
+let vcDashTimer = null;
+function updateVcDash(){
+  if(!vibecodeActive) return;
+  const nameEl = $vc('vcDashProjectName');
+  const dotEl = $vc('vcDashDot');
+  const portEl = $vc('vcDashPort');
+  const portNum = $vc('vcDashPortNum');
+  const filesEl = $vc('vcDashFiles');
+  const filesNum = $vc('vcDashFilesNum');
+  if(!nameEl) return;
+  nameEl.textContent = vcSlug || 'no project';
+  // Fetch project status
+  if(vcSlug){
+    fetch('/api/vibecode/status/' + encodeURIComponent(vcSlug)).then(r=>r.json()).then(d=>{
+      const running = (d.status||'').toLowerCase().indexOf('running') >= 0;
+      dotEl.className = 'vc-dot-sm ' + (running ? 'running' : 'stopped');
+      if(d.port){ portEl.style.display='inline-flex'; portNum.textContent = d.port; }
+      else { portEl.style.display='none'; }
+    }).catch(()=>{});
+    // Fetch file count
+    fetch('/api/vibecode/files/' + encodeURIComponent(vcSlug)).then(r=>r.json()).then(d=>{
+      const count = (d.entries||[]).length;
+      filesEl.style.display = count > 0 ? 'inline-flex' : 'none';
+      filesNum.textContent = count;
+    }).catch(()=>{});
+  } else {
+    dotEl.className = 'vc-dot-sm stopped';
+    portEl.style.display = 'none';
+    filesEl.style.display = 'none';
+  }
+  // Fetch weather/activity from dashboard API
+  fetch('/api/dashboard').then(r=>r.json()).then(d=>{
+    const wEl = $vc('vcDashWeather');
+    const wText = $vc('vcDashWeatherText');
+    const aEl = $vc('vcDashActivity');
+    const aText = $vc('vcDashActivityText');
+    if(d.weather && d.weather.current && wEl){
+      const c = d.weather.current;
+      wEl.style.display = 'inline-flex';
+      wText.textContent = (c.icon || '') + ' ' + (c.temp_c || '—') + '° ' + (c.desc || '');
+    }
+    if(d.activity && aEl){
+      aEl.style.display = 'inline-flex';
+      aText.textContent = (d.activity.type || 'idle') + (d.activity.distance ? ' · ' + d.activity.distance : '');
+    }
+  }).catch(()=>{});
+}
+function startVcDashPoll(){
+  stopVcDashPoll();
+  updateVcDash();
+  vcDashTimer = setInterval(updateVcDash, 15000);
+}
+function stopVcDashPoll(){ if(vcDashTimer){ clearInterval(vcDashTimer); vcDashTimer = null; } }
+
+/* ─── Chat input handler for vcChat ─── */
+function sendVcChatFromInput(){
+  const inp = $vc('vcChatInput');
+  if(!inp) return;
+  const text = inp.value.trim();
+  if(!text) return;
+  inp.value = '';
+  sendVibeCodeMessage(text);
+}
+// Allow Enter key to send
+document.addEventListener('DOMContentLoaded', ()=>{
+  const inp = $vc('vcChatInput');
+  if(inp) inp.addEventListener('keydown', e => { if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendVcChatFromInput(); } });
+});
+
+function openVibecode(slug){
+  vibecodeActive = true;
+  if(slug) vcSlug = String(slug).replace(/[^\w.-]/g,'');
+  $vc('vcLeft').classList.add('vc-show');
+  $vc('vcRight').classList.add('vc-show');
+  // Hide the separate vibecode chat panel — chat now flows through the
+  // main #chatContainer so there's only ONE chat the user sees.
+  $vc('vcChat').classList.remove('vc-show');
+  $vc('vcAlpha').classList.add('vc-show');
+  if(inputField) inputField.placeholder = 'Ask Alpha about the project…';
+  buildVcRoster();
+  loadVcProjects();
+  if(vcSlug) selectVcProject(vcSlug);
+   startVcDashPoll();
+  // Show the main chat container with Alpha label
+  showMainChat();
+  // Update the chat title to reflect coding mode
+  var titleEl = document.getElementById('chatTitle');
+  if(titleEl) titleEl.textContent = 'Coding with Alpha';
+  // Inject a compact dashboard bar into the chat header so the user can
+  // see project status / weather / activity while coding.
+  injectVcDashBar();
+  // Sync the selected avatar to the vibecode agent
+  if(typeof selectedAvatar !== 'undefined'){
+    vcAgent = resolvePersonaKey(selectedAvatar) || 'puppy';
+    selectVcAgent(vcAgent);
+  }
+  // Seed a system message in the main chat
+  addChatMessage('system', 'VibeCode is up — pick a project in the left panel. I\'m here to help.');
+  if(inputField) inputField.focus();
+}
+
+// ── Inject / remove a mini dashboard bar in the chat header ──
+function injectVcDashBar(){
+  var header = document.getElementById('chatHeader');
+  if(!header) return;
+  // Remove existing
+  var existing = document.getElementById('vcDashBar');
+  if(existing) existing.remove();
+  var bar = document.createElement('div');
+  bar.id = 'vcDashBar';
+  bar.className = 'vc-dash';
+  bar.style.marginRight = '8px';
+  bar.style.flex = '1';
+  bar.innerHTML = '<span class="vc-dash-pill" id="vcDashProject"><span class="vc-dot-sm stopped"></span> <span id="vcDashProjectName">no project</span></span>' +
+    '<span class="vc-dash-pill files" id="vcDashFiles" style="display:none">📄 <span id="vcDashFilesNum">0</span></span>' +
+    '<span class="vc-dash-pill weather" id="vcDashWeather" style="display:none">☀️ <span id="vcDashWeatherText">—</span></span>' +
+    '<span class="vc-dash-pill activity" id="vcDashActivity" style="display:none">🚶 <span id="vcDashActivityText">—</span></span>';
+  header.appendChild(bar);
+  updateVcDash();
+}
+function removeVcDashBar(){
+  var bar = document.getElementById('vcDashBar');
+  if(bar) bar.remove();
+}
+
+function closeVibecode(){
+  vibecodeActive = false;
+  vcSlug = '';
+  $vc('vcLeft').classList.remove('vc-show');
+  $vc('vcRight').classList.remove('vc-show');
+  $vc('vcChat').classList.remove('vc-show');
+  $vc('vcAlpha').classList.remove('vc-show');
+  $vc('vcAlphaRoster').classList.remove('vc-show');
+   removeVcDashBar();
+   // Restore the chat title
+   var titleEl = document.getElementById('chatTitle');
+   if(titleEl) titleEl.textContent = 'Chat';
+   if(inputField) inputField.placeholder = 'Talk to me...';
+  stopVcLogs();
+  stopVcDashPoll();
+}
+
+function toggleVcRoster(){
+  $vc('vcAlphaRoster').classList.toggle('vc-show');
+}
+function buildVcRoster(){
+  const box = $vc('vcAlphaRoster');
+  box.innerHTML = '';
+  VC_ROSTER.forEach(p => {
+    const s = document.createElement('div');
+    s.className = 'vc-ar' + (p.key === vcAgent ? ' sel' : '');
+    s.dataset.key = p.key;
+    s.textContent = p.emoji;
+    s.title = p.name + ' — ' + p.role;
+    s.onclick = () => { selectVcAgent(p.key); toggleVcRoster(); };
+    box.appendChild(s);
+  });
+}
+function selectVcAgent(key){
+  vcAgent = key;
+  const p = VC_ROSTER.find(x => x.key === key) || VC_ROSTER[0];
+  $vc('vcAlphaOrb').textContent = p.emoji;
+  $vc('vcAlphaName').textContent = p.name;
+  $vc('vcAlphaSub').textContent = p.role + ' · VibeCode';
+  $vc('vcChatOrb').textContent = p.emoji;
+  $vc('vcChatTitle').textContent = 'VibeCode Coding Assistant' + (vcSlug ? ' — ' + vcSlug : '');
+  document.querySelectorAll('.vc-ar').forEach(c => c.classList.toggle('sel', c.dataset.key === key));
+}
+function setVcTab(t){
+  vcTab = t;
+  $vc('vcTabPreview').classList.toggle('active', t === 'preview');
+  $vc('vcTabLogs').classList.toggle('active', t === 'logs');
+  $vc('vcPreviewWrap').classList.toggle('active', t === 'preview');
+  $vc('vcLogsWrap').classList.toggle('active', t === 'logs');
+}
+
+// Toggle one of the two side panels (used by the ◀/▶ buttons in the right
+// panel header) while leaving the overall VibeCode mode active.
+function toggleVcPanel(which){
+  const el = $vc(which === 'left' ? 'vcLeft' : 'vcRight');
+  if(el) el.classList.toggle('vc-show');
+}
+
+async function loadVcProjects(){
+  try{
+    const r = await fetch('/api/vibecode/projects');
+    const d = await r.json();
+    const sel = $vc('vcProjectSel');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">— no project —</option>';
+    (d.projects || []).forEach(p => {
+      const o = document.createElement('option');
+      o.value = p.slug;
+      o.textContent = p.slug + (p.status === 'running' ? ' ●' : '');
+      sel.appendChild(o);
+    });
+    if(prev) sel.value = prev;
+    if(vcSlug) sel.value = vcSlug;
+  }catch(e){}
+  if(!vcSlug) $vc('vcFileTree').innerHTML = '<div class="vc-empty">Pick a project to see its files.</div>';
+}
+
+function selectVcProject(slug){
+  vcSlug = slug || '';
+  $vc('vcProjectSel').value = slug || '';
+  if(!vcSlug){
+    $vc('vcFileTree').innerHTML = '<div class="vc-empty">Pick a project to see its files.</div>';
+    $vc('vcStatusText').textContent = 'no project selected';
+    $vc('vcFrame').src = 'about:blank';
+    $vc('vcLogs').textContent = '(select a project)';
+    stopVcLogs();
+    updateVcDash();
+    return;
+  }
+  loadVcFiles('', $vc('vcFileTree'));
+  vcRefreshStatus();
+  setVcTab('preview');
+  $vc('vcFrame').src = '/api/vibecode/preview/' + encodeURIComponent(vcSlug);
+  vcPollLogs();
+  if(inputField) inputField.placeholder = 'Ask Alpha about ' + vcSlug + '…';
+  selectVcAgent(vcAgent);
+  updateVcDash();
+}
+
+async function loadVcFiles(path, container){
+  container.innerHTML = '<div class="vc-empty">loading…</div>';
+  try{
+    const q = path ? '?path=' + encodeURIComponent(path) : '';
+    const r = await fetch('/api/vibecode/files/' + encodeURIComponent(vcSlug) + q);
+    if(!r.ok){ container.innerHTML = '<div class="vc-empty">error loading files</div>'; return; }
+    const d = await r.json();
+    renderVcTree(d.entries || [], container, 0);
+  }catch(e){ container.innerHTML = '<div class="vc-empty">error loading files</div>'; }
+}
+
+function renderVcTree(entries, container, depth){
+  container.innerHTML = '';
+  if(!entries.length){ container.innerHTML = '<div class="vc-empty">empty folder</div>'; return; }
+  entries.forEach(en => {
+    const row = document.createElement('div');
+    row.className = 'vc-tree-row ' + (en.type === 'dir' ? 'dir' : 'file');
+    if(en.type === 'dir'){
+      const caret = document.createElement('span');
+      caret.className = 'vc-caret'; caret.textContent = '▸';
+      row.appendChild(caret);
+      const nm = document.createElement('span'); nm.textContent = '📁 ' + en.name;
+      row.appendChild(nm);
+      let open = false, childWrap = null;
+      row.onclick = async () => {
+        open = !open; caret.textContent = open ? '▾' : '▸';
+        if(!childWrap){
+          childWrap = document.createElement('div');
+          childWrap.className = 'vc-tree-children';
+          row.after(childWrap);
+          await loadVcFiles(en.path, childWrap);
+        }
+        childWrap.style.display = open ? 'block' : 'none';
+      };
+    }else{
+      row.style.paddingLeft = (22 + depth) + 'px';
+      const nm = document.createElement('span'); nm.textContent = '📄 ' + en.name;
+      row.appendChild(nm);
+      row.title = en.name;
+    }
+    container.appendChild(row);
+  });
+}
+
+async function vcRefreshStatus(){
+  if(!vcSlug) return;
+  try{
+    const r = await fetch('/api/vibecode/status/' + encodeURIComponent(vcSlug));
+    const d = await r.json();
+    const running = (d.status || '').toLowerCase().indexOf('running') >= 0;
+    $vc('vcDot').className = 'vc-dot ' + (running ? 'running' : 'stopped');
+    $vc('vcStatusText').textContent = vcSlug + (d.port ? ' · :' + d.port : '') + (running ? ' · running' : ' · ' + (d.status || 'stopped'));
+    if(running) $vc('vcFrame').src = '/api/vibecode/preview/' + encodeURIComponent(vcSlug);
+  }catch(e){}
+}
+
+function vcPollLogs(){
+  stopVcLogs();
+  if(!vibecodeActive || !vcSlug) return;
+  vcLogTimer = setInterval(async () => {
+    if(!vcSlug || !vibecodeActive){ stopVcLogs(); return; }
+    try{
+      const r = await fetch('/api/vibecode/logs/' + encodeURIComponent(vcSlug) + '?lines=60');
+      const d = await r.json();
+      $vc('vcLogs').textContent = d.log || '(no output yet)';
+      $vc('vcLogs').scrollTop = $vc('vcLogs').scrollHeight;
+    }catch(e){}
+  }, 2500);
+}
+function stopVcLogs(){ if(vcLogTimer){ clearInterval(vcLogTimer); vcLogTimer = null; } }
+
+async function vcRunProject(){
+  if(!vcSlug) return;
+  const btn = $vc('vcRunBtn'); btn.disabled = true; btn.textContent = 'Starting…';
+  try{
+    await fetch('/api/vibecode/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slug:vcSlug})});
+  }catch(e){}
+  setTimeout(() => { btn.disabled = false; btn.textContent = '▶ Run'; vcRefreshStatus(); }, 1500);
+}
+async function vcStopProject(){
+  if(!vcSlug) return;
+  const btn = $vc('vcStopBtn'); btn.disabled = true;
+  try{
+    await fetch('/api/vibecode/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slug:vcSlug})});
+  }catch(e){}
+  setTimeout(() => { btn.disabled = false; vcRefreshStatus(); }, 800);
+}
+
+function vcEsc(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function vcRender(text){
+  let out = vcEsc(text || '');
+  out = out.replace(/```(\w+)?\n([\s\S]*?)```/g, (m, lang, code) => {
+    const ext = {python:'py',javascript:'js',js:'js',typescript:'ts',html:'html',css:'css',json:'json',bash:'sh',shell:'sh',sql:'sql',ruby:'rb',java:'java',go:'go',rust:'rs',c:'c',cpp:'cpp'}[lang] || 'txt';
+    return '<pre><div style="text-align:right;margin-bottom:4px">' +
+      '<button onclick="vcCopy(this)" class="vc-btn">Copy</button> ' +
+      '<button onclick="vcSaveCode(this)" data-code="' + encodeURIComponent(code.trim()) + '" data-fname="' + (lang || 'code') + '.' + ext + '">Save</button></div>' +
+      '<code class="lang-' + (lang || '') + '">' + vcEsc(code.trim()) + '</code></pre>';
+  });
+  out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+  out = out.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  out = out.replace(/\n/g, '<br>');
+  return out;
+}
+function vcCopy(btn){
+  const code = btn.closest('pre').querySelector('code').textContent;
+  navigator.clipboard.writeText(code);
+  btn.textContent = '✓';
+  setTimeout(() => btn.textContent = 'Copy', 1200);
+}
+async function vcSaveCode(btn){
+  if(!vcSlug) return;
+  const code = decodeURIComponent(btn.dataset.code || '');
+  const path = prompt('Save as (path within ' + vcSlug + '):', btn.dataset.fname || 'code.txt');
+  if(!path) return;
+  try{
+    const r = await fetch('/api/vibecode/file/' + encodeURIComponent(vcSlug) + '?path=' + encodeURIComponent(path),
+      {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content:code})});
+    const d = await r.json();
+    if(!r.ok) alert(d.error || 'save failed');
+    else{
+      btn.textContent = '✓ saved';
+      setTimeout(() => btn.textContent = 'Save', 1500);
+      if($vc('vcFileTree')) loadVcFiles('', $vc('vcFileTree'));
+    }
+  }catch(e){ alert('save failed: ' + e.message); }
+}
+
+function vcAppendMsg(role, html, meta){
+  const box = $vc('vcChatMsgs');
+  const div = document.createElement('div');
+  div.className = 'vcc-msg ' + (role === 'user' ? 'user' : 'alpha');
+  let head = '';
+  if(role === 'assistant' && meta){
+    const p = VC_ROSTER.find(x => x.key === (meta.key || vcAgent)) || VC_ROSTER[0];
+    const emoji = meta.emoji || p.emoji;
+    const name = meta.name || p.name;
+    const isAlpha = (meta.key || vcAgent) === 'puppy';
+    head = '<div class="vcc-sender"><span class="vcc-s-emoji">' + emoji + '</span> ' + vcEsc(name) +
+      (isAlpha ? ' <span class="vcc-alpha-badge">Alpha</span>' : '') + '</div>';
+  }
+  div.innerHTML = head + html;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+function vcAppendSys(t){
+  const box = $vc('vcChatMsgs');
+  const div = document.createElement('div');
+  div.className = 'vcc-msg sys';
+  div.textContent = t;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+// ── Thinking indicator for the main chat container (used by sendVibeCodeMessage) ──
+// This replaces the old vcAppendThinking that appended to the separate #vcChatMsgs panel.
+
+async function sendVibeCodeMessage(text){
+  if(!text) return;
+  // While the overlay is active the main input routes here, so handle
+  // open/close commands locally instead of forwarding them to the chat.
+  const t = text.toLowerCase();
+  const closeWords = ['close vibecode','close vibe code','hide vibecode','hide vibe code',
+    'exit vibecode','exit vibe code','vibecode off','vibe code off','close the vibe panels','hide the vibe panels'];
+  if(closeWords.some(w => t.indexOf(w) >= 0)){
+    closeVibecode();
+    if(typeof displaySpeech === 'function') displaySpeech('VibeCode panels closed.');
+    return;
+  }
+  // ── Route through the MAIN chat container so the coding conversation
+  //    appears alongside all other chat (not in a separate vibecode panel) ──
+  addChatMessage('user', vcRender(text), {rawHtml: true});
+  const thinkingEl = vcAppendThinking();
+  try{
+    const r = await fetch('/api/vibecode/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({slug:vcSlug || '', message:text, file:'', agent:vcAgent || (typeof selectedAvatar !== 'undefined' ? selectedAvatar : 'puppy'), session_id:'main-chat'})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || 'unknown error');
+    thinkingEl.remove();
+    let html = vcRender(d.reply || '');
+    if(d.suggestions && d.suggestions.length){
+      html += '<div class="vcc-suggest">' + d.suggestions.map(s =>
+        '<a href="' + (s.repo_url || '#') + '" target="_blank" rel="noopener">⭐ ' +
+        vcEsc(s.repo_name || s.repo_url || 'repo') + '</a>').join('') + '</div>';
+    }
+    // Display in the MAIN chat container with the Alpha badge
+    addChatMessage('assistant', html, {key: d.agent || vcAgent, emoji: d.agent_emoji, name: d.agent_name, alpha: true, rawHtml: true});
+    if(d.alpha_mode === 'asking'){
+      addChatMessage('system', 'Alpha is asking a few clarifying questions.');
+    }
+    if(d.project_applied){
+      vcSlug = d.project_applied;
+      selectVcProject(vcSlug);
+      addChatMessage('system', 'Project ' + d.project_applied + ' is up — run it from the right panel.');
+    }
+    // The avatar speaks the reply aloud through the main speech channel
+    if(typeof displaySpeech === 'function' && d.reply) displaySpeech(d.reply);
+    if(d.audio_id && typeof playAudio === 'function') playAudio(d.audio_id);
+    // Update dashboard after reply
+    updateVcDash();
+  }catch(e){
+    thinkingEl.remove();
+    addChatMessage('system', 'Error: ' + (e.message || 'unknown'));
+  }
+  // Focus back on main chat input
+  if(inputField) inputField.focus();
+}
+
+// ── Thinking indicator that appears in the MAIN chat container ──
+function vcAppendThinking(){
+  if(!chatMessages) return null;
+  const div = document.createElement('div');
+  div.className = 'chat-msg assistant vc-thinking';
+  // Use the currently selected avatar (Alpha/puppy by default)
+  var avatarKey = (vibecodeActive && vcAgent) || (typeof selectedAvatar !== 'undefined' && selectedAvatar) || 'puppy';
+  var meta = chatAvatarMeta(avatarKey);
+  div.innerHTML = '<div class="chat-alpha"><span style="font-size:14px">' + (meta.emoji || '🐶') + '</span> ' + (meta.name || 'Alpha') + '</div>' +
+    '<div class="vcc-think"><span></span><span></span><span></span></div>';
+  chatMessages.appendChild(div);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+  return div;
+}
+
 </body>
 </html>"""
 
-@app.get("/clerk", response_class=HTMLResponse)
-async def clerk_landing():
-    """
-    Clerk redirect landing page.
-    Add this URL in your Clerk dashboard under:
-      Configure → Paths → Sign-in redirect URL  →  /clerk
-      Configure → Paths → Sign-up redirect URL  →  /clerk
-    Clerk will redirect here after a successful sign-in/sign-up,
-    complete its OAuth/SSO handshake, then bounce the user to /.
-    """
-    clerk_pk = os.environ.get("CLERK_PUBLISHABLE_KEY", "")
-    _fallback_js = "https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js"
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Signing in to Lilly…</title>
-  <style>
-    *{{margin:0;padding:0;box-sizing:border-box}}
-    body{{min-height:100vh;display:flex;flex-direction:column;align-items:center;
-          justify-content:center;font-family:-apple-system,'Segoe UI',system-ui,sans-serif;
-          background:#f0e6ef;color:#5d4e6d}}
-    .ring{{width:72px;height:72px;border-radius:50%;border:4px solid transparent;
-           border-top-color:#b8a9c9;border-right-color:#d4b8e0;
-           animation:spin 0.9s linear infinite;margin-bottom:20px}}
-    @keyframes spin{{to{{transform:rotate(360deg)}}}}
-    p{{font-size:15px;color:#b8a9c9;font-weight:400;letter-spacing:0.3px}}
-    .err{{font-size:13px;color:#e85a6e;margin-top:12px;display:none}}
-  </style>
-</head>
-<body>
-  <div class="ring"></div>
-  <p>Signing you in…</p>
-  <div class="err" id="err"></div>
-  <script>
-    window.__CLERK_PK = {json.dumps(clerk_pk)};
-    window.__clerk_publishable_key = {json.dumps(clerk_pk)};
-
-    (async () => {{
-      try {{
-        const pk = window.__CLERK_PK;
-
-        if (!window.Clerk) {{
-          await new Promise((res, rej) => {{
-            const s = document.createElement('script');
-            s.setAttribute('data-clerk', 'true');
-            s.setAttribute('data-clerk-publishable-key', pk);
-            s.src = '{_fallback_js}';
-            s.onload = res;
-            s.onerror = () => rej(new Error('Clerk JS SDK failed to load'));
-            document.head.appendChild(s);
-          }});
-          if (!window.Clerk) {{
-            await new Promise((res, rej) => {{
-              const start = Date.now();
-              const check = () => {{
-                if (window.Clerk) return res();
-                if (Date.now() - start > 3000) return rej(new Error('Clerk global not available'));
-                setTimeout(check, 30);
-              }};
-              check();
-            }});
-          }}
-        }}
-
-        // Initialize Clerk
-        if (typeof window.Clerk === 'function') {{
-          window.Clerk = new window.Clerk(pk);
-          await window.Clerk.load();
-        }} else if (window.Clerk && typeof window.Clerk.load === 'function') {{
-          await window.Clerk.load();
-        }}
-
-        // handleRedirectCallback processes the OAuth/SSO token from the URL.
-        const cbResult = await Promise.race([
-          window.Clerk.handleRedirectCallback().then(() => 'ok'),
-          new Promise((_, rej) => setTimeout(() => rej(new Error('OAuth callback timed out')), 10000)),
-        ]).catch(e => {{
-          console.warn('handleRedirectCallback issue:', e);
-          return 'timeout';
-        }});
-
-        if (cbResult === 'timeout') {{
-          document.getElementById('err').textContent = 'Sign-in is taking longer than expected — redirecting…';
-          document.getElementById('err').style.display = 'block';
-        }}
-
-        // Session established (or timed out) — go to main app
-        window.location.replace('/');
-      }} catch (e) {{
-        console.error('Clerk redirect failed:', e);
-        document.getElementById('err').textContent = 'Sign-in failed — redirecting…';
-        document.getElementById('err').style.display = 'block';
-        setTimeout(() => window.location.replace('/'), 1500);
-      }}
-    }})();
-  </script>
-</body>
-</html>"""
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
-    # Inject the Clerk publishable key so the front-end JS can load the SDK.
-    clerk_pk = os.environ.get("CLERK_PUBLISHABLE_KEY", "")
-    page = HTML_PAGE.replace(
-        "// Clerk publishable key is injected by the server into window.__CLERK_PK",
-        f"window.__CLERK_PK = {json.dumps(clerk_pk)};",
-    )
-    return page
+    return HTML_PAGE
+
 
 _pairing_codes: dict[str, dict] = {}
 # Maps device_token → {"user_id": str, "user_name": str, "created": float}
@@ -12037,7 +15286,7 @@ async def input_pairing_code(request: Request):
 
 @app.get("/api/pair/status")
 async def pairing_status(request: Request):
-    """Check if the current request is authenticated (Clerk or device token)."""
+    """Check if the current request is authenticated (Auth0 or device token)."""
     user = _resolve_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Not paired")
@@ -12048,7 +15297,7 @@ async def pairing_status(request: Request):
 
 
 def _resolve_user(request: Request) -> dict | None:
-    """Try Clerk session first, then fall back to device token header."""
+    """Try Auth0 session first, then fall back to device token header."""
     if AUTH_AVAILABLE:
         try:
             user = asyncio.run(get_current_user(request))
@@ -12502,6 +15751,132 @@ async def get_notifications():
     )
 
 
+@app.post("/api/pushbullet/send")
+async def api_pushbullet_send(req: Request):
+    """Send a push notification via Pushbullet. Body: {title, body, url?}.
+
+    Works as a direct API endpoint OR as a fallback channel for system notifications.
+    """
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    title = body.get("title", "Lilly")
+    content = body.get("body", "")
+    url = body.get("url")
+    ok = await send_pushbullet_note(title, content, url)
+    if ok:
+        return {"status": "sent"}
+    return JSONResponse(
+        {"error": "Pushbullet send failed (check API key)"}, status_code=502
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SETTINGS
+# GET  /api/settings           — Load user settings
+# POST /api/settings/pushbullet — Save Pushbullet API key
+# POST /api/settings/sensor    — Save sensor server URL
+# POST /api/settings/clear     — Clear all local data
+# ─────────────────────────────────────────────────────────────────────────────
+
+_settings_store: dict[str, dict] = {}  # In-memory per-user settings (dev)
+
+
+def _get_user_settings(user_id: str) -> dict:
+    return _settings_store.get(user_id, {})
+
+
+def _set_user_settings(user_id: str, data: dict):
+    cur = _get_user_settings(user_id)
+    cur.update(data)
+    _settings_store[user_id] = cur
+
+
+@app.get("/api/settings")
+async def get_settings(request: Request):
+    user = await get_current_user(request)
+    uid = user.get("id") if user else "anonymous"
+    s = _get_user_settings(uid)
+    return {
+        "pushbullet_api_key": s.get("pushbullet_api_key", ""),
+        "sensor_server_url": s.get(
+            "sensor_server_url", os.environ.get("SENSOR_SERVER_URL", "")
+        ),
+        "proactive_notifications": s.get("proactive_notifications", True),
+        "notification_sound": s.get("notification_sound", True),
+        "pushbullet_fallback": s.get("pushbullet_fallback", False),
+        "notif_paused": _NOTIF_PREFS.get("paused", False),
+        "notif_daily_cap": _NOTIF_PREFS.get("daily_cap", 3),
+    }
+
+
+@app.post("/api/settings/pushbullet")
+async def save_pushbullet_setting(request: Request):
+    user = await get_current_user(request)
+    uid = user.get("id") if user else "anonymous"
+    try:
+        body = await request.json()
+        key = (body.get("api_key") or "").strip()
+    except Exception:
+        key = ""
+    _set_user_settings(uid, {"pushbullet_api_key": key})
+    # Update runtime global so new notifications use the key immediately
+    if key:
+        os.environ["PUSHBULLET_API_KEY"] = key
+        global PUSHBULLET_API_KEY
+        PUSHBULLET_API_KEY = key
+    return {"ok": True}
+
+
+@app.post("/api/settings/sensor")
+async def save_sensor_setting(request: Request):
+    user = await get_current_user(request)
+    uid = user.get("id") if user else "anonymous"
+    try:
+        body = await request.json()
+        url = (body.get("url") or "").strip()
+    except Exception:
+        url = ""
+    _set_user_settings(uid, {"sensor_server_url": url})
+    global SENSOR_SERVER_URL
+    SENSOR_SERVER_URL = url
+    return {"ok": True}
+
+
+@app.post("/api/settings/clear")
+async def clear_settings(request: Request):
+    user = await get_current_user(request)
+    uid = user.get("id") if user else "anonymous"
+    _settings_store.pop(uid, None)
+    return {"ok": True}
+
+
+@app.post("/api/settings/notifications")
+async def save_notification_prefs(request: Request):
+    """Save Alpha-notification prefs: paused toggle, daily cap, proactive switch.
+
+    Disallowed notifications are dropped (never queued), so reactivating
+    notifications never stockpiles a backlog.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if isinstance(body, dict):
+        if "paused" in body:
+            _NOTIF_PREFS["paused"] = bool(body["paused"])
+        if "proactive" in body:
+            _NOTIF_PREFS["proactive"] = bool(body["proactive"])
+        if "cap" in body:
+            try:
+                _NOTIF_PREFS["daily_cap"] = max(0, int(body["cap"]))
+            except (TypeError, ValueError):
+                pass
+    _save_notif_prefs()
+    return {"ok": True}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TASK 5 — LOCAL TERMUX COMMAND FAST-PATH
 # POST /api/termux/exec  — Execute a shell/package-manager command directly
@@ -12733,6 +16108,21 @@ async def _cf_who_is_around(cmd: str, trigger: str) -> Optional[str]:
     return summary
 
 
+# ── Canned function fast-path definitions ──────────────────────
+from dataclasses import dataclass
+from typing import List
+
+
+@dataclass
+class CannedFunction:
+    name: str
+    triggers: list
+    func: object
+    description: str = ""
+
+
+CANNED_FUNCTIONS: List[CannedFunction] = []
+
 CANNED_FUNCTIONS.insert(
     0,
     CannedFunction(
@@ -12801,14 +16191,22 @@ VIBECODE_PORT_BASE = 8201  # allocate from here upward (8200 is used by entity-p
 VIBECODE_PORT_MAX = 8299
 
 
-def _vibecode_get_base_url(request: Request | None, port: int) -> str:
+def _vibecode_get_base_url(request: Request | None, slug: str) -> str:
     """Construct the public URL for a vibecode project from the incoming request."""
     if request is not None and request.url is not None:
         host = request.url.hostname or "localhost"
         scheme = request.url.scheme or "http"
-        return f"{scheme}://{host}:{port}"
-    # Fallback when request is not available
-    return f"http://localhost:{port}"
+        return f"{scheme}://{host}/vibecode/p/{slug}"
+    return f"/vibecode/p/{slug}"
+
+
+def _vibecode_get_slug_by_port(port: int) -> str | None:
+    """Look up project slug from port number in deployments."""
+    dep = _vibecode_load_deployments().get("projects", {})
+    for slug, info in dep.items():
+        if info.get("port") == port:
+            return slug
+    return None
 
 
 def _vibecode_port_is_available(port: int) -> bool:
@@ -12826,7 +16224,12 @@ def _vibecode_port_is_available(port: int) -> bool:
 
 def _vibecode_cleanup_stale_deployments() -> None:
     """Remove deployment entries for projects that no longer exist on disk."""
-    d = _vibecode_load_deployments()
+    if not VIBECODE_DEPLOYMENTS_FILE.exists():
+        return
+    try:
+        d = json.loads(VIBECODE_DEPLOYMENTS_FILE.read_text())
+    except Exception:
+        return
     projects = d.get("projects", {})
     stale = [
         slug
@@ -12840,7 +16243,6 @@ def _vibecode_cleanup_stale_deployments() -> None:
 
 
 def _vibecode_load_deployments() -> dict:
-    _vibecode_cleanup_stale_deployments()
     if VIBECODE_DEPLOYMENTS_FILE.exists():
         try:
             return json.loads(VIBECODE_DEPLOYMENTS_FILE.read_text())
@@ -12883,6 +16285,95 @@ def _vibecode_container_name(slug: str) -> str:
     return f"vibecode-{slug}"
 
 
+# ── VibeCode skills (reusable project baselines from GitHub repos) ──────────
+# A skill is a git repo — suggested by Alpha, dropped in chat, or cloned —
+# that can be applied to start a new project from it.
+
+VIBECODE_SKILLS_FILE = WORKSPACE / "vibecode_skills.json"
+
+
+def _vibecode_skills_load() -> dict:
+    """Load the skills store: {"skills": {key: {...}}}."""
+    if VIBECODE_SKILLS_FILE.exists():
+        try:
+            return json.loads(VIBECODE_SKILLS_FILE.read_text())
+        except Exception:
+            pass
+    return {"skills": {}}
+
+
+def _vibecode_skills_save(d: dict) -> None:
+    try:
+        VIBECODE_SKILLS_FILE.write_text(json.dumps(d, indent=2))
+    except Exception:
+        pass
+
+
+def _vibecode_skills_list() -> list:
+    """All skills, newest first."""
+    d = _vibecode_skills_load()
+    skills = list(d.get("skills", {}).values())
+    return sorted(skills, key=lambda s: s.get("created_at", ""), reverse=True)
+
+
+def _vibecode_skills_upsert(
+    repo_url: str,
+    meta: Optional[dict] = None,
+    source: str = "dropped",
+) -> str:
+    """Record a git repo as a reusable VibeCode skill. Returns the skill key.
+
+    meta may carry: name, description, language, stars, tags.
+    Re-running for an existing repo just bumps the timestamp / source.
+    """
+    repo_url = (repo_url or "").strip().rstrip("/")
+    if not repo_url:
+        return ""
+    # Normalize the URL to a canonical .git-less form
+    canonical = repo_url
+    for suffix in (".git", "/"):
+        if canonical.endswith(suffix):
+            canonical = canonical[: -len(suffix)]
+    key = _vibecode_project_slug(canonical.split("/")[-1] or canonical)
+    meta = meta or {}
+    store = _vibecode_skills_load()
+    skills = store.setdefault("skills", {})
+    existing = skills.get(key, {})
+    entry = {
+        "key": key,
+        "name": meta.get("name")
+        or existing.get("name")
+        or key.replace("-", " ").title(),
+        "repo_url": canonical,
+        "description": meta.get("description") or existing.get("description", ""),
+        "language": meta.get("language") or existing.get("language", ""),
+        "stars": meta.get("stars") or existing.get("stars", 0),
+        "tags": meta.get("tags") or existing.get("tags", []),
+        "source": source or existing.get("source", "dropped"),
+        "created_at": existing.get("created_at")
+        or __import__("datetime").datetime.utcnow().isoformat()[:19],
+        "used_count": existing.get("used_count", 0),
+    }
+    skills[key] = entry
+    _vibecode_skills_save(store)
+    return key
+
+
+def _vibecode_skills_get(key: str) -> Optional[dict]:
+    key = _vibecode_project_slug(key or "")
+    return _vibecode_skills_load().get("skills", {}).get(key)
+
+
+def _vibecode_skills_bump_used(key: str) -> None:
+    """Increment used_count for a skill (called when it's applied)."""
+    key = _vibecode_project_slug(key or "")
+    store = _vibecode_skills_load()
+    skills = store.setdefault("skills", {})
+    if key in skills:
+        skills[key]["used_count"] = int(skills[key].get("used_count", 0)) + 1
+        _vibecode_skills_save(store)
+
+
 # ── List projects ───────────────────────────────────────────────────────────
 
 
@@ -12912,7 +16403,7 @@ async def vibecode_list_projects(request: Request):
                 status = result.stdout.strip()
         except Exception:
             pass
-        url = _vibecode_get_base_url(request, port) if port else ""
+        url = _vibecode_get_base_url(request, slug) if port else ""
         projects.append(
             {
                 "slug": slug,
@@ -12974,12 +16465,612 @@ async def vibecode_clone_repo(data: dict, request: Request):
         )
 
     port = _vibecode_alloc_port(slug)
-    url = _vibecode_get_base_url(request, port)
+    url = _vibecode_get_base_url(request, slug)
+    _vibecode_bootstrap_project(slug, dest)
+    _vibecode_skills_upsert(repo_url, source="cloned")
     return {
         "slug": slug,
         "port": port,
         "url": url,
         "path": str(dest),
+        "message": f"Cloned '{slug}' — port {port} allocated.",
+    }
+
+
+# ── Bootstrap cloned project with themed preview overlay ─────────────────────
+
+
+def _vibecode_bootstrap_project(slug: str, project_dir: Path) -> None:
+    """Add a themed preview overlay for cloned repos so they use the VibeCode frost theme."""
+    try:
+        # Find the main entry point: index.html at root, or first HTML file found
+        entry_candidates = [
+            project_dir / "index.html",
+            project_dir / "index.htm",
+        ]
+        entry = next((p for p in entry_candidates if p.exists()), None)
+        if not entry:
+            for p in sorted(project_dir.rglob("*.html")):
+                if ".git" not in str(p).lower():
+                    entry = p
+                    break
+
+        overlay_name = "_vibecode_preview.html"
+        overlay_path = project_dir / overlay_name
+
+        if entry:
+            # Read original entry
+            original = entry.read_text(encoding="utf-8", errors="replace")
+            entry_rel = entry.relative_to(project_dir)
+            entry_rel = entry.relative_to(project_dir)
+            # Create overlay that injects frost theme + drag-drop cards
+            overlay = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>DroolingWithSanity — {slug}</title>
+<style>
+:root{{
+  --frost-bg:rgba(15,15,28,0.88);
+  --frost-surface:rgba(255,255,255,0.06);
+  --frost-border:rgba(255,255,255,0.10);
+  --accent:#a78bfa;
+  --accent2:#818cf8;
+  --green:#4ade80;
+  --red:#f87171;
+  --yellow:#fbbf24;
+  --text:rgba(255,255,255,0.88);
+  --text-dim:rgba(255,255,255,0.42);
+  --radius:14px;
+}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{
+  background:#0b0b18;
+  background-image:radial-gradient(ellipse at 20% 20%,rgba(88,60,160,0.22) 0%,transparent 55%),
+                   radial-gradient(ellipse at 80% 80%,rgba(40,80,160,0.18) 0%,transparent 55%);
+  color:var(--text);
+  font-family:"Segoe UI",system-ui,-apple-system,sans-serif;
+  min-height:100vh;
+  padding:20px;
+}}
+.frost{{
+  background:var(--frost-bg);
+  backdrop-filter:blur(24px) saturate(1.4);
+  -webkit-backdrop-filter:blur(24px) saturate(1.4);
+  border:1px solid var(--frost-border);
+  border-radius:var(--radius);
+  box-shadow:0 8px 40px rgba(0,0,0,0.55),0 0 0 1px rgba(255,255,255,0.04) inset;
+}}
+.topbar{{
+  display:flex;align-items:center;gap:12px;
+  padding:12px 16px;margin-bottom:20px;
+}}
+.topbar .logo{{font-size:15px;font-weight:700;color:var(--accent);letter-spacing:.5px}}
+.topbar .logo span{{color:var(--text-dim);font-weight:400}}
+.topbar .subtitle{{font-size:12px;color:var(--text-dim)}}
+.board{{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
+  gap:16px;
+}}
+.card{{
+  padding:16px;
+  cursor:grab;
+  transition:transform .15s,box-shadow .15s;
+}}
+.card:active{{cursor:grabbing}}
+.card.drag-over{{
+  transform:scale(1.03);
+  box-shadow:0 0 0 2px var(--accent),0 12px 48px rgba(0,0,0,.6);
+}}
+.card-header{{
+  display:flex;align-items:center;gap:8px;
+  margin-bottom:10px;
+}}
+.card-dot{{
+  width:10px;height:10px;border-radius:50%;
+}}
+.card-dot.accent{{background:var(--accent);box-shadow:0 0 8px var(--accent)}}
+.card-dot.green{{background:var(--green);box-shadow:0 0 8px var(--green)}}
+.card-dot.yellow{{background:var(--yellow);box-shadow:0 0 8px var(--yellow)}}
+.card-title{{font-size:14px;font-weight:600;color:var(--text)}}
+.card-body{{font-size:13px;color:var(--text-dim);line-height:1.5;margin-bottom:12px}}
+.cta{{
+  background:rgba(167,139,250,.18);
+  border:1px solid rgba(167,139,250,.35);
+  color:var(--accent);
+  border-radius:10px;
+  padding:8px 14px;
+  font-size:13px;
+  cursor:pointer;
+}}
+.cta:hover{{background:rgba(167,139,250,.28)}}
+.preview-frame{{
+  width:100%;
+  height:calc(100vh - 160px);
+  border:1px solid var(--frost-border);
+  border-radius:var(--radius);
+  background:#000;
+}}
+</style>
+</head>
+<body>
+  <header class="topbar frost">
+    <div class="logo">Drooling<span>WithSanity</span></div>
+    <div class="subtitle">{slug}</div>
+  </header>
+
+  <main class="board">
+    <div class="card frost" draggable="true" data-color="accent">
+      <div class="card-header">
+        <span class="card-dot accent"></span>
+        <span class="card-title">Repository</span>
+      </div>
+      <p class="card-body">Cloned repo preview with VibeCode theme.</p>
+      <button class="cta" onclick="openOriginal()">Open Original</button>
+    </div>
+
+    <div class="card frost" draggable="true" data-color="green">
+      <div class="card-header">
+        <span class="card-dot green"></span>
+        <span class="card-title">Status</span>
+      </div>
+      <p class="card-body" id="vcs-status">Loading git status…</p>
+    </div>
+
+    <div class="card frost" draggable="true" data-color="yellow">
+      <div class="card-header">
+        <span class="card-dot yellow"></span>
+        <span class="card-title">Branch</span>
+      </div>
+      <p class="card-body" id="vcs-branch">Loading…</p>
+    </div>
+  </main>
+
+  <div style="margin-top:16px">
+    <iframe id="preview" class="preview-frame" src="{entry.relative_to(project_dir) if entry else ""}"></iframe>
+  </div>
+
+  <script>
+    function openOriginal() {{
+      const src = document.getElementById('preview').src;
+      if (src) window.open(src, '_blank');
+    }}
+
+    async function loadVCS() {{
+      try {{
+        const r = await fetch('/api/vibecode/git/status/{slug}');
+        const d = await r.json();
+        if (d.branch) document.getElementById('vcs-branch').textContent = d.branch;
+        if (d.status) document.getElementById('vcs-status').textContent = d.status;
+      }} catch(e) {{
+        document.getElementById('vcs-status').textContent = 'VCS unavailable';
+      }}
+    }}
+    loadVCS();
+
+    let dragged = null;
+    document.querySelectorAll('.card').forEach(card => {{
+      card.addEventListener('dragstart', e => {{
+        dragged = card;
+        e.dataTransfer.effectAllowed = 'move';
+        setTimeout(() => card.style.opacity = '0.4', 0);
+      }});
+      card.addEventListener('dragend', () => {{
+        card.style.opacity = '1';
+        dragged = null;
+        document.querySelectorAll('.card').forEach(c => c.classList.remove('drag-over'));
+      }});
+      card.addEventListener('dragover', e => {{
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        if (card !== dragged) card.classList.add('drag-over');
+      }});
+      card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+      card.addEventListener('drop', e => {{
+        e.preventDefault();
+        card.classList.remove('drag-over');
+        if (!dragged || card === dragged) return;
+        const board = document.querySelector('.board');
+        const children = Array.from(board.children);
+        const fromIdx = children.indexOf(dragged);
+        const toIdx = children.indexOf(card);
+        if (fromIdx < toIdx) board.insertBefore(dragged, card.nextSibling);
+        else board.insertBefore(dragged, card);
+      }});
+    }});
+  </script>
+</body>
+</html>"""
+            overlay_path.write_text(overlay, encoding="utf-8")
+        else:
+            # No entry point found — create a themed directory listing overlay
+            try:
+                entries = sorted(
+                    project_dir.iterdir(), key=lambda p: (p.is_file(), p.name.lower())
+                )
+                files = [p.name for p in entries if p.name != ".git"]
+                listing = "\n".join(files)
+                overlay = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>DroolingWithSanity — {slug}</title>
+<style>
+:root{{--frost-bg:rgba(15,15,28,0.88);--frost-surface:rgba(255,255,255,0.06);--frost-border:rgba(255,255,255,0.10);--accent:#a78bfa;--text:rgba(255,255,255,0.88);--text-dim:rgba(255,255,255,0.42);--radius:14px}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:#0b0b18;color:var(--text);font-family:"Segoe UI",system-ui,sans-serif;min-height:100vh;padding:20px}}
+.frost{{background:var(--frost-bg);backdrop-filter:blur(24px) saturate(1.4);border:1px solid var(--frost-border);border-radius:var(--radius);padding:16px}}
+h1{{font-size:16px;color:var(--accent);margin-bottom:12px}}
+ul{{list-style:none}}li{{padding:4px 0}}a{{color:var(--text);text-decoration:none}}a:hover{{color:var(--accent)}}
+</style></head><body><div class="frost"><h1>{slug}</h1><p style="color:var(--text-dim);margin-bottom:12px">Repository files:</p><ul>
+"""
+                for f in files:
+                    icon = "📁" if (project_dir / f).is_dir() else "📄"
+                    overlay += f'<li><a href="{f}">{icon} {f}</a></li>\n'
+                overlay += "</ul></div></body></html>"
+                overlay_path.write_text(overlay, encoding="utf-8")
+            except Exception:
+                pass
+    except Exception:
+        # Non-fatal: if bootstrap fails, project still works normally
+        pass
+
+
+# ── Create project from template ────────────────────────────────
+
+_VIBECODE_TEMPLATES = {
+    "html-site": {
+        "title": "Static HTML Site",
+        "description": "A lightweight static site with HTML, CSS, and vanilla JS.",
+        "files": {
+            "index.html": '<!DOCTYPE html>\n<html lang="en">\n<head><meta charset="UTF-8">\n<meta name="viewport" content="width=device-width,initial-scale=1.0">\n<title>My Site</title>\n<link rel="stylesheet" href="style.css">\n</head>\n<body>\n<header><h1>Welcome</h1></header>\n<main><p>Starter page. Edit index.html and style.css.</p>\n<button id="cta">Click me</button>\n</main>\n<script src="app.js"></script>\n</body>\n</html>\n',
+            "style.css": ":root { --accent: #a78bfa; --bg: #0f0f18; --text: #e0e0ff; }\n* { margin: 0; padding: 0; box-sizing: border-box; }\nbody { font-family: sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 2rem; }\n",
+            "app.js": "document.getElementById('cta').addEventListener('click', () => { alert('Hello from VibeCode!'); });\n",
+            "Dockerfile": "FROM nginx:alpine\nWORKDIR /usr/share/nginx/html\nCOPY . .\nEXPOSE 80\n",
+        },
+    },
+    "vue-app": {
+        "title": "Vue.js App",
+        "description": "A modern Vue 3 SPA with Vite hot-reload.",
+        "files": {
+            "package.json": __import__("json").dumps(
+                {
+                    "name": "vue-app",
+                    "version": "0.1.0",
+                    "private": True,
+                    "scripts": {
+                        "dev": "vite",
+                        "build": "vite build",
+                        "preview": "vite preview",
+                    },
+                    "dependencies": {"vue": "^3.4.0"},
+                    "devDependencies": {
+                        "vite": "^5.0.0",
+                        "@vitejs/plugin-vue": "^5.0.0",
+                    },
+                },
+                indent=2,
+            ),
+            "index.html": '<!DOCTYPE html>\n<html lang="en">\n<head><meta charset="UTF-8">\n<meta name="viewport" content="width=device-width,initial-scale=1.0">\n<title>Vue App</title>\n</head>\n<body>\n<div id="app"></div>\n<script type="module" src="/src/main.js"></script>\n</body>\n</html>\n',
+            "vite.config.js": "import { defineConfig } from 'vite';\nimport vue from '@vitejs/plugin-vue';\nexport default defineConfig({\n  plugins: [vue()],\n  server: { host: '0.0.0.0', port: 3000 },\n});\n",
+            "src/main.js": "import { createApp } from 'vue';\nimport App from './App.vue';\ncreateApp(App).mount('#app');\n",
+            "src/App.vue": "<template>\n  <div class=\"app\">\n    <header><h1>{{ msg }}</h1></header>\n    <main><p>Edit src/App.vue</p>\n      <button @click=\"count++\">Pressed {{ count }} times</button>\n    </main>\n  </div>\n</template>\n<script setup>\nimport { ref } from 'vue';\nconst msg = ref('Welcome to Vue + VibeCode');\nconst count = ref(0);\n</script>\n",
+            "Dockerfile": "FROM node:20-alpine AS builder\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci\nCOPY . .\nRUN npm run build\nFROM nginx:alpine\nCOPY --from=builder /app/dist /usr/share/nginx/html\nEXPOSE 80\n",
+        },
+    },
+    "flask-api": {
+        "title": "Flask API",
+        "description": "A Python Flask backend with API endpoints and Dockerfile.",
+        "files": {
+            "requirements.txt": "Flask==3.0.0\nrequests==2.31.0\n",
+            "main.py": "from flask import Flask, jsonify\napp = Flask(__name__)\n\n@app.route('/')\n@app.route('/api/hello')\ndef hello():\n    return jsonify({'message': 'Hello from Flask + VibeCode!', 'status': 'ok'})\n\n@app.route('/api/health')\ndef health():\n    return jsonify({'healthy': True})\n\nif __name__ == '__main__':\n    app.run(host='0.0.0.0', port=8000, debug=True)\n",
+            "Dockerfile": 'FROM python:3.11-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY . .\nEXPOSE 8000\nCMD ["python", "main.py"]\n',
+        },
+    },
+}
+
+
+@app.post("/api/vibecode/create")
+async def vibecode_create(data: dict, request: Request):
+    template = (data.get("template") or "").strip()
+    if template not in _VIBECODE_TEMPLATES:
+        return JSONResponse({"error": "invalid template"}, status_code=400)
+    raw_name = data.get("name") or _VIBECODE_TEMPLATES[template][
+        "title"
+    ].lower().replace(" ", "-")
+    slug = _vibecode_project_slug(raw_name)
+    dest = VIBECODE_PROJECTS_DIR / slug
+    if dest.exists():
+        return JSONResponse(
+            {"error": f"Project '{slug}' already exists."}, status_code=409
+        )
+    VIBECODE_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    dest.mkdir(parents=True)
+    tmpl = _VIBECODE_TEMPLATES[template]
+    for path, content in tmpl["files"].items():
+        fpath = dest / path
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        fpath.write_text(content)
+    port = _vibecode_alloc_port(slug)
+    url = _vibecode_get_base_url(request, slug)
+    _vibecode_bootstrap_project(slug, dest)
+    return {
+        "slug": slug,
+        "port": port,
+        "url": url,
+        "path": str(dest),
+        "template": template,
+        "message": f"Created '{slug}' from template '{template}' — port {port} allocated.",
+    }
+
+
+@app.get("/api/vibecode/templates")
+async def vibecode_templates():
+    return {
+        "templates": [
+            {"key": k, "title": v["title"], "description": v["description"]}
+            for k, v in _VIBECODE_TEMPLATES.items()
+        ]
+    }
+
+
+# ── CodeMode: Project Management ─────────────────────────────────────────
+# List, browse, create, delete projects. Alpha Companion uses these to
+# scaffold new coding sessions, inspect existing ones, and spin up
+# disposable containers for quick experiments.
+
+
+@app.get("/api/codemode/projects")
+async def codemode_list_projects():
+    """List all projects in the VibeCode projects directory."""
+    projects = []
+    if VIBECODE_PROJECTS_DIR.exists():
+        for entry in sorted(VIBECODE_PROJECTS_DIR.iterdir()):
+            if entry.is_dir() and entry.name != ".git":
+                # Gather basic file listing and size
+                files = []
+                try:
+                    for f in entry.rglob("*"):
+                        if f.is_file() and ".git" not in str(f):
+                            files.append(
+                                {
+                                    "name": f.name,
+                                    "path": str(f.relative_to(entry)),
+                                    "size": f.stat().st_size,
+                                }
+                            )
+                except OSError:
+                    pass
+                projects.append(
+                    {
+                        "slug": entry.name,
+                        "path": str(entry),
+                        "files": files,
+                        "file_count": len(files),
+                    }
+                )
+    return {"projects": projects}
+
+
+@app.get("/api/codemode/project/{slug}")
+async def codemode_get_project(slug: str):
+    """Read a project's file tree and contents (optionally a specific file)."""
+    slug = _vibecode_project_slug(slug)
+    dest = VIBECODE_PROJECTS_DIR / slug
+    if not dest.exists():
+        return JSONResponse({"error": f"Project '{slug}' not found"}, status_code=404)
+    # Return the full file tree
+    tree = {}
+    for f in sorted(dest.rglob("*")):
+        if f.is_file() and ".git" not in str(f):
+            rel = str(f.relative_to(dest))
+            try:
+                tree[rel] = f.read_text(errors="replace")
+            except OSError:
+                tree[rel] = "<unable to read>"
+    return {"slug": slug, "path": str(dest), "files": tree}
+
+
+@app.post("/api/codemode/project/{slug}/file")
+async def codemode_write_file(slug: str, data: dict):
+    """Write or create a file inside a project. Body: {path, content}."""
+    slug = _vibecode_project_slug(slug)
+    dest = VIBECODE_PROJECTS_DIR / slug
+    if not dest.exists():
+        return JSONResponse({"error": f"Project '{slug}' not found"}, status_code=404)
+    fpath = (dest / data.get("path", "")).resolve()
+    # Prevent path traversal
+    if not str(fpath).startswith(str(dest.resolve())):
+        return JSONResponse({"error": "Path traversal detected"}, status_code=400)
+    fpath.parent.mkdir(parents=True, exist_ok=True)
+    fpath.write_text(data.get("content", ""))
+    return {"ok": True, "path": str(fpath.relative_to(dest))}
+
+
+@app.delete("/api/codemode/project/{slug}")
+async def codemode_delete_project(slug: str):
+    """Delete a project directory."""
+    import shutil
+
+    slug = _vibecode_project_slug(slug)
+    dest = VIBECODE_PROJECTS_DIR / slug
+    if not dest.exists():
+        return JSONResponse({"error": f"Project '{slug}' not found"}, status_code=404)
+    shutil.rmtree(dest)
+    return {"ok": True, "deleted": slug}
+
+
+# ── GitHub Scraping for Alpha Suggestions ─────────────────────────────────
+# Scrapes the GitHub API for trending/popular repos and turns them into
+# project suggestions the Alpha Companion can present to the user.
+
+
+_GITHUB_CACHE: dict = {}
+_GITHUB_CACHE_TTL = 300  # 5 minutes
+
+
+@app.get("/api/codemode/github/suggestions")
+async def github_suggestions(
+    language: str = "python",
+    sort: str = "stars",
+    per_page: int = 10,
+    since: str = "monthly",
+):
+    """
+    Fetch GitHub repos via the public Search API and format them as
+    project suggestions for the Alpha Companion.
+
+    Returns trending repos filtered by language, sorted by stars/forks,
+    with metadata Alpha can use to recommend a starting point.
+    """
+    cache_key = f"{language}:{sort}:{per_page}:{since}"
+    now = time.time()
+    if cache_key in _GITHUB_CACHE:
+        cached_ts, cached_data = _GITHUB_CACHE[cache_key]
+        if now - cached_ts < _GITHUB_CACHE_TTL:
+            return cached_data
+
+    try:
+        url = "https://api.github.com/search/repositories"
+        params = {
+            "q": f"language:{language} created:>2020-01-01",
+            "sort": sort,
+            "order": "desc",
+            "per_page": min(per_page, 20),
+        }
+        headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "Lilly-AI-Codemode",
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code != 200:
+                return JSONResponse(
+                    {
+                        "error": f"GitHub API error: {resp.status_code}",
+                        "detail": resp.text[:200],
+                    },
+                    status_code=502,
+                )
+            data = resp.json()
+    except Exception as e:
+        logger.error(f"GitHub API fetch failed: {e}")
+        return JSONResponse({"error": f"GitHub API fetch failed: {e}"}, status_code=502)
+
+    suggestions = []
+    for item in data.get("items", []):
+        # Determine what kind of project this would be for the user
+        desc = item.get("description") or ""
+        stars = item.get("stargazers_count", 0)
+        forks = item.get("forks_count", 0)
+        topics = item.get("topics", [])
+        license_info = item.get("license", {})
+        suggestions.append(
+            {
+                "name": item.get("full_name", ""),
+                "url": item.get("html_url", ""),
+                "description": desc,
+                "language": item.get("language", ""),
+                "stars": stars,
+                "forks": forks,
+                "issues": item.get("open_issues_count", 0),
+                "license": license_info.get("spdx_id") if license_info else None,
+                "topics": topics,
+                "suggested_template": _github_to_template(language, topics),
+                "alpha_blurb": _generate_alpha_blurb(item, topics, stars),
+            }
+        )
+
+    result = {"suggestions": suggestions, "cached": False}
+    _GITHUB_CACHE[cache_key] = (now, result)
+    return result
+
+
+def _github_to_template(language: str, topics: list) -> str:
+    """Suggest a VibeCode template based on repo language + topics."""
+    if (
+        language == "vue"
+        or "vue" in [t.lower() for t in topics]
+        or "svelte" in [t.lower() for t in topics]
+    ):
+        return "vue-app"
+    if language in ("python", "flask", "django") or "api" in [
+        t.lower() for t in topics
+    ]:
+        return "flask-api"
+    return "html-site"
+
+
+def _generate_alpha_blurb(item: dict, topics: list, stars: int) -> str:
+    """Generate a friendly description the Alpha Companion can speak."""
+    name = item.get("full_name", "this project")
+    desc = item.get("description") or "No description provided"
+    lang = item.get("language", "Unknown")
+    topic_str = ", ".join(topics[:3]) if topics else "general development"
+
+    popularity = (
+        "very popular"
+        if stars > 5000
+        else "popular"
+        if stars > 1000
+        else "a smaller project"
+    )
+
+    return (
+        f"Alpha spotted '{name}' — a {lang} project tagged '{topic_str}'. "
+        f"It's {popularity} with {stars:,} stars. {desc[:120]}..."
+        if len(desc) > 120
+        else f"Alpha spotted '{name}' — a {lang} project tagged '{topic_str}'. "
+        f"It's {popularity} with {stars:,} stars. {desc}"
+    )
+
+
+@app.post("/api/codemode/github/scaffold")
+async def github_scaffold(data: dict, request: Request):
+    """
+    Clone a GitHub repo into a project folder and allocate a port.
+    Body: {repo_url, name}
+    """
+    repo_url = (data.get("repo_url") or "").strip()
+    if not repo_url or "github.com" not in repo_url:
+        return JSONResponse(
+            {"error": "Valid GitHub repo URL required"}, status_code=400
+        )
+    raw_name = data.get("name") or Path(repo_url).stem
+    slug = _vibecode_project_slug(raw_name)
+    dest = VIBECODE_PROJECTS_DIR / slug
+    if dest.exists():
+        return JSONResponse(
+            {"error": f"Project '{slug}' already exists"}, status_code=409
+        )
+    VIBECODE_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        import subprocess
+
+        subprocess.run(
+            ["git", "clone", repo_url, str(dest)],
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return JSONResponse({"error": "git clone timed out (120s)"}, status_code=504)
+    except subprocess.CalledProcessError as e:
+        stderr = (
+            e.stderr.decode(errors="replace")[:500] if e.stderr else "unknown error"
+        )
+        return JSONResponse({"error": f"git clone failed: {stderr}"}, status_code=500)
+    port = _vibecode_alloc_port(slug)
+    url = _vibecode_get_base_url(request, slug)
+    return {
+        "slug": slug,
+        "port": port,
+        "url": url,
+        "path": str(dest),
+        "repo_url": repo_url,
         "message": f"Cloned '{slug}' — port {port} allocated.",
     }
 
@@ -13018,10 +17109,18 @@ async def vibecode_build(data: dict):
     output = stdout.decode(errors="replace")
 
     if proc.returncode != 0:
+        await proactive_notify(
+            f"Build failed for {slug}: {output[-200:]}",
+            Archetype.CAREGIVER,
+        )
         return JSONResponse(
             {"error": "Build failed", "log": output[-2000:]}, status_code=500
         )
 
+    await proactive_notify(
+        f"{slug} build complete — ready to run.",
+        Archetype.CREATOR,
+    )
     return {"message": f"Built image {container}", "log": output[-1000:]}
 
 
@@ -13121,6 +17220,10 @@ async def vibecode_run(data: dict):
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
             if proc.returncode != 0:
+                await proactive_notify(
+                    f"Run failed for {slug}: {stderr.decode(errors='replace')[:200]}",
+                    Archetype.CAREGIVER,
+                )
                 return JSONResponse(
                     {
                         "error": "Run failed",
@@ -13129,12 +17232,20 @@ async def vibecode_run(data: dict):
                     status_code=500,
                 )
         else:
+            await proactive_notify(
+                f"Run failed for {slug}: {stderr.decode(errors='replace')[:200]}",
+                Archetype.CAREGIVER,
+            )
             return JSONResponse(
                 {"error": "Run failed", "log": stderr.decode(errors="replace")[:1000]},
                 status_code=500,
             )
 
-    url = _vibecode_get_base_url(None, port)
+    await proactive_notify(
+        f"{slug} is running at {url}",
+        Archetype.EXPLORER,
+    )
+    url = _vibecode_get_base_url(None, slug)
     return {"message": f"Container started on port {port}", "url": url, "port": port}
 
 
@@ -13284,6 +17395,37 @@ async def vibecode_logs(slug: str, lines: int = 80):
     return {"log": output or "(no output yet)"}
 
 
+# ── Project download (ZIP) ──────────────────────────────────────────────────────
+
+
+@app.get("/api/vibecode/download/{slug}")
+async def vibecode_download_project(slug: str):
+    """Download the entire project as a ZIP archive."""
+    slug = _vibecode_project_slug(slug)
+    project_dir = VIBECODE_PROJECTS_DIR / slug
+    if not project_dir.exists():
+        return JSONResponse({"error": "Project not found"}, status_code=404)
+
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(project_dir.rglob("*")):
+            if f.is_file() and not any(
+                p in str(f) for p in [".git/", "__pycache__", "node_modules", ".venv"]
+            ):
+                arcname = f.relative_to(project_dir)
+                zf.writestr(str(arcname), f.read_bytes())
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{slug}.zip"'},
+    )
+
+
 # ── Container status ────────────────────────────────────────────────────────
 
 
@@ -13293,7 +17435,7 @@ async def vibecode_status(slug: str):
     container = _vibecode_container_name(slug)
     dep = _vibecode_load_deployments().get("projects", {}).get(slug, {})
     port = dep.get("port")
-    url = dep.get("url", f"https://droolingwithsanity.ca:{port}" if port else "")
+    url = dep.get("url", f"/vibecode/p/{slug}" if port else "")
     try:
         result = subprocess.run(
             [
@@ -13463,24 +17605,1184 @@ async def vibecode_delete_file(slug: str, path: str):
     return {"message": f"Deleted {path}"}
 
 
+# ── Alpha GitHub Suggestion Flow ─────────────────────────────────────────────
+# When the user says "I want to create X", Alpha asks for more details,
+# scrapes GitHub for similar projects, presents 3 suggestions, and lets
+# the user pick one to clone (with an editable folder name).
+
+
+# Track in-flight Alpha suggestion conversations per session
+_ALPHA_SUGGESTION_STATE: dict[str, dict] = {}
+
+# ── VibeCode chat memory: per-session conversation history so the coding
+#     assistant remembers the flow of the conversation across messages.
+#     Keyed by session_id (default: "main-chat").
+_VC_CHAT_MEMORY: dict[str, list[dict]] = {}
+
+
+@app.post("/api/codemode/alpha/suggest")
+async def alpha_suggest(data: dict, request: Request):
+    """
+    Alpha receives the user's project idea and fetches 3 similar GitHub repos.
+
+    Body: {"query": "web dashboard", "language": "vue", "session_id": "optional-id"}
+    Flow:
+      1. User: "I want to create a web dashboard"
+      2. Alpha: "What kind of dashboard? Which framework?"
+      3. User: "Vue, with charts and auth"
+      4. Alpha: fetches 3 GitHub suggestions → presents them
+    """
+    session_id = data.get("session_id") or "default"
+    query = (data.get("query") or "").strip()
+    language = (data.get("language") or "").strip()
+
+    suggestions = await _alpha_fetch_suggestions(
+        f"{language} {query}" if language else query
+    )
+    if not suggestions:
+        return JSONResponse(
+            {"error": "GitHub API returned no results or fetch failed"},
+            status_code=502,
+        )
+
+    # Store session state so the user's selection can be mapped back
+    _ALPHA_SUGGESTION_STATE[session_id] = {
+        "query": query,
+        "language": language,
+        "suggestions": suggestions,
+        "timestamp": time.time(),
+    }
+
+    return {
+        "query": query,
+        "language": language,
+        "suggestions": suggestions,
+        "session_id": session_id,
+    }
+
+
+@app.post("/api/codemode/alpha/scaffold")
+async def alpha_scaffold(data: dict, request: Request):
+    """
+    Clone the selected GitHub repo into a project folder with an editable name.
+
+    Body: {"session_id": "...", "repo_url": "...", "project_name": "my-project", "branch": "main"}
+    Returns a project_id (unique per user+project) that's embedded in all
+    downloaded files. This ID enables 30-day preview revisits and offline
+    recapping/coding without the preview UI.
+    """
+    # Get user for project_id (falls back to "anon" if not authenticated)
+    try:
+        user = auth0_auth.get_current_user(request)
+        user_id = user.get("user_id", "anon") if user else "anon"
+    except Exception:
+        user_id = "anon"
+
+    session_id = data.get("session_id") or "default"
+    repo_url = (data.get("repo_url") or "").strip()
+    project_name = (data.get("project_name") or "").strip()
+    branch = (data.get("branch") or "main").strip()
+
+    if not repo_url or "github.com" not in repo_url:
+        return JSONResponse(
+            {"error": "Valid GitHub repo URL required"}, status_code=400
+        )
+
+    # Validate against session state if available
+    state = _ALPHA_SUGGESTION_STATE.get(session_id)
+    if state:
+        valid_urls = [s["repo_url"] for s in state.get("suggestions", [])]
+        if repo_url not in valid_urls:
+            return JSONResponse(
+                {"error": "Repo not in current suggestions. Start a new search."},
+                status_code=400,
+            )
+
+    slug = _vibecode_project_slug(project_name) if project_name else None
+    if not slug:
+        repo_name = Path(repo_url).stem
+        slug = _vibecode_project_slug(repo_name)
+
+    dest = VIBECODE_PROJECTS_DIR / slug
+    if dest.exists():
+        return JSONResponse(
+            {"error": f"Project '{slug}' already exists. Choose a different name."},
+            status_code=409,
+        )
+
+    VIBECODE_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import subprocess
+
+        cmd = ["git", "clone", "--depth", "1", "-b", branch, repo_url, str(dest)]
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode != 0:
+            # Fallback: try cloning default branch
+            cmd_fallback = ["git", "clone", "--depth", "1", repo_url, str(dest)]
+            result = subprocess.run(cmd_fallback, capture_output=True, timeout=120)
+            if result.returncode != 0:
+                stderr = result.stderr.decode(errors="replace")[:500]
+                return JSONResponse(
+                    {"error": f"git clone failed: {stderr}"}, status_code=500
+                )
+    except subprocess.TimeoutExpired:
+        return JSONResponse({"error": "git clone timed out (120s)"}, status_code=504)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    port = _vibecode_alloc_port(slug)
+    # Preview URL uses the main server's hostname (same server, no CNAME)
+    if request is not None and request.url is not None:
+        host = request.url.hostname or "localhost"
+        scheme = request.url.scheme or "http"
+        # Use port 8098 (main Lilly server) with path-based routing
+        server_port = request.url.port or 8098
+        preview_url = f"{scheme}://{host}:{server_port}/vibecode/p/{slug}"
+    else:
+        preview_url = f"http://localhost:8098/vibecode/p/{slug}"
+
+    # Generate unique project ID (user-scoped)
+    project_id = _generate_project_id(user_id, slug)
+
+    # Write project metadata file (.vibecode) into the project directory
+    _vibecode_write_metadata(dest, project_id, slug, repo_url, user_id)
+
+    # Record expiration (30 days from now)
+    _vibecode_record_project_expiry(slug, dest, port)
+
+    # Clear session state on successful clone
+    _ALPHA_SUGGESTION_STATE.pop(session_id, None)
+    _vibecode_skills_upsert(repo_url, source="cloned")
+
+    return {
+        "slug": slug,
+        "project_id": project_id,
+        "port": port,
+        "url": preview_url,
+        "path": str(dest),
+        "repo_url": repo_url,
+        "expires_at": _vibecode_project_expiry(slug),
+        "message": f"Alpha cloned '{repo_url}' → '{slug}'. Preview at {preview_url} (available for 30 days).",
+    }
+
+
+def _generate_project_id(user_id: str, slug: str) -> str:
+    """Generate a unique project ID scoped to user + project + timestamp."""
+    # Base: user_id (truncated) + slug + random suffix
+    user_part = user_id.replace("|", "_")[:12] if user_id != "anon" else "anon"
+    suffix = uuid.uuid4().hex[:6]
+    return f"vc-{user_part}-{slug[:20]}-{suffix}"
+
+
+_PROJECT_IDS: dict[str, dict] = {}  # slug → {project_id, user_id, repo_url, slug}
+
+
+def _vibecode_write_metadata(
+    project_dir: Path, project_id: str, slug: str, repo_url: str, user_id: str
+):
+    """Write a .vibecode metadata file into the project directory."""
+    import json as _json
+
+    meta = {
+        "project_id": project_id,
+        "slug": slug,
+        "repo_url": repo_url,
+        "user_id": user_id,
+        "created_at": time.time(),
+        "expires_days": 30,
+    }
+    meta_path = project_dir / ".vibecode"
+    try:
+        meta_path.write_text(_json.dumps(meta, indent=2))
+    except Exception:
+        pass
+    _PROJECT_IDS[slug] = {
+        "project_id": project_id,
+        "user_id": user_id,
+        "repo_url": repo_url,
+        "slug": slug,
+    }
+
+
+@app.get("/api/codemode/alpha/project/{project_id}")
+async def alpha_get_project_by_id(project_id: str):
+    """
+    Look up a project by its unique project_id.
+    Useful for revisiting within 30 days or recapping offline.
+    """
+    # Search by project_id in metadata files
+    if VIBECODE_PROJECTS_DIR.exists():
+        for d in VIBECODE_PROJECTS_DIR.iterdir():
+            if d.is_dir() and not d.name.startswith("."):
+                meta_file = d / ".vibecode"
+                if meta_file.exists():
+                    try:
+                        import json as _json
+
+                        meta = _json.loads(meta_file.read_text())
+                        if meta.get("project_id") == project_id:
+                            return {
+                                "slug": meta.get("slug", d.name),
+                                "project_id": project_id,
+                                "repo_url": meta.get("repo_url"),
+                                "user_id": meta.get("user_id"),
+                                "created_at": meta.get("created_at"),
+                                "expires_at": _vibecode_project_expiry(d.name),
+                                "path": str(d),
+                            }
+                    except Exception:
+                        continue
+    return JSONResponse({"error": "Project not found"}, status_code=404)
+
+
+@app.get("/api/codemode/alpha/docker-compose/{slug}")
+async def alpha_docker_compose(slug: str):
+    """
+    Download a docker-compose.yml for the project so the user can
+    build it on their own server.
+    Includes the project_id as a comment for tracking.
+    """
+    slug = _vibecode_project_slug(slug)
+    project_dir = VIBECODE_PROJECTS_DIR / slug
+    if not project_dir.exists():
+        return JSONResponse({"error": "Project not found"}, status_code=404)
+
+    # Read project_id from .vibecode metadata
+    project_id = "unknown"
+    meta_file = project_dir / ".vibecode"
+    if meta_file.exists():
+        try:
+            import json as _json
+
+            meta = _json.loads(meta_file.read_text())
+            project_id = meta.get("project_id", "unknown")
+        except Exception:
+            pass
+
+    # Detect project type
+    has_package_json = (project_dir / "package.json").exists()
+    has_requirements = (project_dir / "requirements.txt").exists()
+    has_pyproject = (project_dir / "pyproject.toml").exists()
+    has_dockerfile = (project_dir / "Dockerfile").exists()
+
+    header = f"# VibeCode Project ID: {project_id}\n# Project: {slug}\n# Download this compose file and run: docker-compose up\n\n"
+
+    if has_dockerfile:
+        compose = f"""version: "3.8"
+services:
+  {slug}:
+    build: .
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+"""
+    elif has_package_json:
+        compose = f"""version: "3.8"
+services:
+  {slug}:
+    build: .
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+"""
+    elif has_requirements or has_pyproject:
+        compose = f"""version: "3.8"
+services:
+  {slug}:
+    build: .
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+"""
+    else:
+        compose = f"""version: "3.8"
+services:
+  {slug}:
+    build: .
+    ports:
+      - "80:80"
+    restart: unless-stopped
+"""
+
+    response = Response(
+        content=header + compose,
+        media_type="text/yaml",
+        headers={"Content-Disposition": f"attachment; filename=docker-compose.yml"},
+    )
+    return response
+
+
+@app.get("/api/codemode/alpha/project/{slug}/download")
+async def alpha_download_project(slug: str):
+    """Download the entire project as a ZIP file."""
+    slug = _vibecode_project_slug(slug)
+    project_dir = VIBECODE_PROJECTS_DIR / slug
+    if not project_dir.exists():
+        return JSONResponse({"error": "Project not found"}, status_code=404)
+
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in sorted(project_dir.rglob("*")):
+            if f.is_file() and not any(
+                p in str(f) for p in [".git/", "__pycache__", "node_modules", ".venv"]
+            ):
+                arcname = f.relative_to(project_dir)
+                zf.writestr(str(arcname), f.read_bytes())
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{slug}.zip"',
+        },
+    )
+
+
+# Track project expiration times
+_PROJECT_EXPIRY: dict[str, float] = {}
+
+
+def _vibecode_record_project_expiry(slug: str, project_dir: Path, port: int):
+    """Record that a project expires 30 days from now."""
+    _PROJECT_EXPIRY[slug] = time.time() + (30 * 24 * 60 * 60)  # 30 days
+
+
+def _vibecode_project_expiry(slug: str) -> str:
+    """Return ISO timestamp of project expiration."""
+    exp = _PROJECT_EXPIRY.get(slug)
+    if not exp:
+        return "unknown"
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(exp, tz=timezone.utc).isoformat()
+
+
+@app.get("/api/codemode/alpha/projects")
+async def alpha_list_projects():
+    """List all Alpha projects with expiration status and project IDs."""
+    projects = []
+    if VIBECODE_PROJECTS_DIR.exists():
+        for d in sorted(VIBECODE_PROJECTS_DIR.iterdir()):
+            if d.is_dir() and not d.name.startswith("."):
+                exp = _PROJECT_EXPIRY.get(d.name)
+                remaining = ""
+                if exp:
+                    from datetime import datetime, timezone
+
+                    delta = exp - time.time()
+                    if delta > 0:
+                        days = int(delta // 86400)
+                        remaining = f"{days} days remaining"
+                    else:
+                        remaining = "expired"
+                # Read project_id from .vibecode metadata
+                project_id = "unknown"
+                meta_file = d / ".vibecode"
+                if meta_file.exists():
+                    try:
+                        import json as _json
+
+                        meta = _json.loads(meta_file.read_text())
+                        project_id = meta.get("project_id", "unknown")
+                    except Exception:
+                        pass
+                projects.append(
+                    {
+                        "slug": d.name,
+                        "project_id": project_id,
+                        "path": str(d),
+                        "expires_at": _vibecode_project_expiry(d.name),
+                        "status": remaining,
+                    }
+                )
+    return {"projects": projects}
+
+
+@app.on_event("shutdown")
+async def _alpha_expire_projects():
+    """Clean up expired projects on shutdown (best-effort)."""
+    now = time.time()
+    for slug, exp in list(_PROJECT_EXPIRY.items()):
+        if exp <= now:
+            project_dir = VIBECODE_PROJECTS_DIR / slug
+            if project_dir.exists():
+                try:
+                    shutil.rmtree(project_dir)
+                except Exception:
+                    pass
+            _PROJECT_EXPIRY.pop(slug, None)
+
+
+def _rank_github_suggestions(candidates: list, query: str, language: str) -> list:
+    """Rank GitHub repos by similarity to the user's query."""
+    query_terms = set(query.lower().split())
+
+    scored = []
+    for item in candidates:
+        score = 0.0
+        name = item.get("full_name", "").lower()
+        desc = (item.get("description") or "").lower()
+        topics = [t.lower() for t in item.get("topics", [])]
+        combined = f"{name} {desc} {' '.join(topics)}"
+
+        # Match query terms in repo name/description/topics
+        for term in query_terms:
+            if term in combined:
+                score += 1.0
+
+        # More stars = higher score (log-scaled)
+        stars = item.get("stargazers_count", 0)
+        score += math.log10(max(stars, 1)) * 0.5
+
+        # Exact language match bonus
+        if language and item.get("language", "").lower() == language.lower():
+            score += 2.0
+
+        # Topic matches
+        for topic in topics:
+            if topic in query_terms:
+                score += 1.5
+
+        scored.append((score, item))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [item for _, item in scored]
+
+
+def _generate_suggestion_blurb(item: dict, query: str) -> str:
+    """Generate Alpha's friendly blurb for a suggestion."""
+    name = item.get("full_name", "this repo")
+    desc = item.get("description") or "No description"
+    lang = item.get("language", "Unknown")
+    stars = item.get("stargazers_count", 0)
+    topics = item.get("topics", [])
+
+    topic_str = ", ".join(topics[:3]) if topics else "interesting project"
+    popularity = (
+        "very popular"
+        if stars > 10000
+        else "popular"
+        if stars > 1000
+        else "a solid project"
+    )
+
+    return (
+        f"Alpha found '{name}' — a {lang} project about {topic_str}. "
+        f"It's {popularity} ({stars:,} stars). {desc[:120]}. "
+        f"This looks like a great match for your '{query}' idea."
+    )
+
+
+@app.post("/api/codemode/alpha/clarify")
+async def alpha_clarify(data: dict):
+    """
+    Alpha asks follow-up questions to refine the search.
+
+    Body: {"query": "web dashboard", "session_id": "optional-id"}
+    Returns: {"needs_clarification": true/false, "questions": [...], "suggested_keywords": [...]}
+    """
+    query = (data.get("query") or "").strip()
+    session_id = data.get("session_id") or "default"
+
+    # If the query already has enough detail, skip clarification
+    if len(query.split()) >= 4:
+        return {"needs_clarification": False, "query": query}
+
+    # Generate follow-up questions based on query keywords
+    questions = _generate_clarification_questions(query)
+    return {
+        "needs_clarification": True,
+        "session_id": session_id,
+        "original_query": query,
+        "questions": questions,
+        "suggested_keywords": _suggest_keywords(query),
+    }
+
+
+def _generate_clarification_questions(query: str) -> list:
+    """Generate follow-up questions based on the initial query."""
+    q = query.lower()
+    questions = []
+
+    if any(w in q for w in ["dashboard", "ui", "interface", "app"]):
+        questions.append(
+            "Which framework or library? (e.g. React, Vue, Svelte, Tailwind)"
+        )
+    if any(w in q for w in ["api", "backend", "server", "flask", "django"]):
+        questions.append(
+            "What's the backend stack? (e.g. Flask, FastAPI, Express, Django)"
+        )
+    if any(w in q for w in ["chart", "graph", "visualize", "plot"]):
+        questions.append("What kind of charts? (e.g. D3, Chart.js, Plotly)")
+    if any(w in q for w in ["auth", "login", "auth0", "clerk"]):
+        questions.append(
+            "Authentication provider? (e.g. Auth0, Clerk, Supabase, Firebase)"
+        )
+    if any(w in q for w in ["game", "game", "pygame"]):
+        questions.append("Game engine or framework? (e.g. pygame, godot, three.js)")
+    if any(w in q for w in ["bot", "chatbot", "agent"]):
+        questions.append("Which framework? (e.g. LangChain, LlamaIndex, Botpress)")
+    if any(w in q for w in ["ml", "machine", "ai", "model", "neural"]):
+        questions.append(
+            "ML library preference? (e.g. PyTorch, TensorFlow, scikit-learn)"
+        )
+    if any(w in q for w in ["web", "site", "landing", "marketing"]):
+        questions.append(
+            "Style preference? (e.g. minimalist, brutalist, dark mode, neumorphic)"
+        )
+
+    if not questions:
+        questions.append("Any specific tech stack or features you have in mind?")
+
+    return questions[:3]
+
+
+def _suggest_keywords(query: str) -> list:
+    """Suggest keywords the user could add to refine their search."""
+    q = query.lower()
+    suggestions = []
+
+    if "dashboard" in q:
+        suggestions += ["vue", "react", "admin", "charts"]
+    if "api" in q:
+        suggestions += ["fastapi", "flask", "rest", "graphql"]
+    if "auth" in q:
+        suggestions += ["auth0", "supabase", "firebase", "jwt"]
+    if "game" in q:
+        suggestions += ["pygame", "godot", "phaser", "threejs"]
+    if "bot" in q:
+        suggestions += ["langchain", "openai", "llamaindex"]
+    if "ml" in q or "ai" in q:
+        suggestions += ["pytorch", "tensorflow", "scikit-learn"]
+    if "web" in q:
+        suggestions += ["react", "vue", "svelte", "nextjs"]
+    if "mobile" in q:
+        suggestions += ["react-native", "flutter", "ionic"]
+
+    return suggestions[:5]
+
+
+@app.get("/api/codemode/alpha/state/{session_id}")
+async def alpha_get_state(session_id: str):
+    """Get the current Alpha suggestion session state."""
+    state = _ALPHA_SUGGESTION_STATE.get(session_id)
+    if not state:
+        return {"state": None}
+    # Don't expose timestamp, just the suggestions
+    return {
+        "state": {
+            "query": state["query"],
+            "language": state["language"],
+            "suggestions": state["suggestions"],
+        }
+    }
+
+
+# ── Alpha GitHub Suggestion Flow — helpers ────────────────────────────────
+
+
+def _detect_create_intent(message: str) -> str | None:
+    """
+    Detect natural-language intent to create/build a project.
+    Returns the extracted topic/subject if matched, otherwise None.
+
+    Handles phrasing like:
+      - "I want to create a Vue dashboard"
+      - "I need to build a flask API"
+      - "I wanna make a game"
+      - "Can you make me a React app?"
+      - "Build me a chat app"
+      - "Let's create a Telegram bot"
+      - "Give me a Vue dashboard with charts"
+      - "Show me a project for a todo list"
+      - "Let's get a Next.js landing page"
+    """
+    msg = message.lower().strip()
+
+    # Pattern 1: "I want/need/wanna to create/build/make [a/an/the] <X>"
+    m = re.match(
+        r"^i\s+(?:want|need|wanna|gonna)\s+to\s+(?:create|build|make|start|kick off)\s+"
+        r"(?:a\s+|an\s+|the\s+)?(.+)$",
+        msg,
+    )
+    if m:
+        return _clean_create_subject(m.group(1))
+
+    # Pattern 1b: "I wanna make a <X>" (common shorthand)
+    m = re.match(r"^i\s+wanna\s+make\s+(?:a\s+|an\s+|the\s+)?(.+)$", msg)
+    if m:
+        return _clean_create_subject(m.group(1))
+
+    # Pattern 2: "Can you create/build/make me a <X>" / "Can you build <X>"
+    m = re.match(
+        r"^can\s+(?:you\s+)?(?:please\s+)?(?:create|build|make)\s+(?:me\s+)?(?:a\s+|an\s+|the\s+)?(.+)$",
+        msg,
+    )
+    if m:
+        return _clean_create_subject(m.group(1))
+
+    # Pattern 3: "Build me a <X>" / "Make me a <X>" / "Create a <X>" / "Code a <X>"
+    # Only match if the subject contains a project-related keyword
+    m = re.match(
+        r"^(?:build|make|create|code)\s+(?:me\s+)?(?:a\s+|an\s+|the\s+)?(.+)$",
+        msg,
+    )
+    if m:
+        subject = _clean_create_subject(m.group(1))
+        _project_keywords = [
+            "dashboard",
+            "app",
+            "api",
+            "bot",
+            "site",
+            "website",
+            "game",
+            "tool",
+            "service",
+            "project",
+            "template",
+            "starter",
+            "landing",
+            "page",
+            "ui",
+            "interface",
+            "system",
+            "server",
+            "vue",
+            "react",
+            "next",
+            "svelte",
+            "nuxt",
+            "express",
+            "fastapi",
+            "laravel",
+            "flask",
+            "django",
+            "telegram",
+            "discord",
+            "website",
+            "app",
+            "bot",
+            "dashboard",
+        ]
+        if any(kw in subject.lower() for kw in _project_keywords):
+            return subject
+
+    # Pattern 4: "Let's create/build/make/start a <X>" / "let us"
+    m = re.match(
+        r"^let'?s\s+(?:create|build|make|start)\s+"
+        r"(?:a\s+|an\s+|the\s+)?(.+)$",
+        msg,
+    )
+    if m:
+        return _clean_create_subject(m.group(1))
+
+    # Pattern 4b: "Let's get a <X>"
+    m = re.match(
+        r"^let'?s\s+get\s+(?:a\s+|an\s+|the\s+)?(.+)$",
+        msg,
+    )
+    if m:
+        return _clean_create_subject(m.group(1))
+
+    # Pattern 5: "Give me/show me a <X>" / "I need a <X>" (project-oriented)
+    m = re.match(
+        r"^(?:give\s+me\s+|show\s+me\s+|i\s+need\s+a\s+|i\s+want\s+a\s+|i\s+need\s+an\s+)"
+        r"(.+)$",
+        msg,
+    )
+    if m:
+        subject = _clean_create_subject(m.group(1))
+        # Don't catch "show me notifications" — require a project-ish noun
+        project_keywords = [
+            "dashboard",
+            "app",
+            "api",
+            "bot",
+            "site",
+            "website",
+            "game",
+            "tool",
+            "service",
+            "project",
+            "template",
+            "starter",
+            "landing",
+            "page",
+            "ui",
+            "interface",
+            "system",
+            "server",
+            "vue",
+            "react",
+            "next",
+            "svelte",
+            "nuxt",
+            "express",
+            "fastapi",
+            "laravel",
+            "flask",
+            "django",
+            "telegram",
+            "discord",
+        ]
+        if any(kw in subject.lower() for kw in project_keywords):
+            return subject
+
+    return None
+
+
+def _clean_create_subject(raw: str) -> str:
+    """Strip trailing punctuation and leading articles.
+    Does NOT strip 'with X features' / 'for X' suffixes — those may contain
+    the actual subject (e.g. 'project for a todo list' → 'todo list').
+    Instead, if the subject starts with a generic noun like 'project',
+    try to use the part after 'for'."""
+    # Strip trailing ? ! . etc
+    subject = re.sub(r"[?!.,;]+$", "", raw.strip())
+    # Strip leading article that got captured
+    subject = re.sub(r"^(?:a\s+|an\s+|the\s+)+", "", subject)
+
+    # If the subject is just "project", grab the part after "for"
+    if subject.lower().strip() in ("project", "something"):
+        m = re.match(
+            r"^project\s+for\s+(?:a\s+|an\s+|the\s+)?(.+)$", subject, re.IGNORECASE
+        )
+        if m:
+            subject = m.group(1).strip()
+        else:
+            m2 = re.match(
+                r"^something\s+(?:for|cool|interesting)\s*(?:for\s+)?(?:a\s+|an\s+)?(.+)$",
+                subject,
+                re.IGNORECASE,
+            )
+            if m2:
+                subject = m2.group(1).strip()
+
+    return subject.strip()
+
+
+async def _alpha_fetch_suggestions(query: str) -> list:
+    """
+    Core GitHub search logic shared by the endpoint and the chat interceptor.
+    Returns the top 3 ranked suggestions for *query*.
+    """
+    keywords = query.split()[:5] if query else []
+    gh_query = " ".join(keywords)
+    gh_query = f"created:>2018-01-01 {gh_query}".strip()
+
+    try:
+        url = "https://api.github.com/search/repositories"
+        params = {
+            "q": gh_query,
+            "sort": "stars",
+            "order": "desc",
+            "per_page": 10,
+        }
+        headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "Lilly-AI-AlphaSuggest",
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code != 200:
+                return []
+            gh_data = resp.json()
+    except Exception as e:
+        logger.error(f"Alpha suggest GitHub fetch failed: {e}")
+        return []
+
+    candidates = gh_data.get("items", [])[:10]
+    ranked = _rank_github_suggestions(candidates, query, "")
+    top3 = ranked[:3]
+
+    suggestions = []
+    for item in top3:
+        suggestions.append(
+            {
+                "repo_name": item.get("full_name", ""),
+                "repo_url": item.get("html_url", ""),
+                "description": item.get("description") or "",
+                "language": item.get("language", ""),
+                "stars": item.get("stargazers_count", 0),
+                "forks": item.get("forks_count", 0),
+                "topics": item.get("topics", []),
+                "default_branch": item.get("default_branch", "main"),
+                "alpha_blurb": _generate_suggestion_blurb(item, query),
+            }
+        )
+    return suggestions
+
+
+def _alpha_clarification_prompt(query: str, questions: list) -> str:
+    """Build Alpha's clarifying question message."""
+    q_str = "\n".join(f"  {i + 1}. {_q}" for i, _q in enumerate(questions))
+    return (
+        f"Alpha caught that — you want to create a '{query}'. "
+        f"Let me ask a couple quick questions so I can find the best GitHub starter for you:\n"
+        f"{q_str}\n\n"
+        f"Once you answer, Alpha will suggest 3 repos, clone your pick into a "
+        f"project you can preview online for 30 days."
+    )
+
+
+def _alpha_present_suggestions(query: str, suggestions: list) -> str:
+    """Build Alpha's suggestion presentation message."""
+    parts = [f"Alpha found 3 projects on GitHub for your '{query}' idea:\n"]
+    for i, s in enumerate(suggestions):
+        star_label = f"{s['stars']:,}" if s["stars"] else "~"
+        parts.append(
+            f"  [{i + 1}] {s['repo_name']} ⭐ {star_label}\n      {s['alpha_blurb']}\n"
+        )
+    parts.append(
+        "\nPick a number (or say the repo name). Alpha will clone it into a "
+        "project you can preview online for 30 days, download as a ZIP, "
+        "or get a docker-compose.yml to run on your own server."
+    )
+    return "\n".join(parts)
+
+
+def alpha_clarify_internal(payload: dict) -> dict:
+    """Sync wrapper around the clarify logic for use inside chat interception."""
+    query = (payload.get("query") or "").strip()
+    if len(query.split()) >= 4:
+        return {"needs_clarification": False, "query": query}
+    questions = _generate_clarification_questions(query)
+    return {
+        "needs_clarification": True,
+        "questions": questions,
+        "suggested_keywords": _suggest_keywords(query),
+    }
+
+
 # ── VibeCode chat (AI coding assistant with project context) ─────────────────
 
 
+# ── VibeCode dashboard ───────────────────────────────────────────────────────
+# Served as a pop-out panel when the user asks for "dashboard" in VibeCode chat.
+
+
+async def _vibecode_dashboard_response(
+    slug: Optional[str], project_dir, agent: str, agent_name: str, agent_emoji: str
+) -> dict:
+    """Build the chat response that triggers the dashboard pop-out."""
+    d = await _vibecode_dashboard_data(slug, project_dir)
+
+    # Build a human-readable summary + compact table
+    lines: list[str] = []
+    lines.append(f"**{d['project']}** · {d['date']}")
+    lines.append("")
+
+    # Status row
+    status_icon = "🟢" if d["status"] == "running" else "🔴"
+    lines.append(f"{status_icon} **Status:** {d['status']}")
+    if d["port"]:
+        preview_url = f"/api/vibecode/preview/{slug}"
+        lines.append(f"  Preview: {preview_url}")
+        lines.append(f"  Port: {d['port']}")
+
+    lines.append("")
+
+    # File stats
+    lines.append(
+        f"📁 **Files:** {d['file_count']} files, {d['size_bytes'] / 1024:.1f} KB"
+    )
+    if d.get("lang_breakdown"):
+        parts = [f"{ext}: {cnt}" for ext, cnt in sorted(d["lang_breakdown"].items())]
+        lines.append(f"  By type: {', '.join(parts[:8])}")
+
+    lines.append("")
+
+    # System / LLM
+    llm_icon = "✅" if d.get("llm_ready") else "⚠️"
+    backend_label = d["backend"].upper()
+    models = d.get("llm_models", [])
+    lines.append(f"{llm_icon} **Backend:** {backend_label}")
+    if models:
+        lines.append(f"  Models: {', '.join(models[:3])}")
+
+    lines.append("")
+
+    # Environment
+    lines.append(f"📍 **Location:** {d['location']}")
+    w = d.get("weather", {})
+    if w.get("current"):
+        cur = w["current"]
+        lines.append(
+            f"🌤️ **Weather:** {cur.get('temp_c', '--')}°C — {cur.get('desc', '—')}"
+        )
+
+    summary = "\n".join(lines)
+
+    return {
+        "reply": summary,
+        "agent": agent,
+        "agent_name": agent_name,
+        "agent_emoji": agent_emoji,
+        "action": "dashboard_open",
+        "dashboard_data": d,
+    }
+
+
+async def _vibecode_dashboard_data(slug: Optional[str], project_dir) -> dict:
+    """Assemble all dashboard data the frontend needs."""
+    import datetime as _dt
+
+    now = _dt.datetime.now()
+    data: dict = {
+        "time": now.strftime("%H:%M"),
+        "date": now.strftime("%A, %d %B"),
+        "project": slug or "no project",
+        "files": [],
+        "file_count": 0,
+        "size_bytes": 0,
+        "status": "stopped",
+        "port": None,
+        "url": "",
+        "weather": await get_weather(),
+        "location": _last_location_name or "—",
+        "backend": "unknown",
+        "skills": _vibecode_skills_list(),
+    }
+
+    # Try the deployment store for port/url/status
+    dep = _vibecode_load_deployments().get("projects", {}).get(slug or "", {})
+    if dep.get("port"):
+        data["port"] = dep["port"]
+        data["url"] = dep.get("url", "")
+        data["status"] = "running"
+
+    # File inventory
+    if project_dir and project_dir.exists():
+        files = []
+        ext_counts: dict = {}
+        for f in sorted(project_dir.rglob("*")):
+            if f.is_file() and not any(
+                p in str(f) for p in [".git/", "__pycache__", "node_modules", ".venv"]
+            ):
+                rel = str(f.relative_to(project_dir))
+                files.append(rel)
+                ext = f.suffix.lstrip(".") or "(none)"
+                ext_counts[ext] = ext_counts.get(ext, 0) + 1
+        data["files"] = files
+        data["file_count"] = len(files)
+        data["lang_breakdown"] = ext_counts
+        data["size_bytes"] = sum((project_dir / f).stat().st_size for f in files)
+
+    # Backend health
+    data["backend"] = "ollama"
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{OLLAMA_URL}/api/tags")
+            if r.status_code == 200:
+                models = [m["name"] for m in r.json().get("models", [])]
+                data["llm_models"] = models
+                data["llm_ready"] = True
+    except Exception:
+        data["llm_ready"] = False
+
+    return data
+
+
 @app.post("/api/vibecode/chat")
-async def vibecode_chat(data: dict):
+async def vibecode_chat(data: dict, request: Request):
     """
     Chat with Lilly about the current VibeCode project.
-    Body: { "slug": "...", "message": "...", "file": "optional current file content", "agent": "optional agent key (puppy, fox, cat, bear, bunny, owl, deer, wolf, raccoon)" }
+    Body: { "slug": "...", "message": "...", "file": "optional current file content", "agent": "optional agent key, emoji, or name (puppy/🐶/Lilly, fox/🦊, ...)", "session_id": "optional conversation id" }
+
+    If the message matches "I want to create X" and no slug is active,
+    Alpha intercepts to ask clarifying questions and then presents
+    GitHub project suggestions before dropping the user into the IDE.
     """
-    slug = _vibecode_project_slug(data.get("slug") or "")
+    raw_slug = (data.get("slug") or "").strip()
+    slug = _vibecode_project_slug(raw_slug) if raw_slug else None
     msg = (data.get("message") or "").strip()
     file_ctx = data.get("file", "")  # current open file content for context
-    agent = data.get("agent", "puppy")  # selected agent/persona
+    agent = data.get("agent", "puppy")  # selected agent/persona (key, emoji, or name)
+    agent = resolve_persona_key(agent)
+    session_id = data.get("session_id") or "default"
 
     if not msg:
         return JSONResponse({"error": "message required"}, status_code=400)
 
     project_dir = VIBECODE_PROJECTS_DIR / slug if slug else None
+
+    # Resolve agent persona early (needed by dashboard path)
+    agent_persona = HIVE_PERSONAS.get(agent, HIVE_PERSONAS["puppy"])
+    agent_name = agent_persona.get("name", "Lilly")
+    agent_emoji = agent_persona.get("emoji", "🐶")
+    agent_role = agent_persona.get("role", "Companion")
+
+    # ── Detect dashboard request ─────────────────────────────────────────
+    msg_lower = msg.lower().strip()
+    dashboard_keywords = [
+        "dashboard",
+        "admin dashboard",
+        "show dashboard",
+        "open dashboard",
+        "project dashboard",
+        "system dashboard",
+        "stats",
+        "metrics",
+        "status panel",
+    ]
+    is_dashboard = any(kw in msg_lower for kw in dashboard_keywords)
+
+    # "Dashboard off" must be handled before the generic dashboard check
+    is_dashboard_off = msg_lower in (
+        "dashboard off",
+        "close dashboard",
+        "hide dashboard",
+        "dismiss dashboard",
+        "turn off dashboard",
+        "dashboard off please",
+    ) or msg_lower.startswith("dashboard off")
+    if is_dashboard_off:
+        return {
+            "reply": "📊 Dashboard hidden. Type `Dashboard` anytime to bring it back.",
+            "agent": agent,
+            "agent_name": agent_name,
+            "agent_emoji": agent_emoji,
+            "action": "dashboard_close",
+        }
+
+    # ── Capture git repo links dropped in chat as reusable skills ─────────
+    import re as _re
+
+    _url_pattern = r"https?://github\.com/[\w.-]+/[\w.-]+(?:\.git)?"
+    dropped_urls = list(dict.fromkeys(_re.findall(_url_pattern, msg)))
+    for u in dropped_urls:
+        _vibecode_skills_upsert(u, source="dropped")
+
+    if is_dashboard:
+        return await _vibecode_dashboard_response(
+            slug, project_dir, agent, agent_name, agent_emoji
+        )
+
+    # ── Detect "I want to create X" and natural-language variants ────────────
+    create_match = _detect_create_intent(msg)
+    if create_match and not slug:
+        query = create_match.strip()
+        # Check if we need to ask clarifying questions first
+        clarification = alpha_clarify_internal(
+            {"query": query, "session_id": session_id}
+        )
+        if clarification.get("needs_clarification"):
+            return {
+                "reply": _alpha_clarification_prompt(query, clarification["questions"]),
+                "clarification": clarification,
+                "agent": "puppy",
+                "agent_name": "Lilly",
+                "agent_emoji": "🐶",
+                "alpha_mode": "asking",
+            }
+
+        # Enough detail — fetch GitHub suggestions directly
+        suggestions = await _alpha_fetch_suggestions(query)
+
+        if not suggestions:
+            return {
+                "reply": "Alpha looked far and wide, but couldn't find any GitHub repos matching that. Try different keywords?",
+                "agent": "puppy",
+                "agent_name": "Lilly",
+                "agent_emoji": "🐶",
+                "alpha_mode": "no_results",
+            }
+
+        # Record every baseline Alpha suggests as a reusable skill
+        for s in suggestions:
+            _vibecode_skills_upsert(
+                s.get("repo_url", ""),
+                meta={
+                    "name": s.get("repo_name", ""),
+                    "description": s.get("description", ""),
+                    "language": s.get("language", ""),
+                    "stars": s.get("stars", 0),
+                    "tags": s.get("topics", []),
+                },
+                source="alpha",
+            )
+
+        _ALPHA_SUGGESTION_STATE[session_id] = {
+            "query": query,
+            "language": "",
+            "suggestions": suggestions,
+            "timestamp": time.time(),
+        }
+
+        alpha_msg = _alpha_present_suggestions(query, suggestions)
+        return {
+            "reply": alpha_msg,
+            "suggestions": suggestions,
+            "session_id": session_id,
+            "agent": "puppy",
+            "agent_name": "Lilly",
+            "agent_emoji": "🐶",
+            "alpha_mode": "suggesting",
+        }
+
+    # A bare repo link dropped in chat — confirm it was captured as a skill
+    if dropped_urls and len(_re.findall(r"\s", msg.strip())) <= 3:
+        entry = _vibecode_skills_get(
+            _vibecode_project_slug(
+                dropped_urls[0].rstrip("/").split("/")[-1].removesuffix(".git")
+            )
+        )
+        if not entry:
+            entry = {"key": "repo", "name": "repo"}
+        return {
+            "reply": (
+                f"📦 Saved **{entry['name']}** as a reusable skill from {dropped_urls[0]}.\n\n"
+                "You can apply it to a brand-new project any time — open the "
+                "**📊 dashboard → Skills** and hit *Apply*, or just say "
+                f"`apply {entry['key']}`."
+            ),
+            "skill_saved": entry,
+            "agent": agent,
+            "agent_name": agent_name,
+            "agent_emoji": agent_emoji,
+            "alpha_mode": "skill_saved",
+        }
+
+    # ── Apply a saved skill to a brand-new project ──────────────────────────
+    apply_match = _re.match(
+        r"^(?:apply|use|start)\s+(?:skill\s+)?([a-z0-9-]+)$", msg_lower
+    )
+    if apply_match:
+        skill = _vibecode_skills_get(apply_match.group(1))
+        if not skill:
+            skills = _vibecode_skills_list()
+            names = "`, `".join(s["key"] for s in skills[:10]) or "none yet"
+            return {
+                "reply": f"Couldn't find a skill called **{apply_match.group(1)}**. "
+                f"Available: `{names}` — or drop a GitHub link to create a new one.",
+                "agent": agent,
+                "agent_name": agent_name,
+                "agent_emoji": agent_emoji,
+            }
+        result = await _vibecode_apply_skill_repo(skill, "", request)
+        if not result.get("ok"):
+            return {
+                "reply": f"Couldn't apply **{skill['name']}**: {result['error']}",
+                "agent": agent,
+                "agent_name": agent_name,
+                "agent_emoji": agent_emoji,
+            }
+        return {
+            "reply": (
+                f"⚡ Applied skill **{skill['name']}** → new project "
+                f"`{result['slug']}` on port {result['port']}."
+            ),
+            "project_applied": result["slug"],
+            "agent": agent,
+            "agent_name": agent_name,
+            "agent_emoji": agent_emoji,
+        }
 
     # Build project context
     project_info = ""
@@ -13498,11 +18800,6 @@ async def vibecode_chat(data: dict):
     if file_ctx:
         file_snippet = f"\nCurrent open file:\n```\n{file_ctx[:3000]}\n```\n"
 
-    agent_persona = HIVE_PERSONAS.get(agent, HIVE_PERSONAS["puppy"])
-    agent_name = agent_persona.get("name", "Lilly")
-    agent_emoji = agent_persona.get("emoji", "🐶")
-    agent_role = agent_persona.get("role", "Companion")
-
     system = build_avatar_system_prompt(agent, "")
     system += f"\n\nYou are inside VibeCode, a live coding environment where the user has dropped in a Git repo. "
     system += f"The project runs in a Docker container. You can suggest and generate code changes. "
@@ -13510,16 +18807,63 @@ async def vibecode_chat(data: dict):
     system += f"The UI includes a frost-themed file tree, code editor with tabs, live auto-save, container logs, and an AI chat panel. "
     system += f"When writing code, use fenced code blocks with the language tag. "
     system += f"Be direct and concise. One punchy answer beats three average ones. "
+    system += f"Vary your phrasing, structure, and tone between replies — never reuse stock phrases, "
+    system += f"templates, or the same greeting across messages. "
+    system += f"GROUNDING: Do NOT fabricate facts or code behavior. If you don't know something, say so. "
     system += f"{project_info}{file_snippet}"
 
+    # ── Retrieve per-session chat history so the coding assistant remembers
+    # the conversation flow (previously each /api/vibecode/chat call was stateless)
+    hist = _VC_CHAT_MEMORY.get(session_id, [])
+    # Keep last 12 messages to stay within context window
+    hist = hist[-12:]
+    messages: list[dict] = [
+        {"role": "system", "content": system},
+    ]
+    messages.extend(hist)
+    messages.append({"role": "user", "content": msg})
+
     try:
-        reply = await llama_backend.chat(
-            [{"role": "system", "content": system}, {"role": "user", "content": msg}],
-            temperature=0.3,
-            max_tokens=1200,
-        )
+        reply = ""
+        # Model chain: VIBECODE_MODEL (qwen2.5:3b by default) first, then
+        # progressively smaller fallbacks. Skip empty/duplicate entries so we
+        # never end up asking for an unset model — previously an empty
+        # VIBE_MODEL made every request fall straight through to the tiny
+        # qwen2.5:1.5b and produced canned, templated replies.
+        vibe_models = (VIBECODE_MODEL, VIBE_MODEL, FAST_MODEL, OLLAMA_MODEL)
+        seen = set()
+        for model in vibe_models:
+            if not model or model in seen:
+                continue
+            seen.add(model)
+            reply = await llama_backend.chat(
+                messages,
+                temperature=0.6,
+                max_tokens=1200,
+                timeout=60,
+                model=model,
+            )
+            if reply:
+                break
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+    # ── Post-filter hallucination patterns (YouTube/media noise etc.)
+    reply = _filter_hallucination_patterns(reply)
+
+    # Store this exchange in session memory for context continuity
+    _VC_CHAT_MEMORY[session_id] = (
+        _VC_CHAT_MEMORY.get(session_id, [])
+        + [{"role": "user", "content": msg}, {"role": "assistant", "content": reply}]
+    )[-20:]
+
+    if not reply:
+        return JSONResponse(
+            {
+                "error": "No model responded (7b too big for free RAM, small model empty)."
+            },
+            status_code=503,
+        )
 
     # Extract any code blocks and return them separately for the IDE to apply
     import re as _re
@@ -13542,6 +18886,126 @@ async def vibecode_chat(data: dict):
 # ── VibeCode preview proxy ─────────────────────────────────────────────────────
 # Proxy the running container through the main server so the preview iframe
 # can inject HMR/reload helpers without fighting cross-origin container pages.
+
+
+@app.get("/api/vibecode/dashboard/")
+async def vibecode_dashboard_global():
+    """Return global dashboard data when no project is selected."""
+    d = await _vibecode_dashboard_data(None, None)
+    return JSONResponse(d)
+
+
+@app.get("/api/vibecode/dashboard/{slug}")
+async def vibecode_dashboard(slug: str):
+    """Return all dashboard data for a project as JSON (for the pop-out panel)."""
+    slug = _vibecode_project_slug(slug) if slug else None
+    project_dir = VIBECODE_PROJECTS_DIR / slug if slug else None
+    d = await _vibecode_dashboard_data(slug, project_dir)
+    return JSONResponse(d)
+
+
+# ── VibeCode skills API ──────────────────────────────────────────────────────
+
+
+@app.get("/api/vibecode/skills")
+async def vibecode_skills_api():
+    """List all reusable VibeCode skills (GitHub baselines)."""
+    return JSONResponse({"skills": _vibecode_skills_list()})
+
+
+@app.post("/api/vibecode/skills")
+async def vibecode_skills_create(data: dict):
+    """Manually record a git repo as a skill. Body: {"url": "...", "source": "..."}"""
+    url = (data.get("url") or "").strip()
+    if not url:
+        return JSONResponse({"error": "url required"}, status_code=400)
+    key = _vibecode_skills_upsert(url, source=data.get("source") or "dropped")
+    return JSONResponse({"key": key, "skill": _vibecode_skills_get(key)})
+
+
+@app.delete("/api/vibecode/skills/{key}")
+async def vibecode_skills_delete(key: str):
+    """Remove a skill. Body-less DELETE keyed by slug."""
+    key = _vibecode_project_slug(key or "")
+    store = _vibecode_skills_load()
+    if key in store.get("skills", {}):
+        del store["skills"][key]
+        _vibecode_skills_save(store)
+        return JSONResponse({"ok": True})
+    return JSONResponse({"error": "Skill not found"}, status_code=404)
+
+
+@app.post("/api/vibecode/skills/apply")
+async def vibecode_skills_apply(data: dict, request: Request):
+    """
+    Apply a saved skill: clone its repo into a brand-new project.
+    Body: {"key": "...", "name": "optional-project-name"}
+    """
+    key = data.get("key") or ""
+    skill = _vibecode_skills_get(key)
+    if not skill or not skill.get("repo_url"):
+        return JSONResponse({"error": "Skill not found"}, status_code=404)
+    result = await _vibecode_apply_skill_repo(skill, data.get("name") or "", request)
+    if not result.get("ok"):
+        return JSONResponse(
+            {"error": result["error"]}, status_code=result.get("code", 500)
+        )
+    return {
+        k: result[k] for k in ("slug", "port", "url", "path", "message") if k in result
+    }
+
+
+async def _vibecode_apply_skill_repo(
+    skill: dict, project_name: str, request: Request | None = None
+) -> dict:
+    """Clone a skill's repo into a brand-new project. Returns {ok: bool, ...}."""
+    repo_url = (skill.get("repo_url") or "").strip()
+    if not repo_url:
+        return {"ok": False, "error": "Skill has no repo URL", "code": 400}
+
+    raw_name = (project_name or "").strip() or (
+        f"{_vibecode_project_slug(skill['key'])}-app"
+    )
+    slug = _vibecode_project_slug(raw_name)
+    dest = VIBECODE_PROJECTS_DIR / slug
+    if dest.exists():
+        return {
+            "ok": False,
+            "error": f"Project '{slug}' already exists. Pick a different name.",
+            "code": 409,
+        }
+
+    VIBECODE_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "clone",
+        "--depth",
+        "1",
+        repo_url,
+        str(dest),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+    if proc.returncode != 0:
+        return {
+            "ok": False,
+            "error": f"git clone failed: {stderr.decode(errors='replace')[:500]}",
+            "code": 500,
+        }
+
+    port = _vibecode_alloc_port(slug)
+    url = _vibecode_get_base_url(request, slug)
+    _vibecode_bootstrap_project(slug, dest)
+    _vibecode_skills_bump_used(skill["key"])
+    return {
+        "ok": True,
+        "slug": slug,
+        "port": port,
+        "url": url,
+        "path": str(dest),
+        "message": f"Skill '{skill['name']}' applied → new project '{slug}' on port {port}.",
+    }
 
 
 @app.get("/api/vibecode/preview/{slug}")
@@ -13568,47 +19032,21 @@ async def vibecode_preview_proxy(slug: str, request: Request):
     content_type = resp.headers.get("content-type", "")
     if "text/html" in content_type:
         try:
-            text = resp.text
-            inject = (
-                "<script>\n"
-                "  (function(){\n"
-                "    try {\n"
-                "      window.__vibecode = window.__vibecode || {};\n"
-                "      window.__vibecode.preview = true;\n"
-                '      window.__vibecode.slug = "'
-                + slug.replace("\\", "\\\\").replace('"', '\\"')
-                + '";\n'
-                '      window.__vibecode.baseUrl = location.origin + "/api/vibecode/preview/'
-                + slug
-                + '";\n'
-                '      window.__vibecode.hmrProxy = location.origin + "/api/vibecode/hmr/'
-                + slug
-                + '";\n'
-                "      window.addEventListener('message', (e) => {\n"
-                "        if (e.data && e.data.__vibecode === 'reload') location.reload();\n"
-                "      });\n"
-                "    } catch(e) {}\n"
-                "  })();\n"
-                "</script>\n"
-            )
-            if "</head>" in text:
-                text = text.replace("</head>", inject + "</head>", 1)
-            else:
-                text = inject + text
+            text = _vibecode_inject_into_html(resp.text, slug)
             from fastapi.responses import HTMLResponse as _HTMLResponse
 
             return _HTMLResponse(
-                content=text, status_code=resp.status_code, headers=dict(resp.headers)
+                content=text,
+                status_code=resp.status_code,
+                headers=_vibecode_safe_preview_headers(resp.headers),
             )
         except Exception:
             pass
 
-    from fastapi.responses import Response as _Response
-
     return _Response(
         content=resp.content,
         status_code=resp.status_code,
-        headers=dict(resp.headers),
+        headers=_vibecode_safe_preview_headers(resp.headers),
         media_type=content_type,
     )
 
@@ -13659,6 +19097,307 @@ async def vibecode_hmr_proxy(websocket: WebSocket, slug: str):
             await websocket.close()
         except Exception:
             pass
+
+
+# ── VibeCode static file server (fallback when no container is running) ──────
+
+
+# ── Git version control API ───────────────────────────────────────────────────
+
+
+def _vibecode_git_dir(slug: str) -> Path:
+    """Return the project directory for git operations."""
+    slug = _vibecode_project_slug(slug)
+    project_dir = VIBECODE_PROJECTS_DIR / slug
+    if not project_dir.exists() or not project_dir.is_dir():
+        raise FileNotFoundError(f"Project '{slug}' not found")
+    return project_dir
+
+
+async def _vibecode_git(slug: str, *args: str) -> tuple[str, str]:
+    """Run a git command in the project directory."""
+    project_dir = _vibecode_git_dir(slug)
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        *args,
+        cwd=str(project_dir),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    out = stdout.decode(errors="replace").strip()
+    err = stderr.decode(errors="replace").strip()
+    return out, err, proc.returncode
+
+
+@app.get("/api/vibecode/git/status/{slug}")
+async def vibecode_git_status(slug: str):
+    """Return git status for a project."""
+    try:
+        out, err, rc = await _vibecode_git(slug, "status", "--porcelain")
+        branch_out, _, _ = await _vibecode_git(slug, "branch", "--show-current")
+        branch = branch_out or "HEAD"
+        return JSONResponse(
+            {
+                "slug": slug,
+                "branch": branch,
+                "status": out if out else "clean",
+                "raw": out,
+                "error": err if rc != 0 else None,
+            }
+        )
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/vibecode/git/log/{slug}")
+async def vibecode_git_log(slug: str):
+    """Return recent commit history."""
+    try:
+        out, err, rc = await _vibecode_git(
+            slug, "log", "--oneline", "-10", "--date=short", "--pretty=format:%h %ad %s"
+        )
+        if rc != 0:
+            return JSONResponse({"error": err or "git log failed"}, status_code=500)
+        commits = []
+        for line in out.splitlines():
+            parts = line.split(" ", 2)
+            if len(parts) >= 3:
+                commits.append(
+                    {"hash": parts[0], "date": parts[1], "message": parts[2]}
+                )
+            elif line:
+                commits.append({"raw": line})
+        return JSONResponse({"slug": slug, "commits": commits})
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/vibecode/git/commit/{slug}")
+async def vibecode_git_commit(slug: str, data: dict):
+    """Stage all changes and create a commit. Body: {message: str}."""
+    message = (data.get("message") or "VibeCode update").strip()
+    try:
+        await _vibecode_git(slug, "add", ".")
+        out, err, rc = await _vibecode_git(slug, "commit", "-m", message)
+        if rc != 0:
+            return JSONResponse(
+                {"error": err or "git commit failed", "output": out}, status_code=500
+            )
+        return JSONResponse({"ok": True, "message": message, "output": out})
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/vibecode/git/push/{slug}")
+async def vibecode_git_push(slug: str):
+    """Push commits to the remote repository."""
+    try:
+        out, err, rc = await _vibecode_git(slug, "push")
+        if rc != 0:
+            return JSONResponse(
+                {"error": err or "git push failed", "output": out}, status_code=500
+            )
+        return JSONResponse({"ok": True, "output": out})
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/vibecode/git/branches/{slug}")
+async def vibecode_git_branches(slug: str):
+    """List local and remote branches."""
+    try:
+        local, err_local, _ = await _vibecode_git(slug, "branch", "--list")
+        remote, err_remote, _ = await _vibecode_git(slug, "branch", "-r")
+        current, _, _ = await _vibecode_git(slug, "branch", "--show-current")
+        return JSONResponse(
+            {
+                "slug": slug,
+                "current": current,
+                "local": [
+                    b.strip("* ").strip() for b in local.splitlines() if b.strip()
+                ],
+                "remote": [b.strip() for b in remote.splitlines() if b.strip()],
+            }
+        )
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/vibecode/git/checkout/{slug}")
+async def vibecode_git_checkout(slug: str, data: dict):
+    """Switch branch. Body: {branch: str}."""
+    branch = (data.get("branch") or "").strip()
+    if not branch:
+        return JSONResponse({"error": "branch required"}, status_code=400)
+    try:
+        out, err, rc = await _vibecode_git(slug, "checkout", branch)
+        if rc != 0:
+            return JSONResponse(
+                {"error": err or f"git checkout {branch} failed", "output": out},
+                status_code=500,
+            )
+        return JSONResponse({"ok": True, "branch": branch, "output": out})
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/vibecode/git/diff/{slug}")
+async def vibecode_git_diff(slug: str):
+    """Return uncommitted diff."""
+    try:
+        out, err, rc = await _vibecode_git(slug, "diff")
+        if rc != 0:
+            return JSONResponse({"error": err or "git diff failed"}, status_code=500)
+        return JSONResponse({"slug": slug, "diff": out})
+    except FileNotFoundError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/vibecode/learning/{slug}")
+async def vibecode_learning(slug: str):
+    """Return learning resources for a project's tech stack."""
+    slug = _vibecode_project_slug(slug)
+    project_dir = VIBECODE_PROJECTS_DIR / slug
+    if not project_dir.exists() or not project_dir.is_dir():
+        return JSONResponse({"error": "Project not found"}, status_code=404)
+    stack = _vibecode_detect_stack(project_dir)
+    topics = stack if stack else ["programming"]
+    # Search for the top topic
+    article = await _vibecode_search_learning_article(f"{topics[0]} best practices")
+    return JSONResponse(
+        {
+            "slug": slug,
+            "stack": stack,
+            "article": article,
+            "message": article["title"] if article else "No article found right now.",
+        }
+    )
+
+
+# ── VibeCode static file server (fallback when no container is running) ──────
+
+
+@app.get("/api/vibecode/serve/{slug}")
+@app.get("/api/vibecode/serve/{slug}/{path:path}")
+async def vibecode_serve_static(slug: str, path: str = ""):
+    """Serve static files directly from a project directory."""
+    slug = _vibecode_project_slug(slug)
+    project_dir = VIBECODE_PROJECTS_DIR / slug
+    if not project_dir.exists() or not project_dir.is_dir():
+        return JSONResponse({"error": "Project not found"}, status_code=404)
+
+    # Resolve safely to prevent path traversal
+    if path.startswith("/"):
+        path = path[1:]
+    target = (project_dir / path).resolve() if path else project_dir.resolve()
+    if not str(target).startswith(str(project_dir.resolve())):
+        return JSONResponse({"error": "Invalid path"}, status_code=403)
+
+    # Default to index.html for directory requests, with common fallbacks
+    if not path or target.is_dir():
+        candidates = [
+            project_dir / "index.html",
+            project_dir / "index.htm",
+            project_dir / "public" / "index.html",
+            project_dir / "src" / "index.html",
+            project_dir / "profile" / "index.html",
+            project_dir / "pages" / "index.html",
+            project_dir / "app" / "index.html",
+        ]
+        target = next((p for p in candidates if p.exists() and p.is_file()), None)
+        if target is None:
+            # List directory contents as a simple HTML page
+            try:
+                entries = sorted(
+                    project_dir.iterdir(), key=lambda p: (p.is_file(), p.name.lower())
+                )
+                files = [p.name for p in entries if p.name != ".git"]
+                html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>{project_dir.name}</title>
+<style>
+:root{{--accent:#8b7a9e;--bg:#f0e6ef;--text:#5d4e6d;--text-dim:rgba(93,78,109,.55)}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:sans-serif;background:linear-gradient(135deg,#f5d5e0 0%,#f0e6ef 45%,#d5f0e6 100%) fixed;color:var(--text);min-height:100vh;padding:2rem}}
+h1{{font-size:1.2rem;margin-bottom:1rem;color:var(--accent)}}
+ul{{list-style:none}}li{{padding:4px 0}}a{{color:var(--text);text-decoration:none}}
+a:hover{{color:var(--accent)}}.dir{{color:var(--text-dim)}}
+</style></head><body><h1>{project_dir.name}</h1><ul>
+"""
+                for f in files:
+                    icon = "📁" if (project_dir / f).is_dir() else "📄"
+                    html += f'<li><a href="{f}">{icon} {f}</a></li>\n'
+                html += "</ul></body></html>"
+                from fastapi.responses import HTMLResponse as _HTMLResponse
+
+                html = _vibecode_inject_into_html(html, slug)
+                resp = _HTMLResponse(content=html, media_type="text/html")
+                resp.headers["Cache-Control"] = (
+                    "no-store, no-cache, must-revalidate, max-age=0"
+                )
+                resp.headers["Pragma"] = "no-cache"
+                resp.headers["Expires"] = "0"
+                return resp
+            except Exception:
+                return JSONResponse({"error": "File not found"}, status_code=404)
+
+    if not target.exists() or not target.is_file():
+        return JSONResponse({"error": "File not found"}, status_code=404)
+
+    # Inject VibeCode theme into HTML files
+    if target.suffix.lower() in (".html", ".htm"):
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+            text = _vibecode_inject_into_html(text, slug)
+            from fastapi.responses import HTMLResponse as _HTMLResponse
+
+            resp = _HTMLResponse(content=text, media_type="text/html")
+            resp.headers["Cache-Control"] = (
+                "no-store, no-cache, must-revalidate, max-age=0"
+            )
+            resp.headers["Pragma"] = "no-cache"
+            resp.headers["Expires"] = "0"
+            return resp
+        except Exception:
+            pass
+
+    resp = FileResponse(target)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
+
+@app.post("/api/vibecode/bootstrap/{slug}")
+async def vibecode_bootstrap(slug: str):
+    """Bootstrap an existing project with the themed preview overlay."""
+    slug = _vibecode_project_slug(slug)
+    project_dir = VIBECODE_PROJECTS_DIR / slug
+    if not project_dir.exists() or not project_dir.is_dir():
+        return JSONResponse({"error": "Project not found"}, status_code=404)
+    try:
+        _vibecode_bootstrap_project(slug, project_dir)
+        return JSONResponse({"ok": True, "message": f"Bootstrapped '{slug}'"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # ── VibeCode page route ──────────────────────────────────────────────────────
@@ -13735,20 +19474,269 @@ async def vibecode_preview_proxy(slug: str, request: Request):
                 text = inject + text
             from fastapi.responses import HTMLResponse as _HTMLResponse
 
+            # Strip headers that become invalid after script injection
+            safe_headers = {
+                k: v
+                for k, v in resp.headers.items()
+                if k.lower() not in ("content-length", "content-encoding")
+            }
             return _HTMLResponse(
-                content=text, status_code=resp.status_code, headers=dict(resp.headers)
+                content=text, status_code=resp.status_code, headers=safe_headers
             )
         except Exception:
             pass
 
+    safe_headers = {
+        k: v
+        for k, v in resp.headers.items()
+        if k.lower() not in ("content-length", "content-encoding")
+    }
     from fastapi.responses import Response as _Response
 
     return _Response(
         content=resp.content,
         status_code=resp.status_code,
-        headers=dict(resp.headers),
+        headers=safe_headers,
         media_type=content_type,
     )
+
+
+# ── Preview proxy helpers ────────────────────────────────────────────────────
+
+_VIBECODE_THEMES = {
+    "lilac": ("#f0e6ef", "#f5d5e0", "#d4e8f5", "#d5f0e6", "#8b7a9e", "#5d4e6d"),
+    "blush": ("#f7eaed", "#f5c8d0", "#f5e8d4", "#f0d5e0", "#a0607a", "#6d3d50"),
+    "sky": ("#e6f0f7", "#b8d8f0", "#d4e8f5", "#c8f0e8", "#4a80a0", "#2d5068"),
+    "mint": ("#e6f5ef", "#b8e8d0", "#d4f5e8", "#d0f0c8", "#3a8a6a", "#2d5a44"),
+    "peach": ("#f7f0e6", "#f5d8b0", "#f5e8c8", "#f0d0b8", "#a07040", "#6d4a28"),
+    "slate": ("#e6eaf2", "#b0c0d8", "#c8d4e8", "#b8c8e0", "#506080", "#304050"),
+}
+
+
+def _vibecode_preview_inject(slug: str) -> str:
+    """Head snippet for preview pages: pastel frosted-glass theme that follows
+    the Alpha-selected `lilly_theme`, plus live-reload hooks."""
+    theme_rows = "".join(
+        f"      {name}:{{bg:'{bg}',a1:'{a1}',a2:'{a2}',a3:'{a3}',accent:'{ac}',text:'{tx}'}},\n"
+        for name, (bg, a1, a2, a3, ac, tx) in _VIBECODE_THEMES.items()
+    )
+    style = (
+        "<style id='vibecode-theme'>\n"
+        ":root{--frost-bg:rgba(255,255,255,0.72);--frost-surface:rgba(255,255,255,0.55);"
+        "--frost-border:rgba(255,255,255,0.65);--accent:#8b7a9e;--accent2:#8b7a9e;"
+        "--green:#3a8a6a;--red:#c05555;--yellow:#b58900;--text:#5d4e6d;"
+        "--text-dim:rgba(93,78,109,0.55);--radius:14px}\n"
+        "body{font-family:'Segoe UI',system-ui,sans-serif;color:var(--text);"
+        "background:linear-gradient(135deg,#f5d5e0 0%,#f0e6ef 45%,#d5f0e6 100%) fixed}\n"
+        "a{color:var(--accent)}a:hover{opacity:.85}\n"
+        "</style>\n"
+    )
+    theme_script = (
+        "<script>\n"
+        "(function(){\n"
+        "  try {\n"
+        "    var t={\n" + theme_rows + "    };\n"
+        "    var th=t[localStorage.getItem('lilly_theme')]||t.lilac;\n"
+        "    var rs=document.documentElement.style;\n"
+        "    rs.setProperty('--accent',th.accent);\n"
+        "    rs.setProperty('--accent2',th.accent);\n"
+        "    rs.setProperty('--text',th.text);\n"
+        "    rs.setProperty('--text-dim',th.text+'99');\n"
+        "    document.body.style.background='linear-gradient(135deg,'+th.a1+'55 0%,'+th.bg+' 45%,'+th.a3+'66 100%) fixed';\n"
+        "    document.body.style.color=th.text;\n"
+        "  } catch(e){}\n"
+        "})();\n"
+        "</script>\n"
+    )
+    hook = (
+        "<script>\n"
+        "(function(){\n"
+        "  try {\n"
+        "    window.__vibecode=window.__vibecode||{};\n"
+        "    window.__vibecode.preview=true;\n"
+        "    window.__vibecode.slug=" + json.dumps(slug) + ";\n"
+        '    window.__vibecode.baseUrl=location.origin+"/vibecode/p/' + slug + '";\n'
+        "    window.addEventListener('message',function(e){if(e.data&&e.data.__vibecode==='reload')location.reload();});\n"
+        "  } catch(e){}\n"
+        "})();\n"
+        "</script>\n"
+    )
+    return style + theme_script + hook
+
+
+def _vibecode_inject_into_html(text: str, slug: str) -> str:
+    inject = _vibecode_preview_inject(slug)
+    if "</head>" in text:
+        text = text.replace("</head>", inject + "</head>", 1)
+    else:
+        text = inject + text
+    return text
+
+
+def _vibecode_safe_preview_headers(headers) -> dict:
+    """Drop headers that break embedding (X-Frame-Options/CSP) or leak internals."""
+    out = {}
+    blocked = {
+        "x-frame-options",
+        "content-security-policy",
+        "content-length",
+        "content-encoding",
+        "server",
+        "x-powered-by",
+    }
+    for k, v in headers.items():
+        if k.lower() in blocked:
+            continue
+        out[k] = v
+    return out
+
+
+@app.get("/vibecode/p/{slug}/{path:path}")
+@app.get("/vibecode/p/{slug}")
+async def alpha_preview_proxy(slug: str, request: Request, path: str = ""):
+    """
+    Preview proxy for Alpha-scaffolded projects.
+    Routes through the same server (port 8098) using path-based URLs.
+    Proxies to the project's container port via the deployments file,
+    or falls back to static file serving when no container is running.
+    Injects the VibeCode IDE theme into served HTML pages.
+    """
+    slug = _vibecode_project_slug(slug)
+    dep = _vibecode_load_deployments().get("projects", {}).get(slug, {})
+    port = dep.get("port")
+    path = request.url.path.replace(f"/vibecode/p/{slug}", "") or ""
+    query = request.url.query
+    # Strip leading slash to prevent absolute path resolution
+    if path.startswith("/"):
+        path = path[1:]
+
+    # If container is running, proxy to it
+    if port:
+        target_base = f"http://127.0.0.1:{port}"
+        target_url = (
+            target_base + (f"/{path}" if path else "") + (f"?{query}" if query else "")
+        )
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(10.0, connect=5.0)
+            ) as client:
+                resp = await client.get(target_url)
+        except Exception as e:
+            # Fall back to static files if container is unreachable
+            pass
+        else:
+            content_type = resp.headers.get("content-type", "")
+            if "text/html" in content_type:
+                try:
+                    text = _vibecode_inject_into_html(resp.text, slug)
+                    from fastapi.responses import HTMLResponse as _HTMLResponse
+
+                    return _HTMLResponse(
+                        content=text,
+                        status_code=resp.status_code,
+                        headers=_vibecode_safe_preview_headers(resp.headers),
+                    )
+                except Exception:
+                    pass
+
+            from fastapi.responses import Response as _Response
+
+            return _Response(
+                content=resp.content,
+                status_code=resp.status_code,
+                headers=_vibecode_safe_preview_headers(resp.headers),
+                media_type=content_type,
+            )
+
+    # Fallback: serve static files from project directory
+    project_dir = VIBECODE_PROJECTS_DIR / slug
+    if not project_dir.exists() or not project_dir.is_dir():
+        return JSONResponse({"error": "Project not found"}, status_code=404)
+
+    # Resolve safely to prevent path traversal
+    if path.startswith("/"):
+        path = path[1:]
+    target = (project_dir / path).resolve() if path else project_dir.resolve()
+    if not str(target).startswith(str(project_dir.resolve())):
+        return JSONResponse({"error": "Invalid path"}, status_code=403)
+
+    # Default to index.html for directory requests, with common fallbacks
+    if not path or target.is_dir():
+        candidates = [
+            project_dir / "index.html",
+            project_dir / "index.htm",
+            project_dir / "public" / "index.html",
+            project_dir / "src" / "index.html",
+            project_dir / "profile" / "index.html",
+            project_dir / "pages" / "index.html",
+            project_dir / "app" / "index.html",
+        ]
+        target = next((p for p in candidates if p.exists() and p.is_file()), None)
+        if target is None:
+            # List directory contents as a simple HTML page
+            try:
+                entries = sorted(
+                    project_dir.iterdir(), key=lambda p: (p.is_file(), p.name.lower())
+                )
+                files = [p.name for p in entries if p.name != ".git"]
+                html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>{project_dir.name}</title>
+<style>
+:root{{--accent:#8b7a9e;--bg:#f0e6ef;--text:#5d4e6d;--text-dim:rgba(93,78,109,.55)}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:sans-serif;background:linear-gradient(135deg,#f5d5e0 0%,#f0e6ef 45%,#d5f0e6 100%) fixed;color:var(--text);min-height:100vh;padding:2rem}}
+h1{{font-size:1.2rem;margin-bottom:1rem;color:var(--accent)}}
+ul{{list-style:none}}li{{padding:4px 0}}a{{color:var(--text);text-decoration:none}}
+a:hover{{color:var(--accent)}}.dir{{color:var(--text-dim)}}
+</style></head><body><h1>{project_dir.name}</h1><ul>
+"""
+                for f in files:
+                    icon = "📁" if (project_dir / f).is_dir() else "📄"
+                    html += f'<li><a href="{f}">{icon} {f}</a></li>\n'
+                html += "</ul></body></html>"
+                from fastapi.responses import HTMLResponse as _HTMLResponse
+
+                html = _vibecode_inject_into_html(html, slug)
+                resp = _HTMLResponse(content=html, media_type="text/html")
+                resp.headers["Cache-Control"] = (
+                    "no-store, no-cache, must-revalidate, max-age=0"
+                )
+                resp.headers["Pragma"] = "no-cache"
+                resp.headers["Expires"] = "0"
+                return resp
+            except Exception:
+                return JSONResponse({"error": "File not found"}, status_code=404)
+
+    if not target.exists() or not target.is_file():
+        return JSONResponse({"error": "File not found"}, status_code=404)
+
+    # Inject VibeCode theme into HTML files
+    if target.suffix.lower() in (".html", ".htm"):
+        try:
+            text = target.read_text(encoding="utf-8", errors="replace")
+            text = _vibecode_inject_into_html(text, slug)
+            from fastapi.responses import HTMLResponse as _HTMLResponse
+
+            resp = _HTMLResponse(content=text, media_type="text/html")
+            resp.headers["Cache-Control"] = (
+                "no-store, no-cache, must-revalidate, max-age=0"
+            )
+            resp.headers["Pragma"] = "no-cache"
+            resp.headers["Expires"] = "0"
+            return resp
+        except Exception:
+            pass
+
+    resp = FileResponse(target)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.get("/vibecode", response_class=HTMLResponse)
@@ -13768,6 +19756,30 @@ async def serve_vibecode():
         )
     return HTMLResponse(
         "<h1>VibeCode</h1><p>vibecode.html not found.</p>", status_code=404
+    )
+
+
+ALPHA_POPOUT_HTML_PATH = Path(__file__).parent / "alpha_popout.html"
+
+
+@app.get("/alpha-popout", response_class=HTMLResponse)
+@app.get("/alpha", response_class=HTMLResponse)
+async def serve_alpha_popout():
+    if ALPHA_POPOUT_HTML_PATH.exists():
+        from fastapi.responses import Response as _Resp
+
+        body = ALPHA_POPOUT_HTML_PATH.read_text(encoding="utf-8")
+        return _Resp(
+            content=body,
+            media_type="text/html",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
+    return HTMLResponse(
+        "<h1>Alpha</h1><p>alpha_popout.html not found.</p>", status_code=404
     )
 
 

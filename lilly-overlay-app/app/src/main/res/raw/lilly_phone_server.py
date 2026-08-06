@@ -714,7 +714,8 @@ def ui_state_endpoint():
 @app.route("/api/toggle_mic", methods=["POST"])
 def toggle_mic_endpoint():
     """Toggle microphone state."""
-    return jsonify({"active": False, "timestamp": time.time()})
+    _state["mic_active"] = not _state.get("mic_active", False)
+    return jsonify({"active": _state["mic_active"], "timestamp": time.time()})
 
 
 @app.route("/api/tts", methods=["POST"])
