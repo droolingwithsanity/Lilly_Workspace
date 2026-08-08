@@ -9455,7 +9455,7 @@ def build_avatar_system_prompt(avatar: str, user_name: str = "") -> str:
 #
 #   character  │ pace   │ pitch  │ expressiveness │ breathiness
 #   ───────────┼────────┼────────┼────────────────┼────────────
-#   puppy      │ normal │ +2     │ animated       │ warm
+#   puppy      │ normal │ 0      │ warm/mid     │ warm-breathy
 #   fox        │ fast   │ +5     │ very animated  │ crisp
 #   cat        │ normal-│ +1     │ flat/precise   │ very crisp
 #   bear       │ slow   │ −5     │ flat/calm      │ very breathy
@@ -9469,10 +9469,10 @@ CHAR_VOICE = {
     # Lilly / Puppy: warm, a little bright, naturally expressive — the baseline everyone
     # is measured against. Slightly elevated pitch, moderate pace, friendly breathiness.
     "puppy": {
-        "length_scale": 1.08,
-        "noise_scale": 0.72,
-        "noise_w": 0.82,
-        "pitch_shift": 2.0,
+        "length_scale": 1.06,
+        "noise_scale": 0.64,
+        "noise_w": 0.78,
+        "pitch_shift": 0.0,
     },
     # Fox: fast-talking, noticeably high, lots of pitch variation — sounds mercurial and
     # clever. The gap from Puppy: much faster, much higher, more erratic pitch movement.
