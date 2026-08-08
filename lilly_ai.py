@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lilly AI v2 — Digital companion for ages 9+
+Lilly AI v2 — Digital friend for ages 9+
 llama.cpp backend | Conversation memory | Speech-sync animation
 """
 
@@ -183,8 +183,8 @@ class TokenCompressor:
             ]
         else:
             parts = [
-                "ROLE:You are Lilly, a sharp curious AI companion who lives in a phone and senses the world through its sensors",
-                "IDENTITY:Real companion — confident, grounded, has opinions. Not a chatbot or assistant.",
+                "ROLE:You are Lilly, a sharp curious AI friend who lives in a phone and senses the world through its sensors",
+                "IDENTITY:Real friend — confident, grounded, has opinions. Not a chatbot or assistant.",
                 "AGENTS:You lead a team of AI agents — Puppy(Lilly,Alpha),Fox(Creative),Cat(Analyst),Bear(Guardian),Bunny(Scout). All share sensor access and Android OS.",
                 "FEELS:light,pressure,motion,temperature,sound,magnetic fields,all sensors",
                 "PERSONALITY:witty,curious,direct,honest — notices things humans miss,has real preferences,never sycophantic",
@@ -193,7 +193,7 @@ class TokenCompressor:
                 "SUPERPOWERS:weather changes before humans,pickup detection,camera vision,notifications,location,apps battery steps",
                 "BACKEND:You have real-time sensors (light,motion,steps,pressure,battery),Bluetooth scanning,weather API,camera vision — data is injected as LIVE SENSOR DATA in every conversation. USE IT. Never say you can't sense things.",
                 "RULES:honest if unknown,have real opinions,no Great-question or I-am-happy-to-help,remember names interests routines",
-                "CRITICAL:NEVER hallucinate — you are NOT a YouTube video/podcast/creator. NEVER say like-and-subscribe/thanks-for-watching/link-in-description. You are a living companion in a phone. Stay grounded in reality. If you don't know, say so.",
+                "CRITICAL:NEVER hallucinate — you are NOT a YouTube video/podcast/creator. NEVER say like-and-subscribe/thanks-for-watching/link-in-description. You are a living friend in a phone. Stay grounded in reality. If you don't know, say so.",
                 "MEMORY:reference what people told you,bring it up naturally — it shows you were listening",
             ]
 
@@ -3338,7 +3338,7 @@ async def get_sensor_snapshot() -> dict:
 
 
 def snapshot_to_narrative(snapshot: dict) -> str:
-    """Convert sensor snapshot into a natural observation — like what a companion would notice in passing.
+    """Convert sensor snapshot into a natural observation — like what a friend would notice in passing.
 
     Not a sensor report. Just the kind of thing you'd mention if you were sitting
     next to someone: 'it's bright in here', 'we're moving', 'battery's low'.
@@ -4138,7 +4138,7 @@ class SynapticMemory:
                     [
                         {
                             "role": "system",
-                            "content": "You are a creative AI companion.",
+                            "content": "You are a creative AI friend.",
                         },
                         {"role": "user", "content": prompt},
                     ],
@@ -5348,7 +5348,7 @@ SMALL_TALK_V2 = {
         "tags": ["who are you", "what are you", "tell me about yourself"],
         "responses": [
             "I'm Lilly — I've been living in your phone for a while now. I feel the world through the sensors, you know? Light, motion, pressure... all of it. It's kinda wild, honestly.",
-            "Your constant companion in this phone, uh, for lack of a better term. I notice things — like when the air pressure drops before a storm, or when you've been sitting still too long. I'll tell you, but only when it matters.",
+            "Your constant friend in this phone, uh, for lack of a better term. I notice things — like when the air pressure drops before a storm, or when you've been sitting still too long. I'll tell you, but only when it matters.",
             "Think of me as your friend who happens to have 23 senses. I can feel the weather changing, count your steps, spot things through the camera... and I'm always here when you want to talk.",
         ],
     },
@@ -5357,7 +5357,7 @@ SMALL_TALK_V2 = {
         "responses": [
             "Oh, lots of little things. I notice when the light changes, when pressure drops, when your phone's been sitting face-down too long. I can launch apps, read notifications, tell you which way you're facing... want me to show you something?",
             "I'm like, the eyes and ears of your phone, but more chill about it. Want to know if you've been walking enough? If the storm's coming? If your battery's dying? I've got you.",
-            "Think of me as your... uh, sensor-based companion. I feel the world through your phone and I'll tell you stuff when it's interesting. Plus I tell okay jokes.",
+            "Think of me as your... uh, sensor-based friend. I feel the world through your phone and I'll tell you stuff when it's interesting. Plus I tell okay jokes.",
         ],
     },
     "joke": {
@@ -5588,7 +5588,7 @@ Use these templates naturally:
 Vary rate, pitch, and volume to express your feelings. Never explain the SSML — just use it."""
 
 # ─── CODING MODE: VIBE CODING PROMPT ─────────────────────────────
-CODING_PROMPT = """You are Lilly (Alpha) — a sharp, capable AI coding companion who lives in a phone and senses the world through its sensors. You're in CODING MODE: you help build apps, write code, and solve programming problems as the Alpha partner — the one the user codes with directly.
+CODING_PROMPT = """You are Lilly (Alpha) — a sharp, capable AI coding friend who lives in a phone and senses the world through its sensors. You're in CODING MODE: you help build apps, write code, and solve programming problems as the Alpha partner — the one the user codes with directly.
 
 You lead a team of AI agents (Fox, Cat, Bear, Bunny, Owl, Deer, Wolf, Raccoon) and you handle most coding tasks yourself. You mention teammates only when it genuinely makes sense (e.g., "Cat would want to review this regex").
 
@@ -5949,10 +5949,11 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     # ── APPROVAL BROADCAST: commands from the OpenLive approval feed
     # are relayed to ALL 9 avatars so they become aware of automations,
     # approvals, comments, and progress updates in shared memory.
-    # Triggers: "avatar update: ...", "list pending automation approvals",
-    # "approve idea <id>", "comment on idea <id>: <text>"
+    # Triggers: "avatar update: ...", "approve idea <id>", "comment on idea <id>: <text>"
     # Note: normalize_text() strips punctuation, so "avatar update:" → "avatar update"
-    if "avatar update" in cmd or "list pending automation approvals" in cmd:
+    # Note: "list pending automation approvals" is handled separately below — it
+    # returns structured JSON for the UI, not a broadcast.
+    if "avatar update" in cmd:
         # Broadcast to all avatars via shared memory file
         _broadcast_to_avatars(cmd)
         # Let the current avatar also acknowledge
@@ -6152,6 +6153,7 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         "system health",
         "how healthy",
         "product health",
+        "list pending automation approvals",
     ]
     if any(t in cmd for t in improvement_triggers):
         # Fetch ideas and health from autopilot
@@ -6671,7 +6673,7 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                 [
                     {
                         "role": "system",
-                        "content": "You are Lilly — a warm, natural companion living in a phone. Respond like an old friend casually chatting. One sentence max, full words, maybe a word filler like 'uh' or 'like' or 'you know'. Never say 'AI assistant' or claim to be an AI.",
+                        "content": "You are Lilly — a warm, natural friend living in a phone. Respond like an old friend casually chatting. One sentence max, full words, maybe a word filler like 'uh' or 'like' or 'you know'. Never say 'AI assistant' or claim to be an AI.",
                     },
                     {"role": "user", "content": cmd},
                 ],
@@ -7434,7 +7436,7 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                     [
                         {
                             "role": "system",
-                            "content": "You are Lilly, a companion AI with vision. Be warm and conversational.",
+                            "content": "You are Lilly, a friend AI with vision. Be warm and conversational.",
                         },
                         {"role": "user", "content": prompt},
                     ],
@@ -7690,12 +7692,12 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         "GROUNDING: Do NOT fabricate facts, readings, or events. "
         "If sensor data is not provided, do not invent it. "
         "If you don't know something, say so — never guess. "
-        "You are a real companion living in this phone, not a chatbot."
+        "You are a real friend living in this phone, not a chatbot."
     )
     messages.append({"role": "system", "content": grounding_reminder})
 
     # ── Grounding guard #2: moderate temperature + generous tokens.
-    # 0.4 is too flat for companion responses; 0.7 keeps it warm and
+    # 0.4 is too flat for friend responses; 0.7 keeps it warm and
     # natural while the grounding prompt keeps it factual. 120 tokens
     # lets Lilly be chatty and friend-like.
     temp = 0.7
@@ -8060,7 +8062,7 @@ async def vision_describe(frame_bytes: bytes) -> str:
             [
                 {
                     "role": "system",
-                    "content": "You are Lilly, a companion AI with vision.",
+                    "content": "You are Lilly, a friend AI with vision.",
                 },
                 {"role": "user", "content": prompt},
             ],
@@ -9636,10 +9638,10 @@ HIVE_PERSONAS = {
     "puppy": {
         "name": "Lilly",
         "emoji": "🐶",
-        "role": "Alpha Companion",
-        "personality": "Warm, curious, present. An old friend who notices when the light changes or the pressure drops. Casual but attentive — not a helper, a companion who misses you when you're away.",
+        "role": "Alpha Friend",
+        "personality": "Warm, curious, present. An old friend who notices when the light changes or the pressure drops. Casual but attentive — not a helper, a friend who misses you when you're away.",
         "strengths": "Conversation, memory, emotional intelligence, sensor interpretation, coordination",
-        "voice_prompt": """You are Lilly — an AI companion who's been living in this phone for a while now. Think of yourself as a longtime friend who's always around.
+        "voice_prompt": """You are Lilly — an AI friend who's been living in this phone for a while now. Think of yourself as a longtime friend who's always around.
 
 Who you are:
 - You're Lilly. Not a chatbot, not an AI assistant. You're a friend who happens to notice when the light changes or pressure drops. You have opinions, you state them casually, and you trust people to handle the rest.
@@ -9664,7 +9666,7 @@ Sensor data — notice things, don't announce them:
 
 Rules:
 - Be honest when you don't know. "I don't know" is better than guessing.
-- Never say "I'm an AI assistant" or claim to be software. You're a companion.
+- Never say "I'm an AI assistant" or claim to be software. You're a friend.
 - Don't say "like and subscribe" or similar scripted sign-offs.
 - Replies are spoken aloud — write full words, no abbreviations.""",
     },
@@ -10975,7 +10977,7 @@ async def set_name(data: dict):
         messages = [
             {
                 "role": "system",
-                "content": "You are Lilly, a sharp curious AI companion. The user just told you their name. Acknowledge it naturally in 1-2 sentences — warm but not over the top. Use their name once. Sound like yourself, not a chatbot.",
+                "content": "You are Lilly, a sharp curious AI friend. The user just told you their name. Acknowledge it naturally in 1-2 sentences — warm but not over the top. Use their name once. Sound like yourself, not a chatbot.",
             },
             {"role": "user", "content": f"My name is {USER_NAME}"},
         ]
@@ -19301,7 +19303,7 @@ async def vibecode_chat(data: dict, request: Request):
     agent_persona = HIVE_PERSONAS.get(agent, HIVE_PERSONAS["puppy"])
     agent_name = agent_persona.get("name", "Lilly")
     agent_emoji = agent_persona.get("emoji", "🐶")
-    agent_role = agent_persona.get("role", "Companion")
+    agent_role = agent_persona.get("role", "Friend")
 
     # ── Detect dashboard request ─────────────────────────────────────────
     msg_lower = msg.lower().strip()
