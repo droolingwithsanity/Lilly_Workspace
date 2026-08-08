@@ -5910,33 +5910,13 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         "run automator",
     ]
     if any(s in cmd for s in support_triggers):
-        # Run health checks via the support automator
-        import importlib
-
-        try:
-            sa = await asyncio.to_thread(
-                lambda: __import__("termux_support_automator") if False else None
-            )
-        except ImportError:
-            sa = None
-
-        # Inline diagnostics (same checks the automator runs)
+        # Inline diagnostics (fast checks, no LLM test for speed)
         piper_ok = os.path.exists(PIPER_BIN)
         voice_ok = os.path.exists(PIPER_VOICE)
         llm_ok = False
         try:
-            test_resp = await llama_backend.chat(
-                [
-                    {
-                        "role": "system",
-                        "content": "You are Lilly, give a 1-word answer.",
-                    },
-                    {"role": "user", "content": "test"},
-                ],
-                temperature=0.3,
-                max_tokens=5,
-            )
-            llm_ok = bool(test_resp and len(test_resp) > 0)
+            _r = await httpx.AsyncClient(timeout=3.0).get(f"{OLLAMA_URL}/api/tags")
+            llm_ok = _r.status_code == 200
         except Exception:
             pass
 
@@ -5955,10 +5935,14 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
             f"Audio cache: {len(AUDIO_CACHE) if AUDIO_CACHE else 0} entries",
         ]
 
-        reply = "System check complete. Here's what I found: " + (
-            "; ".join(checks) + "."
-            if all(piper_ok and voice_ok and llm_ok and sensor_ok)
-            else "; ".join(checks) + ". I'd recommend checking the affected services."
+        all_ok = all(piper_ok and voice_ok and llm_ok and sensor_ok)
+        reply = (
+            "System check complete. Everything looks good: " + "; ".join(checks) + "."
+            if all_ok
+            else "System check complete. Here's what I found: "
+            + "; ".join(checks)
+            + "."
+            f" {'I can help fix these — want me to try?' if not all_ok else ''}"
         )
 
         await memory.add("user", cmd)
