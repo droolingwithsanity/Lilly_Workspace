@@ -5936,7 +5936,7 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
             f"Audio cache: {len(AUDIO_CACHE) if AUDIO_CACHE else 0} entries",
         ]
 
-        all_ok = all(piper_ok and voice_ok and llm_ok and sensor_ok)
+        all_ok = piper_ok and voice_ok and llm_ok and sensor_ok
         reply = (
             "System check complete. Everything looks good: " + "; ".join(checks) + "."
             if all_ok
