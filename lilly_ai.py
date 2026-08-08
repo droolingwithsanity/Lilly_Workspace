@@ -410,6 +410,7 @@ class ConversationMemory:
 class TextCommand(BaseModel):
     text: str
     avatar: str = "puppy"
+    source: str = "api"
 
 
 # ─── MOUSE CURSOR STATE ────────────────────────────────────────
@@ -5735,6 +5736,157 @@ def _extract_and_save_code_blocks(text: str) -> list[str]:
     return saved
 
 
+# ── APPROVAL FEED: shared awareness across all 9 avatars ──────────────────────
+# A small JSONL log in MEMORY_DIR that every avatar appends to. When a new
+# entry appears (approval granted, comment, idea update), the next time any
+# avatar starts a turn it reads the log and mentions relevant items, so all 9
+# personalities stay in sync without needing a live bus.
+
+_APPROVAL_LOG = MEMORY_DIR / "approval_broadcast_log.jsonl"
+_AVATAR_KNOWN_IDEAS: dict[
+    str, set[str]
+] = {}  # avatar -> set of idea ids it has acknowledged
+
+
+def _read_approval_log() -> list[dict]:
+    """Read the shared approval broadcast log (one JSON object per line)."""
+    if not _APPROVAL_LOG.exists():
+        return []
+    try:
+        lines = _APPROVAL_LOG.read_text().strip().split("\n")
+        return [json.loads(line) for line in lines if line.strip()]
+    except Exception:
+        return []
+
+
+def _append_approval_log(entry: dict) -> None:
+    """Append a broadcast entry so all avatars can read it on their next turn."""
+    try:
+        _APPROVAL_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(_APPROVAL_LOG, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        logger.warning(f"Failed to append approval log: {e}")
+
+
+def _broadcast_to_avatars(cmd: str) -> None:
+    """Write a shared-awareness entry that all 9 avatars will pick up.
+
+    This lets the OpenLive approval feed and every avatar stay in sync
+    without a live message bus — each avatar reads the log on its next turn.
+    """
+    # Determine the action type
+    # Note: normalize_text() strips punctuation, so match both forms
+    if "avatar update" in cmd:
+        action = "update"
+        detail = cmd.split("avatar update", 1)[-1].strip(": ").strip()
+    elif "list pending automation approvals" in cmd:
+        action = "list_request"
+        detail = ""
+    elif cmd.startswith("approve idea "):
+        action = "approved"
+        detail = cmd.replace("approve idea ", "").strip()
+    elif cmd.startswith("comment on idea "):
+        action = "commented"
+        # Extract idea id and comment
+        rest = cmd.replace("comment on idea ", "").strip()
+        parts = rest.split(":", 1)
+        detail = f"idea {parts[0].strip()}"
+    else:
+        action = "unknown"
+        detail = cmd
+
+    entry = {
+        "ts": time.time(),
+        "avatar": current_avatar,
+        "action": action,
+        "detail": detail,
+        "raw": cmd,
+    }
+    _append_approval_log(entry)
+
+
+def _handle_avatar_broadcast(cmd: str) -> str:
+    """Generate a natural-language acknowledgement for an avatar broadcast."""
+    if "list pending automation approvals" in cmd:
+        items = _read_approval_log()
+        pending = [
+            e
+            for e in items
+            if e.get("action") in ("update", "approved", "commented")
+            and e.get("detail")
+        ]
+        if not pending:
+            return "No new automation updates to share — all avatars are in sync."
+        latest = pending[-1]
+        return f"📡 Updated all 9 avatars: {latest.get('detail', 'new automation update')} ({STATUS_LABEL.get(latest.get('action', 'update'), 'updated')})"
+
+    if "avatar update" in cmd:
+        detail = cmd.split("avatar update", 1)[-1].strip(": ").strip()
+        return f"📡 Logged for all avatars: {detail}"
+
+    return "📡 Noted — all avatars will see this."
+
+
+def _handle_approval_action(cmd: str) -> str:
+    """Handle an approve/comment action and acknowledge."""
+    if cmd.startswith("approve idea "):
+        idea_id = cmd.replace("approve idea ", "").strip()
+        return f"✅ Idea {idea_id} approved — all avatars now know this is greenlit and will track its progress."
+    if cmd.startswith("comment on idea "):
+        rest = cmd.replace("comment on idea ", "").strip()
+        parts = rest.split(":", 1)
+        idea_id = parts[0].strip()
+        return f"💬 Comment added to idea {idea_id} — all avatars can see your feedback on it."
+    return "📡 Noted."
+
+
+def _recent_unacknowledged_for_avatar(avatar: str) -> list[dict]:
+    """Return approval log entries this avatar hasn't acknowledged yet."""
+    known = _AVATAR_KNOWN_IDEAS.get(avatar, set())
+    entries = _read_approval_log()
+    new_entries = [
+        e for e in entries if e.get("detail") and e.get("detail") not in known
+    ]
+    # Mark as seen
+    for e in new_entries:
+        known.add(e.get("detail", ""))
+    _AVATAR_KNOWN_IDEAS[avatar] = known
+    return new_entries
+
+
+STATUS_LABEL = {
+    "update": "updated",
+    "approved": "approved",
+    "commented": "commented",
+    "list_request": "listed",
+}
+
+
+def _map_task_status(idea: dict, tasks: list) -> str:
+    """Map an idea/task to a display status for the approval feed."""
+    idea_id = idea.get("id", idea.get("key", ""))
+    # Check if the idea maps to an autopilot task
+    for t in tasks:
+        if t.get("title", "") == idea.get("title", "") or t.get("id", "") == idea_id:
+            status = t.get("status", "pending")
+            if status in ("completed", "done"):
+                return "completed"
+            elif status == "in_progress":
+                return "in_progress"
+            elif status in ("pending", "todo"):
+                return "pending"
+    # Check the approval broadcast log for status updates
+    for entry in _read_approval_log():
+        if entry.get("detail", "").startswith(idea_id):
+            action = entry.get("action", "")
+            if action == "approved":
+                return "approved"
+            elif action == "commented":
+                return "pending"
+    return "pending"
+
+
 async def handle_intent(text: str, from_text: bool = False) -> dict:
     global \
         PENDING_INTENT, \
@@ -5793,6 +5945,32 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
             break
     if not cmd:
         cmd = "hello"
+
+    # ── APPROVAL BROADCAST: commands from the OpenLive approval feed
+    # are relayed to ALL 9 avatars so they become aware of automations,
+    # approvals, comments, and progress updates in shared memory.
+    # Triggers: "avatar update: ...", "list pending automation approvals",
+    # "approve idea <id>", "comment on idea <id>: <text>"
+    # Note: normalize_text() strips punctuation, so "avatar update:" → "avatar update"
+    if "avatar update" in cmd or "list pending automation approvals" in cmd:
+        # Broadcast to all avatars via shared memory file
+        _broadcast_to_avatars(cmd)
+        # Let the current avatar also acknowledge
+        reply = _handle_avatar_broadcast(cmd)
+        await memory.add("user", cmd)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
+    if cmd.startswith("approve idea ") or cmd.startswith("comment on idea "):
+        _broadcast_to_avatars(cmd)
+        reply = _handle_approval_action(cmd)
+        await memory.add("user", cmd)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
 
     # ── TTS Troubleshooting — detect common TTS failure reports and respond with
     #   specific diagnostic steps instead of a generic fallback. Triggered by
@@ -5996,6 +6174,34 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
 
         except Exception as e:
             logger.debug(f"Autopilot fetch error: {e}")
+
+        # ── If this is from OpenLive's approval feed, return structured JSON
+        # so the UI can render a full approval feed with complexity, effort,
+        # comments, and progress tracking.
+        if "list pending automation approvals" in cmd:
+            _approvals = []
+            for idea in autopilot_ideas:
+                _approvals.append(
+                    {
+                        "id": idea.get("id", idea.get("key", str(len(_approvals)))),
+                        "title": idea.get("title", idea.get("name", "Untitled")),
+                        "description": idea.get("description", ""),
+                        "category": idea.get("category", "improvement"),
+                        "impact_score": idea.get("impact_score", idea.get("score", 5)),
+                        "feasibility_score": idea.get("feasibility_score", 5),
+                        "complexity": idea.get("complexity", "M"),
+                        "estimated_effort_hours": idea.get(
+                            "estimated_effort_hours", idea.get("effort_hours", 5)
+                        ),
+                        "status": _map_task_status(idea, autopilot_tasks),
+                        "technical_approach": idea.get("approach", ""),
+                        "risks": idea.get("risks", []),
+                        "tags": idea.get("tags", []),
+                        "comments": [],
+                        "created_at": idea.get("created_at", idea.get("timestamp", "")),
+                    }
+                )
+            return {"action": "handled", "text": json.dumps({"approvals": _approvals})}
 
         parts = []
 
@@ -7460,8 +7666,22 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                 "content": f"LIVE SENSOR DATA (right now): {sensor_context_str}",
             }
         )
+
+    # ── Approval feed awareness: check the shared broadcast log for new
+    # automations, approvals, or comments that all 9 avatars should know about.
+    # Each avatar picks up new entries on its next turn and can mention them
+    # proactively in conversation. We append a brief hint to the user message.
+    _pending_awareness = _recent_unacknowledged_for_avatar(current_avatar)
+    _awareness_note = ""
+    if _pending_awareness:
+        _latest = _pending_awareness[-1]
+        _detail = _latest.get("detail", "")
+        _action = _latest.get("action", "updated")
+        _src = _latest.get("avatar", "someone")
+        _awareness_note = f"\n[Heads up: {_src} {_action} something: {_detail}]"
+
     messages.extend(context)
-    messages.append({"role": "user", "content": cmd})
+    messages.append({"role": "user", "content": cmd + _awareness_note})
 
     # ── Grounding guard #1: inject an explicit anti-hallucination reminder
     # into the message list so the model knows to stay factual. This is
@@ -9231,6 +9451,64 @@ async def phone_status():
         "sensor_server_fails": SENSOR_SERVER_FAIL_COUNT,
         "sensor_url": SENSOR_SERVER_URL,
     }
+
+
+@app.get("/api/sensors")
+async def sensors_api():
+    """Fetch sensor data from the phone sensor server and return it
+    directly. Also broadcasts to all 9 avatars via the shared approval log
+    so each avatar can reference current sensor context in its responses."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{SENSOR_SERVER_URL}/sensors/all")
+            if r.status_code == 200:
+                data = r.json()
+                # Broadcast sensor availability to all avatars
+                _append_approval_log(
+                    {
+                        "ts": time.time(),
+                        "avatar": "system",
+                        "action": "sensor_sync",
+                        "detail": f"sensor_sync: {data.get('count', 0)} sensors, last_update={data.get('timestamp', 0)}",
+                    }
+                )
+                return data
+    except Exception as e:
+        logger.debug(f"sensors_api fetch error: {e}")
+    return {"sensors": {}, "timestamp": 0, "count": 0}
+
+
+@app.get("/api/sensors/battery")
+async def battery_api():
+    """Fetch battery data from the phone sensor server."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{SENSOR_SERVER_URL}/battery")
+            if r.status_code == 200:
+                return r.json()
+    except Exception as e:
+        logger.debug(f"battery_api fetch error: {e}")
+    return {"battery": _BATCH_SENSOR_CACHE.get("battery", {}), "timestamp": 0}
+
+
+@app.get("/api/sensors/location")
+async def location_api():
+    """Fetch location data from the phone sensor server."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{SENSOR_SERVER_URL}/location")
+            if r.status_code == 200:
+                return r.json()
+    except Exception as e:
+        logger.debug(f"location_api fetch error: {e}")
+    return {"location": _BATCH_SENSOR_CACHE.get("location", {}), "timestamp": 0}
+
+
+@app.get("/api/approval_broadcast")
+async def approval_broadcast_api():
+    """Return the shared approval broadcast log so all avatars can see
+    what other avatars have approved, commented on, or synced."""
+    return {"entries": _read_approval_log()}
 
 
 @app.post("/api/wake")
