@@ -15,7 +15,60 @@ RUN npm run build
 RUN npm run build --workspace web
 
 ###############################################
-# Stage 2 — Open Connector runtime (Node.js)
+# Stage — OpenLive Agent (Node.js + pnpm workspace)
+###############################################
+FROM node:22-slim AS ol-agent-build
+RUN corepack enable && corepack prepare pnpm@11.5.2 --activate
+WORKDIR /ol-agent
+COPY openlive/package.json openlive/pnpm-lock.yaml openlive/pnpm-workspace.yaml ./
+COPY openlive/tsconfig.base.json ./
+COPY openlive/.env ./.env
+COPY openlive/services/agent/package.json ./services/agent/
+COPY openlive/packages/db/package.json ./packages/db/
+COPY openlive/packages/harness/package.json ./packages/harness/
+COPY openlive/packages/shared/package.json ./packages/shared/
+RUN pnpm install --frozen-lockfile
+COPY openlive/services/agent/ ./services/agent/
+COPY openlive/packages/db/ ./packages/db/
+COPY openlive/packages/harness/ ./packages/harness/
+COPY openlive/packages/shared/ ./packages/shared/
+RUN mkdir -p /ol-agent/data /ol-agent/voice
+
+###############################################
+# Stage — OpenLive Web (Next.js build)
+###############################################
+FROM node:22-slim AS ol-web-build
+RUN corepack enable && corepack prepare pnpm@11.5.2 --activate
+WORKDIR /ol-web
+COPY openlive/package.json openlive/pnpm-lock.yaml openlive/pnpm-workspace.yaml ./
+COPY openlive/tsconfig.base.json ./
+COPY openlive/apps/web/package.json ./apps/web/
+COPY openlive/packages/db/package.json ./packages/db/
+COPY openlive/packages/harness/package.json ./packages/harness/
+COPY openlive/packages/shared/package.json ./packages/shared/
+RUN pnpm install --frozen-lockfile
+COPY openlive/apps/web/ ./apps/web/
+COPY openlive/packages/db/ ./packages/db/
+COPY openlive/packages/harness/ ./packages/harness/
+COPY openlive/packages/shared/ ./packages/shared/
+RUN node apps/web/scripts/copy-voice-assets.mjs
+# Remove output: "standalone" since we use a custom server (server.mjs) with
+# Next.js's own API, not the standalone server.js. Standalone mode breaks custom servers.
+RUN sed -i 's/  output: "standalone",//' apps/web/next.config.ts
+RUN NODE_ENV=production pnpm --filter @openlive/web build
+RUN mkdir -p /ol-web/data
+
+###############################################
+# Stage — Lilly Bridge (Node.js → connects OpenLive to Lilly AI)
+###############################################
+FROM node:22-slim AS lilly-bridge-build
+WORKDIR /bridge
+COPY openlive/services/bridge/package.json ./
+RUN npm install
+COPY openlive/services/bridge/src/ src/
+
+###############################################
+# Stage — Open Connector runtime (Node.js)
 ###############################################
 FROM node:24-alpine AS oc-runtime
 WORKDIR /app
@@ -82,6 +135,33 @@ ENV OOMOL_CONNECT_DATA_DIR=/app/data/connect
 ENV NODE_ENV=production
 ENV PORT=3002
 
+# OpenLive Agent runtime
+# Install tsx globally (pnpm shims have build-time paths; global tsx works for ESM)
+RUN npm install -g tsx 2>/dev/null
+
+# Copy pnpm workspace node_modules and agent source
+# NOTE: Must use same path depth (/ol-agent) as build stage to preserve
+# relative symlinks in pnpm workspace node_modules.
+COPY --from=ol-agent-build /ol-agent/node_modules/ /ol-agent/node_modules/
+COPY --from=ol-agent-build /ol-agent/services/agent/ /ol-agent/services/agent/
+COPY --from=ol-agent-build /ol-agent/packages/ /ol-agent/packages/
+RUN mkdir -p /ol-agent/data /ol-agent/voice
+ENV OL_DATA_DIR=/ol-agent/data
+
+# OpenLive Web runtime
+# Must use same path depth (/ol-web) as build stage to preserve pnpm symlinks.
+COPY --from=ol-web-build /ol-web/node_modules/ /ol-web/node_modules/
+COPY --from=ol-web-build /ol-web/apps/web/node_modules/ /ol-web/apps/web/node_modules/
+COPY --from=ol-web-build /ol-web/apps/web/.next/ /ol-web/apps/web/.next/
+COPY --from=ol-web-build /ol-web/apps/web/server.mjs /ol-web/apps/web/server.mjs
+COPY --from=ol-web-build /ol-web/apps/web/public/ /ol-web/apps/web/public/
+COPY --from=ol-web-build /ol-web/packages/ /ol-web/packages/
+RUN mkdir -p /ol-web/data
+
+# Lilly Bridge (connects OpenLive to Lilly AI)
+COPY --from=lilly-bridge-build /bridge/node_modules/ /opt/openlive-bridge/node_modules/
+COPY --from=lilly-bridge-build /bridge/src/ /opt/openlive-bridge/src/
+
 # Copy the startup script
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
@@ -92,6 +172,6 @@ COPY lilly_skills.json .
 COPY auth.py .
 COPY auth0_auth.py .
 
-EXPOSE 8098 8099 3002
+EXPOSE 8098 8099 3000 3002 8787 8788
 
 CMD ["/start.sh"]

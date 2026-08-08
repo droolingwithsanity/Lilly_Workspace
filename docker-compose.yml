@@ -10,12 +10,16 @@ services:
       - /root/ai-server:/root/ai-server:rw
       - lilly-data:/app/data
       - connector-data:/app/data/connect
+      - openlive-data:/opt/openlive-agent/data
+      - openlive-voice:/opt/openlive-agent/voice
+      - openlive-data:/opt/openlive-web/data
     env_file:
       - .env
       - .env.openconnector
     environment:
       - PORT=8098
-      - OLLAMA_URL=${OLLAMA_URL:-http://100.93.131.114:11434}
+      - OLLAMA_URL=${OLLAMA_URL:-http://127.0.0.1:11434}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
       - PREFER_BACKEND=${PREFER_BACKEND:-ollama}
       - SENSOR_SERVER_URL=${SENSOR_SERVER_URL:-http://100.115.234.87:8099}
       - TERMUX_SSH_HOST=${TERMUX_SSH_HOST}
@@ -39,8 +43,10 @@ services:
       - PIPER_VOICE=/voices/lilly_voice.onnx
       # Cascade model tiers
       - SMALL_MODEL=${SMALL_MODEL:-qwen2.5:1.5b}
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-Ternary-Bonsai-27B-Q2_g64}
-      - FAST_MODEL=${FAST_MODEL:-Ternary-Bonsai-27B-Q2_g64}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
+      - FAST_MODEL=${FAST_MODEL:-qwen2.5:7b}
+      # OpenLive settings
+      - OPENLIVE_AGENT_SECRET=${OPENLIVE_AGENT_SECRET:-lilly-openlive-secret-2026}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -48,3 +54,5 @@ services:
 volumes:
   lilly-data:
   connector-data:
+  openlive-data:
+  openlive-voice:

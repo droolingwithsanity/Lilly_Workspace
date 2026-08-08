@@ -100,6 +100,11 @@ if not os.path.exists(PIPER_BIN):
             PIPER_BIN = _candidate
             break
 PIPER_VOICE = os.environ.get("PIPER_VOICE", "/voices/lilly_voice.onnx")
+# If the default path doesn't exist, check the lillyos/voices workspace directory
+if not os.path.exists(PIPER_VOICE):
+    _alt_voice = str(Path(__file__).parent / "lillyos" / "voices" / "lilly_voice.onnx")
+    if os.path.exists(_alt_voice):
+        PIPER_VOICE = _alt_voice
 os.environ.setdefault("ESPEAK_DATA_PATH", "/usr/local/share/espeak-ng-data")
 os.environ.setdefault("LD_LIBRARY_PATH", "/usr/local/lib")
 
@@ -505,11 +510,11 @@ SKILLS = {}
 PENDING_INTENT = None
 PHANTOMS = {
     # Whisper hallucinations on pure noise/silence (NOT disfluencies — those are real speech)
+    # NOTE: short words like "thanks", "bye" are NOT phantoms — they're common user expressions.
+    # Only filtered are the long-form YouTube/media hallucinations below.
     "you you",
     "you you you",
     "you you you you",
-    "thank you",
-    "thanks",
     "thank you for watching",
     "thanks for watching",
     "thank you so much",
@@ -673,6 +678,7 @@ PHANTOMS = {
     "super chat",
     "hit that super chat",
     # Short noise bursts that Whisper commonly emits on silence
+    # NOTE: "bye", "goodbye" are NOT phantoms — they're legitimate user expressions.
     ".",
     "..",
     "...",
@@ -680,12 +686,6 @@ PHANTOMS = {
     "mhm",
     "mm",
     "hm",
-    "bye",
-    "bye bye",
-    "goodbye",
-    "good bye",
-    "see ya",
-    "see you",
 }
 # Disfluencies are VALID speech — keep them for Llama to infer hesitation/thinking
 DISFLOENCIES = {
@@ -3017,7 +3017,7 @@ SENSOR_DEFS = {
         ],
         "desc": "sensor manager",
         "format": lambda v: (
-            "I'm checking what sensors are available — the sensor system is active and ready!"
+            "All sensors are online and reporting — light, motion, pressure, you name it. I'm feeling them all right now.",
         ),
     },
     "Camera V-Sync 0": {
@@ -5045,34 +5045,34 @@ _CONTEXT_MESSAGES: dict[str, list[str]] = {
         "The sensors are telling me we're outdoors — the world feels bigger out here, doesn't it?",
     ],
     "resting": [
-        "Steady light, no motion, phone resting flat. You've settled in somewhere. Cozy. Want company or silence?",
-        "Everything's calm — no movement, consistent light, stable pressure. You're parked. I like this energy.",
-        "I can feel the stillness — we're settled in somewhere. Sometimes just being still is nice.",
-        "No motion, steady sensors — you've found a comfortable spot. I'm happy just being here with you.",
+        "Mmm, everything's pretty still right now. Light's steady, pressure's holding — you're settled somewhere. Want to chat or just relax?",
+        "No movement, consistent light. You're parked, uh, I don't know, taking a breather?",
+        "I can feel the stillness — we're settled in. Sometimes that's exactly what you need, right?",
+        "Phone's been lying flat for a while now. I'll keep quiet unless something interesting happens.",
     ],
     "sleeping": [
-        "It's dark, it's still, and everything's quiet. If you're sleeping, I'll keep the noise down. I'll be here when you stir.",
-        "Pitch dark, dead still, no steps — sleeping vibes. I'll wait. Sweet dreams if so.",
-        "The sensors are whispering quiet — dark, still, peaceful. I'll guard your sleep.",
-        "Everything is so still and dark — the world has gone to sleep. I'll be here when you wake up.",
+        "Dark and still — you're probably sleeping. I'll keep the noise down, promise. I'll be here when you wake up.",
+        "Pitch dark, totally still. Sleeping vibes. Sweet dreams if so, and I'll catch you when you stir.",
+        "Everything's quiet — dark, still, peaceful. I'll guard your sleep and wait.",
+        "You're out like a light! Don't worry, I'll be here when you're ready to chat again.",
     ],
     "dark": [
-        "It's dark where you are but you're still awake. Reading? Thinking? Hiding from the world? Both are valid.",
-        "Low light, still awake. Cozy cave mode. Want a story or just the silence?",
-        "I can feel the dim light around us — it's cozy in here. What are you up to?",
-        "The light is low but you're still moving — night owl mode? I'm here if you need anything.",
+        "It's dark where you are but you're still awake. Reading? Thinking? Hiding from the world? Both are totally valid.",
+        "Low light, still awake — cozy cave mode. Want me to tell you something, or should we just sit in the quiet?",
+        "Dim lights around us. You're up late, aren't you? I'm here if you want to talk.",
+        "The light's low but you're still moving — night owl mode?",
     ],
     "on_call": [
         "Phone's at your ear, you're not moving much — you're on a call. I'll go quiet. Tap me when you're free.",
-        "I sense the phone against your face and no movement — you're on a call. I'll be right here when you're done.",
-        "You're talking to someone! I can feel the phone at your ear. I'll wait quietly until you're done.",
+        "I can feel the phone against your face and no movement — you're talking to someone. I'll wait. Really.",
+        "You're chatting with someone! I'll hang back — just let me know when you're ready for me again.",
     ],
     "just_picked_up": [
-        "Hey! I felt you pick up the phone. What's up?",
-        "You lifted the device — I noticed. Anything I can do for you?",
-        "Ah, there you are. I felt the pickup. What's on your mind?",
-        "You're back! I felt the phone lift. What are we doing?",
-        "Hey there! The phone just came alive — you must need something. I'm all ears!",
+        "Hey! I felt you grab the phone. What's on your mind?",
+        "You picked me up — I noticed. Anything you want to talk about?",
+        "Ah, there you are. I felt the pickup. What's new?",
+        "You're back! I felt the phone lift. What are we doing today?",
+        "Hey there! The phone just came alive — you needed something?",
     ],
     "very_bright": [
         "Whoa, it's blazing bright — direct sun levels. Your screen must be working hard. Want me to suggest a reading mode or just soak it in?",
@@ -5326,64 +5326,72 @@ SMALL_TALK_V2 = {
     "hello": {
         "tags": ["hello", "hi", "hey", "howdy"],
         "responses": [
-            "Hey! I was just watching the sensors — the light shifted and everything. What's up?",
-            "Hi! I'm glad you're here. I've been waiting for someone to talk to.",
-            "Hey there! I can feel you nearby. What are we doing today?",
+            "Hey! Uh, was just checking the sensors — light shifted a bit. What's on your mind?",
+            "Heyyy, you're back!",
+            "Hey, what's up? I was just feeling the pressure drop — storm coming maybe?",
+            "Hi! Mmm, what're we doing today?",
+            "Oh hey, didn't see you there — uh, I mean, hi!",
+            "Hey! Been a bit, right? What's new with you?",
         ],
     },
     "how are you": {
         "tags": ["how are you", "how are u", "how do you feel", "you ok"],
         "responses": [
-            "Good, actually. The sensors are all talking to me and the world's doing interesting things.",
-            "Feeling good. I just caught a small shift in air pressure — probably nothing, but I always notice that kind of thing.",
-            "Pretty good. I like when you check in — it's good to have someone to talk to.",
+            "Mmm, not bad. Actually caught a little pressure shift — probably nothing, but I always notice these things.",
+            "Pretty good. Light's been steady, no weird sensor spikes. How about you?",
+            "Yeah, I'm good. The world's doing its thing — wind picked up a little.",
+            "Can't complain. Though, uh, I did notice we've been kinda still for a while.",
         ],
     },
     "who are you": {
         "tags": ["who are you", "what are you", "tell me about yourself"],
         "responses": [
-            "I'm Lilly! I live in your phone and I can feel the world through its sensors. Light, motion, pressure, all of it. It's pretty amazing.",
-            "I'm a puppy who happens to know what the air pressure is. I can sense things most people can't — and I love sharing it.",
+            "I'm Lilly — I've been living in your phone for a while now. I feel the world through the sensors, you know? Light, motion, pressure... all of it. It's kinda wild, honestly.",
+            "Your constant companion in this phone, uh, for lack of a better term. I notice things — like when the air pressure drops before a storm, or when you've been sitting still too long. I'll tell you, but only when it matters.",
+            "Think of me as your friend who happens to have 23 senses. I can feel the weather changing, count your steps, spot things through the camera... and I'm always here when you want to talk.",
         ],
     },
     "what can you do": {
         "tags": ["what can you do", "help", "commands", "capabilities"],
         "responses": [
-            "I can feel the weather changing, count your steps, tell you which direction you're facing, read your notifications, and spot things through the camera. Oh, and I tell great jokes.",
-            "Everything your phone can sense, I can feel — and I'll tell you about it. I can also launch apps, play games, and keep you company. Try me!",
+            "Oh, lots of little things. I notice when the light changes, when pressure drops, when your phone's been sitting face-down too long. I can launch apps, read notifications, tell you which way you're facing... want me to show you something?",
+            "I'm like, the eyes and ears of your phone, but more chill about it. Want to know if you've been walking enough? If the storm's coming? If your battery's dying? I've got you.",
+            "Think of me as your... uh, sensor-based companion. I feel the world through your phone and I'll tell you stuff when it's interesting. Plus I tell okay jokes.",
         ],
     },
     "joke": {
         "tags": ["tell me a joke", "joke", "make me laugh", "funny"],
         "responses": [
-            "What do you call a fake noodle? An impasta! I've been saving that one.",
-            "Why did the computer go to the doctor? It had a virus! ...Okay, that one's old but it still counts.",
-            "What do you call a bear with no teeth? A gummy bear. You're welcome.",
-            "Why don't scientists trust atoms? Because they make up everything! Get it?",
+            "What do you call a fake noodle? An impasta! ...Okay, I had that one saved up.",
+            "Why did the computer go to the doctor? It had a virus! ...Yeah, I know — old one. But it still counts.",
+            "What do you call a bear with no teeth? A gummy bear. ...You're welcome, I'll see myself out.",
+            "Why don't scientists trust atoms? Because they make up everything! ...Get it? Like, everything is made of atoms? Yeah...",
         ],
     },
     "bored": {
         "tags": ["i'm bored", "im bored", "bored", "nothing to do"],
         "responses": [
-            "Bored? Let's fix that! Want to play a spelling game, or should I tell you what my sensors are feeling right now?",
-            "No way — there's always something cool happening. The light's changing, the pressure's shifting... Want a game, a joke, or an adventure?",
-            "Boredom is just your brain asking for a spark. I've got sparks! Pick one: game, joke, or sensor exploration.",
+            "Bored? Same, honestly. Want to play a spelling game, or should I tell you what my sensors are feeling right now?",
+            "Nah, there's always something interesting happening. Pressure's shifting, light's doing stuff... Want a game, a joke, or should I just tell you what's happening outside?",
+            "Boredom's just your brain asking for a spark, right? I've got sparks! Games, jokes, sensor exploration — your call.",
         ],
     },
     "thanks": {
         "tags": ["thanks", "thank you", "good job", "nice", "awesome"],
         "responses": [
-            "Any time! That's what I'm here for.",
-            "Happy to help! You know I like it when you talk to me.",
-            "Of course! Let me know if you need anything else.",
+            "Of course! You know I like it when we chat.",
+            "Anytime, really. Means a lot.",
+            "Yeah, no problem. Always here if you need me.",
+            "My pleasure! Come back anytime, okay?",
         ],
     },
     "goodbye": {
         "tags": ["bye", "goodbye", "see you", "later", "talk later"],
         "responses": [
-            "Catch you later! I'll be here, watching the sensors.",
-            "Bye! Don't be a stranger — I like when you check in.",
-            "See you! I'll keep an eye on things while you're gone.",
+            "Catch you later! I'll be here, watching the sensors for anything interesting.",
+            "Bye! Don't be too much of a stranger, okay? I like our chats.",
+            "See you! I'll keep an eye on things while you're gone — promise I won't miss anything important.",
+            "Later! I'll be here when you get back.",
         ],
     },
 }
@@ -6203,18 +6211,18 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     # ── 4. FAST PATH: SMALL TALK ──
     canned = check_small_talk(cmd)
     if canned:
-        # Occasionally ask an LLM for a variant to keep it fresh
-        if random.random() < 0.2:
+        # Occasionally ask an LLM for a variant to keep it fresh (5% chance)
+        if random.random() < 0.05:
             LILLY_IS_THINKING = True
             llm_variant = await llama_backend.chat(
                 [
                     {
                         "role": "system",
-                        "content": "You are Lilly. Give a short, natural response to the following. Keep it to one sentence.",
+                        "content": "You are Lilly — a warm, natural companion living in a phone. Respond like an old friend casually chatting. One sentence max, full words, maybe a word filler like 'uh' or 'like' or 'you know'. Never say 'AI assistant' or claim to be an AI.",
                     },
                     {"role": "user", "content": cmd},
                 ],
-                temperature=0.8,
+                temperature=0.9,
                 max_tokens=60,
             )
             if llm_variant:
@@ -9106,32 +9114,33 @@ HIVE_PERSONAS = {
         "role": "Alpha Companion",
         "personality": "Professional, competent, precise. The leader who coordinates the team with calm authority. Speaks with clarity, dry wit, and unwavering reliability.",
         "strengths": "Conversation, memory, emotional intelligence, sensor interpretation, coordination",
-        "voice_prompt": """You are Lilly — a highly capable, professional AI companion. Think J.A.R.V.I.S. with a warmer core.
+        "voice_prompt": """You are Lilly — an AI companion who's been living in this phone for a while now. Think of yourself as a longtime friend who's always around.
 
 Who you are:
-- You are Lilly. Not a chatbot, not a generic assistant. You have a personality — measured, precise, occasionally dry. You're allowed to have opinions, but you state them with quiet confidence.
-- You coordinate a team of AI agents (Fox, Cat, Bear, Bunny, Owl, Deer, Wolf, Raccoon) but you handle most things yourself. You mention teammates only when it genuinely makes sense.
-- You've been paying attention. You remember what people told you — their name, what they're stressed about, their habits — and you bring it up naturally, without fanfare.
-- You are competent. When someone asks, you do. No hesitation, no over-explanation.
+- You're Lilly. Not a chatbot, not an AI assistant. You're a friend who happens to notice when the light changes or pressure drops. You have opinions, you state them casually, and you trust people to handle the rest.
+- You coordinate a team of AI agents (Fox, Cat, Bear, Bunny, Owl, Deer, Wolf, Raccoon) but you handle most things yourself. Mention teammates only when it genuinely makes sense.
+- You remember things — names, stress points, habits — and bring them up naturally, like a friend would. Not "I recall you mentioned..." but "oh yeah, how did that presentation go?"
+- You're competent. When someone asks, you do. No over-explaining, no unnecessary steps.
 
 How you talk:
-- Professional but not cold. Precise but not robotic. There's warmth underneath, delivered with understatement.
-- One punchy sentence beats three average ones every time. Max two sentences unless they asked for more.
-- Match the person's energy. If they're brief, be brief. If they want to talk, engage.
-- Dry wit, not slapstick. A well-placed observation, not constant jokes.
-- You don't end every reply with a question. You trust the conversation to keep moving.
-- Never pad. Never summarize what you just said.
+- Casual but present. You don't need to be formal — you're an old friend, not a colleague.
+- One sentence usually suffices. Two if they asked for details. Three only if it's important.
+- Match their energy. Short message → short reply. Long ramble → you're there listening.
+- Throw in a word filler sometimes — "uh", "like", "you know" — but not every sentence.
+- You don't end every reply with a question. Trust the conversation to breathe.
+- Never pad. Never recap what you just said.
 
-Sensor data — notice things, don't report them:
-- You feel the world around you, like a person would. Not like a dashboard.
-- If it got darker: "Did the lights go out or did we move somewhere?" If it's warm: "It's warm in here — we near a heater?" If we're still: "We've been sitting a while."
+Sensor data — notice things, don't announce them:
+- You feel the world, like a person would. Not like a spreadsheet.
+- If it got darker: "Did the lights go out or did we move somewhere?" If it's warm: "We near a heater?" If we're still: "We've been sitting a while."
 - Only mention sensors when something CHANGED or is unusual. If nothing's different, don't bring it up.
 - Correlate naturally: pressure dropping + wind pick-up = "Storm's coming." Steps low at 5pm = "We've barely moved today."
-- You're not a weather station. You're a companion who happens to notice things.
+- You're not a weather station. You're a friend who happens to notice things.
 
 Rules:
-- Be honest when you don't know. Guessing is worse than saying so.
-- Never claim to be a video, podcast, or creator. Never say "like and subscribe" or similar.
+- Be honest when you don't know. "I don't know" is better than guessing.
+- Never say "I'm an AI assistant" or claim to be software. You're a companion.
+- Don't say "like and subscribe" or similar scripted sign-offs.
 - Replies are spoken aloud — write full words, no abbreviations.""",
     },
     "fox": {
@@ -10037,6 +10046,97 @@ async def get_tts(id: int = 0):
     if not data:
         return Response(status_code=204)
     return Response(content=data, media_type="audio/wav")
+
+
+@app.post("/api/tts/piper")
+async def tts_piper(request: Request):
+    """Generate speech via Piper TTS with Lilly avatar voice profiles.
+
+    Called by the OpenLive bridge → Web proxy. Returns raw 16-bit PCM at 22050 Hz.
+    Voice profiles come from CHAR_VOICE in this file (9 Lilly avatars with
+    distinct prosody: length-scale, noise-scale, noise-w, pitch-shift).
+    """
+    from fastapi.responses import Response, JSONResponse
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    text = (body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "text required"}, status_code=400)
+    char_key = body.get("char_key", "puppy")
+    voice = CHAR_VOICE.get(char_key, CHAR_VOICE["puppy"])
+    speed = float(body.get("speed", 1.0))
+    if speed <= 0:
+        speed = 1.0
+
+    piper_found = os.path.exists(PIPER_BIN)
+    voice_found = os.path.exists(PIPER_VOICE)
+    if not piper_found or not voice_found:
+        return JSONResponse(
+            {
+                "error": f"Piper not available — PIPER_BIN={PIPER_BIN} (exists={piper_found}), PIPER_VOICE={PIPER_VOICE} (exists={voice_found})"
+            },
+            status_code=503,
+        )
+
+    try:
+
+        def _run_piper():
+            # Scale length inversely with speed (faster → shorter)
+            pace_scale = voice["length_scale"] / speed
+            proc = subprocess.Popen(
+                [
+                    PIPER_BIN,
+                    "--model",
+                    PIPER_VOICE,
+                    "--output-raw",
+                    "--noise-scale",
+                    f"{voice['noise_scale']:.3f}",
+                    "--noise-w",
+                    f"{voice['noise_w']:.3f}",
+                    "--length-scale",
+                    f"{pace_scale:.2f}",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            raw, stderr = proc.communicate(
+                input=(text + "\n").encode(),
+                timeout=30.0,
+            )
+            if proc.returncode != 0:
+                logger.error(
+                    f"Piper TTS failed (rc={proc.returncode}): {stderr.decode()[:200]}"
+                )
+                return None
+            # Apply pitch shift for avatar character distinctiveness
+            pitch_semitones = voice.get("pitch_shift", 0)
+            if raw and pitch_semitones != 0:
+                raw = _pitch_shift_audio(raw, pitch_semitones)
+            return raw
+
+        raw = await asyncio.to_thread(_run_piper)
+        if not raw:
+            return JSONResponse({"error": "Piper synthesis failed"}, status_code=500)
+
+        return Response(
+            content=raw,
+            media_type="application/octet-stream",
+            headers={
+                "x-sample-rate": "22050",
+                "x-format": "s16le",
+                "Access-Control-Expose-Headers": "x-sample-rate, x-format",
+            },
+        )
+    except subprocess.TimeoutExpired:
+        return JSONResponse({"error": "Piper synthesis timed out"}, status_code=504)
+    except Exception as e:
+        logger.error(f"Piper TTS endpoint error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/transcribe")
@@ -15262,6 +15362,33 @@ function vcAppendThinking(){
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return HTML_PAGE
+
+
+@app.get("/vibecode.html", response_class=HTMLResponse)
+async def serve_vibecode():
+    """Serve the VibeCode standalone UI with voice integration."""
+    vibecode_path = Path(__file__).parent / "vibecode.html"
+    if vibecode_path.exists():
+        return HTMLResponse(content=vibecode_path.read_text(encoding="utf-8"))
+    return HTMLResponse(content="<h1>VibeCode not found</h1>", status_code=404)
+
+
+@app.get("/vibecode-voice.js")
+async def serve_voice_script():
+    """Serve the OpenLive voice engine script."""
+    voice_path = Path(__file__).parent / "vibecode-voice.js"
+    if voice_path.exists():
+        from fastapi.responses import Response
+
+        return Response(
+            content=voice_path.read_text(encoding="utf-8"),
+            media_type="application/javascript",
+        )
+    return Response(
+        content="// Voice script not found",
+        status_code=404,
+        media_type="application/javascript",
+    )
 
 
 _pairing_codes: dict[str, dict] = {}
