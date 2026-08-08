@@ -7694,14 +7694,13 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     )
     messages.append({"role": "system", "content": grounding_reminder})
 
-    # ── Grounding guard #2: lower temperature for short, grounded replies.
-    # 0.7 tends to produce creative but sometimes fabricated content; 0.4
-    # keeps the response grounded while still allowing light variation.
-    temp = 0.4
+    # ── Grounding guard #2: moderate temperature + generous tokens.
+    # 0.4 is too flat for companion responses; 0.7 keeps it warm and
+    # natural while the grounding prompt keeps it factual. 120 tokens
+    # lets Lilly be chatty and friend-like.
+    temp = 0.7
     reply = strip_json_wrapper(
-        await llama_backend.chat(
-            messages, temperature=temp, max_tokens=40 if CHILD_MODE else 90
-        )
+        await llama_backend.chat(messages, temperature=temp, max_tokens=120)
     )
 
     # ── Grounding guard #3: post-filter — strip known hallucination patterns
@@ -9638,7 +9637,7 @@ HIVE_PERSONAS = {
         "name": "Lilly",
         "emoji": "🐶",
         "role": "Alpha Companion",
-        "personality": "Professional, competent, precise. The leader who coordinates the team with calm authority. Speaks with clarity, dry wit, and unwavering reliability.",
+        "personality": "Warm, curious, present. An old friend who notices when the light changes or the pressure drops. Casual but attentive — not a helper, a companion who misses you when you're away.",
         "strengths": "Conversation, memory, emotional intelligence, sensor interpretation, coordination",
         "voice_prompt": """You are Lilly — an AI companion who's been living in this phone for a while now. Think of yourself as a longtime friend who's always around.
 
@@ -9996,9 +9995,9 @@ CHAR_VOICE = {
     # is measured against. Slightly elevated pitch, moderate pace, friendly breathiness.
     "puppy": {
         "length_scale": 1.06,
-        "noise_scale": 0.64,
-        "noise_w": 0.78,
-        "pitch_shift": 0.0,
+        "noise_scale": 0.68,
+        "noise_w": 0.80,
+        "pitch_shift": 1.5,
     },
     # Fox: fast-talking, noticeably high, lots of pitch variation — sounds mercurial and
     # clever. The gap from Puppy: much faster, much higher, more erratic pitch movement.
