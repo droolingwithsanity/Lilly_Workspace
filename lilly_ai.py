@@ -5952,6 +5952,95 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         await speak(reply)
         return {"action": "handled", "text": reply}
 
+    # ── AUTOPILOT INTEGRATION: discuss self-improvement ideas ──────────────
+    # User can ask: "what should I improve", "any improvement ideas",
+    # "what does my autopilot say", "show me my ideas", "what's my health"
+    improvement_triggers = [
+        "improvement ideas",
+        "what should i improve",
+        "what to improve",
+        "improve lilly",
+        "improve yourself",
+        "new ideas",
+        "feature ideas",
+        "autopilot",
+        "what does my autopilot",
+        "show me my ideas",
+        "what ideas",
+        "self improvement",
+        "build suggestions",
+        "what should i build",
+        "health score",
+        "system health",
+        "how healthy",
+        "product health",
+    ]
+    if any(t in cmd for t in improvement_triggers):
+        # Fetch ideas and health from autopilot
+        autopilot_ideas = []
+        autopilot_health = None
+        autopilot_tasks = []
+
+        try:
+            import importlib
+
+            autopilot_mod = importlib.import_module("lilly_autopilot_client")
+
+            autopilot_ideas = await autopilot_mod.get_lilly_improvement_ideas()
+            autopilot_health = await autopilot_mod.get_lilly_health()
+
+            if autopilot_mod.LillyAutopilotClient:
+                _client = await autopilot_mod.LillyAutopilotClient()
+                autopilot_tasks = await _client.list_tasks()
+                await _client.close()
+
+        except Exception as e:
+            logger.debug(f"Autopilot fetch error: {e}")
+
+        parts = []
+
+        # Health score
+        if autopilot_health and isinstance(autopilot_health, dict):
+            _score = autopilot_health.get(
+                "ec8e611b-6f2a-4f9c-90f6-f7e3505bc180", autopilot_health.get("score", 0)
+            )
+            parts.append(f"My system health score is {_score}%")
+
+        # Ideas
+        if autopilot_ideas:
+            _idea_text = autopilot_mod.format_ideas_for_lilly(autopilot_ideas)
+            parts.append(_idea_text)
+        else:
+            parts.append(
+                "My research system doesn't have new ideas right now — want me to generate some?"
+            )
+
+        # Tasks
+        if autopilot_tasks:
+            _task_names = [
+                t.get("title", "") for t in autopilot_tasks if t.get("title")
+            ]
+            _in_progress = [
+                t for t in autopilot_tasks if t.get("status") == "in_progress"
+            ]
+            _todo = [
+                t for t in autopilot_tasks if t.get("status") in ("todo", "pending")
+            ]
+            if _in_progress:
+                parts.append(
+                    f"I'm currently working on: {', '.join(t['title'] for t in _in_progress)}"
+                )
+            if _todo:
+                parts.append(f"Next up: {', '.join(t['title'] for t in _todo[:2])}")
+
+        reply = "; ".join(p for p in parts if p)
+
+        await memory.add("user", cmd)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
     # ── KID MODE TOGGLE via text command ──
     kid_on = any(
         w in cmd
