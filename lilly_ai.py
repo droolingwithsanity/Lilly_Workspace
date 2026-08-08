@@ -5915,8 +5915,9 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         voice_ok = os.path.exists(PIPER_VOICE)
         llm_ok = False
         try:
-            _r = await _get_ollama_client().get(f"{OLLAMA_URL}/api/tags", timeout=3.0)
-            llm_ok = _r.status_code == 200
+            async with httpx.AsyncClient(timeout=3.0) as _oc:
+                _r = await _oc.get(f"{OLLAMA_URL}/api/tags")
+                llm_ok = _r.status_code == 200
         except Exception:
             pass
 
@@ -8291,6 +8292,7 @@ async def task_scheduler_loop():
 async def proactive_suggestion_loop():
     """Background: proactively suggest things based on learned interests, time of day, and context."""
     await asyncio.sleep(60)  # wait for initial conversations
+    global LILLY_IS_THINKING, LILLY_IS_SPEAKING, WAITING_FOR_PROMPT
     last_suggestion = 0.0
     SUGGESTION_COOLDOWN = 600  # 10 minutes between suggestions
 
