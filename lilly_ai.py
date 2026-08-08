@@ -5794,6 +5794,101 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     if not cmd:
         cmd = "hello"
 
+    # ── TTS Troubleshooting — detect common TTS failure reports and respond with
+    #   specific diagnostic steps instead of a generic fallback. Triggered by
+    #   phrases like "TTS not working", "no audio", "can't hear", etc.
+    #   This runs early (before skill/LLM lookup) so users get immediate help.
+    tts_trouble_patterns = [
+        "tts not working",
+        "tts is not working",
+        "no audio",
+        "no sound",
+        "cant hear",
+        "not speaking",
+        "not saying",
+        "voice not working",
+        "no voice",
+        "audio is broken",
+        "broken audio",
+        "piper not working",
+    ]
+    if any(t in cmd for t in tts_trouble_patterns):
+        # Run a quick diagnostic
+        diagnostics = []
+        piper_ok = os.path.exists(PIPER_BIN)
+        voice_ok = os.path.exists(PIPER_VOICE)
+        espeak_ok = os.path.exists(
+            os.environ.get("ESPEAK_DATA_PATH", "/usr/local/share/espeak-ng-data")
+        )
+
+        diagnostics.append(
+            f"Piper binary: {'OK' if piper_ok else 'MISSING'} ({PIPER_BIN})"
+        )
+        diagnostics.append(
+            f"Voice model: {'OK' if voice_ok else 'MISSING'} ({PIPER_VOICE})"
+        )
+        diagnostics.append(f"eSpeak data: {'OK' if espeak_ok else 'MISSING'}")
+        diagnostics.append(
+            f"Audio cache entries: {len(AUDIO_CACHE) if AUDIO_CACHE else 0}"
+        )
+
+        # Quick test synthesis
+        try:
+            import subprocess
+
+            _diag_voice = CHAR_VOICE.get(current_avatar, CHAR_VOICE["puppy"])
+            proc = subprocess.Popen(
+                [
+                    PIPER_BIN,
+                    "--model",
+                    PIPER_VOICE,
+                    "--output-raw",
+                    "--noise-scale",
+                    f"{_diag_voice['noise_scale']:.3f}",
+                    "--noise-w",
+                    f"{_diag_voice['noise_w']:.3f}",
+                    "--length-scale",
+                    f"{_diag_voice['length_scale']:.2f}",
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            raw, stderr = proc.communicate(input="test\n".encode(), timeout=5)
+            if proc.returncode == 0 and raw and len(raw) > 1000:
+                diagnostics.append("Synthesis test: PASS")
+            else:
+                diagnostics.append(f"Synthesis test: FAIL (rc={proc.returncode})")
+        except Exception as e:
+            diagnostics.append(f"Synthesis test: ERROR ({e})")
+
+        # Build a helpful, avatar-appropriate response
+        from datetime import datetime as _dt
+
+        _now = _dt.now().strftime("%H:%M")
+        diag_str = " | ".join(diagnostics)
+        reply = f"Let me check that for you, {_now}. TTS diagnostics: {diag_str}"
+
+        # If Piper or voice is missing, give targeted fix
+        if not (piper_ok and voice_ok):
+            fixes = []
+            if not piper_ok:
+                fixes.append("install Piper: pip install piper-tts")
+            if not voice_ok:
+                fixes.append(f"copy voice model to {PIPER_VOICE}")
+            reply += f" To fix: {'; '.join(fixes)}"
+        else:
+            reply += (
+                " If audio still isn't playing, check your device volume "
+                "and make sure the browser tab has sound permissions."
+            )
+
+        await memory.add("user", cmd)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
     # ── KID MODE TOGGLE via text command ──
     kid_on = any(
         w in cmd
@@ -7215,97 +7310,6 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         )
     messages.extend(context)
     messages.append({"role": "user", "content": cmd})
-
-    # ── TTS Troubleshooting — detect common TTS failure reports and respond with
-    #   specific diagnostic steps instead of a generic fallback. Triggered by
-    #   phrases like "TTS not working", "no audio", "can't hear", etc.
-    tts_trouble_patterns = [
-        "tts not working",
-        "tts is not working",
-        "no audio",
-        "no sound",
-        "cant hear",
-        "can't hear",
-        "not speaking",
-        "not saying",
-        "voice not working",
-        "no voice",
-        "audio is broken",
-        "broken audio",
-        "piper not working",
-    ]
-    if any(t in cmd.lower() for t in tts_trouble_patterns):
-        # Run a quick diagnostic
-        diagnostics = []
-        piper_ok = os.path.exists(PIPER_BIN)
-        voice_ok = os.path.exists(PIPER_VOICE)
-        espeak_ok = os.path.exists(
-            os.environ.get("ESPEAK_DATA_PATH", "/usr/local/share/espeak-ng-data")
-        )
-
-        diagnostics.append(
-            f"Piper binary: {'OK' if piper_ok else 'MISSING'} ({PIPER_BIN})"
-        )
-        diagnostics.append(
-            f"Voice model: {'OK' if voice_ok else 'MISSING'} ({PIPER_VOICE})"
-        )
-        diagnostics.append(f"eSpeak data: {'OK' if espeak_ok else 'MISSING'}")
-        diagnostics.append(
-            f"Audio cache entries: {len(AUDIO_CACHE) if AUDIO_CACHE else 0}"
-        )
-
-        # Quick test synthesis
-        try:
-            import subprocess
-
-            proc = subprocess.Popen(
-                [
-                    PIPER_BIN,
-                    "--model",
-                    PIPER_VOICE,
-                    "--output-raw",
-                    "--noise-scale",
-                    "0.640",
-                    "--noise-w",
-                    "0.780",
-                    "--length-scale",
-                    "1.06",
-                ],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            raw, stderr = proc.communicate(input=b"test\n", timeout=5)
-            if proc.returncode == 0 and raw and len(raw) > 1000:
-                diagnostics.append("Synthesis test: PASS")
-            else:
-                diagnostics.append(
-                    f"Synthesis test: FAIL (stderr: {stderr.decode()[:100]})"
-                )
-        except Exception as e:
-            diagnostics.append(f"Synthesis test: ERROR ({e})")
-
-        # Build a helpful, avatar-appropriate response
-        from datetime import datetime as _dt
-
-        _ = _dt.now().strftime("%H:%M")
-        diag_str = " | ".join(diagnostics)
-        reply = f"Let me check that for you. TTS diagnostics at {_}: {diag_str}"
-
-        # If Piper or voice is missing, give targeted fix
-        if not (piper_ok and voice_ok):
-            if not piper_ok:
-                reply += " The Piper binary isn't found — run: pip install piper-tts"
-            if not voice_ok:
-                reply += f" Voice model missing at {PIPER_VOICE} — copy lilly_voice.onnx there"
-        else:
-            reply += " If audio still isn't playing, check your device volume and browser tab permissions"
-
-        await memory.add("user", cmd)
-        await memory.add("assistant", reply)
-        await save_memory()
-        await speak(reply)
-        return {"action": "handled", "text": reply}
 
     # ── Grounding guard #1: inject an explicit anti-hallucination reminder
     # into the message list so the model knows to stay factual. This is
