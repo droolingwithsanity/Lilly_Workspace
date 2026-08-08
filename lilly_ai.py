@@ -5889,6 +5889,84 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         await speak(reply)
         return {"action": "handled", "text": reply}
 
+    # ── SUPPORT AUTOMATOR: trigger proactive diagnostics from conversation
+    #   User can say: "run diagnostics", "check system", "system status",
+    #   "check for issues", or ask Lilly to "report problems"
+    support_triggers = [
+        "run diagnostics",
+        "check system",
+        "system status",
+        "system check",
+        "check for issues",
+        "report problems",
+        "run support check",
+        "check lilly",
+        "is everything working",
+        "any problems",
+        "how is everything",
+        "check health",
+        "health check",
+        "automated check",
+        "run automator",
+    ]
+    if any(s in cmd for s in support_triggers):
+        # Run health checks via the support automator
+        import importlib
+
+        try:
+            sa = await asyncio.to_thread(
+                lambda: __import__("termux_support_automator") if False else None
+            )
+        except ImportError:
+            sa = None
+
+        # Inline diagnostics (same checks the automator runs)
+        piper_ok = os.path.exists(PIPER_BIN)
+        voice_ok = os.path.exists(PIPER_VOICE)
+        llm_ok = False
+        try:
+            test_resp = await llama_backend.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": "You are Lilly, give a 1-word answer.",
+                    },
+                    {"role": "user", "content": "test"},
+                ],
+                temperature=0.3,
+                max_tokens=5,
+            )
+            llm_ok = bool(test_resp and len(test_resp) > 0)
+        except Exception:
+            pass
+
+        sensor_ok = False
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as _client:
+                _r = await _client.get(f"{SENSOR_SERVER_URL}/sensors/all")
+                sensor_ok = _r.status_code == 200
+        except Exception:
+            pass
+
+        checks = [
+            f"Piper TTS: {'OK' if piper_ok and voice_ok else 'ISSUE'}",
+            f"LLM backend: {'OK' if llm_ok else 'ISSUE'}",
+            f"Sensor server: {'OK' if sensor_ok else 'ISSUE'}",
+            f"Audio cache: {len(AUDIO_CACHE) if AUDIO_CACHE else 0} entries",
+        ]
+
+        reply = "System check complete. Here's what I found: " + (
+            "; ".join(checks) + "."
+            if all(piper_ok and voice_ok and llm_ok and sensor_ok)
+            else "; ".join(checks) + ". I'd recommend checking the affected services."
+        )
+
+        await memory.add("user", cmd)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
     # ── KID MODE TOGGLE via text command ──
     kid_on = any(
         w in cmd
