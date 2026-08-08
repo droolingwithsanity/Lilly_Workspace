@@ -5915,7 +5915,7 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         voice_ok = os.path.exists(PIPER_VOICE)
         llm_ok = False
         try:
-            _r = await httpx.AsyncClient(timeout=3.0).get(f"{OLLAMA_URL}/api/tags")
+            _r = await _get_ollama_client().get(f"{OLLAMA_URL}/api/tags", timeout=3.0)
             llm_ok = _r.status_code == 200
         except Exception:
             pass
