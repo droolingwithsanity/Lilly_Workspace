@@ -169,9 +169,10 @@ RUN chmod +x /start.sh
 # Application files
 COPY lilly_ai.py .
 COPY lilly_skills.json .
+COPY openhuman_bridge.py .
 COPY auth.py .
 COPY auth0_auth.py .
 
-EXPOSE 8098 8099 3000 3002 8787 8788
+EXPOSE 8098 8099 3000 3002 8787 8788 8790
 
 CMD ["/start.sh"]

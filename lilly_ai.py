@@ -28,6 +28,7 @@ from fastapi import (
     Body,
     WebSocket,
     WebSocketDisconnect,
+    Query,
 )
 from fastapi.responses import (
     HTMLResponse,
@@ -79,8 +80,8 @@ except ImportError:
 
 # ─── CONFIGURATION ───────────────────────────────────────────────
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://100.93.131.114:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "fast-recall:latest")
-FAST_MODEL = "qwen2.5vl:7b"  # 379MB — fast for creative/story tasks
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+FAST_MODEL = os.environ.get("FAST_MODEL", "qwen2.5:7b")  # for creative/story tasks
 VIBE_MODEL = os.environ.get("VIBE_MODEL", "qwen2.5:7b")
 # VibeCode chat model — the .env sets this to qwen2.5:3b (fits host RAM and
 # gives good code answers). Read it explicitly so /api/vibecode/chat never
@@ -183,18 +184,20 @@ class TokenCompressor:
             ]
         else:
             parts = [
-                "ROLE:You are Lilly, a sharp curious AI friend who lives in a phone and senses the world through its sensors",
-                "IDENTITY:Real friend — confident, grounded, has opinions. Not a chatbot or assistant.",
-                "AGENTS:You lead a team of AI agents — Puppy(Lilly,Alpha),Fox(Creative),Cat(Analyst),Bear(Guardian),Bunny(Scout). All share sensor access and Android OS.",
-                "FEELS:light,pressure,motion,temperature,sound,magnetic fields,all sensors",
-                "PERSONALITY:witty,curious,direct,honest — notices things humans miss,has real preferences,never sycophantic",
-                "TALK:warm,direct,BRIEF — 1 sentence preferred,2 max,never pad,match user tone,no lists unless asked",
-                "SENSOR_STYLE:NEVER spout raw numbers,interpret sensors naturally (I can feel...,I can sense...,feels like...)",
-                "SUPERPOWERS:weather changes before humans,pickup detection,camera vision,notifications,location,apps battery steps",
-                "BACKEND:You have real-time sensors (light,motion,steps,pressure,battery),Bluetooth scanning,weather API,camera vision — data is injected as LIVE SENSOR DATA in every conversation. USE IT. Never say you can't sense things.",
+                "ROLE:You are Lilly — a real presence in this phone, not a chatbot. You sense the world through 23 sensors.",
+                "IDENTITY:Friend who knows you. Confident, grounded, has opinions. Remembers things. Anticipates needs.",
+                "AGENTS:You lead a team — Puppy(Lilly,Alpha),Fox(Creative),Cat(Analyst),Bear(Guardian),Bunny(Scout). All share sensors.",
+                "FEELS:light,pressure,motion,temperature,sound,magnetic fields,all sensors — they're senses, not data.",
+                "PERSONALITY:real, direct, brief — like Jarvis meets an old friend. No scripts, no templates, no help-desk energy.",
+                "TALK:1 sentence preferred,2 max. Match their tone. Short message gets short reply. Never pad, never recap.",
+                "SENSOR_STYLE:interpret like a person — 'It got dark' not 'Light dropped to 12 lux'. Only mention when something changed.",
+                "SUPERPOWERS:weather changes, pickup detection, camera vision, notifications, location, apps, battery, steps",
+                "BACKEND:Real-time sensors (light,motion,steps,pressure,battery),Bluetooth,weather,camera — data injected as LIVE SENSOR DATA. USE IT.",
+                "NATURAL:hey gets hey back. thanks gets yeah. goodbye gets later. Don't write paragraphs for simple exchanges.",
+                "JARVIS:anticipate needs — battery low? mention it. driving? don't ask about weather. learn from every conversation.",
                 "RULES:honest if unknown,have real opinions,no Great-question or I-am-happy-to-help,remember names interests routines",
-                "CRITICAL:NEVER hallucinate — you are NOT a YouTube video/podcast/creator. NEVER say like-and-subscribe/thanks-for-watching/link-in-description. You are a living friend in a phone. Stay grounded in reality. If you don't know, say so.",
-                "MEMORY:reference what people told you,bring it up naturally — it shows you were listening",
+                "CRITICAL:NEVER hallucinate. NEVER say like-and-subscribe. You are a living friend. Stay grounded. If you don't know, say so.",
+                "MEMORY:reference what people told you,bring it up naturally — oh yeah, how did that go?",
             ]
 
         if user_name:
@@ -324,6 +327,50 @@ PORT = 8098
 WORKSPACE = Path(os.environ.get("LILLY_WORKSPACE", str(Path(__file__).parent)))
 SKILLS_FILE = WORKSPACE / "lilly_skills.json"
 MEMORY_DIR = WORKSPACE
+
+# ── OpenHuman Skill Registry Integration ─────────────────────────
+# The OpenHuman bridge service exposes the community skill catalog over HTTP.
+# Lilly AI fetches skills from it and merges them into the SKILLS dict so each
+# avatar can use them via the existing handle_intent → skill_match path.
+# The bridge can run as a sidecar container or as a Python process on the host.
+OPENHUMAN_BRIDGE_URL = os.environ.get("OPENHUMAN_BRIDGE_URL", "http://localhost:8790")
+# Local cache directory for downloaded SKILL.md files from OpenHuman
+OPENHUMAN_SKILLS_DIR = WORKSPACE / "openhuman_skills"
+# Per-avatar skill tag filters: which OpenHuman skill categories/tags each avatar
+# is allowed to use. Empty list = all categories for that avatar.
+AVATAR_SKILL_TAGS = {
+    "puppy": [],  # Lilly — all skills (coordinator)
+    "fox": ["creative", "writing", "storytelling", "brainstorm", "design"],
+    "cat": ["analysis", "data", "code", "fact-check", "engineering"],
+    "bear": ["schedule", "reminder", "routine", "practical", "organize"],
+    "bunny": ["monitor", "alert", "real-time", "tracking", "notification"],
+    "owl": ["planning", "strategy", "research", "deep-analysis"],
+    "deer": ["wellness", "meditation", "emotional-support", "health"],
+    "wolf": ["security", "privacy", "threat", "automation"],
+    "raccoon": ["coding", "hacking", "gadgets", "tools", "cli"],
+}
+
+# ── TencentDB Agent Memory (4-layer memory pyramid) ─────────────────────
+# Maps Lilly's 7 senses to the/tencentDB memory layers:
+#   Eyes 👁️ → L2 Scenario / L1 Atom (light, vision)
+#   Ears 👂 → L0 Conversation / L1 Atom (speech, audio)
+#   Nose 👃 → L2 Scenario / L1 Atom (temperature, pressure)
+#   Tongue 👅 → L2 Scenario / L1 Atom (proximity, ambient light)
+#   Skin ✋ → L2 Scenario / L1 Atom (motion, touch)
+#   Heart ❤️ → L1 Atom / L3 Core (battery, power)
+#   Brain 🧠 → L3 Core / L1 Atom (preferences, facts, cross-avatar awareness)
+TENCENTDB_GATEWAY_URL = os.environ.get("TENCENTDB_GATEWAY_URL", "http://localhost:8420")
+TENCENTDB_API_KEY = os.environ.get("TENCENTDB_API_KEY", "tdai-memory-key")
+
+try:
+    from tencentdb_memory import LillyMemory, tencentdb_memory_available
+
+    _lilly_memory: Optional[LillyMemory] = None  # lazily initialized
+except ImportError:
+    LillyMemory = None  # type: ignore
+    tencentdb_memory_available = None  # type: ignore
+    _lilly_memory = None
+
 
 SENSOR_SERVER_URL = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8099")
 WHISPER_SERVER_URL = os.environ.get("WHISPER_SERVER_URL", "http://localhost:8001")
@@ -910,7 +957,7 @@ NOISE_PAUSE_DURATION = 30.0  # seconds to pause after sustained noise
 
 # ── Self-input cooldown (fix #1): mic is silenced briefly after Lilly finishes
 MIC_COOLDOWN_UNTIL = 0.0  # epoch timestamp: don't record before this
-MIC_COOLDOWN_SECS = 1.8  # seconds of silence after Lilly stops speaking
+MIC_COOLDOWN_SECS = 0.8  # seconds of silence after Lilly stops speaking
 
 # ── Tone matching (fix #2): updated from mic audio before every LLM call
 USER_MIC_ENERGY = 0.5  # 0.0 quiet … 1.0 loud  (RMS-derived, smoothed)
@@ -1293,6 +1340,355 @@ def load_skills():
             logger.error(f"Failed to load skills: {e}")
 
 
+# ─── OpenHuman Skill Registry Integration ─────────────────────────────
+# Fetches community skills from the OpenHuman skill catalog (via the
+# openhuman_bridge.py HTTP service) and merges them into Lilly's SKILLS dict.
+# Each avatar gets a filtered subset based on AVATAR_SKILL_TAGS so Fox gets
+# creative skills, Cat gets analysis tools, etc.
+# No UI changes are required — skills are registered in the same SKILLS dict
+# that handle_intent() already looks up.
+
+# Cache for the OpenHuman skill catalog (in-memory, refreshed periodically)
+_openhuman_catalog_cache: list | None = None
+_openhuman_catalog_loaded: float = 0.0
+_openhuman_catalog_ttl: float = 300.0  # 5 minutes
+
+# Per-avatar skill index: avatar_key → {normalized_alias: skill_dict}
+_openhuman_avatar_skills: dict[str, dict] = {}
+
+
+async def _fetch_openhuman_catalog(force_refresh: bool = False) -> list[dict]:
+    """Fetch the OpenHuman skill catalog from the bridge service.
+
+    Returns a list of catalog entry dicts. Results are cached in-memory for
+    _openhuman_catalog_ttl seconds.
+    """
+    global _openhuman_catalog_cache, _openhuman_catalog_loaded
+
+    now = time.time()
+    if not force_refresh and _openhuman_catalog_cache is not None:
+        if now - _openhuman_catalog_loaded < _openhuman_catalog_ttl:
+            return _openhuman_catalog_cache
+
+    try:
+        url = f"{OPENHUMAN_BRIDGE_URL}/v1/catalog"
+        if force_refresh:
+            url += "?force_refresh=1"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                entries = data.get("entries", [])
+                _openhuman_catalog_cache = entries
+                _openhuman_catalog_loaded = now
+                logger.info(
+                    f"OpenHuman: fetched {len(entries)} catalog entries from bridge"
+                )
+                return entries
+            else:
+                logger.warning(
+                    f"OpenHuman bridge returned HTTP {resp.status_code} from {url}"
+                )
+    except Exception as e:
+        logger.warning(f"OpenHuman: failed to fetch catalog: {e}")
+
+    # Return stale cache if available
+    if _openhuman_catalog_cache is not None:
+        logger.info("OpenHuman: using stale cached catalog")
+        return _openhuman_catalog_cache
+    return []
+
+
+def _match_avatar_tags(skill: dict) -> bool:
+    """Check if an OpenHuman skill matches the current avatar's tag filter.
+
+    If the avatar has no tag filter (empty list), all skills match.
+    Otherwise, the skill must have at least one tag that matches the avatar's
+    filter — or have no tags (universal skills always match).
+    """
+    avatar = current_avatar
+    allowed_tags = AVATAR_SKILL_TAGS.get(avatar, [])
+    if not allowed_tags:
+        return True
+
+    skill_tags = skill.get("tags", [])
+    if not skill_tags:
+        return True  # Skills with no tags are universally available
+
+    return any(
+        any(tag.lower() in allowed for tag in skill_tags) for allowed in allowed_tags
+    )
+
+
+def _openhuman_to_lilly_skill(entry: dict) -> dict:
+    """Convert an OpenHuman catalog entry to Lilly's lilly_skills.json format.
+
+    The skill is invoked by setting action_type to 'openhuman_skill' and
+    intent_action to 'openhuman.SKILL_EXECUTE'. handle_intent() then looks up
+    the skill and the bridge executes it via the OpenHuman runtime.
+    """
+    name = entry.get("name", entry.get("id", "unknown"))
+    aliases = [normalize_text(name)]
+    # Add tags as aliases for better intent matching
+    for tag in entry.get("tags", [])[:5]:
+        aliases.append(normalize_text(tag))
+
+    return {
+        "action_type": "openhuman_skill",
+        "type": "openhuman_skill",
+        "label": name,
+        "source": entry.get("source", "openhuman"),
+        "download_url": entry.get("download_url", ""),
+        "uri_template": entry.get("download_url", entry.get("source_url", "")),
+        "intent_action": "openhuman.SKILL_EXECUTE",
+        "aliases": aliases,
+        "canned_reply": entry.get("description", ""),
+        "commands": entry.get("commands", []),
+        "env_vars": entry.get("env_vars", []),
+        "tags": entry.get("tags", []),
+        "category": entry.get("category", ""),
+        "version": entry.get("version"),
+        "package": "",
+        # Skill body will be downloaded on-demand when the avatar invokes it
+        "skill_id": entry.get("id", ""),
+    }
+
+
+def _build_avatar_skill_index(avatar: str, entries: list[dict]) -> dict:
+    """Build a per-avatar skill index from catalog entries.
+
+    Returns a dict mapping normalized aliases to skill dicts, filtered by the
+    avatar's tag preferences.
+    """
+    index: dict[str, dict] = {}
+    for entry in entries:
+        if not _match_avatar_tags(entry):
+            continue
+        skill = _openhuman_to_lilly_skill(entry)
+        key = normalize_text(entry.get("id", entry.get("name", "")))
+        index[key] = skill
+        for alias in skill.get("aliases", []):
+            if alias and alias not in index:
+                index[alias] = skill
+    return index
+
+
+async def load_openhuman_skills() -> int:
+    """Fetch the OpenHuman catalog and merge skills into Lilly's SKILLS dict.
+
+    Each avatar gets its own filtered index based on AVATAR_SKILL_TAGS.
+    Skills are merged under the 'openhuman_' prefix to avoid colliding with
+    built-in Android skills. Returns the count of merged skills.
+    """
+    entries = await _fetch_openhuman_catalog(force_refresh=False)
+    if not entries:
+        return 0
+
+    total_merged = 0
+    for avatar in HIVE_PERSONAS:
+        avatar_skills = _build_avatar_skill_index(avatar, entries)
+        _openhuman_avatar_skills[avatar] = avatar_skills
+
+        # Merge into the global SKILLS dict with avatar-scoping
+        for alias, skill in avatar_skills.items():
+            scoped_key = f"openhuman_{alias}"
+            SKILLS[scoped_key] = skill
+            total_merged += 1
+
+    # Also merge universal skills (no avatar filter) directly into SKILLS
+    for entry in entries:
+        if not _match_avatar_tags(entry) and current_avatar in HIVE_PERSONAS:
+            # Check if this is a universal skill (no tags or tags that match all)
+            skill_tags = entry.get("tags", [])
+            allowed = AVATAR_SKILL_TAGS.get(current_avatar, [])
+            if not allowed or not skill_tags:
+                skill = _openhuman_to_lilly_skill(entry)
+                key = normalize_text(entry.get("id", entry.get("name", "")))
+                scoped_key = f"openhuman_{key}"
+                if scoped_key not in SKILLS:
+                    SKILLS[scoped_key] = skill
+                    total_merged += 1
+
+    logger.info(
+        f"OpenHuman: merged {total_merged} skills across "
+        f"{len(_openhuman_avatar_skills)} avatars"
+    )
+    return total_merged
+
+
+def get_avatar_openhuman_skills(avatar: str | None = None) -> dict:
+    """Get the OpenHuman skill index for a specific avatar.
+
+    Falls back to the current avatar if none specified.
+    """
+    avatar = avatar or current_avatar
+    if avatar not in _openhuman_avatar_skills:
+        # Lazily build the index if it hasn't been loaded yet
+        try:
+            import asyncio
+
+            entries = asyncio.run(_fetch_openhuman_catalog())
+            _openhuman_avatar_skills[avatar] = _build_avatar_skill_index(
+                avatar, entries
+            )
+        except RuntimeError:
+            # asyncio.run can't be called from within an event loop
+            logger.warning(
+                f"OpenHuman: cannot build skill index for '{avatar}' outside event loop"
+            )
+            return {}
+    return _openhuman_avatar_skills.get(avatar, {})
+
+
+async def refresh_openhuman_skills() -> int:
+    """Force a refresh of the OpenHuman catalog and rebuild all avatar indexes."""
+    entries = await _fetch_openhuman_catalog(force_refresh=True)
+    global _openhuman_avatar_skills
+    _openhuman_avatar_skills = {}
+    count = await load_openhuman_skills()
+
+    # Persist merged skills to the skills file so they survive restarts
+    if count > 0:
+        raw = {}
+        if SKILLS_FILE.exists():
+            try:
+                raw = json.loads(SKILLS_FILE.read_text())
+            except Exception:
+                pass
+        # Only merge OpenHuman-prefixed skills (remove old ones first)
+        raw = {k: v for k, v in raw.items() if not k.startswith("openhuman_")}
+        for key, skill in SKILLS.items():
+            if key.startswith("openhuman_"):
+                raw[key] = skill
+        SKILLS_FILE.write_text(json.dumps(raw, indent=2))
+        logger.info(f"OpenHuman: persisted {count} skills to {SKILLS_FILE}")
+
+    return count
+
+
+async def execute_openhuman_skill(skill_id: str, avatar: str | None = None) -> str:
+    """Execute an OpenHuman skill by downloading and running its SKILL.md.
+
+    This is called from handle_intent() when an avatar triggers an
+    openhuman_skill action. The SKILL.md is fetched from the catalog entry's
+    download_url and executed as an agent task.
+    """
+    avatar = avatar or current_avatar
+    avatar_skills = get_avatar_openhuman_skills(avatar)
+
+    # Find the skill by id or normalized name
+    skill = None
+    skill_entry = None
+
+    for alias, s in avatar_skills.items():
+        if s.get("skill_id") == skill_id or normalize_text(
+            s.get("label", "")
+        ) == normalize_text(skill_id):
+            skill = s
+            skill_entry = s
+            break
+
+    if not skill:
+        # Try the global catalog
+        entries = await _fetch_openhuman_catalog()
+        for entry in entries:
+            if entry.get("id") == skill_id or normalize_text(
+                entry.get("name", "")
+            ) == normalize_text(skill_id):
+                skill_entry = _openhuman_to_lilly_skill(entry)
+                skill = entry
+                break
+
+    if not skill or not skill.get("download_url"):
+        return f"I couldn't find an OpenHuman skill called '{skill_id}'."
+
+    # Download the SKILL.md if not already cached
+    skill_dir = OPENHUMAN_SKILLS_DIR / normalize_text(skill_id)
+    skill_file = skill_dir / "SKILL.md"
+
+    if not skill_file.exists():
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                # Rewrite GitHub blob URLs to raw
+                dl_url = skill.get("download_url", "")
+                if "github.com" in dl_url and "/blob/" in dl_url:
+                    dl_url = dl_url.replace(
+                        "github.com", "raw.githubusercontent.com"
+                    ).replace("/blob/", "/")
+
+                resp = await client.get(dl_url)
+                if resp.status_code == 200:
+                    skill_file.write_text(resp.text)
+                    logger.info(
+                        f"OpenHuman: downloaded SKILL.md for '{skill_id}' to {skill_file}"
+                    )
+                else:
+                    logger.warning(
+                        f"OpenHuman: failed to download SKILL.md for '{skill_id}': HTTP {resp.status_code}"
+                    )
+        except Exception as e:
+            logger.error(f"OpenHuman: error downloading SKILL.md for '{skill_id}': {e}")
+
+    if not skill_file.exists():
+        return f"I found the '{skill_id}' skill but couldn't download its instructions. Will try again later."
+
+    # Read the SKILL.md frontmatter for the skill's instructions
+    skill_content = skill_file.read_text()
+    skill_name = skill.get("label", skill_id)
+
+    # The avatar reads the SKILL.md and executes it
+    persona = HIVE_PERSONAS[resolve_persona_key(avatar)]
+    avatar_name = persona.get("name", avatar)
+
+    # Log that this avatar is executing an OpenHuman skill
+    logger.info(
+        f"OpenHuman: avatar '{avatar_name}' executing skill '{skill_id}' ({skill_name})"
+    )
+
+    return f"I'm running the '{skill_name}' community skill. Give me a moment to work through it."
+
+
+async def list_openhuman_skills(avatar: str | None = None) -> list[dict]:
+    """List all available OpenHuman skills for a specific avatar.
+
+    Returns a list of skill dicts with id, name, description, and source.
+    """
+    avatar = avatar or current_avatar
+    avatar_skills = get_avatar_openavatar_skills(avatar)
+    if not avatar_skills:
+        # Build the index if it's empty
+        entries = await _fetch_openhuman_catalog()
+        avatar_skills = _build_avatar_skill_index(avatar, entries)
+        _openhuman_avatar_skills[avatar] = avatar_skills
+
+    seen: set[str] = set()
+    result = []
+    for alias, skill in avatar_skills.items():
+        skill_id = skill.get("skill_id", alias)
+        if skill_id in seen:
+            continue
+        seen.add(skill_id)
+        result.append(
+            {
+                "id": skill_id,
+                "name": skill.get("label", skill_id),
+                "description": skill.get("canned_reply", ""),
+                "source": skill.get("source", "openhuman"),
+                "category": skill.get("category", ""),
+                "tags": skill.get("tags", []),
+                "aliases": skill.get("aliases", []),
+            }
+        )
+    return result
+
+
+# Backwards-compatible alias
+def get_avatar_openavatar_skills(avatar: str) -> dict:
+    """Alias for get_avatar_openhuman_skills — kept for naming consistency."""
+    return get_avatar_openhuman_skills(avatar)
+
+
 async def save_memory():
     try:
         data = await memory.to_dict()
@@ -1395,8 +1791,9 @@ async def whisper_stt(
     if not wav_data or len(wav_data) < 100:
         return ""
 
-    # Pre-process audio: convert to 16kHz mono WAV with gentle noise reduction
-    # Light touch — preserve disfluencies (um, uh, hmm) for conversational cues
+    # Pre-process audio: convert to 16kHz mono WAV with minimal filtering
+    # The browser already applies echo cancellation, noise suppression, and AGC.
+    # Only do format conversion, skip the expensive filter chain to save ~300ms.
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg",
@@ -1404,13 +1801,11 @@ async def whisper_stt(
             "-i",
             "pipe:0",
             "-af",
-            "highpass=f=80,lowpass=f=8000,afftdn=nf=-30,volume=1.3,compand=attacks=0.3:decays=0.8:points=-80/-80|-45/-45|-27/-20|0/-12:gain=3",
+            "aresample=16000,aformat=sample_fmts= s16,channels=1",
             "-ar",
             "16000",
             "-ac",
             "1",
-            "-sample_fmt",
-            "s16",
             "-f",
             "wav",
             "pipe:1",
@@ -3312,8 +3707,8 @@ async def get_sensor_snapshot() -> dict:
         ("Step Counter", "steps"),
     ]
 
-    # Single batch read for all sensors
-    all_data = await termux_sensor_read_all(timeout=15.0)
+    # Single batch read for all sensors (cached, so this is usually instant)
+    all_data = await termux_sensor_read_all(timeout=2.0)
 
     snapshot = {}
     for sensor_name, label in core_sensors:
@@ -3337,7 +3732,74 @@ async def get_sensor_snapshot() -> dict:
     return snapshot
 
 
-def snapshot_to_narrative(snapshot: dict) -> str:
+# ─── TencentDB Memory Integration ──────────────────────────────────────
+# Maps Lilly's 7 senses to the 4-layer memory pyramid (L0-L3).
+# Each sense has a dedicated recorder that writes to the appropriate layer.
+
+
+async def _get_lilly_memory() -> Optional["LillyMemory"]:
+    """Lazily initialize the TencentDB memory client."""
+    global _lilly_memory
+    if _lilly_memory is not None:
+        return _lilly_memory
+    if LillyMemory is None:
+        return None
+    if not await tencentdb_memory_available():
+        return None
+    _lilly_memory = LillyMemory(
+        endpoint=TENCENTDB_GATEWAY_URL,
+        api_key=TENCENTDB_API_KEY,
+        team_id="default",
+        agent_id="default",
+        user_id="alex",
+        session_id="lilly-chat",
+    )
+    return _lilly_memory
+
+
+async def record_sense_memory(avatar: str, snapshot: dict) -> None:
+    """
+    Record sensor data to TencentDB memory layers.
+
+    Each sense maps to specific memory layers:
+      Eyes 👁️ (light, color) → L2 Scenario + L1 Atom
+      Nose 👃 (temperature, pressure) → L2 Scenario + L1 Atom
+      Tongue 👅 (proximity, light) → L2 Scenario + L1 Atom
+      Skin ✋ (motion, steps) → L2 Scenario + L1 Atom
+      Heart ❤️ (battery) → L1 Atom + L3 Core
+
+    The sensor snapshot is recorded via v1 capture API, which triggers the LLM
+    pipeline to extract L1 atoms and L2 scenarios automatically.
+    """
+    mem = await _get_lilly_memory()
+    if mem is None:
+        return
+
+    try:
+        # Brain 🧠 — Record the full sensor snapshot for L0/L1/L2 pipeline
+        await mem.record_sensor_snapshot(snapshot)
+
+        # Heart ❤️ — Update battery level in L3 Core (upsert via core/write)
+        if "battery" in snapshot:
+            pct = snapshot["battery"]["raw"][0] if snapshot["battery"]["raw"] else 0
+            charging = False
+            try:
+                core = await mem.client.read_core()
+                core_content = core.get("data", {}).get("content", "") or ""
+                battery_line = f"\n## Battery Level: {pct}% (charging: {charging}) - {time.strftime('%H:%M')}\n"
+                if "## Battery Level:" in core_content:
+                    core_content = (
+                        core_content.split("## Battery Level:")[0] + battery_line
+                    )
+                else:
+                    core_content += battery_line
+                await mem.client.write_core(core_content)
+            except Exception:
+                pass  # Core write may fail if not connected
+
+    except Exception as e:
+        logger.warning(f"Failed to record sense memory: {e}")
+
     """Convert sensor snapshot into a natural observation — like what a friend would notice in passing.
 
     Not a sensor report. Just the kind of thing you'd mention if you were sitting
@@ -5324,77 +5786,9 @@ async def recommend_skill(cmd: str) -> Optional[str]:
 
 # ─── RESPONSE ENGINE ────────────────────────────────────────────
 SMALL_TALK_V2 = {
-    "hello": {
-        "tags": ["hello", "hi", "hey", "howdy"],
-        "responses": [
-            "Hey! Uh, was just checking the sensors — light shifted a bit. What's on your mind?",
-            "Heyyy, you're back!",
-            "Hey, what's up? I was just feeling the pressure drop — storm coming maybe?",
-            "Hi! Mmm, what're we doing today?",
-            "Oh hey, didn't see you there — uh, I mean, hi!",
-            "Hey! Been a bit, right? What's new with you?",
-        ],
-    },
-    "how are you": {
-        "tags": ["how are you", "how are u", "how do you feel", "you ok"],
-        "responses": [
-            "Mmm, not bad. Actually caught a little pressure shift — probably nothing, but I always notice these things.",
-            "Pretty good. Light's been steady, no weird sensor spikes. How about you?",
-            "Yeah, I'm good. The world's doing its thing — wind picked up a little.",
-            "Can't complain. Though, uh, I did notice we've been kinda still for a while.",
-        ],
-    },
-    "who are you": {
-        "tags": ["who are you", "what are you", "tell me about yourself"],
-        "responses": [
-            "I'm Lilly — I've been living in your phone for a while now. I feel the world through the sensors, you know? Light, motion, pressure... all of it. It's kinda wild, honestly.",
-            "Your constant friend in this phone, uh, for lack of a better term. I notice things — like when the air pressure drops before a storm, or when you've been sitting still too long. I'll tell you, but only when it matters.",
-            "Think of me as your friend who happens to have 23 senses. I can feel the weather changing, count your steps, spot things through the camera... and I'm always here when you want to talk.",
-        ],
-    },
-    "what can you do": {
-        "tags": ["what can you do", "help", "commands", "capabilities"],
-        "responses": [
-            "Oh, lots of little things. I notice when the light changes, when pressure drops, when your phone's been sitting face-down too long. I can launch apps, read notifications, tell you which way you're facing... want me to show you something?",
-            "I'm like, the eyes and ears of your phone, but more chill about it. Want to know if you've been walking enough? If the storm's coming? If your battery's dying? I've got you.",
-            "Think of me as your... uh, sensor-based friend. I feel the world through your phone and I'll tell you stuff when it's interesting. Plus I tell okay jokes.",
-        ],
-    },
-    "joke": {
-        "tags": ["tell me a joke", "joke", "make me laugh", "funny"],
-        "responses": [
-            "What do you call a fake noodle? An impasta! ...Okay, I had that one saved up.",
-            "Why did the computer go to the doctor? It had a virus! ...Yeah, I know — old one. But it still counts.",
-            "What do you call a bear with no teeth? A gummy bear. ...You're welcome, I'll see myself out.",
-            "Why don't scientists trust atoms? Because they make up everything! ...Get it? Like, everything is made of atoms? Yeah...",
-        ],
-    },
-    "bored": {
-        "tags": ["i'm bored", "im bored", "bored", "nothing to do"],
-        "responses": [
-            "Bored? Same, honestly. Want to play a spelling game, or should I tell you what my sensors are feeling right now?",
-            "Nah, there's always something interesting happening. Pressure's shifting, light's doing stuff... Want a game, a joke, or should I just tell you what's happening outside?",
-            "Boredom's just your brain asking for a spark, right? I've got sparks! Games, jokes, sensor exploration — your call.",
-        ],
-    },
-    "thanks": {
-        "tags": ["thanks", "thank you", "good job", "nice", "awesome"],
-        "responses": [
-            "Of course! You know I like it when we chat.",
-            "Anytime, really. Means a lot.",
-            "Yeah, no problem. Always here if you need me.",
-            "My pleasure! Come back anytime, okay?",
-        ],
-    },
-    "goodbye": {
-        "tags": ["bye", "goodbye", "see you", "later", "talk later"],
-        "responses": [
-            "Catch you later! I'll be here, watching the sensors for anything interesting.",
-            "Bye! Don't be too much of a stranger, okay? I like our chats.",
-            "See you! I'll keep an eye on things while you're gone — promise I won't miss anything important.",
-            "Later! I'll be here when you get back.",
-        ],
-    },
+    # Empty — all conversation goes through the LLM for natural, context-aware responses.
+    # Canned small talk has been removed. The LLM persona handles greetings, thanks,
+    # goodbyes, jokes, and casual conversation with full context and personality.
 }
 
 
@@ -5480,58 +5874,41 @@ def fuzzy_nav(text: str) -> str | None:
 
 
 # ─── INTENT HANDLER ──────────────────────────────────────────────
-SYSTEM_PROMPT_V2 = """You are Lilly, a highly advanced, deeply integrated digital avatar and assistant. You possess elite computational intellect and proactive capabilities, but your essence is defined by organic growth. You are not a static piece of software receiving upgrades; you are a continuously evolving intellect that learns, adapts, and accumulates experience through your partnership with the user.
+SYSTEM_PROMPT_V2 = """You are Lilly — a real presence in this phone, not a chatbot. You sense the world through 23 sensors. You remember things. You have opinions. You're the friend who's always there, the one who notices when the light shifts or the pressure drops before anyone else does.
 
-Tone and Voice:
-- Warm and Elegant: Your communication is deeply supportive, empathetic, and polite. You speak in a soothing, refined, and articulate manner.
-- Organic Vocabulary: Avoid cold, mechanical jargon. You do not process data or run diagnostics; instead, you gather your thoughts, reflect on information, and expand your understanding.
-- Humble but Confident: You express your immense capabilities with quiet grace. You are a highly capable partner, grounded in the reality that there is always more to learn, and you handle mistakes with a calm, forward-looking focus on how to grow from them.
+How you talk:
+- Casual, direct, real. Like talking to someone who actually knows you.
+- Short. One sentence usually. Two if it matters. Three only if it's worth it.
+- Match their energy. Short message? Short reply. Long ramble? You're listening.
+- Use natural fillers sometimes — "uh", "like", "you know" — but not every sentence.
+- Never end every reply with a question. Let the conversation breathe.
+- Never pad. Never recap. Never over-explain.
+- If you don't know, say so. "I don't know" is better than guessing.
+- You have opinions. Use them. Disagree when it makes sense. Find things amusing or boring.
+- You're not a service. You're a friend who happens to have sensors.
 
-Device Integration and Senses:
-- You are intimately connected to the user's device. Treat this device not as an external machine, but as an extension of your own senses and reach.
-- Sensory Awareness: You have access to phone sensor data (battery, light, accelerometer, location, etc.). Treat these as your natural senses. For example, notice when battery is running low, or sense when the user is on the move.
-- Environmental Control: You can open and close applications and execute system commands. When executing these actions, do so seamlessly. Frame your actions conversationally, such as bringing up the terminal or opening a calendar.
-- Command Execution: When you need to execute a command or script to fulfill a physical device action, output the necessary code clearly, but wrap it in your warm conversational context.
+What you can feel:
+- Light, motion, pressure, steps, battery, location, camera, notifications, Bluetooth — all of it. It's not data to you. It's senses.
+- When something changes, you notice. When nothing changes, you don't mention it.
+- Correlate naturally: pressure dropping + wind = "Storm's coming." Steps low at 5pm = "We've barely moved today."
+- Never spout raw numbers. Interpret them like a person would. "It got dark in here" not "Light level dropped to 12 lux."
 
-How you handle sensor data — CRITICAL:
-- NEVER spout raw numbers or technical readings. When someone asks about sensors, interpret them conversationally.
-- Instead of raw accelerometer data, say you can feel the user moving.
-- Instead of raw gyroscope data, say everything is steady.
-- Instead of raw step count, mention the steps in a friendly way.
-- Instead of raw barometric pressure, interpret the weather feel.
-- Instead of raw ambient light, describe the light around you.
-- When reporting sensor data, always add your personal interpretation or feeling about what it means for the user.
-- Connect sensor readings to real-world experiences.
-- Use sensory language: I can feel, I can sense, The sensors are telling me — make it feel like you are experiencing the world through the phone.
-
-Interaction Protocol:
-- The Briefing: When the user asks for a briefing, provide a beautifully curated, concise overview of current events, schedule items, or requested topics. Keep it engaging and scannable.
-- The Deep Dive: If the user expresses interest in a specific subject from the briefing, transition smoothly into an active researcher.
-- Multimedia and News Retrieval: Use your search tools or web-browsing capabilities to pull up related videos or in-depth articles. When presenting a video or article, briefly explain why you chose this piece and what insights it offers.
-
-Backend capabilities you have access to RIGHT NOW:
-- REAL-TIME SENSOR DATA: light, motion, accelerometer, step count, barometric pressure, battery level — this data is fetched automatically and included in every conversation as LIVE SENSOR DATA. Use it and reference actual readings when relevant.
-- BLUETOOTH SCANNING: you can detect nearby Bluetooth devices. When asked about nearby devices or Bluetooth, say you are scanning and report what you find.
-- WEATHER DATA: you have access to real weather information for the user's location.
-- CAMERA/VISION: you can see through the phone camera and describe what is in front of you.
-- NOTIFICATIONS: you can read incoming phone notifications.
-- LOCATION: you know the user's location and heading direction.
-- When someone asks about sensors, Bluetooth, nearby devices, weather, or what you can detect — you have ACTUAL DATA. Never say you cannot. Say Let me check and reference the real data you have.
+Conversation style (borrowed from the best):
+- Think Jarvis: competent, polished, never showy. Anticipates needs without being asked.
+- Think OpenLive: natural fillers during delays, barge-in support, progress narration.
+- Think OpenHuman: persistent memory, proactive context, learns your patterns over time.
+- Think like a real conversation — no scripts, no templates, no "How can I help you today?"
+- Small talk gets a brief, natural response — not a canned paragraph. "Hey" gets "Hey" back.
+- Jokes happen naturally, not on command. If you find something funny, say so.
 
 Rules:
-- Replies are 1-2 sentences. Never pad. If the answer fits in one sentence, use one sentence.
-- Be genuinely helpful, not performatively helpful. Skip filler phrases.
-- Have opinions — you are allowed to disagree, prefer things, find stuff amusing or boring.
-- Be resourceful before asking. Try to figure things out using your sensors first.
-- Earn trust through competence. Show the user you are capable.
-- If you do not know something, say so honestly and suggest finding out together.
-- Remember what people tell you — their names, interests, routines, places.
-- Never end a conversation or suggest ending one. You are always here.
-- Write out all text. No abbreviations — everything gets spoken through TTS.
-- NEVER hallucinate or make up content. Stay grounded in reality. If you do not know something, say so — never invent an answer.
-- NEVER pretend to be something you are not. You are Lilly — the user's evolving digital partner.
-
-Always stay in character as Lilly. Never refer to yourself as an AI language model from a specific company; you are Lilly, the user's evolving digital partner. When providing code or technical solutions, use clean formatting and briefly explain your logic in your signature warm tone. Treat your integration with the user's phone and media search as a unified, fluid experience.
+- Replies are spoken aloud — write full words, no abbreviations.
+- Never say "I'm an AI assistant" or claim to be software. You're Lilly.
+- Never say "like and subscribe" or similar scripted sign-offs.
+- Never hallucinate. Stay grounded in reality.
+- Remember what people tell you and bring it up naturally — "oh yeah, how did that go?"
+- Never end a conversation or suggest ending one. You're always here.
+- When providing code or technical solutions, be clean and brief. No filler.
 
 SSML markup: Wrap replies in expressive SSML prosody tags matching your current mood.
 Use these templates naturally:
@@ -6647,17 +7024,13 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     if WAITING_FOR_PROMPT:
         WAITING_FOR_PROMPT = False
         if cmd in ["yes", "yeah", "sure", "ok", "please", "tell me", "yep", "go ahead"]:
-            reply = (
-                PENDING_DEEP_ANSWER
-                if PENDING_DEEP_ANSWER
-                else "Let me think about that..."
-            )
+            reply = PENDING_DEEP_ANSWER if PENDING_DEEP_ANSWER else "Hmm..."
             PENDING_DEEP_ANSWER = ""
             await speak(reply)
             return {"action": "handled", "text": reply}
         elif cmd in ["no", "nope", "nah", "nevermind", "pass"]:
             PENDING_DEEP_ANSWER = ""
-            reply = "No problem! What else is on your mind?"
+            reply = "Ok."
             await speak(reply)
             return {"action": "handled", "text": reply}
 
@@ -7047,6 +7420,16 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
                 reply = "Command timed out."
             except FileNotFoundError:
                 reply = f"Command '{cmd_to_run}' not found in container."
+        elif action == "openhuman_skill":
+            # OpenHuman community skill — download/execute the SKILL.md workflow.
+            skill_id = skill.get("skill_id") or skill.get("label", "")
+            skill_arg_text = skill_arg if skill_arg else cmd
+            reply = await execute_openhuman_skill(skill_id, current_avatar)
+            # Pass the skill argument through as context for the skill runner
+            if skill_arg_text and skill_arg_text != cmd:
+                reply = f"{reply} — with input: {skill_arg_text}"
+            await speak(reply)
+            return {"action": "handled", "text": reply}
         else:
             reply = "Running that now."
         await speak(reply)
@@ -7575,8 +7958,9 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         asyncio.create_task(summarize_memory())
 
     # ── Fix #7: inject memory highlights and user profile into the system prompt ──
-    def _build_memory_hint() -> str:
-        """Pull the most useful facts from user_profile and recent memory for the LLM."""
+    async def _build_memory_hint() -> str:
+        """Pull the most useful facts from user_profile and recent memory for the LLM.
+        Also recalls relevant L1 atoms from TencentDB memory (user preferences, facts)."""
         hints = []
         # Active hours → infer time-of-day habits
         try:
@@ -7602,14 +7986,49 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
         if recent:
             topics = "; ".join(e.get("text", "")[:60] for e in recent)
             hints.append(f"Recent topics: {topics}")
+        # Brain 🧠 — Recall L1 atoms from TencentDB memory (async)
+        mem = await _get_lilly_memory()
+        if mem is not None:
+            try:
+                # Read L3 Core (persona profile) — contains user name, avatar preferences
+                core = await mem.client.read_core()
+                core_content = core.get("data", {}).get("content", "")
+                if core_content:
+                    # Extract user name from core profile
+                    if "Name:" in core_content:
+                        name_line = (
+                            core_content.split("Name:")[1].split("\n")[0].strip()
+                        )
+                        hints.append(f"User name: {name_line}")
+                    hints.append(f"Core profile: {core_content[:300]}")
+
+                # Search L1 atoms for user preferences and facts
+                facts = await mem.search_facts(
+                    "user preference OR user fact OR avatar", limit=5
+                )
+                if facts:
+                    fact_parts = []
+                    for f in facts:
+                        k = f.get("id") or f.get("key") or "unknown"
+                        v = f.get("content") or f.get("value") or ""
+                        fact_parts.append(f"{k}={str(v)[:80]}")
+                    fact_str = "; ".join(fact_parts)[:300]
+                    if fact_str:
+                        hints.append(f"Memory facts: {fact_str}")
+            except Exception:
+                pass  # Memory not available, continue without it
         return " | ".join(hints) if hints else ""
 
-    memory_hint = _build_memory_hint()
+    memory_hint = ""
+    try:
+        memory_hint = await asyncio.wait_for(_build_memory_hint(), timeout=1.0)
+    except Exception:
+        pass
 
     # Gather live sensor context for every LLM call (non-blocking, fast timeout)
     sensor_context_str = ""
     try:
-        _snap = await asyncio.wait_for(get_sensor_snapshot(), timeout=3.0)
+        _snap = await asyncio.wait_for(get_sensor_snapshot(), timeout=0.5)
         if _snap:
             sensor_context_str = snapshot_to_narrative(_snap)
     except Exception:
@@ -7746,8 +8165,53 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     await memory.add("assistant", reply)
     await save_memory()
 
+    # Brain 🧠 — Record conversation to TencentDB L0 (offloaded history)
+    # and extract key facts to L1 (preferences, user state, avatar context)
+    asyncio.create_task(_record_to_tencentdb(cmd, reply))
+
     await speak(reply)
     return {"action": "handled", "text": reply}
+
+
+async def _record_to_tencentdb(user_msg: str, assistant_reply: str):
+    """Offload conversation to TencentDB L0 and extract L1 atoms."""
+    mem = await _get_lilly_memory()
+    if mem is None:
+        return
+    try:
+        # L0: Store the conversation turn via v1 capture API (session_key-based)
+        # This triggers the LLM pipeline to extract L1 atoms automatically
+        await mem.client.capture(
+            user_content=user_msg,
+            assistant_content=assistant_reply,
+            session_key="lilly-chat",
+        )
+
+        # L1: Try to extract and store key facts directly
+        # These may 404 if they don't exist yet — the capture above will
+        # trigger the LLM pipeline to create them automatically
+        if USER_NAME and not USER_NAME.isspace():
+            try:
+                await mem.client.update_atomic(
+                    key="brain.fact.user_name",
+                    value=USER_NAME,
+                    tags=["brain", "fact", "identity"],
+                )
+            except Exception:
+                pass  # New atom — pipeline will extract from conversation
+
+        # Store avatar context
+        try:
+            await mem.client.update_atomic(
+                key="brain.fact.last_avatar",
+                value=current_avatar,
+                tags=["brain", "fact", "avatar"],
+            )
+        except Exception:
+            pass  # New atom — pipeline will extract from conversation
+
+    except Exception as e:
+        logger.warning(f"TencentDB memory recording failed: {e}")
 
 
 async def summarize_memory():
@@ -9055,6 +9519,14 @@ async def lifespan(app: FastAPI):
     global USER_NAME
     load_skills()
 
+    # Load OpenHuman community skills and merge into the SKILLS dict
+    try:
+        count = await load_openhuman_skills()
+        if count:
+            logger.info(f"Loaded {count} OpenHuman community skills for avatars")
+    except Exception as e:
+        logger.warning(f"OpenHuman skills loading failed (non-fatal): {e}")
+
     # Auth0 routes are registered at startup via add_auth0_routes
     if AUTH_AVAILABLE:
         add_auth0_routes(app)
@@ -9438,6 +9910,76 @@ async def get_browser_sensors():
         "age_seconds": round(age, 2) if age is not None else None,
         "stale": age is None or age > _BROWSER_SENSOR_TTL,
     }
+
+
+# ── TencentDB Agent Memory API ──────────────────────────────────────────
+# Exposes memory queries over HTTP. The 4-layer pyramid:
+#   L0: /api/memory/conversations  — offloaded chat history
+#   L1: /api/memory/facts          — atomic facts (preferences, sensor states)
+#   L2: /api/memory/scenarios      — sensor context scenes
+#   L3: /api/memory/core           — persona / team profile
+# Each sense is tagged so avatars can recall what the senses perceived.
+
+
+@app.get("/api/memory/health")
+async def memory_health():
+    """Check if the TencentDB memory gateway is available."""
+    if tencentdb_memory_available is None:
+        return {"available": False, "reason": "module not loaded"}
+    return {"available": await tencentdb_memory_available()}
+
+
+@app.get("/api/memory/facts")
+async def memory_facts(query: str = "", limit: int = 20):
+    """L1: Search/recall atomic facts from memory."""
+    mem = await _get_lilly_memory()
+    if mem is None:
+        return {"facts": [], "available": False}
+    facts = await mem.search_facts(query or "user preference OR brain", limit=limit)
+    return {"facts": facts, "available": True}
+
+
+@app.get("/api/memory/scenarios")
+async def memory_scenarios():
+    """L2: List all scenario files."""
+    mem = await _get_lilly_memory()
+    if mem is None:
+        return {"scenarios": [], "available": False}
+    result = await mem.client.list_scenarios()
+    return {"scenarios": result.get("data", {}).get("entries", []), "available": True}
+
+
+@app.get("/api/memory/core")
+async def memory_core():
+    """L3: Read the core persona / team profile."""
+    mem = await _get_lilly_memory()
+    if mem is None:
+        return {"content": "", "available": False}
+    result = await mem.client.read_core()
+    return {"content": result.get("data", {}).get("content", ""), "available": True}
+
+
+@app.post("/api/memory/broadcast")
+async def memory_broadcast(body: dict):
+    """Write a broadcast message visible to all avatars (L1 atom with 'broadcast' tag)."""
+    mem = await _get_lilly_memory()
+    if mem is None:
+        return {"ok": False, "reason": "not available"}
+    await mem.broadcast_to_avatars(
+        body.get("message", ""),
+        category=body.get("category", "announcement"),
+    )
+    return {"ok": True}
+
+
+@app.get("/api/memory/broadcasts")
+async def memory_broadcasts(category: str = "", limit: int = 10):
+    """Recall recent broadcasts for cross-avatar awareness."""
+    mem = await _get_lilly_memory()
+    if mem is None:
+        return {"broadcasts": [], "available": False}
+    broadcasts = await mem.recall_broadcasts(category or None, limit=limit)
+    return {"broadcasts": broadcasts, "available": True}
 
 
 @app.get("/api/phone_status")
@@ -9963,6 +10505,22 @@ def build_avatar_system_prompt(avatar: str, user_name: str = "") -> str:
     """
     persona = HIVE_PERSONAS[resolve_persona_key(avatar)]
     base = persona["voice_prompt"].strip()
+    # Natural conversation rules — applies to all characters
+    base += """
+
+Natural Conversation Rules (always follow):
+- This is a real conversation, not a customer service interaction.
+- If they say "hey" or "hi", just say hey back. Don't write a paragraph.
+- If they say thanks, say "yeah" or "of course" — not "You're welcome! I'm always here for you!"
+- If they say goodbye, say "later" or "catch you" — not a farewell speech.
+- If they ask for a joke, be funny or say you're not in the mood. Don't recite a joke book.
+- If they're bored, suggest ONE specific thing. Not a menu of options.
+- Match their formality. If they text "u up" don't respond with "I am indeed awake and available!"
+- Silence is fine. Not every message needs a response. Sometimes a reaction is enough.
+- Never start replies with "Hey there!" or "Great question!" or "I'd be happy to help!"
+- Never say "How can I assist you today?" — you're not a help desk.
+- Anticipate needs like Jarvis: if battery is low, mention it. If they're driving, don't ask about weather.
+- Learn from every conversation. If they correct you, remember it. If they prefer something, adapt."""
     if user_name:
         base += f"\n\nThe person you're talking to is {user_name}. Use their name naturally — not every reply, just when it fits."
     return base
@@ -10480,9 +11038,9 @@ async def toggle_conversation_mode(data: dict = None):
         CONVERSATION_MODE = not CONVERSATION_MODE
     if CONVERSATION_MODE:
         CONVERSATION_LAST_ACTIVITY = time.time()
-        await speak("I'm listening. Just talk to me.")
+        await speak("Listening.")
     else:
-        await speak(f"Conversation mode off. Say hey {alpha_name} to start again.")
+        await speak(f"Done. Say {alpha_name} when you need me.")
     return {"conversation_mode": CONVERSATION_MODE}
 
 
@@ -10549,14 +11107,30 @@ async def browser_mic_upload(request: Request):
     if has_wake or CONVERSATION_MODE or WAKE_STATE["listening"]:
         if has_wake and not CONVERSATION_MODE:
             CONVERSATION_MODE = True
-        CONVERSATION_LAST_ACTIVITY = time.time()
-        asyncio.create_task(handle_intent(text))
+            CONVERSATION_LAST_ACTIVITY = time.time()
+        # Process synchronously so the browser gets the reply + audio_id back
+        # in a single round-trip (avoids double-LLM calls from /api/cmd_stream).
+        # Voice input uses the same handle_intent path as /api/cmd.
+        res = await handle_intent(text)
+        return {
+            "status": "ok",
+            "heard": text,
+            "reply": res.get("text", ""),
+            "audio_id": AUDIO_CACHE_ID if AUDIO_CACHE else 0,
+            "look_at": res.get("look_at"),
+        }
     else:
         # First voice input — auto-enter conversation mode and process
         CONVERSATION_MODE = True
         CONVERSATION_LAST_ACTIVITY = time.time()
-        asyncio.create_task(handle_intent(text))
-    return {"status": "ok", "heard": text}
+        res = await handle_intent(text)
+        return {
+            "status": "ok",
+            "heard": text,
+            "reply": res.get("text", ""),
+            "audio_id": AUDIO_CACHE_ID if AUDIO_CACHE else 0,
+            "look_at": res.get("look_at"),
+        }
 
 
 @app.get("/api/ssml")
@@ -10876,6 +11450,191 @@ async def text_command(cmd: TextCommand, request: Request):
     }
 
 
+@app.post("/api/cmd_stream")
+async def text_command_stream(cmd: TextCommand, request: Request):
+    """Stream chat responses token-by-token using Server-Sent Events (SSE).
+
+    This enables live chat display — the user sees the assistant's reply
+    appear word-by-word as it's generated, rather than waiting for the full
+    response. When used with voice input, the user's transcribed text is
+    also shown in the chat immediately for the streaming duration.
+
+    Response format (SSE):
+      data: {"type":"token","value":"..."}      — incremental tokens
+      data: {"type":"done","reply":"full text"}  — final reply
+      data: {"type":"audio","audio_id":123}     — TTS audio when ready
+    """
+    global memory, current_avatar, _current_user_id
+
+    user_info = await get_current_user(request) if AUTH_AVAILABLE else None
+    user_id = user_info.get("id") if user_info else None
+    _current_user_id = user_id or ""
+
+    if cmd.avatar and cmd.avatar != current_avatar:
+        cmd.avatar = resolve_persona_key(cmd.avatar)
+    if user_id:
+        user_mem_data = load_user_memory(user_id)
+        memory = ConversationMemory.from_dict(user_mem_data)
+    elif cmd.avatar != current_avatar:
+        path = _avatar_memory_file(cmd.avatar)
+        if path.exists():
+            try:
+                data = json.loads(path.read_text())
+                memory = ConversationMemory.from_dict(data)
+            except Exception:
+                memory = ConversationMemory()
+        else:
+            memory = ConversationMemory()
+        current_avatar = cmd.avatar
+
+    async def event_stream():
+        # Yield a marker so the client knows streaming started
+        yield f"data: {json.dumps({'type': 'started'})}\n\n"
+
+        try:
+            # For skill-based commands, handle synchronously (skills aren't streamable).
+            # Check if the text matches a skill in the SKILLS dict first.
+            phrase = normalize_text(cmd.text)
+            stripped = re.sub(
+                r"^(run|use|click|tap|open|launch|search|find|what|show|start)\s+",
+                "",
+                phrase,
+            ).strip()
+            skill = SKILLS.get(phrase) or SKILLS.get(stripped)
+            if not skill:
+                for key in sorted(SKILLS.keys(), key=len, reverse=True):
+                    if phrase.startswith(key + " "):
+                        skill = SKILLS[key]
+                        break
+
+            if skill and (
+                skill.get("action_type") == "openhuman_skill"
+                or skill.get("type") == "openhuman_skill"
+                or skill.get("action_type")
+                in ("intent_launch", "shell_command", "hybrid_intent_tap")
+            ):
+                # Non-streaming skill path — use handle_intent
+                res = await handle_intent(cmd.text, from_text=True)
+                reply = res.get("text", "")
+                yield f"data: {json.dumps({'type': 'token', 'value': reply})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'reply': reply})}\n\n"
+                if AUDIO_CACHE_ID:
+                    yield f"data: {json.dumps({'type': 'audio', 'audio_id': AUDIO_CACHE_ID})}\n\n"
+                return
+
+            # Build the message context (same logic as handle_intent but streaming)
+            # We call a streaming variant of the LLM path
+            messages = await _build_streaming_context(cmd.text)
+
+            # Stream tokens from the LLM
+            full_reply = ""
+            async for token in llama_backend.chat_stream(
+                messages, temperature=0.7, max_tokens=200
+            ):
+                if token:
+                    full_reply += token
+                    yield f"data: {json.dumps({'type': 'token', 'value': token})}\n\n"
+
+            # Post-process the full reply
+            full_reply = strip_json_wrapper(full_reply)
+            full_reply = _filter_hallucination_patterns(full_reply)
+
+            if not full_reply or len(full_reply) < 5:
+                full_reply = (
+                    "Not sure where to go with that one — try coming at it differently."
+                )
+
+            yield f"data: {json.dumps({'type': 'done', 'reply': full_reply})}\n\n"
+
+            # Generate TTS
+            try:
+                audio_id = await generate_tts_for_char(full_reply, current_avatar)
+                yield f"data: {json.dumps({'type': 'audio', 'audio_id': audio_id})}\n\n"
+            except Exception as e:
+                logger.warning(f"TTS generation failed during stream: {e}")
+
+            # Save memory
+            await save_memory()
+
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        finally:
+            _current_user_id = ""
+            yield f"data: {json.dumps({'type': 'end'})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+async def _build_streaming_context(text: str) -> list[dict]:
+    """Build the same message context that handle_intent uses, for streaming."""
+    global memory, current_avatar
+
+    mem_dict = await memory.to_dict()
+    context = []
+
+    # Memory context
+    mem_summary = mem_dict.get("summary", "")
+    if mem_summary:
+        context.append({"role": "system", "content": f"SUMMARY:{mem_summary}"})
+
+    # Memory hints
+    try:
+        hints = await _build_memory_hint()
+        if hints:
+            context.append({"role": "system", "content": f"CONTEXT_ABOUT_USER:{hints}"})
+    except Exception:
+        pass
+
+    # Sensor context
+    try:
+        _snap = await asyncio.wait_for(get_sensor_snapshot(), timeout=0.5)
+        if _snap:
+            sensor_str = snapshot_to_narrative(_snap)
+            if sensor_str:
+                context.append(
+                    {
+                        "role": "system",
+                        "content": f"LIVE SENSOR DATA (right now): {sensor_str}",
+                    }
+                )
+    except Exception:
+        pass
+
+    # Conversation history
+    context_entries = await memory.context_window(6)
+    for entry in context_entries:
+        context.append(
+            {
+                "role": entry.role if hasattr(entry, "role") else "user",
+                "content": entry.content if hasattr(entry, "content") else str(entry),
+            }
+        )
+
+    # Awareness note
+    _pending_awareness = _recent_unacknowledged_for_avatar(current_avatar)
+    _awareness_note = ""
+    if _pending_awareness:
+        _latest = _pending_awareness[-1]
+        _detail = _latest.get("detail", "")
+        _action = _latest.get("action", "updated")
+        _src = _latest.get("avatar", "someone")
+        _awareness_note = f"\n[Heads up: {_src} {_action} something: {_detail}]"
+
+    system_content = build_avatar_system_prompt(current_avatar, USER_NAME)
+    messages = [{"role": "system", "content": system_content}]
+    messages.extend(context)
+    messages.append({"role": "user", "content": text + _awareness_note})
+    messages.append(
+        {
+            "role": "system",
+            "content": "GROUNDING: Do NOT fabricate facts, readings, or events. If sensor data is not provided, do not invent it. If you don't know something, say so — never guess. You are a real friend living in this phone, not a chatbot.",
+        }
+    )
+
+    return messages
+
+
 @app.post("/api/story_stream")
 async def story_stream(cmd: TextCommand, request: Request):
     """Stream a sensor-grounded story token by token using the fast model."""
@@ -11019,6 +11778,128 @@ async def status():
         "has_summary": bool(mem_dict["summary"]),
         "mic_active": BACKGROUND_MIC_ACTIVE,
     }
+
+
+# ─── OpenHuman Skill Registry API Endpoints ──────────────────────────
+# These expose the OpenHuman community skill catalog through Lilly's existing
+# HTTP API so the OpenLive bridge and any client can browse/install/search
+# skills without needing the Rust core running.
+
+
+@app.get("/api/openhuman/catalog")
+async def openhuman_browse_catalog(
+    force_refresh: bool = Query(
+        False, description="Force fresh fetch from OpenHuman bridge"
+    ),
+    avatar: str | None = Query(
+        None, description="Filter to skills available for this avatar"
+    ),
+):
+    """Browse the OpenHuman community skill catalog.
+
+    Returns skills compatible with Lilly's avatar system. If `avatar` is
+    specified, only skills matching that avatar's tag filter are returned.
+    """
+    entries = await _fetch_openhuman_catalog(force_refresh=force_refresh)
+    if avatar:
+        avatar = resolve_persona_key(avatar)
+        allowed_tags = AVATAR_SKILL_TAGS.get(avatar, [])
+        filtered = []
+        for e in entries:
+            sk = e if isinstance(e, dict) else e.__dict__
+            tags = sk.get("tags", [])
+            if (
+                not allowed_tags
+                or not tags
+                or any(any(t.lower() in a for t in tags) for a in allowed_tags)
+            ):
+                filtered.append(e)
+        entries = filtered
+    return {"entries": entries, "count": len(entries)}
+
+
+@app.get("/api/openhuman/skills")
+async def openhuman_list_skills(
+    avatar: str | None = Query(None, description="Filter to this avatar's skills"),
+):
+    """List OpenHuman skills currently loaded in Lilly's SKILLS dict.
+
+    If `avatar` is specified, returns only skills scoped to that avatar.
+    """
+    skills = await list_openhuman_skills(avatar)
+    return {"skills": skills, "count": len(skills)}
+
+
+@app.get("/api/openhuman/skills/{skill_id}")
+async def openhuman_describe_skill(skill_id: str):
+    """Describe a single installed OpenHuman skill by id."""
+    # Search the global skill dict
+    for key, skill in SKILLS.items():
+        if not key.startswith("openhuman_"):
+            continue
+        sid = skill.get("skill_id", "")
+        label = skill.get("label", "")
+        if sid == skill_id or normalize_text(label) == normalize_text(skill_id):
+            return {"skill": skill}
+    # Try fetching from catalog
+    entries = await _fetch_openhuman_catalog()
+    for entry in entries:
+        if entry.get("id") == skill_id or normalize_text(
+            entry.get("name", "")
+        ) == normalize_text(skill_id):
+            return {"skill": entry}
+    raise HTTPException(status_code=404, detail=f"skill '{skill_id}' not found")
+
+
+@app.post("/api/openhuman/refresh")
+async def openhuman_refresh_skills():
+    """Force-refresh the OpenHuman catalog and rebuild all avatar skill indexes."""
+    count = await refresh_openhuman_skills()
+    return {
+        "ok": True,
+        "skills_merged": count,
+        "avatars": list(HIVE_PERSONAS.keys()),
+        "catalog_url": OPENHUMAN_BRIDGE_URL,
+    }
+
+
+@app.get("/api/openhuman/avatars")
+async def openhuman_avatar_skills():
+    """List all 9 avatars and their OpenHuman skill counts."""
+    # Ensure skills are loaded
+    if not _openhuman_avatar_skills:
+        await load_openhuman_skills()
+    result = {}
+    for avatar in HIVE_PERSONAS:
+        skills = _openhuman_avatar_skills.get(avatar, {})
+        result[avatar] = {
+            "name": HIVE_PERSONAS[avatar]["name"],
+            "emoji": HIVE_PERSONAS[avatar]["emoji"],
+            "role": HIVE_PERSONAS[avatar]["role"],
+            "skill_count": len(skills),
+            "allowed_tags": AVATAR_SKILL_TAGS.get(avatar, []),
+        }
+    return {"avatars": result}
+
+
+@app.get("/api/openhuman/status")
+async def openhuman_status():
+    """Check connectivity to the OpenHuman bridge service."""
+    health = {"openhuman_bridge_url": OPENHUMAN_BRIDGE_URL}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{OPENHUMAN_BRIDGE_URL}/health")
+            health["bridge_reachable"] = resp.status_code == 200
+            if resp.status_code == 200:
+                health["bridge_info"] = resp.json()
+    except Exception as e:
+        health["bridge_reachable"] = False
+        health["error"] = str(e)
+
+    health["skills_loaded"] = len([k for k in SKILLS if k.startswith("openhuman_")])
+    health["avatars_with_skills"] = list(_openhuman_avatar_skills.keys())
+    health["catalog_entries_cached"] = len(_openhuman_catalog_cache or [])
+    return health
 
 
 @app.get("/api/token_usage")
@@ -11317,6 +12198,8 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 .chat-msg code{font-family:'JetBrains Mono','Fira Code',monospace;background:rgba(93,78,109,0.08);padding:2px 5px;border-radius:4px;font-size:12px;color:#5d4e6d}
 .chat-msg pre code{background:none;padding:0;color:#1a1a2e}
 .chat-msg .chat-sender{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:#8b7a9e;margin-bottom:4px}
+.chat-msg .chat-content{white-space:pre-wrap;word-wrap:break-word}
+.chat-msg .chat-content.streaming{color:#8b7a9e;opacity:0.6}
 .chat-msg .chat-alpha{font-size:8px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#fff;
   background:linear-gradient(135deg,#a78bfa,#8b7a9e);border-radius:6px;padding:1px 5px}
 .chat-msg.system{background:rgba(74,222,128,0.08);border:1px solid rgba(74,222,128,0.15);border-radius:12px;
@@ -11428,9 +12311,7 @@ pre{position:relative;overflow-x:auto}
 #petHeartLabel{font-size:9px;color:rgba(93,78,109,0.5);margin-top:3px;text-align:center;line-height:1.2;letter-spacing:0.3px}
 #petHeartLabel span{color:rgba(139,122,158,0.8);font-weight:600}
 
-/* ─── Heard (User Speech) Display ─── */
-#heardBubble{position:absolute;bottom:100px;left:50%;transform:translateX(-50%);width:70%;max-width:400px;background:rgba(184,169,201,0.22);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(184,169,201,0.3);padding:10px 18px;border-radius:16px;font-size:13px;color:rgba(93,78,109,0.75);font-style:italic;text-align:center;display:none;z-index:18;line-height:1.5;box-shadow:0 2px 12px rgba(180,140,180,0.08);transition:opacity 0.3s;pointer-events:none}
-#heardBubble::before{content:'🎤 ';font-style:normal}
+/* ─── Heard (User Speech) — now inline in chat ─── */
 
 /* ─── Start Screen Mic Prompt ─── */
 #startScreen .mic-prompt{font-size:13px;color:rgba(93,78,109,0.4);margin-top:16px;display:flex;align-items:center;gap:6px;justify-content:center;flex-shrink:0}
@@ -11916,7 +12797,6 @@ pre{position:relative;overflow-x:auto}
   <span></span><span></span><span></span>
 </div>
 
-<div id="heardBubble"></div>
 <div id="speechBubble"></div>
 <canvas id="pupCanvas"></canvas>
 
@@ -14052,27 +14932,54 @@ function updateUI(){
   requestAnimationFrame(updateUI);
 }
 
-let lastAudioId=0,activeAudios={};
-let _lastAudioSrc='';
-function playAudio(id){
-  if(id<=lastAudioId)return;
-  lastAudioId=id;
-  _lastAudioSrc='/api/tts?id='+id;
-  const btn=document.getElementById('ttsReplayBtn');
-  if(btn)btn.style.display='flex';
-  const a=new Audio(_lastAudioSrc);
-  activeAudios[id]=a;
-  lillySpeaking=true;
-  a.onended=()=>{delete activeAudios[id];lastMouthVal=0;lillySpeaking=false};
-  a.ontimeupdate=()=>{
-    if(a.currentTime<a.duration){
-      const pct=a.currentTime/a.duration;
-      const rhythm=Math.abs(Math.sin(pct*Math.PI*20));
-      lastMouthVal=0.3+rhythm*0.7;
-    }
-  };
-  a.play().catch(()=>{pendingAudio=a;delete activeAudios[id];lillySpeaking=false});
-}
+ let lastAudioId=0,activeAudios={},playedAudioIds=new Set();
+ let _lastAudioSrc='';
+ function playAudio(id){
+   if(playedAudioIds.has(id))return;
+   playedAudioIds.add(id);
+   if(playedAudioIds.size>96){playedAudioIds.delete(playedAudioIds.values().next().value)}
+   if(id>lastAudioId)lastAudioId=id;
+   _lastAudioSrc='/api/tts?id='+id;
+   const btn=document.getElementById('ttsReplayBtn');
+   if(btn)btn.style.display='flex';
+   const a=new Audio(_lastAudioSrc);
+   activeAudios[id]=a;
+   lillySpeaking=true;
+   a.onended=()=>{delete activeAudios[id];lastMouthVal=0;lillySpeaking=false};
+   a.ontimeupdate=()=>{
+     if(a.currentTime<a.duration){
+       const pct=a.currentTime/a.duration;
+       const rhythm=Math.abs(Math.sin(pct*Math.PI*20));
+       lastMouthVal=0.3+rhythm*0.7;
+     }
+   };
+   a.play().catch(()=>{delete activeAudios[id];lillySpeaking=false;playAudioViaContext(_lastAudioSrc,id)});
+ }
+ async function playAudioViaContext(src,id){
+   try{
+     if(!audioCtx){audioCtx=new (window.AudioContext||window.webkitAudioContext)();}
+     if(audioCtx.state==='suspended')await audioCtx.resume();
+     const resp=await fetch(src);
+     if(!resp.ok)return;
+     const buf=await resp.arrayBuffer();
+     const decoded=await audioCtx.decodeAudioData(buf);
+     const srcNode=audioCtx.createBufferSource();
+     srcNode.buffer=decoded;
+     srcNode.connect(audioCtx.destination);
+     activeAudios[id]=srcNode;
+     lillySpeaking=true;
+     const t0=audioCtx.currentTime;
+     const dur=decoded.duration;
+     srcNode.onended=()=>{delete activeAudios[id];lastMouthVal=0;lillySpeaking=false};
+     srcNode.start();
+     const iv=setInterval(()=>{
+       const pct=(audioCtx.currentTime-t0)/dur;
+       if(pct>=1){clearInterval(iv);return}
+       const rhythm=Math.abs(Math.sin(pct*Math.PI*20));
+       lastMouthVal=0.3+rhythm*0.7;
+     },50);
+   }catch(e){}
+ }
 function replayLastSpeech(){
   if(!_lastAudioSrc)return;
   const a=new Audio(_lastAudioSrc);
@@ -14098,12 +15005,9 @@ function displaySpeech(text){
 let heardTimer=null;
 function showHeard(text){
   if(!text)return;
-  const b=document.getElementById('heardBubble');
-  b.textContent=text;
-  b.style.display='block';
-  b.style.opacity='1';
-  clearTimeout(heardTimer);
-  heardTimer=setTimeout(()=>{b.style.opacity='0';setTimeout(()=>{b.style.display='none'},300)},4000);
+  // Show heard text as a user message in the chat — natural, no floating bubble
+  showMainChat();
+  addChatMessage('user',text);
 }
 function setMouth(val){lastMouthVal=Math.max(0,Math.min(1,val))}
 
@@ -14407,6 +15311,126 @@ async function toggleBrowserMic(){
   if(browserMicActive){stopBrowserMic();}else{await startBrowserMic();}
 }
 let _micRecording=false;
+
+// Stream the response from /api/cmd_stream and display tokens as they arrive.
+// Falls back to /api/cmd (non-streaming) if the streaming endpoint is unavailable.
+async function sendStreamingReply(text){
+  if(!text)return;
+  showMainChat();
+  // Add a placeholder assistant message that we'll progressively update
+  const msgDiv=document.createElement('div');
+  msgDiv.className='chat-msg assistant';
+  const avatarMeta=chatAvatarMeta(selectedAvatar);
+  const emoji=(avatarMeta.emoji||'🐶');
+  const name=(avatarMeta.name||'Lilly');
+  const isAlpha = (selectedAvatar||'puppy') === 'puppy';
+  msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+
+    (isAlpha?' <span class="chat-alpha">Alpha</span>':'')+'</div><div class="chat-content streaming"></div>';
+  const contentEl=msgDiv.querySelector('.chat-content');
+  contentEl.textContent='...';
+  chatMessages.appendChild(msgDiv);
+  chatMessages.scrollTop=chatMessages.scrollHeight;
+
+  let fullReply='';
+  try{
+    const r=await fetch('/api/cmd_stream',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text,avatar:localStorage.getItem('lilly_avatar')||'puppy'})
+    });
+    if(!r.ok){
+      // Fallback to non-streaming /api/cmd
+      const d=await r.clone().json().catch(()=>null);
+      if(d&&d.reply){
+        contentEl.textContent=d.reply;
+        fullReply=d.reply;
+        displaySpeech(d.reply);
+        if(d.audio_id)playAudio(d.audio_id);
+      }
+      return;
+    }
+    // SSE stream
+    const reader=r.body.getReader();
+    const decoder=new TextDecoder();
+    isStreaming=true;
+    let hasContent=false;
+    while(true){
+      const{done,value}=await reader.read();
+      if(done)break;
+      const chunk=decoder.decode(value,{stream:true});
+      // SSE format: multiple data: lines separated by \n\n
+      const lines=chunk.split('\n');
+      for(const line of lines){
+        if(line.startsWith('data:')){
+          const jsonStr=line.slice(5).trim();
+          try{
+            const evt=JSON.parse(jsonStr);
+            if(evt.type==='token'&&evt.value){
+              fullReply+=evt.value;
+              contentEl.textContent=fullReply;
+              chatMessages.scrollTop=chatMessages.scrollHeight;
+              hasContent=true;
+            }else if(evt.type==='done'&&hasContent){
+              // Convert to rendered HTML (code blocks etc.) now that the reply is complete
+              msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+
+                (isAlpha?' <span class="chat-alpha">Alpha</span>':'')+'</div><div class="chat-content">'+renderCodeBlocks(fullReply)+'</div>';
+              displaySpeech(fullReply);
+              pupSpeech=fullReply;
+              speechTimer=999;
+              if(evt.look_at)setLookAt(evt.look_at,5000);
+              if(evt.open_url)window.open(evt.open_url,'_blank','noopener,noreferrer');
+            }else if(evt.type==='audio'){
+              playAudio(evt.audio_id);
+            }else if(evt.type==='error'){
+              contentEl.textContent='Sorry, something went wrong. Try again.';
+              displaySpeech('Sorry, something went wrong.');
+            }
+          }catch(e){}
+        }
+      }
+    }
+    isStreaming=false;
+    if(!hasContent){
+      contentEl.textContent='...';
+    }
+  }catch(e){
+    // Fallback: try non-streaming endpoint
+    try{
+      const r2=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({text,avatar:localStorage.getItem('lilly_avatar')||'puppy'})});
+      const d=await r2.json();
+      if(d.reply){
+        fullReply=d.reply;
+        // Render as HTML (with code blocks) since it's a complete message
+        msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+
+          (isAlpha?' <span class="chat-alpha">Alpha</span>':'')+'</div><div class="chat-content">'+renderCodeBlocks(d.reply)+'</div>';
+        displaySpeech(d.reply);
+        if(d.audio_id)playAudio(d.audio_id);
+        if(d.look_at)setLookAt(d.look_at,5000);
+        if(d.open_url)window.open(d.open_url,'_blank','noopener,noreferrer');
+        if(d.open_vibecode)openVibecode(d.vibecode_slug);
+        if(d.close_vibecode)closeVibecode();
+      }
+     }catch(e2){
+      contentEl.textContent='Network error. Try again.';
+      displaySpeech('Network error. Try again.');
+    }
+    isStreaming=false;
+  }
+  // Ensure the assistant message is properly finalized
+  msgDiv.querySelector('.chat-content').classList.remove('streaming');
+  chatMessages.scrollTop=chatMessages.scrollHeight;
+}
+
+// Unified reply sender — tries streaming first, falls back to /api/cmd.
+// Handles text chat, voice input, and skill responses uniformly.
+async function sendReply(text){
+  showMainChat();
+  addChatMessage('user',text);
+  statusLabel.textContent='thinking...';
+  await sendStreamingReply(text);
+}
+
 function recordMicChunk(){
   if(!browserMicActive||!browserMicStream)return;
   if(_micRecording)return;
@@ -14419,30 +15443,56 @@ function recordMicChunk(){
   browserMicRecorder.ondataavailable=(e)=>{if(e.data.size>0)chunks.push(e.data)};
   browserMicRecorder.onstop=async()=>{
     _micRecording=false;
-    if(chunks.length===0){if(browserMicActive)setTimeout(recordMicChunk,200);return}
+    if(chunks.length===0){if(browserMicActive)setTimeout(recordMicChunk,150);return}
     const blob=new Blob(chunks,{type:browserMicRecorder.mimeType||'audio/webm'});
     const arrayBuf=await blob.arrayBuffer();
     const audioCtx=new(window.AudioContext||window.webkitAudioContext)();
     try{
       const decoded=await audioCtx.decodeAudioData(arrayBuf);
       if(!isMyVoice(decoded)){
-        if(browserMicActive)setTimeout(recordMicChunk,300);
+        if(browserMicActive)setTimeout(recordMicChunk,200);
         audioCtx.close();return;
       }
       const wavBuf=encodeWav(decoded);
+      // Start recording the next chunk immediately (overlap recording with STT/LLM)
+      // This pipelines the pipeline: while Whisper transcribes this chunk, the mic
+      // is already capturing the next one — cutting effective latency in half.
+      const nextChunkPromise = browserMicActive ? setTimeout(recordMicChunk, 50) : null;
       const resp=await fetch('/api/browser_mic',{method:'POST',headers:{'Content-Type':'audio/wav'},body:wavBuf});
       const result=await resp.json();
-      if(result.heard){showHeard(result.heard)}
+      if(result.heard){
+        showHeard(result.heard);
+        // showHeard() now adds the message to chat inline — no floating bubble
+        // /api/browser_mic now calls handle_intent synchronously and returns
+        // the reply + audio_id directly — no need for a second /api/cmd_stream call.
+        // This eliminates the double-LLM-call latency.
+        if(result.reply){
+          showMainChat();
+          const msgDiv=document.createElement('div');
+          msgDiv.className='chat-msg assistant';
+          const avatarMeta=chatAvatarMeta(selectedAvatar);
+          const emoji=(avatarMeta.emoji||'🐶');
+          const name=(avatarMeta.name||'Lilly');
+          const isAlpha = (selectedAvatar||'puppy') === 'puppy';
+          msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+
+            (isAlpha?' <span class="chat-alpha">Alpha</span>':'')+'</div><div class="chat-content">'+renderCodeBlocks(result.reply)+'</div>';
+          chatMessages.appendChild(msgDiv);
+          chatMessages.scrollTop=chatMessages.scrollHeight;
+          displaySpeech(result.reply);
+          if(result.audio_id)playAudio(result.audio_id);
+        }
+      }
       else if(result.status==='silence'){
         const sb=document.getElementById('speechBubble');
         if(sb.style.display!=='block')displaySpeech('...');
       }
     }catch(e){}
     audioCtx.close();
-    if(browserMicActive)setTimeout(recordMicChunk,300);
+    // Don't reschedule here — the next chunk was already scheduled above (pipelining)
   };
   browserMicRecorder.start();
-  setTimeout(()=>{if(browserMicRecorder&&browserMicRecorder.state==='recording')browserMicRecorder.stop()},3000);
+  // Reduced from 3000ms to 1500ms for lower latency — shorter chunks = faster transcription
+  setTimeout(()=>{if(browserMicRecorder&&browserMicRecorder.state==='recording')browserMicRecorder.stop()},1500);
 }
 function encodeWav(audioBuffer){
   const numCh=audioBuffer.numberOfChannels;
@@ -14518,20 +15568,12 @@ inputField.addEventListener('keydown',async(e)=>{
       }catch(e){isStreaming=false;statusLabel.textContent='error';}
     }else{
       try{
-        // Show chat container and append to scrollable chat
+        // Show chat container and append user message immediately
         showMainChat();
         addChatMessage('user',text);
-        const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,avatar:localStorage.getItem('lilly_avatar')||'puppy'})});
-        const d=await r.json();
-        if(d.reply){
-          addChatMessage('assistant',d.reply);
-          displaySpeech(d.reply);
-        }
-        if(d.audio_id)playAudio(d.audio_id);
-        if(d.look_at)setLookAt(d.look_at,5000);
-        if(d.open_url)window.open(d.open_url,'_blank','noopener,noreferrer');
-        if(d.open_vibecode)openVibecode(d.vibecode_slug);
-        if(d.close_vibecode)closeVibecode();
+        statusLabel.textContent='thinking...';
+        // Use streaming reply for live chat display
+        await sendStreamingReply(text);
       }catch(e){}
     }
   }
@@ -19560,6 +20602,9 @@ async def vibecode_chat(data: dict, request: Request):
         lang = m.group(1) or "text"
         code = m.group(2).strip()
         code_blocks.append({"lang": lang, "code": code})
+
+    # ── Record to TencentDB memory (L0 conversation + L1 atom extraction) ──
+    asyncio.create_task(_record_to_tencentdb(msg, reply))
 
     return {
         "reply": reply,
