@@ -17,11 +17,15 @@ body{
 #container{
   width:96px;height:96px;
   position:relative;
-  background:transparent;
+  background:rgba(22,20,36,0.42);
+  backdrop-filter:blur(16px) saturate(1.25);
+  -webkit-backdrop-filter:blur(16px) saturate(1.25);
+  border-radius:50%;
   transition:all 0.3s;
 }
 #container.expanded{
   width:280px;height:320px;
+  border-radius:24px;
 }
 body.expanded{
   width:280px;height:320px;
@@ -795,69 +799,42 @@ function drawAnimalFace(ctx2, animal, cx, cy, r, frame2, noBg) {
 
 function drawPup(){
   ctx.clearRect(0,0,W,H);frame++;
-  // Dispatch to drawAnimalFace for non-puppy avatars
-  if(avatar!=='puppy'){
-    drawAnimalFace(ctx, avatar, W/2, H/2, Math.min(W,H)*0.48, frame, true);
-    return;
-  }
-  if(frame>=blinkFrame){isBlinking=true;if(frame>=blinkFrame+8){isBlinking=false;blinkFrame=frame+140+Math.random()*200}}
-  const isSpeaking=speaking||mouthOpen>0.1;
-  const isExcited=mood==='excited'||mood==='cheerful';
-  const earActive=isSpeaking||isExcited||thinking;
-  ctx.save();ctx.translate(W/2,H/2+breathe());
-  const s=Math.min(W,H)*0.58/150;
-  ctx.scale(s,s);
-  ctx.translate(0,6);
-  if(thinking){const g=0.06+Math.sin(frame*0.06)*0.03;ctx.shadowColor='rgba(200,180,220,'+g+')';ctx.shadowBlur=20}
-  const ew=earActive?Math.sin(frame*0.18)*0.1:0,eb=earActive?Math.sin(frame*0.14)*2:0;
-  ctx.save();ctx.translate(-62,-44+eb);ctx.rotate(-0.22+ew);
-  ctx.fillStyle='#c8c8d0';ctx.beginPath();oe(ctx,0,0,26,50);ctx.fill();
-  ctx.fillStyle='#f0d8e4';ctx.beginPath();oe(ctx,0,6,14,36);ctx.fill();ctx.restore();
-  ctx.save();ctx.translate(62,-44+eb);ctx.rotate(0.22-ew);
-  ctx.fillStyle='#c8c8d0';ctx.beginPath();oe(ctx,0,0,26,50);ctx.fill();
-  ctx.fillStyle='#f0d8e4';ctx.beginPath();oe(ctx,0,6,14,36);ctx.fill();ctx.restore();
-  ctx.fillStyle='#d0d0d8';ctx.beginPath();ctx.roundRect(-72,-48,144,112,[38,38,28,28]);ctx.fill();
-  ctx.fillStyle='#c0c0c8';ctx.beginPath();oe(ctx,0,32,42,22);ctx.fill();
-  ctx.shadowBlur=0;ctx.shadowColor='transparent';
-  ctx.fillStyle='#ffffff';
-  if(isBlinking){
-    ctx.strokeStyle='#8b7a9e';ctx.lineWidth=2.5;ctx.lineCap='round';
-    ctx.beginPath();ctx.moveTo(-38,0);ctx.lineTo(-18,0);ctx.stroke();
-    ctx.beginPath();ctx.moveTo(18,0);ctx.lineTo(38,0);ctx.stroke();
-  }else{
-    ctx.beginPath();ctx.arc(-28,2,11,0,Math.PI*2);ctx.fill();
-    ctx.beginPath();ctx.arc(28,2,11,0,Math.PI*2);ctx.fill();
-    let px=0,py=0;
-    if(lookAt==='heart'){px=-3;py=4;}
-    else if(lookAt==='dashboard'||lookAt==='name'){px=0;py=-4;}
-    else if(lookAt==='input'){py=3;}
-    else if(lookAt==='app'){px=2;py=6;}
-    else if(lookAt==='user'){px=0;py=0;}
-    else{if(mood==='curious'||mood==='excited')py=-3;if(thinking)px=-1;}
-    ctx.fillStyle='#8b7a9e';ctx.beginPath();ctx.arc(-28+px,2+py,4,0,Math.PI*2);ctx.fill();
-    ctx.beginPath();ctx.arc(28+px,2+py,4,0,Math.PI*2);ctx.fill();
-    ctx.fillStyle='rgba(255,255,255,0.6)';ctx.beginPath();ctx.arc(-26,0+py,1.5,0,Math.PI*2);ctx.fill();
-    ctx.beginPath();ctx.arc(30,0+py,1.5,0,Math.PI*2);ctx.fill();
-  }
-  ctx.fillStyle='#d4a0b0';ctx.beginPath();oe(ctx,0,18,10,7);ctx.fill();
-  ctx.strokeStyle='rgba(80,60,100,0.4)';ctx.lineWidth=2.5;ctx.lineCap='round';
-  ctx.beginPath();ctx.moveTo(-38,-10);ctx.lineTo(-18,-10);ctx.stroke();
-  ctx.beginPath();ctx.moveTo(18,-10);ctx.lineTo(38,-10);ctx.stroke();
-  ctx.shadowBlur=0;
-  if(isSpeaking&&!isBlinking){
-    const open=Math.min(1,mouthOpen)*10+Math.abs(Math.sin(frame*0.25))*3;
-    ctx.fillStyle='#3d2b1e';ctx.beginPath();oe(ctx,0,24,9,open*0.5);ctx.fill();
-    ctx.fillStyle='#b45353';ctx.beginPath();oe(ctx,0,23,7,open*0.4);ctx.fill();
-  }else{
-    ctx.strokeStyle='#8b7a9e';ctx.lineWidth=2;ctx.lineCap='round';
-    ctx.beginPath();ctx.arc(0,20,8,0.15,Math.PI-0.15);ctx.stroke();
-  }
+  // Frosted circular backdrop — hides whatever is behind the floating overlay
+  // (e.g. a code editor on the phone) so nothing "leaks" through as background.
+  ctx.save();
+  const bg=ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,W*0.5);
+  bg.addColorStop(0,'rgba(24,22,38,0.62)');
+  bg.addColorStop(0.7,'rgba(24,22,38,0.42)');
+  bg.addColorStop(1,'rgba(24,22,38,0)');
+  ctx.fillStyle=bg;
+  ctx.beginPath();ctx.arc(W/2,H/2,W*0.5,0,Math.PI*2);ctx.fill();
   ctx.restore();
+  // ── UNIFIED CLAY FACE — every avatar (incl. 🐶 Lilly) renders with the
+  // ── same drawAnimalFace style, matching the avatar picker + main UI.
+  drawAnimalFace(ctx, avatar, W/2, H/2, Math.min(W,H)*0.48, frame, true);
+  if(thinking){
+    ctx.save();
+    const g=0.06+Math.sin(frame*0.06)*0.03;
+    ctx.strokeStyle='rgba(200,180,220,'+g+')';
+    ctx.lineWidth=6;
+    ctx.beginPath();ctx.arc(W/2,H/2,Math.min(W,H)*0.48,0,Math.PI*2);ctx.stroke();
+    ctx.restore();
+  }
 }
 
 function drawFrame(){
   try{drawPup();}catch(e){try{console.warn('draw',e)}catch(ex){}}
   requestAnimationFrame(drawFrame);
+}
+
+// Drop Whisper / TTS-echo artefacts that slip through as a made-up "heard"
+// (e.g. a lone "thank you" picked up from Lilly's own voice or background).
+function _heardIsSpurious(text){
+  if(!text)return false;
+  const s=text.toLowerCase().replace(/[.!?,]+$/,' ').trim();
+  if(/^(thank|thanks|thankyou|ty)\b/.test(s))return true;
+  if(/\b(subscribe|like\s+and\s+subscribe|please\s+subscribe|smash\s+(the\s+)?subscribe)\b/.test(s))return true;
+  return false;
 }
 
 // State polling
@@ -916,7 +893,7 @@ async function pollState(){
     const charName=overlayCharName();
     if(heard&&heard!==_lastHeardLog){
       _lastHeardLog=heard;
-      appendMsg('user',heard);
+      if(!_heardIsSpurious(heard)) appendMsg('user',heard);
       if(isRadarIntent(heard))openRadar();
     }
     if(spoken&&spoken!==_lastSpokenLog){
