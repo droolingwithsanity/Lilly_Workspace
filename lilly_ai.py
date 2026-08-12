@@ -14116,7 +14116,8 @@ document.getElementById('ocGate').style.display = 'none';
 (async function() {
   const alreadyAuthed = await checkAuth();
   if (!alreadyAuthed) {
-    showAvatarPicker();
+    // Skip forced login — show main UI immediately; auth remains optional
+    hideStartScreen();
   }
 })();
 
@@ -17444,30 +17445,26 @@ async function loadVersions() {
       dlArea.style.display = 'block';
       return;
     }
-    const light = list.find(f => f.type === 'light');
-    const full = list.find(f => f.type === 'full');
-    let html = '';
-    
-    if (light) {
-      const size = (light.size / 1024 / 1024).toFixed(1);
-      html += '<div style="margin-bottom:16px;padding:16px;border-radius:14px;background:rgba(74,222,128,0.1);border:1px solid rgba(74,222,128,0.2)">';
-      html += '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#4ade80;margin-bottom:6px">Light Version</div>';
-      html += '<div style="font-size:15px;font-weight:600;margin-bottom:4px">v' + light.variant + '</div>';
-      html += '<div style="font-size:12px;color:rgba(93,78,109,0.5);margin-bottom:12px">' + size + ' MB \u00b7 Minimal overlay client</div>';
-      html += '<a class="dl-btn" href="/api/apk/download?type=light" style="padding:12px 32px;font-size:14px;border-radius:12px;background:rgba(74,222,128,0.2);color:#2d5a3e">\u2B07 Download Light</a>';
-      html += '</div>';
+    const latest = list[0];
+    const size = (latest.size / 1024 / 1024).toFixed(1);
+    let html = '<div style="margin-bottom:16px;padding:16px;border-radius:14px;background:rgba(74,222,128,0.1);border:1px solid rgba(74,222,128,0.2)">';
+    html += '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#4ade80;margin-bottom:6px">Latest Build</div>';
+    html += '<div style="font-size:15px;font-weight:600;margin-bottom:4px">' + latest.variant + '</div>';
+    html += '<div style="font-size:12px;color:rgba(93,78,109,0.5);margin-bottom:12px">' + size + ' MB · Updated ' + new Date(latest.modified * 1000).toLocaleDateString() + '</div>';
+    html += '<a class="dl-btn" href="/api/apk/download?name=' + encodeURIComponent(latest.name) + '" style="padding:12px 32px;font-size:14px;border-radius:12px;background:rgba(74,222,128,0.2);color:#2d5a3e">⬇ Download Latest</a>';
+    html += '</div>';
+    if (list.length > 1) {
+      html += '<details style="text-align:left;margin-top:8px"><summary style="cursor:pointer;font-size:12px;color:rgba(93,78,109,0.6);padding:4px 0">Older builds</summary><div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">';
+      for (let i = 1; i < list.length; i++) {
+        const old = list[i];
+        const osize = (old.size / 1024 / 1024).toFixed(1);
+        html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,0.35);border:1px solid rgba(184,169,201,0.2)">';
+        html += '<div><div style="font-size:13px;font-weight:500">' + old.variant + '</div><div style="font-size:11px;color:rgba(93,78,109,0.5)">' + osize + ' MB · ' + new Date(old.modified * 1000).toLocaleDateString() + '</div></div>';
+        html += '<a class="dl-btn" href="/api/apk/download?name=' + encodeURIComponent(old.name) + '" style="padding:6px 14px;font-size:12px">⬇</a>';
+        html += '</div>';
+      }
+      html += '</div></details>';
     }
-    
-    if (full) {
-      const size = (full.size / 1024 / 1024).toFixed(1);
-      html += '<div style="margin-bottom:16px;padding:16px;border-radius:14px;background:rgba(139,122,158,0.1);border:1px solid rgba(139,122,158,0.2)">';
-      html += '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#8b7a9e;margin-bottom:6px">Termux Server Version</div>';
-      html += '<div style="font-size:15px;font-weight:600;margin-bottom:4px">v' + full.variant + '</div>';
-      html += '<div style="font-size:12px;color:rgba(93,78,109,0.5);margin-bottom:12px">' + size + ' MB \u00b7 Full server with AI backend</div>';
-      html += '<a class="dl-btn" href="/api/apk/download?type=full" style="padding:12px 32px;font-size:14px;border-radius:12px;background:rgba(139,122,158,0.2)">\u2B07 Download Termux Server</a>';
-      html += '</div>';
-    }
-    
     dlArea.innerHTML = html;
     dlArea.style.display = 'block';
   } catch (e) {
@@ -17480,6 +17477,57 @@ loadVersions();
 </script>
 </body>
 </html>"""
+
+
+@app.get("/api/apk/variants")
+async def apk_variants():
+    """Return available APK builds from file_share and workspace root."""
+    import glob
+
+    variants = []
+    search_dirs = [FILE_SHARE_DIR, Path(WORKSPACE)]
+    for d in search_dirs:
+        if not d.exists():
+            continue
+        for p in sorted(d.glob("*.apk"), key=lambda x: x.stat().st_mtime, reverse=True):
+            variants.append(
+                {
+                    "name": p.name,
+                    "type": "debug"
+                    if "debug" in p.name.lower() or "v2" in p.name.lower()
+                    else "release",
+                    "variant": p.stem,
+                    "size": p.stat().st_size,
+                    "path": str(p),
+                    "modified": p.stat().st_mtime,
+                }
+            )
+    # Deduplicate by name, keep newest
+    seen = {}
+    for v in variants:
+        seen.setdefault(v["name"], v)
+    return sorted(seen.values(), key=lambda x: x["modified"], reverse=True)
+
+
+@app.get("/api/apk/download")
+async def apk_download(name: str = ""):
+    """Serve an APK file by name from file_share or workspace root."""
+    import glob
+
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    search_dirs = [FILE_SHARE_DIR, Path(WORKSPACE)]
+    for d in search_dirs:
+        if not d.exists():
+            continue
+        candidate = d / name
+        if candidate.exists() and candidate.is_file():
+            return FileResponse(
+                str(candidate),
+                media_type="application/vnd.android.package-archive",
+                filename=name,
+            )
+    raise HTTPException(status_code=404, detail=f"APK '{name}' not found")
 
 
 @app.get("/apk", response_class=HTMLResponse)
@@ -18746,21 +18794,75 @@ async def codemode_list_projects():
 
 
 @app.get("/api/codemode/project/{slug}")
-async def codemode_get_project(slug: str):
-    """Read a project's file tree and contents (optionally a specific file)."""
+async def codemode_get_project(slug: str, path: str = ""):
+    """Read a project's file tree and contents.
+
+    - Without ?path=: returns file tree metadata only (name, path, size, type).
+    - With ?path=...: returns the contents of that specific file only.
+    """
     slug = _vibecode_project_slug(slug)
     dest = VIBECODE_PROJECTS_DIR / slug
     if not dest.exists():
         return JSONResponse({"error": f"Project '{slug}' not found"}, status_code=404)
-    # Return the full file tree
-    tree = {}
-    for f in sorted(dest.rglob("*")):
-        if f.is_file() and ".git" not in str(f):
-            rel = str(f.relative_to(dest))
-            try:
-                tree[rel] = f.read_text(errors="replace")
-            except OSError:
-                tree[rel] = "<unable to read>"
+
+    if path:
+        # Return a single file's contents
+        target = (dest / path).resolve()
+        if not str(target).startswith(str(dest.resolve())):
+            return JSONResponse({"error": "Path out of bounds"}, status_code=400)
+        if not target.is_file():
+            return JSONResponse({"error": "Not a file"}, status_code=404)
+        MAX_SIZE = 512 * 1024  # 512 KB
+        size = target.stat().st_size
+        if size > MAX_SIZE:
+            return JSONResponse(
+                {"error": f"File too large ({size} bytes)"}, status_code=413
+            )
+        try:
+            content = target.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+        ext = target.suffix.lstrip(".").lower()
+        lang_map = {
+            "py": "python",
+            "js": "javascript",
+            "ts": "typescript",
+            "html": "html",
+            "css": "css",
+            "json": "json",
+            "bash": "bash",
+            "sh": "bash",
+            "sql": "sql",
+            "java": "java",
+            "cpp": "cpp",
+            "c": "c",
+            "md": "markdown",
+            "rs": "rust",
+            "go": "go",
+        }
+        return {
+            "slug": slug,
+            "path": path,
+            "content": content,
+            "size": size,
+            "lang": lang_map.get(ext, ext or "text"),
+        }
+
+    # Return file tree metadata only — no contents
+    tree = []
+    try:
+        for f in sorted(dest.rglob("*")):
+            if f.is_file() and ".git" not in str(f):
+                rel = str(f.relative_to(dest))
+                tree.append(
+                    {
+                        "name": f.name,
+                        "path": rel,
+                        "size": f.stat().st_size,
+                    }
+                )
+    except OSError:
+        pass
     return {"slug": slug, "path": str(dest), "files": tree}
 
 
@@ -19413,6 +19515,32 @@ async def vibecode_read_file(slug: str, path: str):
         return JSONResponse({"error": "Path out of bounds"}, status_code=400)
     if not target.is_file():
         return JSONResponse({"error": "Not a file"}, status_code=404)
+
+    # Block sensitive files
+    _SENSITIVE_PATTERNS = (
+        ".env",
+        ".git",
+        ".ssh",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        ".pem",
+        ".p12",
+        ".key",
+        ".secret",
+        ".pwd",
+        "credentials",
+        "token",
+        "api_key",
+        "passwd",
+        "shadow",
+    )
+    rel = str(target.relative_to(project_dir)).lower()
+    if any(pat in rel for pat in _SENSITIVE_PATTERNS):
+        return JSONResponse(
+            {"error": "Access to sensitive files is blocked"}, status_code=403
+        )
 
     MAX_SIZE = 512 * 1024  # 512 KB
     size = target.stat().st_size
@@ -21205,6 +21333,32 @@ async def vibecode_serve_static(slug: str, path: str = ""):
     target = (project_dir / path).resolve() if path else project_dir.resolve()
     if not str(target).startswith(str(project_dir.resolve())):
         return JSONResponse({"error": "Invalid path"}, status_code=403)
+
+    # Block sensitive files from being served
+    _SENSITIVE_PATTERNS = (
+        ".env",
+        ".git",
+        ".ssh",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        ".pem",
+        ".p12",
+        ".key",
+        ".secret",
+        ".pwd",
+        "credentials",
+        "token",
+        "api_key",
+        "passwd",
+        "shadow",
+    )
+    rel = str(target.relative_to(project_dir)).lower() if target.is_file() else ""
+    if any(pat in rel for pat in _SENSITIVE_PATTERNS):
+        return JSONResponse(
+            {"error": "Access to sensitive files is blocked"}, status_code=403
+        )
 
     # Default to index.html for directory requests, with common fallbacks
     if not path or target.is_dir():
