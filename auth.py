@@ -23,7 +23,7 @@ GOOGLE_TOKENS_FILE = DATA_DIR / "google_tokens.json"
 
 
 # ─── PASSWORD HASHING ───────────────────────────────────────────
-def _hash_password(password: str, salt: str = None) -> str:
+def _hash_password(password: str, salt: Optional[str] = None) -> str:
     """Hash password with PBKDF2-SHA256."""
     if salt is None:
         salt = secrets.token_hex(16)

@@ -203,7 +203,7 @@ async def get_current_user(
     if not AUTH_AVAILABLE:
         return None
     client = get_client()
-    store_opts = {"request": request}
+    store_opts: Dict[str, Any] = {"request": request}
     if response:
         store_opts["response"] = response
     user_data = await client.get_user(store_opts)
