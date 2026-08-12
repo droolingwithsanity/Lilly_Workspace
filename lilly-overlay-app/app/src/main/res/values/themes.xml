@@ -1,10 +1,70 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Frosty pastel glass theme (matches website 100.93.131.114:8098) -->
 <resources xmlns:tools="http://schemas.android.com/tools"
     tools:keep="@style/Theme.LillyOverlay">
-    <style name="Theme.LillyOverlay" parent="Theme.AppCompat.DayNight.DarkActionBar">
-        <item name="colorPrimary">@android:color/holo_blue_dark</item>
-        <item name="colorPrimaryDark">@android:color/holo_blue_dark</item>
-        <item name="colorAccent">@android:color/holo_blue_light</item>
+
+    <!-- Frosty pastel glass color palette -->
+    <color name="glass_background">#8CFFFFFF</color>
+    <color name="glass_border">#FFFFFFFF</color>
+    <color name="glass_text_primary">#5D4E6D</color>
+    <color name="glass_text_secondary">#5D4E6D80</color>
+    <color name="glass_text_tertiary">#5D4E6D59</color>
+    <color name="glass_pink">#8CF5D5E0</color>
+    <color name="glass_blue">#8CD4E8F5</color>
+    <color name="glass_mint">#8CD5F0E6</color>
+    <color name="glass_cream">#8CF5E6D4</color>
+    <color name="glass_text_dark">#3D2E52</color>
+    <color name="accent_pink">#F472B6</color>
+    <color name="accent_blue">#7DD3FC</color>
+    <color name="accent_green">#4ADE80</color>
+
+    <!-- Aurora gradient layers -->
+    <drawable name="aurora_bg">
+        <shape xmlns:android="http://schemas.android.com/apk/res/android"
+            android:shape="rectangle">
+            <gradient
+                android:startColor="#F5D5E0"
+                android:centerColor="#D4E8F5"
+                android:endColor="#D5F0E6"
+                android:angle="45" />
+        </shape>
+    </drawable>
+
+    <style name="Theme.LillyOverlay" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <!-- Frosty pastel glass primary colors -->
+        <item name="colorPrimary">@color/glass_blue</item>
+        <item name="colorPrimaryDark">@color/glass_mint</item>
+        <item name="colorAccent">@color/accent_pink</item>
+
+        <!-- Transparent status bar for overlay -->
         <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowIsFloating">true</item>
+
+        <!-- Frosty glass panel style -->
+        <item name="overlayGlassBackground">@drawable/overlay_glass_bg</item>
+
+        <!-- Text appearances matching website -->
+        <item name="textAppearanceOverlaySmall">@style/TextAppearance.OverlaySmall</item>
+    </style>
+
+    <style name="TextAppearance.OverlaySmall" parent="TextAppearance.AppCompat.Small">
+        <item name="android:textColor">@color/glass_text_primary</item>
+        <item name="android:fontFamily">sans-serif</item>
+    </style>
+
+    <!-- Overlay window style -->
+    <style name="Theme.LillyOverlay.Window" parent="Theme.AppCompat.Dialog">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+    </style>
+
+    <!-- Frosted glass panel style for dialogs and popups -->
+    <style name="Widget.LillyOverlay.GlassPanel" parent="Widget.AppCompat.Light.PopupMenu">
+        <item name="android:background">@drawable/overlay_glass_bg</item>
+        <item name="android:textColor">@color/glass_text_primary</item>
     </style>
 </resources>

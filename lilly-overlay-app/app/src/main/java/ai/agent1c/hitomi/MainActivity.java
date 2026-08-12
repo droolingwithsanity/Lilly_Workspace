@@ -58,6 +58,7 @@ public class MainActivity extends AppCompatActivity {
     private ProgressBar deployProgress;
     private TextView deployStatusText;
     private TextView serverModeText;
+    private TextView webserverStatusText;
 
     // Pairing code
     private TextView pairingCodeDisplay;
@@ -92,6 +93,7 @@ public class MainActivity extends AppCompatActivity {
         deployProgress = findViewById(R.id.deployProgress);
         deployStatusText = findViewById(R.id.deployStatusText);
         serverModeText = findViewById(R.id.serverModeText);
+        webserverStatusText = findViewById(R.id.webserverStatusText);
 
         // Pairing code views
         pairingCodeDisplay = findViewById(R.id.pairingCodeDisplay);
@@ -153,19 +155,36 @@ public class MainActivity extends AppCompatActivity {
         if (stopServerBtn != null) stopServerBtn.setOnClickListener(v -> stopLocalServer());
         if (refreshModelsBtn != null) refreshModelsBtn.setOnClickListener(v -> refreshLocalModels());
 
-        // Get Phone App button — copies the APK download URL / path to clipboard
+        // Get Phone App button — opens APK download URL
         Button getPhoneAppBtn = findViewById(R.id.getPhoneAppBtn);
         if (getPhoneAppBtn != null) {
             getPhoneAppBtn.setOnClickListener(v -> {
-                String apkName = "lilly-overlay-v3.5.apk";
-                ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-                if (cm != null) {
-                    cm.setPrimaryClip(ClipData.newPlainText("Lilly APK", apkName));
-                }
-                Toast.makeText(this,
-                    "APK name copied: " + apkName + "\nFind it in ~/Lilly_Workspace/ after build.",
-                    Toast.LENGTH_LONG).show();
+                // Try fetching latest URL from server, then fall back to known URL
+                String apkUrl = "https://100.93.131.114:8098/lilly-overlay-v3.7-debug.apk";
+                Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(apkUrl));
+                browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(browserIntent);
+                Toast.makeText(this, "Opening APK download…", Toast.LENGTH_SHORT).show();
             });
+        }
+
+        // Google Sign-In button
+        Button googleSignInBtn = findViewById(R.id.googleSignInBtn);
+        TextView authStatusText = findViewById(R.id.authStatusText);
+        if (googleSignInBtn != null) {
+            googleSignInBtn.setOnClickListener(v -> {
+                if (authStatusText != null) authStatusText.setText("Starting sign-in…");
+                // Opens the server-side Auth0 Google OAuth URL in browser
+                String authUrl = "https://droolingwithsanity.ca/api/auth0/login?connection=google-oauth2";
+                Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse(authUrl));
+                browserIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(browserIntent);
+            });
+        }
+
+        // Check existing auth state
+        if (authStatusText != null) {
+            checkAuthStatus(authStatusText);
         }
 
         refreshTermuxStatus();
@@ -180,12 +199,37 @@ public class MainActivity extends AppCompatActivity {
         refreshTermuxStatus();
         refreshServerMode();
         fetchLocalPairingCode();
+        refreshWebserverStatus();
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         if (termuxBridge != null) termuxBridge.shutdown();
+    }
+
+    // ─── Built-in webserver status ─────────────────────────────────────
+
+    private void refreshWebserverStatus() {
+        if (webserverStatusText == null) return;
+        if (LillyOverlayService.isHttpServerRunning()) {
+            webserverStatusText.setText("Built-in webserver: RUNNING on :8099");
+            webserverStatusText.setTextColor(0xFF4ADE80);
+            return;
+        }
+        webserverStatusText.setText("Built-in webserver: starting on :8099…");
+        webserverStatusText.setTextColor(0xFF888888);
+        LillyOverlayService.startHttpServer(this, (server, error) -> runOnUiThread(() -> {
+            if (webserverStatusText == null) return;
+            if (server != null && error == null) {
+                webserverStatusText.setText("Built-in webserver: RUNNING on :8099");
+                webserverStatusText.setTextColor(0xFF4ADE80);
+            } else {
+                String msg = error != null ? error.getMessage() : "unknown error";
+                webserverStatusText.setText("Webserver failed: " + msg);
+                webserverStatusText.setTextColor(0xFFE85A6E);
+            }
+        }));
     }
 
     private void checkPermissionsAndStart() {
@@ -730,5 +774,47 @@ public class MainActivity extends AppCompatActivity {
             pairingStatusText.setTextColor(0xFF4ADE80);
         }
         Toast.makeText(this, "Paired! Token saved: " + code.toUpperCase(), Toast.LENGTH_SHORT).show();
+    }
+
+    // ─── Google Auth (Auth0) ─────────────────────────────────────────────────────
+
+    /** Check if the user is already authenticated with Google via Auth0. */
+    private void checkAuthStatus(TextView statusText) {
+        new Thread(() -> {
+            try {
+                // Check the local phone server first (no SSH needed)
+                URL url = new URL("http://127.0.0.1:8099/api/auth/me");
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(5000);
+                if (conn.getResponseCode() == 200) {
+                    java.io.BufferedReader reader = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(conn.getInputStream()));
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) sb.append(line);
+                    reader.close();
+                    conn.disconnect();
+                    org.json.JSONObject obj = new org.json.JSONObject(sb.toString());
+                    String email = obj.optString("email", "");
+                    String name = obj.optString("name", "");
+                    final String display = name.isEmpty()
+                        ? (email.isEmpty() ? "" : email)
+                        : name;
+                    mainHandler.post(() -> {
+                        if (display.isEmpty()) {
+                            statusText.setText("Not signed in");
+                        } else {
+                            statusText.setText("✓ Signed in as " + display);
+                        }
+                    });
+                } else {
+                    conn.disconnect();
+                    mainHandler.post(() -> statusText.setText("Not signed in"));
+                }
+            } catch (Exception e) {
+                mainHandler.post(() -> statusText.setText("Not signed in"));
+            }
+        }).start();
     }
 }

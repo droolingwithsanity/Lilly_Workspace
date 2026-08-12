@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Frosty pastel glass background (matches website) -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#FF1A1A2E">
+    android:background="@drawable/main_frosty_bg">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -11,12 +12,13 @@
         android:orientation="vertical"
         android:padding="24dp">
 
+        <!-- ─── Header ─── -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Lilly AI Companion"
             android:textSize="28sp"
-            android:textColor="#FF6B9CE3"
+            android:textColor="#5D4E6D"
             android:textStyle="bold"
             android:layout_marginBottom="4dp" />
 
@@ -25,27 +27,70 @@
             android:layout_height="wrap_content"
             android:text="@string/app_version"
             android:textSize="16sp"
-            android:textColor="#FF4ADE80"
+            android:textColor="#4ADE80"
             android:layout_marginBottom="8dp" />
 
+        <!-- ─── Google Auth ─── -->
+        <TextView
+            android:id="@+id/authPrompt"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/auth_prompt"
+            android:textSize="12sp"
+            android:textColor="#5D4E6D"
+            android:gravity="center"
+            android:layout_marginBottom="12dp" />
+
+        <Button
+            android:id="@+id/googleSignInBtn"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:text="@string/btn_google_signin"
+            android:textSize="14sp"
+            android:backgroundTint="#5D4E6D"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:id="@+id/authStatusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textSize="12sp"
+            android:textColor="#5D4E6D"
+            android:gravity="center"
+            android:layout_marginBottom="16dp" />
+
+        <!-- ─── Server Status ─── -->
         <TextView
             android:id="@+id/serverModeText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Mode: checking..."
             android:textSize="12sp"
-            android:textColor="#FF888888"
+            android:textColor="#5D4E6D"
             android:gravity="center"
-            android:layout_marginBottom="24dp" />
+            android:layout_marginBottom="6dp" />
 
+        <TextView
+            android:id="@+id/webserverStatusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Built-in webserver: checking…"
+            android:textSize="12sp"
+            android:textColor="#5D4E6D"
+            android:gravity="center"
+            android:layout_marginBottom="18dp" />
+
+        <!-- ─── Overlay Controls ─── -->
         <Button
             android:id="@+id/startOverlay"
             android:layout_width="match_parent"
             android:layout_height="52dp"
-            android:text="Start Lilly Overlay"
+            android:text="@string/app_name"
             android:textSize="16sp"
-            android:backgroundTint="#FF4ADE80"
-            android:textColor="#FF000000"
+            android:backgroundTint="#4ADE80"
+            android:textColor="#000000"
             android:layout_marginBottom="12dp" />
 
         <Button
@@ -54,8 +99,8 @@
             android:layout_height="52dp"
             android:text="Stop Lilly Overlay"
             android:textSize="16sp"
-            android:backgroundTint="#FFFF9AA5"
-            android:textColor="#FF000000"
+            android:backgroundTint="#F472B6"
+            android:textColor="#000000"
             android:layout_marginBottom="12dp" />
 
         <Button
@@ -64,8 +109,8 @@
             android:layout_height="52dp"
             android:text="App Permissions"
             android:textSize="16sp"
-            android:backgroundTint="#FF60A5FA"
-            android:textColor="#FFFFFFFF"
+            android:backgroundTint="#7DD3FC"
+            android:textColor="#FFFFFF"
             android:layout_marginBottom="4dp" />
 
         <TextView
@@ -73,15 +118,15 @@
             android:layout_height="wrap_content"
             android:text="Requires: Overlay, Microphone, Notifications"
             android:textSize="11sp"
-            android:textColor="#FF666666"
+            android:textColor="#7D4E6D"
             android:gravity="center"
             android:layout_marginBottom="24dp" />
 
-        <!-- ─── Pairing Code ─────────────────────────────────────── -->
+        <!-- ─── Pairing Code ─── -->
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
-            android:background="#33FFFFFF"
+            android:background="#5D4E6D33"
             android:layout_marginBottom="16dp" />
 
         <TextView
@@ -89,7 +134,7 @@
             android:layout_height="wrap_content"
             android:text="📱 Pairing"
             android:textSize="14sp"
-            android:textColor="#FF6B9CE3"
+            android:textColor="#5D4E6D"
             android:textStyle="bold"
             android:layout_marginBottom="6dp" />
 
@@ -98,16 +143,15 @@
             android:layout_height="wrap_content"
             android:text="This phone's pairing code (share with your web dashboard):"
             android:textSize="11sp"
-            android:textColor="#FF888888"
+            android:textColor="#5D4E6D80"
             android:layout_marginBottom="6dp" />
 
-        <!-- Pairing code card -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:background="#22FFFFFF"
+            android:background="#FFFFFF33"
             android:padding="12dp"
             android:layout_marginBottom="8dp">
 
@@ -118,7 +162,7 @@
                 android:layout_weight="1"
                 android:text="Loading..."
                 android:textSize="26sp"
-                android:textColor="#FF4ADE80"
+                android:textColor="#4ADE80"
                 android:textStyle="bold"
                 android:fontFamily="monospace"
                 android:letterSpacing="0.25" />
@@ -129,8 +173,8 @@
                 android:layout_height="36dp"
                 android:text="Copy"
                 android:textSize="12sp"
-                android:backgroundTint="#FF60A5FA"
-                android:textColor="#FFFFFFFF"
+                android:backgroundTint="#7DD3FC"
+                android:textColor="#FFFFFF"
                 android:layout_marginStart="8dp" />
 
             <Button
@@ -139,18 +183,17 @@
                 android:layout_height="36dp"
                 android:text="↻"
                 android:textSize="16sp"
-                android:backgroundTint="#FF8B5CF6"
-                android:textColor="#FFFFFFFF"
+                android:backgroundTint="#F472B6"
+                android:textColor="#FFFFFF"
                 android:layout_marginStart="6dp" />
         </LinearLayout>
 
-        <!-- Enter a pairing code from another device -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Enter pairing code from another device or web dashboard:"
             android:textSize="11sp"
-            android:textColor="#FF888888"
+            android:textColor="#5D4E6D80"
             android:layout_marginBottom="6dp" />
 
         <LinearLayout
@@ -168,9 +211,8 @@
                 android:hint="e.g.  A1B2C3D4"
                 android:inputType="textCapCharacters|textNoSuggestions"
                 android:textSize="18sp"
-                android:textColor="#FFFFFFFF"
-                android:fontFamily="monospace"
-                android:backgroundTint="#FF60A5FA"
+                android:textColor="#3D2E52"
+                android:backgroundTint="#7DD3FC"
                 android:padding="10dp"
                 android:importantForAutofill="no"
                 android:maxLength="8" />
@@ -182,8 +224,8 @@
                 android:layout_marginStart="8dp"
                 android:text="Pair"
                 android:textSize="13sp"
-                android:backgroundTint="#FF4ADE80"
-                android:textColor="#FF000000" />
+                android:backgroundTint="#4ADE80"
+                android:textColor="#000000" />
         </LinearLayout>
 
         <TextView
@@ -192,15 +234,15 @@
             android:layout_height="wrap_content"
             android:text=""
             android:textSize="11sp"
-            android:textColor="#FF4ADE80"
+            android:textColor="#4ADE80"
             android:gravity="center"
             android:layout_marginBottom="16dp" />
 
-        <!-- Server URL -->
+        <!-- ─── Server URL ─── -->
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
-            android:background="#33FFFFFF"
+            android:background="#5D4E6D33"
             android:layout_marginBottom="16dp" />
 
         <TextView
@@ -208,7 +250,7 @@
             android:layout_height="wrap_content"
             android:text="Server"
             android:textSize="14sp"
-            android:textColor="#FF6B9CE3"
+            android:textColor="#5D4E6D"
             android:textStyle="bold"
             android:layout_marginBottom="8dp" />
 
@@ -226,7 +268,8 @@
                 android:hint="http://192.168.1.100:8098"
                 android:text="https://droolingwithsanity.ca"
                 android:textSize="13sp"
-                android:backgroundTint="#FF60A5FA"
+                android:textColor="#3D2E52"
+                android:backgroundTint="#7DD3FC"
                 android:padding="10dp"
                 android:importantForAutofill="no" />
 
@@ -237,19 +280,19 @@
                 android:layout_marginStart="8dp"
                 android:text="Save"
                 android:textSize="13sp"
-                android:backgroundTint="#FF60A5FA"
-                android:textColor="#FFFFFFFF" />
+                android:backgroundTint="#7DD3FC"
+                android:textColor="#FFFFFF" />
         </LinearLayout>
 
-        <!-- Deploy to Termux -->
+        <!-- ─── Deploy to Termux ─── -->
         <Button
             android:id="@+id/deployToTermuxBtn"
             android:layout_width="match_parent"
             android:layout_height="52dp"
             android:text="Deploy AI to Termux"
             android:textSize="14sp"
-            android:backgroundTint="#FF4ADE80"
-            android:textColor="#FFFFFFFF"
+            android:backgroundTint="#4ADE80"
+            android:textColor="#000000"
             android:layout_marginTop="12dp" />
 
         <ProgressBar
@@ -266,15 +309,15 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:textSize="12sp"
-            android:textColor="#FF888888"
+            android:textColor="#5D4E6D80"
             android:gravity="center"
             android:layout_marginTop="4dp" />
 
-        <!-- Termux Bridge -->
+        <!-- ─── Termux Bridge ─── -->
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
-            android:background="#33FFFFFF"
+            android:background="#5D4E6D33"
             android:layout_marginTop="20dp"
             android:layout_marginBottom="16dp" />
 
@@ -283,7 +326,7 @@
             android:layout_height="wrap_content"
             android:text="Termux Bridge"
             android:textSize="14sp"
-            android:textColor="#FF6B9CE3"
+            android:textColor="#5D4E6D"
             android:textStyle="bold"
             android:layout_marginBottom="8dp" />
 
@@ -293,7 +336,7 @@
             android:layout_height="wrap_content"
             android:text="Termux: checking..."
             android:textSize="13sp"
-            android:textColor="#FFAAAAAA"
+            android:textColor="#5D4E6D80"
             android:layout_marginBottom="8dp" />
 
         <Button
@@ -302,8 +345,8 @@
             android:layout_height="48dp"
             android:text="Install Termux (F-Droid)"
             android:textSize="13sp"
-            android:backgroundTint="#FF60A5FA"
-            android:textColor="#FFFFFFFF"
+            android:backgroundTint="#7DD3FC"
+            android:textColor="#FFFFFF"
             android:visibility="gone"
             android:layout_marginBottom="8dp" />
 
@@ -311,10 +354,10 @@
             android:id="@+id/termuxEnableBtn"
             android:layout_width="match_parent"
             android:layout_height="48dp"
-            android:text="Enable Termux Shell Tools"
+            android:text="@string/btn_start_termux"
             android:textSize="13sp"
-            android:backgroundTint="#FF4ADE80"
-            android:textColor="#FF000000"
+            android:backgroundTint="#4ADE80"
+            android:textColor="#000000"
             android:layout_marginBottom="8dp" />
 
         <Button
@@ -323,36 +366,37 @@
             android:layout_height="48dp"
             android:text="Open Termux"
             android:textSize="13sp"
-            android:backgroundTint="#FF8B5CF6"
-            android:textColor="#FFFFFFFF"
+            android:backgroundTint="#8B5CF6"
+            android:textColor="#FFFFFF"
             android:layout_marginBottom="8dp" />
 
         <Button
             android:id="@+id/termuxTestBtn"
             android:layout_width="match_parent"
             android:layout_height="48dp"
-            android:text="Test Termux Command"
+            android:text="@string/btn_test_connection"
             android:textSize="13sp"
-            android:backgroundTint="#FFFF9AA5"
-            android:textColor="#FF000000"
+            android:backgroundTint="#F472B6"
+            android:textColor="#000000"
             android:enabled="false"
             android:layout_marginBottom="8dp" />
 
+        <!-- ─── Local model controls ─── -->
         <Button
             android:id="@+id/startServerBtn"
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:text="Start Selected Local Model"
             android:textSize="13sp"
-            android:backgroundTint="#FF4ADE80"
-            android:textColor="#FF000000"
+            android:backgroundTint="#4ADE80"
+            android:textColor="#000000"
             android:layout_marginBottom="8dp" />
 
         <Spinner
             android:id="@+id/localModelSpinner"
             android:layout_width="match_parent"
             android:layout_height="48dp"
-            android:background="#FF2A2A42"
+            android:background="#3D2E5233"
             android:paddingStart="12dp"
             android:paddingEnd="12dp"
             android:spinnerMode="dropdown" />
@@ -363,8 +407,8 @@
             android:layout_height="40dp"
             android:text="Refresh GGUF Models"
             android:textSize="12sp"
-            android:backgroundTint="#FF60A5FA"
-            android:textColor="#FFFFFFFF"
+            android:backgroundTint="#7DD3FC"
+            android:textColor="#FFFFFF"
             android:layout_marginTop="8dp"
             android:layout_marginBottom="12dp" />
 
@@ -374,11 +418,11 @@
             android:layout_height="48dp"
             android:text="Stop Local Model"
             android:textSize="13sp"
-            android:backgroundTint="#FFFF9AA5"
-            android:textColor="#FF000000"
+            android:backgroundTint="#F472B6"
+            android:textColor="#000000"
             android:layout_marginBottom="12dp" />
 
-        <!-- Termux Setup Panel -->
+        <!-- ─── Termux Setup Panel ─── -->
         <LinearLayout
             android:id="@+id/termuxSetupPanel"
             android:layout_width="match_parent"
@@ -393,7 +437,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:textSize="12sp"
-                android:textColor="#FFAAAAAA"
+                android:textColor="#AAAAAA"
                 android:layout_marginBottom="8dp" />
 
             <TextView
@@ -401,7 +445,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:textSize="11sp"
-                android:textColor="#FF4ADE80"
+                android:textColor="#4ADE80"
                 android:fontFamily="monospace"
                 android:background="#1A000000"
                 android:padding="8dp"
@@ -414,16 +458,16 @@
                 android:text="Copy Command"
                 android:textSize="12sp"
                 android:layout_gravity="end"
-                android:backgroundTint="#FF60A5FA"
-                android:textColor="#FFFFFFFF"
+                android:backgroundTint="#7DD3FC"
+                android:textColor="#FFFFFF"
                 android:layout_marginTop="8dp" />
         </LinearLayout>
 
-        <!-- ─── Get Phone App ──────────────────────────────────────── -->
+        <!-- ─── Get Phone App (APK Download) ─── -->
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
-            android:background="#33FFFFFF"
+            android:background="#5D4E6D33"
             android:layout_marginTop="20dp"
             android:layout_marginBottom="16dp" />
 
@@ -432,7 +476,7 @@
             android:layout_height="wrap_content"
             android:text="Lilly Phone App"
             android:textSize="14sp"
-            android:textColor="#FF6B9CE3"
+            android:textColor="#5D4E6D"
             android:textStyle="bold"
             android:layout_marginBottom="4dp" />
 
@@ -441,26 +485,26 @@
             android:layout_height="wrap_content"
             android:text="Share this APK with another phone or re-install the latest build."
             android:textSize="11sp"
-            android:textColor="#FF888888"
+            android:textColor="#5D4E6D80"
             android:layout_marginBottom="12dp" />
 
         <Button
             android:id="@+id/getPhoneAppBtn"
             android:layout_width="match_parent"
             android:layout_height="52dp"
-            android:text="Get Phone App  v3.5"
+            android:text="@string/btn_download_apk"
             android:textSize="15sp"
-            android:backgroundTint="#FF8B5CF6"
-            android:textColor="#FFFFFFFF"
+            android:backgroundTint="#8B5CF6"
+            android:textColor="#FFFFFF"
             android:layout_marginBottom="4dp" />
 
         <TextView
             android:id="@+id/getPhoneAppSubtitle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="lilly-overlay-v3.5.apk"
+            android:text="lilly-overlay-v3.7-debug.apk"
             android:textSize="11sp"
-            android:textColor="#FF666666"
+            android:textColor="#5D4E6D59"
             android:gravity="center"
             android:layout_marginBottom="24dp" />
 

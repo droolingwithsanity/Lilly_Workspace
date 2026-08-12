@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Long-press quick actions menu — shown as a horizontal scrollable strip above the overlay -->
+<!-- Long-press quick actions menu — frosty pastel glass theme (matches website 100.93.131.114:8098) -->
+<!-- Updated: removed obsolete Solana/Edge Tab quick actions; added Gaming Mode, APK Download, Termux Bridge -->
 <HorizontalScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="wrap_content"
     android:layout_height="wrap_content"
@@ -33,9 +34,9 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Chat"
+                android:text="@string/quick_chat"
                 android:textSize="9sp"
-                android:textColor="#FFFFFFFF" />
+                android:textColor="#5D4E6D" />
         </LinearLayout>
 
         <!-- Mic toggle -->
@@ -58,9 +59,9 @@
                 android:id="@+id/lillyMicLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Mic"
+                android:text="@string/quick_mic"
                 android:textSize="9sp"
-                android:textColor="#FFFFFFFF" />
+                android:textColor="#5D4E6D" />
         </LinearLayout>
 
         <!-- Transcript -->
@@ -81,9 +82,9 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Transcript"
+                android:text="@string/quick_transcript"
                 android:textSize="9sp"
-                android:textColor="#FFFFFFFF" />
+                android:textColor="#5D4E6D" />
         </LinearLayout>
 
         <!-- Avatar picker -->
@@ -105,14 +106,14 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Avatar"
+                android:text="@string/quick_avatar"
                 android:textSize="9sp"
-                android:textColor="#FFFFFFFF" />
+                android:textColor="#5D4E6D" />
         </LinearLayout>
 
-        <!-- Share pairing code -->
+        <!-- Gaming Mode (car ride game) -->
         <LinearLayout
-            android:id="@+id/lillyQuickPairing"
+            android:id="@+id/lillyQuickGame"
             android:layout_width="52dp"
             android:layout_height="56dp"
             android:orientation="vertical"
@@ -123,14 +124,129 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="🔗"
+                android:text="🎮"
                 android:textSize="20sp" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Pair"
+                android:text="@string/quick_game"
                 android:textSize="9sp"
-                android:textColor="#FFFFFFFF" />
+                android:textColor="#5D4E6D" />
+        </LinearLayout>
+
+        <!-- Fetch Mini-Game -->
+        <LinearLayout
+            android:id="@+id/lillyQuickFetch"
+            android:layout_width="52dp"
+            android:layout_height="56dp"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="@android:color/transparent"
+            android:clickable="true"
+            android:focusable="true">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="🐕"
+                android:textSize="20sp" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/quick_fetch"
+                android:textSize="9sp"
+                android:textColor="#5D4E6D" />
+        </LinearLayout>
+
+        <!-- Sensors / Scan -->
+        <LinearLayout
+            android:id="@+id/lillyQuickSensors"
+            android:layout_width="52dp"
+            android:layout_height="56dp"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="@android:color/transparent"
+            android:clickable="true"
+            android:focusable="true">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="📡"
+                android:textSize="20sp" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/quick_sensors"
+                android:textSize="9sp"
+                android:textColor="#5D4E6D" />
+         </LinearLayout>
+
+         <!-- Map: pin current location on Google Maps -->
+         <LinearLayout
+             android:id="@+id/lillyQuickMap"
+             android:layout_width="52dp"
+             android:layout_height="56dp"
+             android:orientation="vertical"
+             android:gravity="center"
+             android:background="@android:color/transparent"
+             android:clickable="true"
+             android:focusable="true">
+             <TextView
+                 android:layout_width="wrap_content"
+                 android:layout_height="wrap_content"
+                 android:text="📍"
+                 android:textSize="20sp" />
+             <TextView
+                 android:layout_width="wrap_content"
+                 android:layout_height="wrap_content"
+                 android:text="@string/quick_map"
+                 android:textSize="9sp"
+                 android:textColor="#5D4E6D" />
+         </LinearLayout>
+
+         <!-- Termux Bridge -->
+        <LinearLayout
+            android:id="@+id/lillyQuickTermux"
+            android:layout_width="52dp"
+            android:layout_height="56dp"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="@android:color/transparent"
+            android:clickable="true"
+            android:focusable="true">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="📱"
+                android:textSize="20sp" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/quick_termux"
+                android:textSize="9sp"
+                android:textColor="#5D4E6D" />
+        </LinearLayout>
+
+        <!-- Download APK -->
+        <LinearLayout
+            android:id="@+id/lillyQuickDownload"
+            android:layout_width="52dp"
+            android:layout_height="56dp"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="@android:color/transparent"
+            android:clickable="true"
+            android:focusable="true">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="⬇️"
+                android:textSize="20sp" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/quick_download"
+                android:textSize="9sp"
+                android:textColor="#5D4E6D" />
         </LinearLayout>
 
         <!-- Settings -->
@@ -151,9 +267,32 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Settings"
+                android:text="@string/quick_settings"
                 android:textSize="9sp"
-                android:textColor="#FFFFFFFF" />
+                android:textColor="#5D4E6D" />
+        </LinearLayout>
+
+        <!-- Share pairing code -->
+        <LinearLayout
+            android:id="@+id/lillyQuickPairing"
+            android:layout_width="52dp"
+            android:layout_height="56dp"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="@android:color/transparent"
+            android:clickable="true"
+            android:focusable="true">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="🔗"
+                android:textSize="20sp" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/quick_pair"
+                android:textSize="9sp"
+                android:textColor="#5D4E6D" />
         </LinearLayout>
 
         <!-- Mode toggle (local ↔ online) -->
@@ -175,9 +314,9 @@
                 android:id="@+id/lillyModeLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Mode"
+                android:text="@string/quick_mode"
                 android:textSize="9sp"
-                android:textColor="#FFFFFFFF" />
+                android:textColor="#5D4E6D" />
         </LinearLayout>
 
         <!-- Minimize (collapse but keep running) -->
@@ -194,13 +333,14 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="➖"
-                android:textSize="20sp" />
+                android:textSize="20sp"
+                android:textColor="#5D4E6D" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Minimize"
+                android:text="@string/quick_minimize"
                 android:textSize="9sp"
-                android:textColor="#FFFFFFFF" />
+                android:textColor="#5D4E6D" />
         </LinearLayout>
 
         <!-- Close overlay -->
@@ -218,13 +358,13 @@
                 android:layout_height="wrap_content"
                 android:text="✕"
                 android:textSize="20sp"
-                android:textColor="#FFFF9AA5" />
+                android:textColor="#F472B6" />
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Close"
+                android:text="@string/quick_close"
                 android:textSize="9sp"
-                android:textColor="#FFFF9AA5" />
+                android:textColor="#F472B6" />
         </LinearLayout>
 
     </LinearLayout>

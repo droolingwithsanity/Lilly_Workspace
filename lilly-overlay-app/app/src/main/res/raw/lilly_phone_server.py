@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lilly Phone Server — Flask/HTTP server running in Termux on localhost:8099
+Lilly Phone Server — Flask/HTTP server running in Termux on localhost:8097
 
 Provides lightweight API for the overlay to access phone capabilities.
 All endpoints use synchronous wrappers around async termux_utils.py.
@@ -615,7 +615,7 @@ def status():
             "llama_available": _llama_available(),
             "llama_url": LLAMA_URL,
             "pair_token": PAIR_TOKEN,
-            "port": 8099,
+            "port": 8097,
             "bt_profiles_loaded": _BT_PROFILES_LOADED,
         }
     )
@@ -956,5 +956,5 @@ def internal_error(error):
 
 
 if __name__ == "__main__":
-    logger.info("Starting Lilly Phone Server on :8099")
-    app.run(host="0.0.0.0", port=8099, debug=False, threaded=True)
+    logger.info("Starting Lilly Phone Server on :8097 (overlay APK owns :8099)")
+    app.run(host="0.0.0.0", port=8097, debug=False, threaded=True)

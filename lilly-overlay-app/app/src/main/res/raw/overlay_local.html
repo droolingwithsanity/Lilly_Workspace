@@ -14,21 +14,66 @@ body{
   user-select:none;-webkit-user-select:none;
   touch-action:manipulation;
 }
+/* ─── Frosty pastel glass theme (matches website 100.93.131.114:8098) ─── */
+:root{
+  --glass-bg:rgba(255,255,255,0.55);
+  --glass-border:rgba(255,255,255,0.6);
+  --glass-blur:blur(24px);
+  --text-primary:rgba(93,78,109,0.85);
+  --text-secondary:rgba(93,78,109,0.5);
+  --text-tertiary:rgba(93,78,109,0.35);
+  --accent-pink:rgba(245,213,224,0.55);
+  --accent-blue:rgba(212,232,245,0.55);
+  --accent-mint:rgba(213,240,230,0.55);
+  --accent-cream:rgba(245,230,212,0.55);
+  --bubble-shadow:rgba(180,140,180,0.15);
+}
 #container{
   width:96px;height:96px;
   position:relative;
-  background:rgba(22,20,36,0.42);
-  backdrop-filter:blur(16px) saturate(1.25);
-  -webkit-backdrop-filter:blur(16px) saturate(1.25);
+  /* Collapsed: transparent so the avatar floats over any app */
+  background:transparent;
+  backdrop-filter:blur(0);
+  -webkit-backdrop-filter:blur(0);
   border-radius:50%;
+  border:none;
+  box-shadow:none;
   transition:all 0.3s;
+  overflow:hidden;
 }
 #container.expanded{
-  width:280px;height:320px;
-  border-radius:24px;
+  width:300px;height:380px;
+  /* Expanded: frosty pastel glass */
+  background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);
+  border-radius:22px;
+  box-shadow:0 8px 40px var(--bubble-shadow);
+  overflow:hidden;
 }
 body.expanded{
-  width:280px;height:320px;
+  width:300px;height:380px;
+}
+/* Aurora background layers for expanded state */
+#aurora{
+  position:absolute;top:0;left:0;width:100%;height:100%;z-index:0;overflow:hidden;
+  opacity:0;transition:opacity 0.3s;
+}
+body.expanded #aurora{opacity:1}
+#aurora .layer{
+  position:absolute;top:-20%;left:-20%;width:140%;height:140%;
+  border-radius:50%;filter:blur(80px);opacity:0.55;
+  animation:auroraDrift 12s ease-in-out infinite alternate;
+}
+#aurora .l1{background:radial-gradient(ellipse at 30% 40%,var(--accent-pink),transparent 70%);animation-delay:0s}
+#aurora .l2{background:radial-gradient(ellipse at 70% 60%,var(--accent-blue),transparent 70%);animation-delay:-4s}
+#aurora .l3{background:radial-gradient(ellipse at 50% 30%,var(--accent-mint),transparent 70%);animation-delay:-8s}
+#aurora .l4{background:radial-gradient(ellipse at 20% 70%,var(--accent-cream),transparent 70%);animation-delay:-2s;opacity:0.3}
+@keyframes auroraDrift{0%{transform:translate(0,0) scale(1)}100%{transform:translate(4%,3%) scale(1.12)}}
+#aurora::after{
+  content:'';position:absolute;top:0;left:0;width:100%;height:100%;
+  background:linear-gradient(180deg,rgba(240,230,239,0.3) 0%,transparent 40%,transparent 70%,rgba(240,230,239,0.4) 100%);
 }
 #pupCanvas{
   position:absolute;
@@ -46,6 +91,8 @@ body.expanded{
   z-index:5;
   touch-action:none;
 }
+
+/* ─── Close hint (drag-to-close) ─── */
 #closeHint{
   position:fixed;bottom:20px;left:50%;transform:translateX(-50%);
   width:44px;height:44px;border-radius:50%;
@@ -59,102 +106,93 @@ body.expanded{
   box-shadow:0 4px 20px rgba(239,68,68,0.3);
 }
 
-/* ─── Compact vertical chat panel (expanded) ─── */
+/* ─── Mood Badge ─── */
+#moodBadge{
+  position:absolute;top:6px;left:6px;z-index:30;
+  display:flex;gap:4px;align-items:center;
+  font-size:10px;color:var(--text-secondary);
+  background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  padding:4px 10px;border-radius:20px;
+  border:1px solid var(--glass-border);
+  transition:all 0.5s;
+}
+#moodDot{width:6px;height:6px;border-radius:50%;background:#c0b0d0;transition:background 0.6s}
+#moodDot.active{background:#b8a9c9;box-shadow:0 0 10px rgba(184,169,201,0.5);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
+
+/* ─── Thinking Indicator ─── */
+#thinkingDots{
+  position:absolute;top:38%;left:50%;transform:translateX(-50%);
+  z-index:20;display:none;gap:8px;align-items:center;justify-content:center
+}
+#thinkingDots span{width:8px;height:8px;border-radius:50%;background:rgba(139,122,158,0.5);animation:thinkBounce 1.2s ease-in-out infinite}
+#thinkingDots span:nth-child(2){animation-delay:0.2s}
+#thinkingDots span:nth-child(3){animation-delay:0.4s}
+@keyframes thinkBounce{0%,60%,100%{transform:translateY(0);opacity:0.3}30%{transform:translateY(-14px);opacity:1}}
+
+/* ─── Streaming Indicator ─── */
+.stream-indicator{
+  position:absolute;bottom:8px;right:12px;
+  font-size:10px;color:var(--text-tertiary);
+  animation:pulse 1.5s infinite;
+}
+
+/* ─── Compact vertical chat panel (expanded) ───
+     Frosty pastel glass style matching the website speech bubble ─── */
 #chatBubble{
   position:absolute;
-  top:112px;left:0;
-  width:280px;
-  background:rgba(15,15,40,0.78);
-  backdrop-filter:blur(12px);
-  -webkit-backdrop-filter:blur(12px);
-  border-radius:0 0 12px 12px;
-  border:1px solid rgba(255,255,255,0.08);
-  border-top:none;
-  box-shadow:0 4px 16px rgba(0,0,0,0.5);
-  padding:6px 8px 8px;
+  top:120px;left:50%;transform:translateX(-50%);
+  width:92%;max-width:280px;
+  background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);
+  border-radius:22px;
+  padding:6px 8px;
   display:none;
   z-index:10;
   transition:opacity 0.25s, top 0.3s ease, max-height 0.3s ease;
-  max-height:260px;
+  max-height:calc(100% - 140px);
   overflow:hidden;
+  box-shadow:0 8px 40px var(--bubble-shadow);
 }
+#chatBubble.show{display:block;opacity:1}
 /* ─── Typing: chat rises up + grows so the log is readable while typing ─── */
 #chatBubble.typing{
-  top:18px;
-  max-height:calc(100vh - 140px);
-  border-radius:12px;
-  border-top:1px solid rgba(255,255,255,0.08);
+  top:20px;
+  max-height:calc(100% - 160px);
+  border-radius:22px;
 }
 #chatBubble.typing #bubbleText{
-  max-height:calc(100vh - 200px);
+  max-height:calc(100% - 120px);
 }
-/* ─── Scrollable message log ─── */
-.msg{
-  display:block;
-  padding:4px 6px;
-  border-radius:8px;
-  font-size:11px;
-  line-height:1.4;
-  margin:2px 0;
-  word-wrap:break-word;
-  max-width:100%;
-}
-.msg .who{
-  font-size:8px;
-  color:rgba(255,255,255,0.35);
-  display:block;
-  margin-bottom:2px;
-  text-transform:uppercase;
-  letter-spacing:0.4px;
-}
-.msg.user{background:rgba(99,102,241,0.15);color:#a5b4fc;text-align:right;margin-left:12%;}
-.msg.lilly{background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.9);}
-.msg img{
-  max-width:100%;
-  border-radius:8px;
-  margin-top:4px;
-  display:block;
-  border:1px solid rgba(255,255,255,0.15);
-  cursor:zoom-in;
-}
-#chatBubble.show{
-  display:block;
-  opacity:1;
-}
-#bubbleTail{display:none}
 #chatHeader{
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
+  display:flex;justify-content:space-between;align-items:center;
   padding:2px 4px 4px;
-  border-bottom:1px solid rgba(255,255,255,0.08);
+  border-bottom:1px solid rgba(93,78,109,0.12);
   margin-bottom:4px;
 }
 #chatTitle{
   font-size:9px;
-  color:rgba(255,255,255,0.4);
-  text-transform:uppercase;
-  letter-spacing:0.5px;
+  color:var(--text-tertiary);
+  text-transform:uppercase;letter-spacing:0.5px;
 }
 #closeChatBtn{
   width:18px;height:18px;
-  border-radius:50%;
-  border:none;
+  border-radius:50%;border:none;
   background:rgba(239,68,68,0.3);
-  color:#ef4444;
-  font-size:10px;
-  cursor:pointer;
-  display:flex;
-  align-items:center;
-  justify-content:center;
+  color:#ef4444;font-size:10px;
+  cursor:pointer;display:flex;
+  align-items:center;justify-content:center;
   transition:all 0.2s;
 }
 #closeChatBtn:hover{background:rgba(239,68,68,0.5)}
 #bubbleText{
-  font-size:11px;
-  line-height:1.4;
-  color:rgba(255,255,255,0.85);
-  max-height:120px;
+  font-size:11px;line-height:1.4;
+  color:var(--text-primary);
+  max-height:160px;
   min-height:30px;
   overflow-y:auto;
   scrollbar-width:thin;
@@ -162,124 +200,83 @@ body.expanded{
   margin-bottom:4px;
   pointer-events:auto;
   cursor:text;
-  user-select:text;
-  -webkit-user-select:text;
+  user-select:text;-webkit-user-select:text;
   padding:4px;
   background:rgba(255,255,255,0.04);
-  border-radius:8px;
+  border-radius:12px;
   transition:max-height 0.3s ease;
 }
 #bubbleText::-webkit-scrollbar{width:2px}
-#bubbleText::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:2px}
+#bubbleText::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.12);border-radius:2px}
 #bubbleStatus{
-  display:flex;
-  align-items:center;
-  gap:3px;
-  font-size:8px;
-  color:rgba(255,255,255,0.35);
-  margin-bottom:3px;
-  pointer-events:none;
+  display:flex;align-items:center;gap:3px;
+  font-size:8px;color:var(--text-tertiary);
+  margin-bottom:3px;pointer-events:none;
 }
-#statusDot{
-  width:4px;height:4px;
-  border-radius:50%;
-  background:#4ade80;
-  transition:all 0.3s;
-  flex-shrink:0;
-}
+#statusDot{width:4px;height:4px;border-radius:50%;background:#4ade80;transition:all 0.3s;flex-shrink:0}
 #statusDot.listening{background:#4ade80;box-shadow:0 0 4px #4ade80}
 #statusDot.thinking{background:#fbbf24;box-shadow:0 0 4px #fbbf24;animation:pulse 0.8s infinite}
 #statusDot.speaking{background:#f472b6;box-shadow:0 0 4px #f472b6;animation:pulse 0.5s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
-#bubbleInput{
-  display:flex;
-  gap:3px;
-  align-items:center;
-  pointer-events:auto;
-}
+#bubbleInput{display:flex;gap:3px;align-items:center;pointer-events:auto}
 #chatInput{
   flex:1;
-  background:rgba(255,255,255,0.08);
-  border:1px solid rgba(255,255,255,0.12);
-  border-radius:10px;
+  background:rgba(255,255,255,0.4);
+  border:1px solid var(--glass-border);
+  border-radius:16px;
   padding:6px 10px;
   font-size:12px;
-  color:rgba(255,255,255,0.85);
-  outline:none;
-  min-width:0;
-  width:140px;
+  color:var(--text-primary);
+  outline:none;min-width:0;width:140px;
 }
-#chatInput::placeholder{color:rgba(255,255,255,0.25)}
-#chatInput:focus{border-color:rgba(255,255,255,0.2)}
+#chatInput::placeholder{color:var(--text-tertiary)}
+#chatInput:focus{border-color:rgba(93,78,109,0.2)}
 .iconBtn{
-  width:26px;height:26px;
-  border-radius:50%;
-  border:none;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  cursor:pointer;
-  transition:all 0.2s;
-  font-size:12px;
-  flex-shrink:0;
+  width:26px;height:26px;border-radius:50%;border:none;
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;transition:all 0.2s;font-size:12px;flex-shrink:0;
 }
-#micBtn{
-  background:rgba(74,222,128,0.2);
-  color:#4ade80;
-}
+#micBtn{background:rgba(74,222,128,0.2);color:#4ade80}
 #micBtn.active{background:rgba(74,222,128,0.35);box-shadow:0 0 6px rgba(74,222,128,0.25)}
 #micBtn.muted{background:rgba(239,68,68,0.2);color:#ef4444}
-#sendBtn{
-  background:rgba(168,85,247,0.2);
-  color:#c084fc;
-}
+#sendBtn{background:rgba(168,85,247,0.2);color:#c084fc}
 .iconBtn:active{transform:scale(0.85)}
 
-/* ─── Presence Radar popout (who's around) ─── */
-#radarBtn{
-  background:rgba(56,189,248,0.2);
-  color:#7dd3fc;
-}
+/* ─── Radar popout (who's around) ─── */
+#radarBtn{background:rgba(56,189,248,0.2);color:#7dd3fc}
 #radarBtn.active{background:rgba(56,189,248,0.35);box-shadow:0 0 6px rgba(56,189,248,0.25)}
 #radarPanel{
-  position:absolute;bottom:50px;right:0;width:240px;
-  background:rgba(20,24,40,0.72);
-  backdrop-filter:blur(18px);
-  -webkit-backdrop-filter:blur(18px);
-  border:1px solid rgba(148,163,184,0.25);
-  border-radius:14px;
-  padding:8px;
+  position:absolute;bottom:50px;right:0;
+  width:240px;background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);
+  border-radius:14px;padding:8px;
   display:none;flex-direction:column;gap:6px;z-index:60;
-  box-shadow:0 8px 32px rgba(0,0,0,0.45);
+  box-shadow:0 8px 32px var(--bubble-shadow);
 }
 #radarPanel.show{display:flex}
 .radar-header{
   display:flex;justify-content:space-between;align-items:center;
-  color:#c7d2fe;font-size:10px;font-weight:600;letter-spacing:0.5px;
+  color:var(--text-primary);font-size:10px;font-weight:600;letter-spacing:0.5px;
 }
 #radarCloseBtn{
   width:18px;height:18px;border-radius:50%;border:none;
   background:rgba(239,68,68,0.3);color:#ef4444;font-size:10px;cursor:pointer;
   display:flex;align-items:center;justify-content:center;
 }
-#radarCanvas{
-  display:block;width:220px;height:220px;margin:0 auto;border-radius:10px;
-  background:radial-gradient(circle at center, rgba(56,189,248,0.12), rgba(10,12,25,0.45) 55%, rgba(10,12,25,0.85));
-}
-#radarList{
-  max-height:88px;overflow-y:auto;font-size:9px;color:rgba(255,255,255,0.75);
-  scrollbar-width:thin;
-}
+#radarCanvas{display:block;width:220px;height:220px;margin:0 auto;border-radius:10px;
+  background:radial-gradient(circle at center,rgba(56,189,248,0.12),rgba(10,12,25,0.45) 55%,rgba(10,12,25,0.85));
+  border:1px solid rgba(255,255,255,0.1)}
+#radarList{max-height:88px;overflow-y:auto;font-size:9px;color:rgba(255,255,255,0.75);scrollbar-width:thin}
 .radar-item{
   display:flex;justify-content:space-between;gap:6px;
-  padding:2px 4px;border-bottom:1px solid rgba(255,255,255,0.06);
-  white-space:nowrap;overflow:hidden;
+  padding:2px 4px;border-bottom:1px solid rgba(255,255,255,0.06);white-space:nowrap;overflow:hidden;
 }
 .radar-item .r-name{color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;max-width:110px}
 .radar-item .r-meta{color:rgba(255,255,255,0.5);flex-shrink:0}
 .radar-status{font-size:9px;color:rgba(255,255,255,0.4);text-align:center}
 
-/* ─── New-user help badges (?) next to UI objects ─── */
+/* ─── Help badges (?). Uses frosty glass ─── */
 .help-badge{
   position:absolute;
   width:12px;height:12px;border-radius:50%;
@@ -289,8 +286,7 @@ body.expanded{
   cursor:pointer;z-index:70;
   border:1px solid rgba(125,211,252,0.5);
   box-shadow:0 0 5px rgba(56,189,248,0.35);
-  pointer-events:auto;
-  line-height:1;
+  pointer-events:auto;line-height:1;
   font-family:system-ui,sans-serif;
 }
 .help-badge:hover,.help-badge.tour{background:rgba(56,189,248,0.8);color:#fff}
@@ -302,17 +298,12 @@ body.expanded{
 #helpPop{
   position:absolute;width:186px;
   background:rgba(15,23,42,0.92);
-  backdrop-filter:blur(14px);
-  -webkit-backdrop-filter:blur(14px);
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
   border:1px solid rgba(125,211,252,0.35);
-  border-radius:10px;
-  padding:8px;
-  z-index:80;
-  font-size:10px;
-  color:#e2e8f0;
+  border-radius:10px;padding:8px;z-index:80;
+  font-size:10px;color:#e2e8f0;
   box-shadow:0 6px 24px rgba(0,0,0,0.55);
-  display:none;
-  pointer-events:auto;
+  display:none;pointer-events:auto;
 }
 #helpPop.show{display:block}
 #helpPop .h-title{color:#7dd3fc;font-weight:600;font-size:10px;margin-bottom:3px;letter-spacing:0.3px}
@@ -322,17 +313,143 @@ body.expanded{
 #avatarFlash{
   position:absolute;top:98px;left:48px;
   transform:translateX(-50%);
-  font-size:9px;
-  color:rgba(255,255,255,0.5);
-  letter-spacing:0.5px;
-  text-transform:uppercase;
-  z-index:6;
-  pointer-events:none;
-  white-space:nowrap;
-  opacity:0;
-  transition:opacity 0.3s;
+  font-size:9px;color:var(--text-tertiary);
+  letter-spacing:0.5px;text-transform:uppercase;
+  z-index:6;pointer-events:none;white-space:nowrap;
+  opacity:0;transition:opacity 0.3s;
 }
 #avatarFlash.show{opacity:1}
+
+/* ─── Emergency Kill Switch ─── */
+#killSwitchBtn{
+  position:absolute;top:8px;right:8px;
+  width:24px;height:24px;border-radius:50%;
+  border:2px solid rgba(255,255,255,0.4);
+  background:rgba(244,114,182,0.85);
+  color:#fff;font-size:14px;
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;z-index:200;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  box-shadow:0 0 8px rgba(244,114,182,0.5);
+}
+#killSwitchBtn.active{
+  background:rgba(239,68,68,0.9);
+  box-shadow:0 0 12px rgba(239,68,68,0.8);
+  animation:none;
+}
+#killSwitchBtn .ks-label{
+  position:absolute;top:-26px;left:50%;transform:translateX(-50%);
+  font-size:9px;color:#fff;background:rgba(0,0,0,0.7);
+  padding:2px 6px;border-radius:4px;
+  opacity:0;transition:opacity 0.2s;
+  white-space:nowrap;
+}
+#killSwitchBtn:hover .ks-label{opacity:1}
+
+/* ─── Car Ride Game Panel (kid mode) ─── */
+#carGamePanel{
+  position:absolute;bottom:100px;left:50%;transform:translateX(-50%);
+  width:92%;max-width:280px;
+  background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);
+  border-radius:22px;padding:10px;
+  display:none;flex-direction:column;gap:8px;z-index:25;
+  box-shadow:0 8px 40px var(--bubble-shadow);
+}
+#carGamePanel.show{display:flex;opacity:1}
+.car-game-header{
+  display:flex;justify-content:space-between;align-items:center;
+  font-size:11px;font-weight:600;color:var(--text-primary);
+  text-transform:uppercase;letter-spacing:0.5px;
+}
+#carGameCloseBtn{
+  width:18px;height:18px;border-radius:50%;border:none;
+  background:rgba(239,68,68,0.3);color:#ef4444;
+  font-size:10px;cursor:pointer;display:flex;
+  align-items:center;justify-content:center;transition:all 0.2s;
+}
+#carGameCloseBtn:hover{background:rgba(239,68,68,0.5)}
+.car-game-status{
+  font-size:10px;color:var(--text-secondary);
+  display:flex;gap:8px;flex-wrap:wrap;
+}
+.car-game-status .status-item{
+  display:flex;align-items:center;gap:3px;
+}
+.car-game-status .status-label{
+  color:var(--text-tertiary);
+  font-size:9px;
+}
+.car-game-status .status-value{
+  color:var(--text-primary);
+  font-weight:600;
+}
+#carGameNarrative{
+  font-size:11px;line-height:1.4;color:var(--text-primary);
+  background:rgba(255,255,255,0.1);
+  border-radius:12px;padding:8px;min-height:40px;
+  max-height:100px;overflow-y:auto;scrollbar-width:thin;
+  word-wrap:break-word;text-align:center;
+}
+#carGameNarrative::-webkit-scrollbar{width:2px}
+#carGameNarrative::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.2);border-radius:2px}
+.car-game-controls{
+  display:flex;gap:6px;align-items:center;
+  flex-wrap:wrap;
+}
+.car-game-btn{
+  flex:1;
+  background:linear-gradient(140deg,#8b7a9e,#a892b8);
+  color:#fff;border:none;border-radius:10px;
+  font-size:11px;font-weight:600;padding:8px 10px;
+  cursor:pointer;transition:.15s;display:flex;
+  align-items:center;justify-content:center;gap:4px;
+}
+.car-game-btn:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.car-game-btn:disabled{opacity:0.5;cursor:default;transform:none}
+.car-game-speed{
+  font-size:20px;font-weight:700;color:var(--text-primary);
+  text-align:center;font-family:monospace;
+  letter-spacing:1px;
+}
+#carGameSpeedValue{color:#4ade80}
+.car-game-compass{
+  display:flex;align-items:center;justify-content:center;
+  gap:4px;font-size:10px;color:var(--text-secondary);
+  background:rgba(255,255,255,0.1);border-radius:10px;padding:4px 8px;
+}
+.car-game-compass .compass-needle{
+  font-size:14px;transition:transform 0.3s;
+}
+.carGameInput{
+  display:none;align-items:center;gap:4px;
+}
+.carGameInput input{
+  flex:1;
+  background:rgba(255,255,255,0.4);
+  border:1px solid var(--glass-border);
+  border-radius:12px;
+  padding:4px 8px;
+  font-size:11px;color:var(--text-primary);
+  outline:none;min-width:0;
+}
+.carGameInput input::placeholder{color:var(--text-tertiary)}
+
+/* ─── Fetch Game Panel (mirrors car game glass style) ─── */
+#fetchGamePanel{
+  position:absolute;bottom:100px;left:50%;transform:translateX(-50%);
+  width:92%;max-width:280px;
+  background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);
+  border-radius:22px;padding:10px;
+  display:none;flex-direction:column;gap:8px;z-index:25;
+  box-shadow:0 8px 40px var(--bubble-shadow);
+}
+#fetchGamePanel.show{display:flex;opacity:1}
 </style>
 </head>
 <body>
@@ -341,6 +458,10 @@ body.expanded{
   <div id="dragHandle"></div>
   <div id="avatarFlash"></div>
   <div id="closeHint">✕</div>
+  <!-- Emergency kill switch button (hidden by default, triple-tap avatar to enable) -->
+  <button id="killSwitchBtn" onclick="toggleKillSwitch()" style="display:none">
+    🔴
+  </button>
   <div id="chatBubble">
     <div id="chatHeader">
       <span id="chatTitle">Chat</span>
@@ -352,12 +473,15 @@ body.expanded{
       <span id="statusDot"></span>
       <span id="statusLabel">idle</span>
     </div>
-    <div id="bubbleInput">
-      <button class="iconBtn" id="micBtn">🎤</button>
-      <input id="chatInput" type="text" placeholder="Message..." autocomplete="off">
-      <button class="iconBtn" id="radarBtn" title="Who's around">📡</button>
-      <button class="iconBtn" id="sendBtn">➤</button>
-    </div>
+     <div id="bubbleInput">
+       <button class="iconBtn" id="micBtn">🎤</button>
+       <input id="chatInput" type="text" placeholder="Message..." autocomplete="off">
+       <button class="iconBtn" id="carGameBtn" title="Car Ride Game" onclick="startCarGame()" style="display:none">🎮</button>
+       <button class="iconBtn" id="fetchGameBtn" title="Fetch Game" onclick="startFetchGame()" style="display:none">🐕</button>
+       <button class="iconBtn" id="mapBtn" title="Where are we?" onclick="showLocationMap()">📍</button>
+       <button class="iconBtn" id="radarBtn" title="Who's around">📡</button>
+       <button class="iconBtn" id="sendBtn">➤</button>
+     </div>
 
     <div id="radarPanel">
       <div class="radar-header">
@@ -368,6 +492,124 @@ body.expanded{
       <div id="radarList"></div>
       <div id="radarStatus" class="radar-status">Scanning...</div>
     </div>
+  </div>
+
+  <!-- ─── Car Ride Game Panel (kid mode) ─── -->
+  <div id="carGamePanel">
+    <div class="car-game-header">
+      <span>🚗 &nbsp;CAR RIDE GAME</span>
+      <button id="carGameCloseBtn" onclick="closeCarGame()">✕</button>
+    </div>
+    <div class="car-game-status">
+      <div class="status-item">
+        <span class="status-label">Direction:</span>
+        <span class="status-value" id="carGameDirection">—</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Light:</span>
+        <span class="status-value" id="carGameLight">—</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Speed:</span>
+        <span class="status-value" id="carGameSpeedValue">0</span> km/h
+      </div>
+      <div class="status-item">
+        <span class="status-label">Distance:</span>
+        <span class="status-value" id="carGameDistance">0</span> km
+      </div>
+      <div class="status-item">
+        <span class="status-label">Score:</span>
+        <span class="status-value" id="carGameScore">0</span>
+      </div>
+    </div>
+    <div id="carGameNarrative">Press Start to begin your adventure!</div>
+    <div class="car-game-compass">
+      <span class="compass-needle" id="carGameCompassNeedle">🧭</span>
+      <span id="carGameHeading">0°</span>
+    </div>
+    <div class="car-game-controls">
+      <button class="car-game-btn" id="carGameStartBtn" onclick="startCarGame()">
+        ▶ &nbsp;Start Drive
+      </button>
+      <button class="car-game-btn" id="carGameNarrateBtn" onclick="narrateCarGame()" disabled>
+        📖 &nbsp;What's Ahead?
+      </button>
+      <button class="car-game-btn" id="carGameStopBtn" onclick="stopCarGame()" disabled>
+        ⏹ &nbsp;Stop
+      </button>
+    </div>
+    <div class="carGameInput" id="carGameNameInput" style="display:none">
+      <input id="carGamePlayerName" type="text" placeholder="Enter your name..." autocomplete="off">
+    </div>
+  </div>
+
+  <!-- ─── Fetch Mini-Game Panel ─── -->
+  <div id="fetchGamePanel">
+    <div class="car-game-header">
+      <span>🐕 &nbsp;FETCH GAME</span>
+      <button id="fetchGameCloseBtn" onclick="closeFetchGame()">✕</button>
+    </div>
+    <div class="car-game-status">
+      <div class="status-item">
+        <span class="status-label">Direction:</span>
+        <span class="status-value" id="fetchGameDirection">—</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Force:</span>
+        <span class="status-value" id="fetchGameForce">—</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Throws:</span>
+        <span class="status-value" id="fetchGameThrows">0</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Catches:</span>
+        <span class="status-value" id="fetchGameCatches">0</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Score:</span>
+        <span class="status-value" id="fetchGameScore">0</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Wind:</span>
+        <span class="status-value" id="fetchGameWind">—</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Weather:</span>
+        <span class="status-value" id="fetchGameWeather">—</span>
+      </div>
+    </div>
+    <div id="fetchGameNarrative">Tap Start to begin the fetch game!</div>
+    <div class="car-game-compass">
+      <span class="compass-needle" id="fetchGameCompassNeedle">🧭</span>
+      <span id="fetchGameHeading">0°</span>
+    </div>
+    <div class="car-game-controls">
+      <button class="car-game-btn" id="fetchGameStartBtn" onclick="startFetchGame()">
+        ▶ &nbsp;Start Fetch
+      </button>
+      <button class="car-game-btn" id="fetchGameCatchBtn" onclick="catchFetchGame()" disabled>
+        ✅ &nbsp;I Caught It!
+      </button>
+      <button class="car-game-btn" id="fetchGameStopBtn" onclick="stopFetchGame()" disabled>
+        ⏹ &nbsp;Stop
+      </button>
+    </div>
+    <div class="carGameInput" id="fetchGameNameInput">
+      <input id="fetchGamePlayerName" type="text" placeholder="Your name..." autocomplete="off">
+    </div>
+  </div>
+
+  <!-- ─── AR Camera + Trajectory Canvas (Fetch AR mode) ─── -->
+  <div id="arOverlay" style="display:none">
+    <!-- Camera preview -->
+    <video id="arCamera" autoplay playsinline muted style="display:none;width:100%;height:100%;object-fit:cover"></video>
+    <!-- 3D trajectory canvas -->
+    <canvas id="arCanvas" width="300" height="380"></canvas>
+    <!-- Frisbee sprite -->
+    <div id="frisbeeSprite" style="position:absolute;width:16px;height:16px;border-radius:50%;background:#4ADE80;box-shadow:0 0 6px rgba(74,222,128,0.5);pointer-events:none;display:none"></div>
+    <!-- Target marker -->
+    <div id="arTarget" style="position:absolute;width:20px;height:20px;border:2px dashed rgba(244,114,182,0.5);border-radius:50%;pointer-events:none;display:none"></div>
   </div>
 </div>
 <script>
@@ -871,6 +1113,19 @@ async function pollState(){
     }
     if(s.user_name)userName=s.user_name;
 
+    // Show/hide game buttons when kid mode is toggled
+    const carGameBtn=document.getElementById('carGameBtn');
+    const fetchGameBtn=document.getElementById('fetchGameBtn');
+    if(carGameBtn&&fetchGameBtn){
+      if(s.child_mode){
+        carGameBtn.style.display='';
+        fetchGameBtn.style.display='';
+      } else {
+        carGameBtn.style.display='none';
+        fetchGameBtn.style.display='none';
+      }
+    }
+
     // Voice-activated avatar switching on heard text
     if(heard){
       checkWakeWordAndSwitch(heard);
@@ -1076,9 +1331,15 @@ async function sendMessage(){
       _lastSpokenLog=res.reply;
       appendMsg('lilly',res.reply);
     }
-    lookAt='app';
+     lookAt='app';
     if(res.audio_id)playAudio(res.audio_id);
     if(res.open_url)handleOpenUrl(res.open_url);
+    // ── Game panel auto-open from voice command ──
+    if(res.show_panel){
+      if(res.show_panel==='car_ride'&&typeof showCarGame==='function')showCarGame();
+      if(res.show_panel==='fetch'&&typeof showFetchGame==='function')showFetchGame();
+      if(res.show_panel==='sensors'&&typeof showSensorPanel==='function')showSensorPanel();
+    }
   }catch(e){
     clearThinking();
     appendMsg('lilly','Connection error');
@@ -1242,6 +1503,12 @@ function recordOverlayChunk(){
               _lastSpokenLog=d.reply;
               appendMsg('lilly',d.reply);
               if(d.audio_id)playAudio(d.audio_id);
+              if(d.open_url)handleOpenUrl(d.open_url);
+              if(d.show_panel){
+                if(d.show_panel==='car_ride'&&typeof showCarGame==='function')showCarGame();
+                if(d.show_panel==='fetch'&&typeof showFetchGame==='function')showFetchGame();
+                if(d.show_panel==='sensors'&&typeof showSensorPanel==='function')showSensorPanel();
+              }
             }
           }catch(e){clearThinking();}
         }
@@ -1600,17 +1867,88 @@ function closeRadar(){
   const panel=document.getElementById('radarPanel');
   if(panel)panel.classList.remove('show');
 }
+
+// ─── Car Ride Game panel toggle ───────────────────────────────────
+function showCarGame(){
+  closeRadar();
+  closeFetchGame();
+  const panel=document.getElementById('carGamePanel');
+  if(panel)panel.classList.add('show');
+}
+
+// ─── Fetch Game panel toggle ──────────────────────────────────────
+function showFetchGame(){
+  closeRadar();
+  closeCarGame();
+  const panel=document.getElementById('fetchGamePanel');
+  if(panel)panel.classList.add('show');
+}
+
+// ─── Sensor Data panel toggle ─────────────────────────────────────
+async function showSensorPanel(){
+  closeRadar();
+  closeCarGame();
+  closeFetchGame();
+
+  try {
+    const srv=await _getServer();
+    const r=await fetch(srv+'/sensors/all');
+    const data=await r.json();
+
+    // Build a compact sensor summary
+    const snap=await apiFetch('/api/ui_state');
+    const state=await snap.json();
+    const heading=state.magnetic_heading||0;
+    const light=state.sensor_light||0;
+    const motion=state.sensor_motion_total||9.8;
+
+    const narrative=(
+      '🧭 Compass: '+Math.round(heading)+'° '+
+      _headingWord(heading)+' | 💡 Light: '+Math.round(light)+' lux | ' +
+      '🏃 Motion: '+motion.toFixed(1)+' m/s²'
+    );
+
+    // Inject sensor info into the chat bubble as a temp message
+    appendMsg('lilly', narrative);
+
+    Toast(narrative, 3000);
+  } catch(e) {
+    Toast('Sensor data unavailable right now', 2000);
+  }
+}
+
+function _headingWord(deg){
+  const dirs=['N','NE','E','SE','S','SW','W','NW'];
+  return dirs[Math.round(deg/45)%8];
+}
+
+function Toast(text, duration){
+  // Simple toast via the chat bubble — no native Toast needed
+  const el=document.createElement('div');
+  el.textContent=text;
+  Object.assign(el.style,{
+    position:'fixed',bottom:'60px',left:'50%',transform:'translateX(-50%)',
+    padding:'8px 16px',background:'rgba(255,255,255,0.85)',backdropFilter:'blur(12px)',
+    borderRadius:'12px',fontSize:'11px',color:'#5d4e6d',zIndex:'1000',
+    boxShadow:'0 4px 16px rgba(0,0,0,0.15)',maxWidth:'80%',textAlign:'center'
+  });
+  document.body.appendChild(el);
+  setTimeout(function(){document.body.removeChild(el);},duration);
+}
+
 document.addEventListener('DOMContentLoaded',function(){
   const rb=document.getElementById('radarBtn');
   if(rb)rb.addEventListener('click',function(){openRadar();});
   placeHelpBadges();
   firstRunTour();
+  initKillSwitchGesture();
 });
 
 // ─── New-user help: ? badges next to UI objects ─────────────────
 const HELP_DEFS={
   micBtn:{title:'🎤 Voice Input',body:'Tap to talk to Lilly hands-free. Voice replies play here too.'},
   radarBtn:{title:'📡 Who\'s Around',body:'Scans nearby Bluetooth and opens the radar. Pin points show devices with brand/name and distance — iPhones vs Android by MAC vendor.'},
+  mapBtn:{title:'📍 Where Are We?',body:'Shows your current GPS location on Google Maps with a pin. Tap to open the Maps app or click the link in chat.'},
   sendBtn:{title:'➤ Send',body:'Sends your message to Lilly. Replies appear as scrollable text, with images when Lilly generates them.'},
   chatInput:{title:'✏️ Chat',body:'Type here and press Enter. The panel expands while typing so you can read history, then drops back down 10s after you stop.'},
   dragHandle:{title:'🐶 Lilly',body:'This is Lilly. Drag to move her around the screen, tap to open chat, long-press for quick actions.'},
@@ -1705,8 +2043,497 @@ function firstRunTour(){
   setTimeout(tour,1800);
 }
 
-// Expose functions for Android WebView bridge
-window.LillyOverlay={sendMessage,toggleOverlayMic,pollState,localToast,localNotif,localOpen,localAM,openRadar,closeRadar};
+// ─── Emergency Kill Switch ───────────────────────────────────────
+let _killSwitchTapCount = 0;
+let _killSwitchLastTap = 0;
+
+async function toggleKillSwitch() {
+  const btn = document.getElementById('killSwitchBtn');
+  if (!btn) return;
+
+  if (!_killSwitchActive) {
+    // Activate kill switch
+    try {
+      const srv = await _getServer();
+      await fetch(srv + '/api/kill_switch/enable', { method: 'POST' });
+    } catch(e) {}
+    _killSwitchActive = true;
+    btn.classList.add('active');
+    btn.innerHTML = '🔴<span class="ks-label">Cmds OFF</span>';
+    Toast('🔴 Kill switch ON — phone commands disabled', 3000);
+  } else {
+    // Deactivate kill switch
+    try {
+      const srv = await _getServer();
+      await fetch(srv + '/api/kill_switch/disable', { method: 'POST' });
+    } catch(e) {}
+    _killSwitchActive = false;
+    btn.classList.remove('active');
+    btn.innerHTML = '🔴<span class="ks-label">Cmds OFF</span>';
+    Toast('Kill switch OFF — phone commands enabled', 2000);
+  }
+}
+
+// Triple-tap the avatar to reveal the kill switch button
+function initKillSwitchGesture() {
+  const avatarEl = document.getElementById('pupCanvas');
+  if (!avatarEl) return;
+  avatarEl.addEventListener('click', function(e) {
+    const now = Date.now();
+    if (now - _killSwitchLastTap < 600) {
+      _killSwitchTapCount++;
+    } else {
+      _killSwitchTapCount = 1;
+    }
+    _killSwitchLastTap = now;
+    if (_killSwitchTapCount >= 3) {
+      e.stopPropagation();
+      _killSwitchTapCount = 0;
+      const ksBtn = document.getElementById('killSwitchBtn');
+      if (ksBtn) ksBtn.style.display = 'block';
+      Toast('🔴 Kill switch button visible — tap it to disable phone commands', 3000);
+    }
+  });
+}
+
+// Auto-hide kill switch button when chat opens
+function hideKillSwitch() {
+  const ksBtn = document.getElementById('killSwitchBtn');
+  if (ksBtn) ksBtn.style.display = 'none';
+}
+
+// ─── Car Ride Game (Kid Mode) ─────────────────────────────────────
+let _carGameActive = false;
+let _carGamePolling = null;
+let _killSwitchActive = false;
+
+async function startCarGame() {
+  const playerNameEl = document.getElementById('carGamePlayerName');
+  const playerName = playerNameEl ? playerNameEl.value.trim() : '';
+  const panel = document.getElementById('carGamePanel');
+  const startBtn = document.getElementById('carGameStartBtn');
+  const narrateBtn = document.getElementById('carGameNarrateBtn');
+  const stopBtn = document.getElementById('carGameStopBtn');
+
+  try {
+    const srv = await _getServer();
+    const r = await fetch(srv + '/api/game_guide/car_ride/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        player_name: playerName || 'Driver',
+      })
+    });
+    const data = await r.json();
+    if (data.status === 'started') {
+      _carGameActive = true;
+      panel.classList.add('show');
+      startBtn.disabled = true;
+      narrateBtn.disabled = false;
+      stopBtn.disabled = false;
+      // Show the guide steps as the first narrative
+      if (data.guide && data.guide.steps) {
+        let guideText = '🎮 ' + data.guide.title + '\n\n';
+        guideText += data.guide.steps.map((s, i) => (i + 1) + '. ' + s).join('\n');
+        document.getElementById('carGameNarrative').textContent = guideText;
+      } else {
+        document.getElementById('carGameNarrative').textContent = 'Engine on! Ready to drive?';
+      }
+      startCarGamePolling();
+    }
+  } catch (e) {
+    // Fallback: still enable UI locally
+    _carGameActive = true;
+    panel.classList.add('show');
+    startBtn.disabled = true;
+    narrateBtn.disabled = false;
+    stopBtn.disabled = false;
+    document.getElementById('carGameNarrative').textContent = 'Engine on! Hold the phone like a steering wheel and turn to drive!';
+    startCarGamePolling();
+  }
+}
+
+async function narrateCarGame() {
+  if (!_carGameActive) return;
+  const narrativeEl = document.getElementById('carGameNarrative');
+  narrativeEl.textContent = 'Driving...';
+
+  try {
+    const srv = await _getServer();
+    const r = await fetch(srv + '/api/car_game/narrate', { method: 'POST' });
+    const data = await r.json();
+    if (data.narrative) {
+      narrativeEl.textContent = data.narrative;
+      updateCarGameStatus(data);
+    }
+  } catch (e) {
+    narrativeEl.textContent = 'The open road awaits!';
+  }
+}
+
+async function stopCarGame() {
+  _carGameActive = false;
+  const panel = document.getElementById('carGamePanel');
+  const startBtn = document.getElementById('carGameStartBtn');
+  const narrateBtn = document.getElementById('carGameNarrateBtn');
+  const stopBtn = document.getElementById('carGameStopBtn');
+
+  try {
+    const srv = await _getServer();
+    const r = await fetch(srv + '/api/car_game/stop', { method: 'POST' });
+    const data = await r.json();
+    document.getElementById('carGameNarrative').textContent = `Trip complete! Drove ${data.trip_km.toFixed(1)} km.`;
+  } catch (e) {
+    document.getElementById('carGameNarrative').textContent = 'Trip complete!';
+  }
+
+  panel.classList.remove('show');
+  startBtn.disabled = false;
+  narrateBtn.disabled = true;
+  stopBtn.disabled = true;
+
+  if (_carGamePolling) {
+    clearInterval(_carGamePolling);
+    _carGamePolling = null;
+  }
+}
+
+function closeCarGame() {
+  stopCarGame();
+  // Also close the overlay (from the parent context)
+  if (typeof window.LillyOverlay !== 'undefined' && window.LillyOverlay.toggleChat) {
+    window.LillyOverlay.toggleChat();
+  }
+}
+
+function updateCarGameStatus(data) {
+  if (data.direction) {
+    document.getElementById('carGameDirection').textContent = data.direction;
+  }
+  if (data.light !== undefined) {
+    const lux = data.light;
+    let label = 'Indoor';
+    if (lux > 10000) label = 'Sunny';
+    else if (lux > 1000) label = 'Bright';
+    else if (lux < 10) label = 'Dark';
+    document.getElementById('carGameLight').textContent = label + ' (' + Math.round(lux) + ' lux)';
+  }
+  if (data.speed !== undefined) {
+    document.getElementById('carGameSpeedValue').textContent = data.speed.toFixed(1);
+  }
+  if (data.heading !== undefined) {
+    document.getElementById('carGameHeading').textContent = data.heading.toFixed(0) + '°';
+    // Rotate compass needle
+    const needle = document.getElementById('carGameCompassNeedle');
+    if (needle) needle.style.transform = `rotate(${data.heading}deg)`;
+  }
+  if (data.position_km !== undefined) {
+    document.getElementById('carGameDistance').textContent = data.position_km.toFixed(2);
+  }
+  if (data.score !== undefined) {
+    document.getElementById('carGameScore').textContent = data.score;
+  }
+}
+
+function startCarGamePolling() {
+  if (_carGamePolling) clearInterval(_carGamePolling);
+  _carGamePolling = setInterval(async function() {
+    if (!_carGameActive) return;
+    try {
+      const srv = await _getServer();
+      const r = await fetch(srv + '/api/car_game');
+      const data = await r.json();
+      updateCarGameStatus(data);
+    } catch (e) {
+      // Silent fail — game continues with last known state
+    }
+  }, 2000);
+}
+
+// Expose car game functions for Android bridge
+window.CarGame = {
+  start: startCarGame,
+  stop: stopCarGame,
+  narrate: narrateCarGame,
+  close: closeCarGame,
+  isActive: function() { return _carGameActive; }
+};
+
+// ─── Fetch Mini-Game ───────────────────────────────────────────
+let _fetchGameActive = false;
+let _fetchGamePolling = null;
+
+async function startFetchGame() {
+  const panel = document.getElementById('fetchGamePanel');
+  const startBtn = document.getElementById('fetchGameStartBtn');
+  const catchBtn = document.getElementById('fetchGameCatchBtn');
+  const stopBtn = document.getElementById('fetchGameStopBtn');
+  const playerName = document.getElementById('fetchGamePlayerName') ? document.getElementById('fetchGamePlayerName').value.trim() : '';
+
+   try {
+    const srv = await _getServer();
+    const r = await fetch(srv + '/api/game_guide/fetch/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        player_name: playerName || 'Champion',
+      })
+    });
+    const data = await r.json();
+    _fetchGameActive = true;
+    panel.classList.add('show');
+    startBtn.disabled = true;
+    catchBtn.disabled = false;
+    stopBtn.disabled = false;
+    // Show the guide steps as the first narrative
+    if (data.guide && data.guide.steps) {
+      let guideText = data.guide.emoji + ' ' + data.guide.title + '\n\n';
+      guideText += data.guide.steps.map((s, i) => (i + 1) + '. ' + s).join('\n');
+      document.getElementById('fetchGameNarrative').textContent = guideText;
+    } else {
+      document.getElementById('fetchGameNarrative').textContent = 'Throw the phone! I’ll catch it!';
+    }
+    startFetchGamePolling();
+  } catch (e) {
+    _fetchGameActive = true;
+    panel.classList.add('show');
+    startBtn.disabled = true;
+    catchBtn.disabled = false;
+    stopBtn.disabled = false;
+    document.getElementById('fetchGameNarrative').textContent = '🐕 Fetch Game!\n\n1. Hold the phone like a frisbee!\n2. Swing your arm and let go!\n3. Watch the compass direction!\n4. Tap I Caught It when Lilly returns!';
+    startFetchGamePolling();
+  }
+}
+
+async function catchFetchGame() {
+  if (!_fetchGameActive) return;
+  const narrativeEl = document.getElementById('fetchGameNarrative');
+  narrativeEl.textContent = 'Got it!';
+
+  try {
+    const srv = await _getServer();
+    const r = await fetch(srv + '/api/fetch_game/catch', { method: 'POST' });
+    const data = await r.json();
+    if (data.narrative) {
+      narrativeEl.textContent = data.narrative;
+      updateFetchGameStatus(data);
+    }
+  } catch (e) {
+    narrativeEl.textContent = 'Got it! Good catch!';
+  }
+}
+
+async function stopFetchGame() {
+  _fetchGameActive = false;
+  const panel = document.getElementById('fetchGamePanel');
+  const startBtn = document.getElementById('fetchGameStartBtn');
+  const catchBtn = document.getElementById('fetchGameCatchBtn');
+  const stopBtn = document.getElementById('fetchGameStopBtn');
+
+  try {
+    const srv = await _getServer();
+    const r = await fetch(srv + '/api/fetch_game/stop', { method: 'POST' });
+    const data = await r.json();
+    document.getElementById('fetchGameNarrative').textContent = `Game over! ${data.throws} throws, ${data.catches} catches, ${data.score} points!`;
+  } catch (e) {
+    document.getElementById('fetchGameNarrative').textContent = 'Game over!';
+  }
+
+  panel.classList.remove('show');
+  startBtn.disabled = false;
+  catchBtn.disabled = true;
+  stopBtn.disabled = true;
+
+  if (_fetchGamePolling) {
+    clearInterval(_fetchGamePolling);
+    _fetchGamePolling = null;
+  }
+}
+
+function closeFetchGame() {
+  stopFetchGame();
+}
+
+// ─── Render fetch trajectory in AR canvas ─────────────────────────
+let _arCanvasCtx = null;
+function _getArcCtx(){
+  if (!_arCanvasCtx) {
+    const c = document.getElementById('arCanvas');
+    if (c) _arCanvasCtx = c.getContext('2d');
+  }
+  return _arCanvasCtx;
+}
+
+function _renderFetchTrajectory(traj, windMs, windDir) {
+  const ctx = _getArcCtx();
+  if (!ctx || !traj || traj.length === 0) return;
+
+  const canvas = ctx.canvas;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Camera dimensions (simulated AR view)
+  const cx = canvas.width / 2;
+  const cy = canvas.height * 0.7;  // horizon line
+
+  // Scale: 300px = 30m distance
+  const scale = 10;  // pixels per meter
+  const xOffset = cx - (traj[0].x * scale / 2);
+
+  // Draw trajectory path
+  ctx.strokeStyle = 'rgba(74,222,128,0.6)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  for (let i = 0; i < traj.length; i++) {
+    const p = traj[i];
+    const px = xOffset + p.x * scale;
+    const py = cy - p.y * scale;  // y is height, invert for canvas
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Draw target flag at target_distance (10m)
+  const targetX = xOffset + 10.0 * scale;
+  const targetY = cy;
+  ctx.fillStyle = 'rgba(244,114,182,0.3)';
+  ctx.strokeStyle = '#f472b6';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  oe(ctx, targetX, targetY, 8, 12);
+  ctx.fill();
+  ctx.stroke();
+
+  // Draw frisbee at last position
+  const last = traj[traj.length - 1];
+  const frisX = xOffset + last.x * scale;
+  const frisY = cy - last.y * scale;
+  ctx.fillStyle = '#4ADE80';
+  ctx.strokeStyle = 'rgba(74,222,128,0.8)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  oe(ctx, frisX, frisY, 8, 8);
+  ctx.fill();
+  ctx.stroke();
+
+  // Draw wind arrow (small)
+  if (windMs > 1) {
+    const arrowLen = windMs * 5;  // scale wind to arrow length
+    const windRad = (windDir * Math.PI) / 180;
+    const wx1 = cx;
+    const wy1 = 20;
+    const wx2 = wx1 + Math.sin(windRad) * arrowLen;
+    const wy2 = wy1 - Math.cos(windRad) * arrowLen;
+    ctx.strokeStyle = 'rgba(100,200,255,0.8)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(wx1, wy1);
+    ctx.lineTo(wx2, wy2);
+    ctx.lineTo(wx2 - 4, wy2 - 4);
+    ctx.stroke();
+  }
+}
+
+function updateFetchGameStatus(data) {
+  if (data.direction) document.getElementById('fetchGameDirection').textContent = data.direction;
+  if (data.force !== undefined) document.getElementById('fetchGameForce').textContent = data.force + ' m/s²';
+  if (data.throws !== undefined) document.getElementById('fetchGameThrows').textContent = data.throws;
+  if (data.catches !== undefined) document.getElementById('fetchGameCatches').textContent = data.catches;
+  if (data.score !== undefined) document.getElementById('fetchGameScore').textContent = data.score;
+  if (data.wind_speed_ms !== undefined) {
+    const windEl = document.getElementById('fetchGameWind');
+    if (windEl) {
+      const windKmh = (data.wind_speed_ms * 3.6).toFixed(1);
+      const dir = data.wind_direction_name || '';
+      windEl.textContent = `${windKmh} km/h ${dir ? 'from ' + dir : ''}`;
+    }
+  }
+  if (data.weather_desc) {
+    const weatherEl = document.getElementById('fetchGameWeather');
+    if (weatherEl) weatherEl.textContent = data.weather_desc;
+  }
+  if (data.trajectory && data.trajectory.length > 0) {
+    _renderFetchTrajectory(data.trajectory, data.wind_speed_ms || 0, data.wind_direction || 0);
+  }
+  if (data.heading !== undefined) {
+    document.getElementById('fetchGameHeading').textContent = data.heading.toFixed(0) + '°';
+    const needle = document.getElementById('fetchGameCompassNeedle');
+    if (needle) needle.style.transform = `rotate(${data.heading}deg)`;
+  }
+}
+
+function startFetchGamePolling() {
+  if (_fetchGamePolling) clearInterval(_fetchGamePolling);
+  _fetchGamePolling = setInterval(async function() {
+    if (!_fetchGameActive) return;
+    try {
+      const srv = await _getServer();
+      const r = await fetch(srv + '/api/fetch_game');
+      const data = await r.json();
+      if (data.active) {
+        updateFetchGameStatus(data);
+        // Auto-narrate on throw detection
+        if (data.throws && data.throws > 0 && data.last_throw_strength > 15) {
+          document.getElementById('fetchGameNarrative').textContent = 'WHOOSH! I caught it!';
+        }
+      }
+    } catch (e) {
+      // Silent fail
+    }
+  }, 1500);
+}
+
+window.FetchGame = {
+  start: startFetchGame,
+  stop: stopFetchGame,
+  catch: catchFetchGame,
+  close: closeFetchGame,
+  isActive: function() { return _fetchGameActive; }
+};
+
+// ─── Show location on Google Maps ─────────────────────────────────
+async function showLocationMap(){
+  try {
+    const srv = await _getServer();
+    const r = await fetch(srv + '/api/maps/location_link');
+    const data = await r.json();
+    if (!data.available) {
+      Toast('GPS not available yet — need a location fix', 3000);
+      return;
+    }
+    // Show the map link in the chat bubble + open on device
+    appendMsg('lilly', `📍 ${data.place_name}\nSpeed: ${data.speed_mps.toFixed(1)} m/s\n[Google Maps link — tap to open](${data.google_maps_web})`);
+    if (window.LillyBridge && window.LillyBridge.launchApp) {
+      window.LillyBridge.launchApp(data.google_maps_web);
+    } else {
+      window.open(data.google_maps_web, '_blank');
+    }
+    Toast('Location shared!', 1500);
+  } catch(e) {
+    Toast('Location unavailable right now', 2000);
+  }
+}
+
+// Expose for Android WebView bridge
+window.LillyOverlay = {
+  sendMessage,
+  toggleOverlayMic,
+  pollState,
+  localToast,
+  localNotif,
+  localOpen,
+  localAM,
+  openRadar,
+  closeRadar,
+  openCarGame: startCarGame,
+  closeCarGame: closeCarGame,
+  openFetchGame: startFetchGame,
+  closeFetchGame: closeFetchGame,
+  toggleChat,
+};
+
+window.LillyOverlay.showLocationMap = showLocationMap;
 
 // ─── Phone state display ───
 const phoneStateEl=document.getElementById('phoneState');

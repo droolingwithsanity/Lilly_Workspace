@@ -208,6 +208,10 @@ public class LillyAIChatClient {
         state.lookAt    = json.optString("look_at", "");
         state.avatar    = json.optString("avatar", "puppy");
         state.phoneConnected = json.optBoolean("phone_connected", false);
+        state.childMode = json.optBoolean("child_mode", false);
+        state.magneticHeading = json.optDouble("magnetic_heading", 0.0);
+        state.sensorLight = json.optDouble("sensor_light", 0.0);
+        state.sensorMotionTotal = json.optDouble("sensor_motion_total", 9.8);
         if (json.has("pending_commands")) {
             state.pendingCommands = json.optJSONArray("pending_commands");
         }
@@ -238,6 +242,13 @@ public class LillyAIChatClient {
         } catch (Exception e) {
             Log.d(TAG, "Could not sync persona: " + e.getMessage());
         }
+    }
+
+    public String makeRequest(String method, String urlStr, String jsonBody) throws Exception {
+        if (!"POST".equalsIgnoreCase(method)) {
+            throw new IllegalArgumentException("Only POST is supported");
+        }
+        return postJson(urlStr, new JSONObject(jsonBody));
     }
 
     public void clearOpenUrl() throws Exception {
@@ -285,6 +296,10 @@ public class LillyAIChatClient {
         public String lookAt   = "";
         public String avatar   = "puppy";
         public boolean phoneConnected = false;
+        public boolean childMode = false;          // new: kid mode active
+        public double magneticHeading = 0.0;       // new: compass heading for games
+        public double sensorLight = 0.0;           // new: ambient light for games
+        public double sensorMotionTotal = 9.8;     // new: accelerometer magnitude for games
         public org.json.JSONArray pendingCommands = null;
     }
 

@@ -97,7 +97,12 @@ public class TermuxCommandBridge {
     }
 
     public void runCommand(String path, String[] args, String workDir, Callback callback) {
+        runCommand(path, args, workDir, 15000L, callback);
+    }
+
+    public void runCommand(String path, String[] args, String workDir, long timeoutMs, Callback callback) {
         if (callback == null) return;
+        long effectiveTimeout = timeoutMs > 0 ? timeoutMs : 15000L;
         if (!isTermuxInstalled()) {
             Result r = new Result();
             r.errorMessage = "Termux not installed";
@@ -142,7 +147,7 @@ public class TermuxCommandBridge {
             cb.onResult(r);
         };
         timeouts.put(reqId, timeout);
-        mainHandler.postDelayed(timeout, 15000L);
+        mainHandler.postDelayed(timeout, effectiveTimeout);
 
         try {
             appContext.startService(intent);

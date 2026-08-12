@@ -50,6 +50,7 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class LillyOverlayService extends Service {
     private static final String TAG = "LillyOverlay";
@@ -58,8 +59,8 @@ public class LillyOverlayService extends Service {
     private static final String CHANNEL_ID = "lilly_overlay_channel";
     private static final int NOTIF_ID = 1018;
     private static final int COLLAPSED_SIZE_DP = 96;
-    private static final int EXPANDED_WIDTH_DP = 280;
-    private static final int EXPANDED_HEIGHT_DP = 320;
+    private static final int EXPANDED_WIDTH_DP = 300;   // width for expanded overlay (frosty glass)
+    private static final int EXPANDED_HEIGHT_DP = 420;  // height for expanded overlay — increased so chat isn't hidden by IME/apps
 
     static {
         Thread.setDefaultUncaughtExceptionHandler((thread, ex) -> {
@@ -97,10 +98,12 @@ public class LillyOverlayService extends Service {
     private LillyAIChatClient chatClient;
     private TermuxCommandBridge termuxBridge;
     private LocalPhoneClient phoneClient;
+    private static LillyHttpServer lillyHttpServer;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable statePoller = this::pollLillyState;
     private boolean offlineMode = false;
+    private boolean gamingMode = false;  // True when car ride game is active
 
     private SpeechRecognizer speechRecognizer;
     private Intent speechIntent;
@@ -164,6 +167,11 @@ public class LillyOverlayService extends Service {
             });
             return START_STICKY;
         }
+        // ── Emergency kill switch from notification ──
+        if ("ai.agent1c.hitomi.KILL_SWITCH".equals(action)) {
+            mainHandler.post(this::toggleKillSwitchNative);
+            return START_STICKY;
+        }
         try {
             createNotificationChannel();
             startForeground(NOTIF_ID, buildNotification());
@@ -172,6 +180,8 @@ public class LillyOverlayService extends Service {
             overlayRunning = true;
             // Auto-start the phone server if Termux is available
             startLillyPhoneServer();
+            // In-process HTTP sensor server (replaces termux_sensor_server.py)
+            startLillyHttpServer();
         } catch (Exception e) {
             Log.e(TAG, "Failed to start overlay service", e);
             stopSelf();
@@ -241,7 +251,7 @@ public class LillyOverlayService extends Service {
                 public void onResult(TermuxCommandBridge.Result result) {
                     String out = result.stdout != null ? result.stdout.trim() : "";
                     if (out.contains("RUNNING")) {
-                        Log.d(TAG, "Phone server already running on :8099");
+                        Log.d(TAG, "Phone server already running on :8097");
                     } else {
                         Log.d(TAG, "Starting phone server in Termux...");
                         // Deploy the raw resource version to ~/Lilly_Workspace/
@@ -267,9 +277,9 @@ public class LillyOverlayService extends Service {
                                 public void onResult(TermuxCommandBridge.Result r) {
                                     String o = r.stdout != null ? r.stdout.trim() : "";
                                     if (o.contains("SERVER_STARTED")) {
-                                        Log.i(TAG, "Phone server started on :8099");
+                                        Log.i(TAG, "Phone server started on :8097");
                                         Toast.makeText(LillyOverlayService.this,
-                                            "Phone server started on :8099", Toast.LENGTH_SHORT).show();
+                                            "Phone server started on :8097", Toast.LENGTH_SHORT).show();
                                     } else if (o.contains("NO_SERVER_FILE")) {
                                         Log.w(TAG, "No phone server file — deploy via settings first");
                                     } else {
@@ -282,6 +292,64 @@ public class LillyOverlayService extends Service {
                 }
             }
         );
+    }
+
+    /**
+     * Start the in-process HTTP sensor server that replaces termux_sensor_server.py.
+     * It binds 0.0.0.0:8099 and proxies /api/* to lilly_phone_server.py on :8097.
+     */
+    private void startLillyHttpServer() {
+        startHttpServer(this, null);
+    }
+
+    /** Callback invoked once the shared HTTP server has been started (or failed). */
+    public interface HttpServerStartCallback {
+        void onDone(LillyHttpServer server, Exception error);
+    }
+
+    private static final ExecutorService httpServerStarter = Executors.newSingleThreadExecutor();
+    private static final AtomicBoolean httpServerStarting = new AtomicBoolean(false);
+
+    /** Shared server is alive and accepting connections. */
+    public static boolean isHttpServerRunning() {
+        return lillyHttpServer != null && lillyHttpServer.isAlive();
+    }
+
+    /**
+     * Starts the shared in-process HTTP sensor server (idempotent). Safe to call from
+     * MainActivity on app open and from the overlay service. If the legacy Termux
+     * sensor server (termux_sensor_server.py) still holds :8099 it is killed first.
+     */
+    public static void startHttpServer(Context ctx, HttpServerStartCallback cb) {
+        synchronized (LillyOverlayService.class) {
+            if (isHttpServerRunning()) {
+                if (cb != null) cb.onDone(lillyHttpServer, null);
+                return;
+            }
+            if (httpServerStarting.get()) {
+                return;
+            }
+            httpServerStarting.set(true);
+        }
+        httpServerStarter.execute(() -> {
+            LillyHttpServer server = null;
+            Exception failure = null;
+            try {
+                TermuxCommandBridge bridge = new TermuxCommandBridge(ctx.getApplicationContext());
+                server = new LillyHttpServer(ctx, bridge);
+                server.freeLegacyPort();
+                server.start();
+                synchronized (LillyOverlayService.class) {
+                    lillyHttpServer = server;
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to start Lilly HTTP sensor server", e);
+                failure = e;
+            } finally {
+                httpServerStarting.set(false);
+            }
+            if (cb != null) cb.onDone(server, failure);
+        });
     }
 
     private void ensureOverlay() {
@@ -801,6 +869,13 @@ public class LillyOverlayService extends Service {
         View modeBtn       = quickActionsView.findViewById(R.id.lillyQuickMode);
         View minimizeBtn   = quickActionsView.findViewById(R.id.lillyQuickMinimize);
         View closeBtn      = quickActionsView.findViewById(R.id.lillyQuickClose);
+        // ── New gaming/sensor/termux/download buttons ──
+        View gameBtn       = quickActionsView.findViewById(R.id.lillyQuickGame);
+        View fetchBtn      = quickActionsView.findViewById(R.id.lillyQuickFetch);
+         View sensorsBtn    = quickActionsView.findViewById(R.id.lillyQuickSensors);
+         View mapBtn        = quickActionsView.findViewById(R.id.lillyQuickMap);
+         View termuxBtn     = quickActionsView.findViewById(R.id.lillyQuickTermux);
+        View downloadBtn   = quickActionsView.findViewById(R.id.lillyQuickDownload);
         modeLabelView      = quickActionsView.findViewById(R.id.lillyModeLabel);
 
         // ── Chat: expand overlay and focus input ──
@@ -892,6 +967,102 @@ public class LillyOverlayService extends Service {
             closeBtn.setOnClickListener(v -> {
                 hideQuickActions();
                 stopSelf();
+            });
+        }
+
+        // ── Game: launch car ride game in overlay WebView ──
+        if (gameBtn != null) {
+            gameBtn.setOnClickListener(v -> {
+                hideQuickActions();
+                expandOverlay();
+                if (lillyWebView != null) {
+                    mainHandler.postDelayed(() ->
+                        lillyWebView.evaluateJavascript(
+                            "if(typeof showCarGame==='function')showCarGame();", null), 200);
+                }
+                Toast.makeText(this, "Car Ride Game — Game On!", Toast.LENGTH_SHORT).show();
+            });
+        }
+
+        // ── Fetch: launch fetch mini-game in overlay WebView ──
+        if (fetchBtn != null) {
+            fetchBtn.setOnClickListener(v -> {
+                hideQuickActions();
+                expandOverlay();
+                if (lillyWebView != null) {
+                    mainHandler.postDelayed(() ->
+                        lillyWebView.evaluateJavascript(
+                            "if(typeof showFetchGame==='function')showFetchGame();", null), 200);
+                }
+                Toast.makeText(this, "Fetch Game — throw the phone!", Toast.LENGTH_SHORT).show();
+            });
+        }
+
+         // ── Sensors: open sensor data panel ──
+         if (sensorsBtn != null) {
+             sensorsBtn.setOnClickListener(v -> {
+                 hideQuickActions();
+                 expandOverlay();
+                 if (lillyWebView != null) {
+                     mainHandler.postDelayed(() ->
+                         lillyWebView.evaluateJavascript(
+                             "if(typeof showSensorPanel==='function')showSensorPanel();", null), 200);
+                 }
+                 Toast.makeText(this, "Sensor Data", Toast.LENGTH_SHORT).show();
+             });
+         }
+
+         // ── Map: pin current location on Google Maps ──
+         if (mapBtn != null) {
+             mapBtn.setOnClickListener(v -> {
+                 hideQuickActions();
+                 expandOverlay();
+                 if (lillyWebView != null) {
+                     mainHandler.postDelayed(() ->
+                         lillyWebView.evaluateJavascript(
+                             "if(typeof showLocationMap==='function')showLocationMap();", null), 200);
+                 }
+                 Toast.makeText(this, "📍 Where are we?", Toast.LENGTH_SHORT).show();
+             });
+         }
+
+         // ── Termux Bridge: run a quick command ──
+        if (termuxBtn != null) {
+            termuxBtn.setOnClickListener(v -> {
+                hideQuickActions();
+                if (termuxBridge == null) termuxBridge = new TermuxCommandBridge(this);
+                termuxBridge.runCommand(
+                    "/data/data/com.termux/files/usr/bin/termux-battery",
+                    new String[]{},
+                    null,
+                    new TermuxCommandBridge.Callback() {
+                        @Override
+                        public void onResult(TermuxCommandBridge.Result result) {
+                            String out = result.stdout != null ? result.stdout.trim() : "";
+                            mainHandler.post(() ->
+                                Toast.makeText(LillyOverlayService.this,
+                                    "📱 " + out.replace("\n", " "), Toast.LENGTH_LONG).show());
+                        }
+                    });
+            });
+        }
+
+        // ── Download APK: open download URL ──
+        if (downloadBtn != null) {
+            downloadBtn.setOnClickListener(v -> {
+                hideQuickActions();
+                // Try to fetch the latest APK download link from the server
+                if (phoneClient != null) {
+                    try {
+                        phoneClient.get("/api/app/download_url");
+                    } catch (Exception e) {
+                        Log.d(TAG, "APK download URL fetch failed: " + e.getMessage());
+                    }
+                }
+                // Fallback: open known URL
+                String apkUrl = "https://100.93.131.114:8098/lilly-overlay-v3.7-debug.apk";
+                openUrl(apkUrl);
+                Toast.makeText(this, "Opening APK download…", Toast.LENGTH_SHORT).show();
             });
         }
     }
@@ -1375,10 +1546,59 @@ public class LillyOverlayService extends Service {
                 int code = pc.getResponseCode();
                 pc.disconnect();
                 Log.d(TAG, "Auto-pair with remote: HTTP " + code);
-            } catch (Exception e) {
-                Log.d(TAG, "Auto-pair skipped: " + e.getMessage());
+             } catch (Exception e) {
+                 Log.d(TAG, "Auto-pair skipped: " + e.getMessage());
+             }
+         });
+     }
+
+    private static boolean _killSwitchActive = false;
+
+    /**
+     * Emergency kill switch: sends /api/kill_switch/enable to the server to
+     * stop ALL termux_run() calls. Can be toggled from the notification button
+     * or the overlay triple-tap gesture.
+     */
+    private void toggleKillSwitchNative() {
+        _killSwitchActive = !_killSwitchActive;
+        String endpoint = _killSwitchActive ? "/api/kill_switch/enable" : "/api/kill_switch/disable";
+        String msg = _killSwitchActive ? "Kill switch ON — phone commands disabled" : "Kill switch OFF — phone commands enabled";
+
+        if (phoneClient != null) {
+            new Thread(() -> {
+                try {
+                    phoneClient.runTermuxCommand(
+                        "{\"type\":\"termux\",\"text\":\"echo kill_switch_" +
+                        (_killSwitchActive ? "on" : "off") + "\"}");
+                } catch (Exception ignored) {}
+            }).start();
+        }
+
+        // Also call the server endpoint
+        if (chatClient != null) {
+            new Thread(() -> {
+                try {
+                    chatClient.makeRequest("POST", endpoint, "{}");
+                } catch (Exception e) {
+                    Log.d(TAG, "Kill switch endpoint call failed: " + e.getMessage());
+                }
+            }).start();
+        }
+
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+    }
+
+    /** Update the foreground notification (called when state changes). */
+    private void updateNotification(String textOverride) {
+        try {
+            android.app.NotificationManager nm =
+                (android.app.NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) {
+                nm.notify(NOTIF_ID, buildNotificationWithText(
+                    textOverride != null ? textOverride :
+                    (_killSwitchActive ? "🔴 Cmds disabled" : "Your companion is here")));
             }
-        });
+        } catch (Exception ignored) {}
     }
 
     private static String readStreamToString(java.io.InputStream is) throws Exception {
@@ -1430,6 +1650,20 @@ public class LillyOverlayService extends Service {
     }
 
     private void handleServerActions(LillyAIChatClient.UiState state) {
+        // ── Sync gaming mode state ────────────────────────────────
+        if (state.childMode != gamingMode) {
+            gamingMode = state.childMode;
+            // Keep overlay game panel visibility in sync
+            if (lillyWebView != null) {
+                lillyWebView.evaluateJavascript(
+                    "(function(){" +
+                    "var cb=document.getElementById('carGamePanel');if(cb){" +
+                    "if(" + gamingMode + "){cb.classList.add('show');}else{cb.classList.remove('show');}" +
+                    "}" +
+                    "})()", null);
+            }
+        }
+
         if (state.openUrl != null && !state.openUrl.isEmpty()) {
             String url = state.openUrl;
             executor.execute(() -> {
@@ -1492,8 +1726,11 @@ public class LillyOverlayService extends Service {
             case "termux":
             case "run": {
                 org.json.JSONObject termuxCmd = new org.json.JSONObject();
-                termuxCmd.put("binary", cmd.optString("binary", "echo"));
-                termuxCmd.put("text", cmd.optString("text", ""));
+                try {
+                    termuxCmd.put("binary", cmd.optString("binary", "echo"));
+                    termuxCmd.put("text", cmd.optString("text", ""));
+                } catch (Exception ignored) {
+                }
                 runTermuxViaBridge(termuxCmd);
                 break;
             }
@@ -1698,6 +1935,13 @@ public class LillyOverlayService extends Service {
         PendingIntent stopPi = PendingIntent.getService(this, 2, stopIntent,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPi);
+
+        // ── Emergency kill switch action ──
+        Intent killIntent = new Intent(this, LillyOverlayService.class);
+        killIntent.setAction("ai.agent1c.hitomi.KILL_SWITCH");
+        PendingIntent killPi = PendingIntent.getService(this, 3, killIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        builder.addAction(android.R.drawable.presence_audio_online, "Kill Cmds", killPi);
 
         return builder.build();
     }

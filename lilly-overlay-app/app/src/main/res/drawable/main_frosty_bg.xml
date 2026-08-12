@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Frosty pastel glass background for the main activity (matches website) -->
+<!-- Aurora layers: lilac/lavender/peach/pink gradient -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Base pastel gradient -->
+    <gradient
+        android:startColor="#F5D5E0"
+        android:centerColor="#D4E8F5"
+        android:endColor="#D5F0E6"
+        android:angle="45" />
+
+    <!-- Aurora layer 1: lilac/pink -->
+    <item>
+        <shape android:shape="oval">
+            <gradient
+                android:startColor="#F5D5E0"
+                android:endColor="#F5E6D4"
+                android:angle="25"
+                android:type="radial"
+                android:gradientRadius="300dp" />
+        </shape>
+        <size
+            android:width="400dp"
+            android:height="400dp"
+            android:top="-50dp"
+            android:left="-50dp" />
+    </item>
+
+    <!-- Aurora layer 2: blue/mint -->
+    <item>
+        <shape android:shape="oval">
+            <gradient
+                android:startColor="#D4E8F5"
+                android:endColor="#D5F0E6"
+                android:angle="45"
+                android:type="radial"
+                android:gradientRadius="300dp" />
+        </shape>
+        <size
+            android:width="400dp"
+            android:height="400dp"
+            android:top="200dp"
+            android:left="100dp" />
+    </item>
+
+    <!-- Aurora layer 3: cream -->
+    <item>
+        <shape android:shape="oval">
+            <gradient
+                android:startColor="#F5E6D4"
+                android:endColor="#F5D5E0"
+                android:angle="65"
+                android:type="radial"
+                android:gradientRadius="300dp" />
+        </shape>
+        <size
+            android:width="400dp"
+            android:height="400dp"
+            android:top="400dp"
+            android:left="-20dp" />
+    </item>
+
+    <!-- Noise overlay for texture -->
+    <item android:drawable="@android:color/transparent" />
+
+</layer-list>

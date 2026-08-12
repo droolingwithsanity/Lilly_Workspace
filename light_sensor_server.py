@@ -49,7 +49,8 @@ import time
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
+from contextlib import asynccontextmanager
+from typing import Any, Optional, cast
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import JSONResponse
@@ -492,7 +493,7 @@ async def lifespan(app: FastAPI):
         logger.info("LightSensorServer stopped.")
 
 
-app.router.lifespan_context = lifespan
+app.router.lifespan_context = cast(Any, lifespan)
 
 # ─── MAIN ENTRY POINT ─────────────────────────────────────────────────────
 
