@@ -32,10 +32,30 @@ MIME_OVERRIDES = {
 }
 
 TEXT_EXTS = {
-    ".txt", ".md", ".py", ".js", ".ts", ".json", ".css",
-    ".sh", ".yml", ".yaml", ".toml", ".cfg", ".ini", ".env",
-    ".xml", ".csv", ".log", ".sql", ".c", ".cpp", ".h", ".java",
-    ".gradle", ".properties",
+    ".txt",
+    ".md",
+    ".py",
+    ".js",
+    ".ts",
+    ".json",
+    ".css",
+    ".sh",
+    ".yml",
+    ".yaml",
+    ".toml",
+    ".cfg",
+    ".ini",
+    ".env",
+    ".xml",
+    ".csv",
+    ".log",
+    ".sql",
+    ".c",
+    ".cpp",
+    ".h",
+    ".java",
+    ".gradle",
+    ".properties",
 }
 
 
@@ -48,8 +68,8 @@ def human_size(n):
 
 
 class FileBrowser(http.server.BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        print(f"[{self.log_date_time_string()}] {fmt % args}")
+    def log_message(self, format, *args):
+        print(f"[{self.log_date_time_string()}] {format % args}")
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -95,7 +115,11 @@ class FileBrowser(http.server.BaseHTTPRequestHandler):
                 link += "/"
             else:
                 ext = os.path.splitext(name)[1].lower()
-                icon = "📄" if ext not in (".png", ".jpg", ".jpeg", ".gif", ".svg") else "🖼️"
+                icon = (
+                    "📄"
+                    if ext not in (".png", ".jpg", ".jpeg", ".gif", ".svg")
+                    else "🖼️"
+                )
                 size = human_size(os.path.getsize(fp))
             rows += f'<tr><td class="icon">{icon}</td><td><a href="{link}">{name}</a></td><td class="size">{size}</td><td></td></tr>\n'
 
@@ -190,7 +214,8 @@ pre {{ background: #0f3460; padding: 16px; border-radius: 6px; overflow-x: auto;
             self.send_error(500, str(e))
 
     def serve_capture_page(self):
-        html = """<!DOCTYPE html>
+        html = (
+            """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Screenshot Capture</title>
 <style>
 body { font-family: system-ui, sans-serif; margin: 40px; background: #1a1a2e; color: #e0e0e0; }
@@ -209,7 +234,9 @@ h1 { color: #00d4ff; }
 </style></head><body>
 <a class="back" href="/">⬅ Back to File Browser</a>
 <h1>📸 Screenshot Capture</h1>
-<p>Captures real screenshots from the running app at <code>""" + CAPTURE_URL + """</code></p>
+<p>Captures real screenshots from the running app at <code>"""
+            + CAPTURE_URL
+            + """</code></p>
 <button class="btn" id="captureBtn" onclick="startCapture()">Capture All Screenshots</button>
 <div id="status"><span class="log info">Ready. Click capture to start.</span></div>
 <script>
@@ -241,6 +268,7 @@ function pollStatus() {
 }
 </script>
 </body></html>"""
+        )
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
@@ -272,6 +300,7 @@ def _run_capture():
     state = _capture_state
     try:
         import asyncio
+
         asyncio.run(_do_capture(state))
     except Exception as e:
         state["log"].append(f"FAIL: {e}")
@@ -283,7 +312,11 @@ async def _do_capture(state):
 
     steps = [
         ("step1-home.png", None, "Landing / avatar picker"),
-        ("step2-chat.png", "confirmPickerBypass()||confirmPicker()", "Enter main app (chat)"),
+        (
+            "step2-chat.png",
+            "confirmPickerBypass()||confirmPicker()",
+            "Enter main app (chat)",
+        ),
         ("step3-camera-pip.png", "toggleCameraView()", "Camera PiP view"),
         ("step4-detection.png", None, "Detection (camera off, text state)"),
         ("step5-maps-overlay.png", "toggleDashboard()", "Dashboard / maps overlay"),
@@ -299,7 +332,7 @@ async def _do_capture(state):
         browser = await p.chromium.launch(
             headless=True,
             executable_path="/usr/bin/google-chrome",
-            args=["--no-sandbox", "--disable-gpu"]
+            args=["--no-sandbox", "--disable-gpu"],
         )
         ctx = await browser.new_context(
             viewport={"width": 390, "height": 844},

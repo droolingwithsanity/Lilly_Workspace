@@ -25,7 +25,14 @@ OSINT_AGENTS = {
     "people": {
         "name": "People Intelligence",
         "description": "Find people by name, username, email, or phone",
-        "tools": ["sherlock", "maigret", "holehe", "ghunt", "idcrawl", "truepeoplesearch"],
+        "tools": [
+            "sherlock",
+            "maigret",
+            "holehe",
+            "ghunt",
+            "idcrawl",
+            "truepeoplesearch",
+        ],
     },
     "email": {
         "name": "Email Intelligence",
@@ -87,6 +94,7 @@ OSINT_AGENTS = {
 
 # ── CLI Runner ──────────────────────────────────────────────────────────────
 
+
 async def _run_cli(cmd: list[str], timeout: int = 60) -> tuple[str, int]:
     """Run a CLI command and return (stdout, returncode)."""
     try:
@@ -108,16 +116,19 @@ async def _run_cli(cmd: list[str], timeout: int = 60) -> tuple[str, int]:
 
 # ── Individual Tool Runners ─────────────────────────────────────────────────
 
+
 async def run_sherlock(target: str) -> str:
     """Run Sherlock for username lookup across 400+ sites."""
     output, rc = await _run_cli(
-        ["sherlock", target, "--timeout", "10", "--print-found"],
-        timeout=120
+        ["sherlock", target, "--timeout", "10", "--print-found"], timeout=120
     )
     if rc == 0 and output:
         lines = [l for l in output.split("\n") if "[+]`" in l or "https:" in l]
         if lines:
-            return f"Sherlock found {len(lines)} accounts for '{target}':\n" + "\n".join(lines[:20])
+            return (
+                f"Sherlock found {len(lines)} accounts for '{target}':\n"
+                + "\n".join(lines[:20])
+            )
         return f"Sherlock: no accounts found for '{target}'"
     return f"Sherlock scan complete for '{target}'"
 
@@ -125,8 +136,16 @@ async def run_sherlock(target: str) -> str:
 async def run_maigret(target: str) -> str:
     """Run Maigret for username dossier across 3000+ sites."""
     output, rc = await _run_cli(
-        ["maigret", target, "--timeout", "10", "--json", "-o", f"/tmp/maigret_{target}.json"],
-        timeout=180
+        [
+            "maigret",
+            target,
+            "--timeout",
+            "10",
+            "--json",
+            "-o",
+            f"/tmp/maigret_{target}.json",
+        ],
+        timeout=180,
     )
     # Try to read the JSON report
     report_path = Path(f"/tmp/maigret_{target}.json")
@@ -162,10 +181,7 @@ print(asyncio.run(check()))
 
 async def run_ghunt(target: str) -> str:
     """Run GHunt for Google account investigation."""
-    output, rc = await _run_cli(
-        ["ghunt", "email", target],
-        timeout=60
-    )
+    output, rc = await _run_cli(["ghunt", "email", target], timeout=60)
     if output:
         return f"GHunt results for '{target}':\n{output[:2000]}"
     return f"GHunt scan complete for '{target}'"
@@ -175,10 +191,11 @@ async def run_waybackpy(target: str) -> str:
     """Query Wayback Machine for archived snapshots."""
     try:
         import waybackpy
+
         url = waybackpy.Url(target)
         oldest = url.oldest()
         newest = url.newest()
-        total = url.total_snapshots()
+        total = url.total_archives()
         return f"Wayback Machine for '{target}':\nOldest: {oldest}\nNewest: {newest}\nTotal snapshots: {total}"
     except Exception as e:
         return f"Wayback query failed: {e}"
@@ -187,8 +204,18 @@ async def run_waybackpy(target: str) -> str:
 async def run_instaloader(target: str) -> str:
     """Download Instagram profile metadata."""
     output, rc = await _run_cli(
-        ["instaloader", "--no-videos", "--no-captions", "--count", "12", "--dirname-pattern", f"/tmp/insta_{target}", "--", target],
-        timeout=60
+        [
+            "instaloader",
+            "--no-videos",
+            "--no-captions",
+            "--count",
+            "12",
+            "--dirname-pattern",
+            f"/tmp/insta_{target}",
+            "--",
+            target,
+        ],
+        timeout=60,
     )
     return f"Instaloader: fetched profile data for '{target}'"
 
@@ -222,6 +249,7 @@ async def run_osint_agent(category: str, target: str) -> str:
     # returns a compiled report with all findings.
     try:
         from osint_engine import investigate
+
         return await investigate(category, target=target, name=target)
     except ImportError:
         pass

@@ -13,6 +13,7 @@ import asyncio
 import tempfile
 from pathlib import Path
 from contextlib import asynccontextmanager
+from typing import Any, Optional, cast
 
 import cv2
 import numpy as np
@@ -23,7 +24,7 @@ from ultralytics import YOLO
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("lilly-vision")
 
-MODEL = None
+MODEL: Optional[YOLO] = None
 CONF_THRESHOLD = float(os.environ.get("CONF_THRESHOLD", "0.35"))
 MODEL_NAME = os.environ.get("YOLO_MODEL", "yolov8n.pt")
 
@@ -622,7 +623,7 @@ async def vision_detect(request: Request):
         return JSONResponse(status_code=503, content={"error": "YOLO model not loaded"})
 
     try:
-        results = MODEL(frame, conf=CONF_THRESHOLD, verbose=False)
+        results = cast(list, MODEL(frame, conf=CONF_THRESHOLD, verbose=False))
     except Exception as e:
         log.error(f"YOLO inference error: {e}")
         return JSONResponse(status_code=500, content={"error": f"Inference error: {e}"})
@@ -637,6 +638,7 @@ async def vision_detect(request: Request):
             conf = float(box.conf[0])
             cls_id = int(box.cls[0])
             label = MODEL.names[cls_id]
+            est = estimate_distance(label, int(x2 - x1), w)
 
             nx = float(x1) / w
             ny = float(y1) / h
@@ -651,12 +653,8 @@ async def vision_detect(request: Request):
                     "w": round(nw, 4),
                     "h": round(nh, 4),
                     "conf": round(conf, 4),
-                    "distance_m": estimate_distance(label, int(x2 - x1), w),
-                    "distance_desc": distance_desc(
-                        estimate_distance(label, int(x2 - x1), w)
-                    )
-                    if estimate_distance(label, int(x2 - x1), w)
-                    else None,
+                    "distance_m": est,
+                    "distance_desc": distance_desc(est) if est else None,
                 }
             )
 
@@ -730,7 +728,7 @@ async def vision_proactive(request: Request):
         return {"should_speak": False, "reason": "decode_error"}
 
     try:
-        results = MODEL(frame, conf=CONF_THRESHOLD, verbose=False)
+        results = cast(list, MODEL(frame, conf=CONF_THRESHOLD, verbose=False))
     except Exception:
         return {"should_speak": False, "reason": "inference_error"}
 

@@ -24,13 +24,15 @@ import httpx
 
 # ── Data Models ─────────────────────────────────────────────────────────────
 
+
 @dataclass
 class IntelFinding:
     source: str
-    category: str        # "username", "email", "social", "breach", "domain", etc.
+    category: str  # "username", "email", "social", "breach", "domain", etc.
     data: str
     url: str = ""
     confidence: float = 0.8
+
 
 @dataclass
 class InvestigationReport:
@@ -40,9 +42,24 @@ class InvestigationReport:
     findings: list[IntelFinding] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
-    def add(self, source: str, category: str, data: str, url: str = "", confidence: float = 0.8):
+    def add(
+        self,
+        source: str,
+        category: str,
+        data: str,
+        url: str = "",
+        confidence: float = 0.8,
+    ):
         if data and data.strip():
-            self.findings.append(IntelFinding(source=source, category=category, data=data.strip(), url=url, confidence=confidence))
+            self.findings.append(
+                IntelFinding(
+                    source=source,
+                    category=category,
+                    data=data.strip(),
+                    url=url,
+                    confidence=confidence,
+                )
+            )
 
     def has_findings(self) -> bool:
         return len(self.findings) > 0
@@ -55,14 +72,21 @@ class InvestigationReport:
 
 _http: Optional[httpx.AsyncClient] = None
 
+
 async def _client() -> httpx.AsyncClient:
     global _http
     if _http is None or _http.is_closed:
-        _http = httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers={"User-Agent": "LillyOSINT/1.0"})
+        _http = httpx.AsyncClient(
+            timeout=15.0,
+            follow_redirects=True,
+            headers={"User-Agent": "LillyOSINT/1.0"},
+        )
     return _http
 
 
-async def _fetch_json(url: str, params: dict = None, headers: dict = None) -> dict:
+async def _fetch_json(
+    url: str, params: Optional[dict] = None, headers: Optional[dict] = None
+) -> dict:
     """Fetch JSON from a URL. Returns {} on failure."""
     try:
         c = await _client()
@@ -74,7 +98,7 @@ async def _fetch_json(url: str, params: dict = None, headers: dict = None) -> di
     return {}
 
 
-async def _fetch_text(url: str, params: dict = None) -> str:
+async def _fetch_text(url: str, params: Optional[dict] = None) -> str:
     """Fetch text from a URL. Returns empty string on failure."""
     try:
         c = await _client()
@@ -88,19 +112,29 @@ async def _fetch_text(url: str, params: dict = None) -> str:
 
 # ── Individual Intel Collectors ─────────────────────────────────────────────
 
+
 async def collect_username_sherlock(username: str, report: InvestigationReport):
     """Sherlock: find username across 400+ sites via CLI."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "sherlock", username, "--timeout", "8", "--print-found",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            "sherlock",
+            username,
+            "--timeout",
+            "8",
+            "--print-found",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=90)
         output = stdout.decode(errors="replace")
-        matches = re.findall(r'\[+\]\s+(\S+):\s+(https?://\S+)', output)
+        matches = re.findall(r"\[+\]\s+(\S+):\s+(https?://\S+)", output)
         if matches:
             sites = [f"{name}" for name, _ in matches[:30]]
-            report.add("Sherlock", "username", f"Found on {len(matches)} sites: {', '.join(sites)}")
+            report.add(
+                "Sherlock",
+                "username",
+                f"Found on {len(matches)} sites: {', '.join(sites)}",
+            )
             # Add individual URLs
             for name, url in matches[:10]:
                 report.add("Sherlock", "social", f"{name}: {url}", url=url)
@@ -116,20 +150,31 @@ async def collect_username_maigret(username: str, report: InvestigationReport):
     """Maigret: build dossier from 3000+ sites."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "maigret", username, "--timeout", "8", "--json",
-            "-o", f"/tmp/maigret_{username}.json",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            "maigret",
+            username,
+            "--timeout",
+            "8",
+            "--json",
+            "-o",
+            f"/tmp/maigret_{username}.json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
         # Read JSON report
         from pathlib import Path
+
         report_path = Path(f"/tmp/maigret_{username}.json")
         if report_path.exists():
             data = json.loads(report_path.read_text())
             sites = data.get("sites", {})
             found = {k: v for k, v in sites.items() if v.get("status") == "OK"}
             if found:
-                report.add("Maigret", "username", f"Confirmed on {len(found)} sites out of {len(sites)} checked")
+                report.add(
+                    "Maigret",
+                    "username",
+                    f"Confirmed on {len(found)} sites out of {len(sites)} checked",
+                )
                 for site_name, site_data in list(found.items())[:15]:
                     url = site_data.get("url", "")
                     report.add("Maigret", "social", f"{site_name}", url=url)
@@ -152,8 +197,11 @@ results = asyncio.run(check())
 print(json.dumps(results))
 '''
         proc = await asyncio.create_subprocess_exec(
-            "python3", "-c", script,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            "python3",
+            "-c",
+            script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
         output = stdout.decode(errors="replace").strip()
@@ -164,7 +212,11 @@ print(json.dumps(results))
                     found = [item for item in data if item.get("exists") is True]
                     if found:
                         sites = [item.get("name", "unknown") for item in found[:20]]
-                        report.add("Holehe", "email", f"Registered on {len(found)} sites: {', '.join(sites)}")
+                        report.add(
+                            "Holehe",
+                            "email",
+                            f"Registered on {len(found)} sites: {', '.join(sites)}",
+                        )
                     else:
                         report.add("Holehe", "email", "No site registrations found")
             except json.JSONDecodeError:
@@ -180,12 +232,19 @@ async def collect_email_haveibeenpwned(email: str, report: InvestigationReport):
     """HIBP: check if email appeared in data breaches."""
     try:
         c = await _client()
-        r = await c.get(f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}",
-                        headers={"hibp-api-key": ""}, timeout=10.0)
+        r = await c.get(
+            f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}",
+            headers={"hibp-api-key": ""},
+            timeout=10.0,
+        )
         if r.status_code == 200:
             breaches = r.json()
             names = [b.get("Name", "") for b in breaches[:10]]
-            report.add("HIBP", "breach", f"Found in {len(breaches)} breaches: {', '.join(names)}")
+            report.add(
+                "HIBP",
+                "breach",
+                f"Found in {len(breaches)} breaches: {', '.join(names)}",
+            )
         elif r.status_code == 404:
             report.add("HIBP", "breach", "Not found in any known breaches")
     except Exception as e:
@@ -201,9 +260,12 @@ async def collect_email_rep(email: str, report: InvestigationReport):
             suspicious = data.get("suspicious", False)
             details = data.get("details", {})
             providers = details.get("providers", [])
-            report.add("EmailRep", "email",
-                       f"Reputation: {reputation}, Suspicious: {suspicious}, "
-                       f"Provider: {', '.join(providers[:3]) if providers else 'unknown'}")
+            report.add(
+                "EmailRep",
+                "email",
+                f"Reputation: {reputation}, Suspicious: {suspicious}, "
+                f"Provider: {', '.join(providers[:3]) if providers else 'unknown'}",
+            )
     except Exception as e:
         report.errors.append(f"EmailRep: {e}")
 
@@ -211,15 +273,23 @@ async def collect_email_rep(email: str, report: InvestigationReport):
 async def collect_domain_shodan(domain: str, report: InvestigationReport):
     """Shodan: exposed services and ports."""
     try:
-        data = await _fetch_json(f"https://api.shodan.io/dns/domain/{domain}", params={"key": ""})
+        data = await _fetch_json(
+            f"https://api.shodan.io/dns/domain/{domain}", params={"key": ""}
+        )
         if data:
             records = data.get("data", [])
             ips = list(set(r.get("data", "") for r in records if r.get("type") == "A"))
             if ips:
                 report.add("Shodan", "infrastructure", f"IPs: {', '.join(ips[:5])}")
-            subdomains = list(set(r.get("subdomain", "") for r in records if r.get("subdomain")))
+            subdomains = list(
+                set(r.get("subdomain", "") for r in records if r.get("subdomain"))
+            )
             if subdomains:
-                report.add("Shodan", "infrastructure", f"Subdomains: {', '.join(subdomains[:10])}")
+                report.add(
+                    "Shodan",
+                    "infrastructure",
+                    f"Subdomains: {', '.join(subdomains[:10])}",
+                )
     except Exception as e:
         report.errors.append(f"Shodan: {e}")
 
@@ -236,7 +306,11 @@ async def collect_domain_crtsh(domain: str, report: InvestigationReport):
                 if name and "*" not in name:
                     names.add(name)
             if names:
-                report.add("crt.sh", "infrastructure", f"Certificate names: {', '.join(sorted(names)[:15])}")
+                report.add(
+                    "crt.sh",
+                    "infrastructure",
+                    f"Certificate names: {', '.join(sorted(names)[:15])}",
+                )
     except Exception as e:
         report.errors.append(f"crt.sh: {e}")
 
@@ -249,7 +323,11 @@ async def collect_domain_whois(domain: str, report: InvestigationReport):
             events = data.get("events", [])
             for ev in events:
                 if ev.get("eventAction") == "registration":
-                    report.add("WHOIS", "domain", f"Registered: {ev.get('eventDate', 'unknown')}")
+                    report.add(
+                        "WHOIS",
+                        "domain",
+                        f"Registered: {ev.get('eventDate', 'unknown')}",
+                    )
             entities = data.get("entities", [])
             for ent in entities:
                 handle = ent.get("handle", "")
@@ -264,7 +342,9 @@ async def collect_phone_infoga(phone: str, report: InvestigationReport):
     """PhoneInfoga: phone number OSINT."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "python3", "-c", f'''
+            "python3",
+            "-c",
+            f'''
 import json
 try:
     from phoneinfoga import scan
@@ -273,7 +353,8 @@ try:
 except Exception as e:
     print(json.dumps({{"error": str(e)}}))
 ''',
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         output = stdout.decode(errors="replace").strip()
@@ -281,7 +362,9 @@ except Exception as e:
             try:
                 data = json.loads(output)
                 if not data.get("error"):
-                    report.add("PhoneInfoga", "phone", f"Phone data retrieved for {phone}")
+                    report.add(
+                        "PhoneInfoga", "phone", f"Phone data retrieved for {phone}"
+                    )
             except json.JSONDecodeError:
                 pass
     except Exception as e:
@@ -291,12 +374,17 @@ except Exception as e:
 async def collect_social_web_search(target: str, report: InvestigationReport):
     """Web search for social media profiles."""
     try:
-        query = urllib.parse.quote(f'"{target}" site:linkedin.com OR site:twitter.com OR site:facebook.com OR site:instagram.com')
+        query = urllib.parse.quote(
+            f'"{target}" site:linkedin.com OR site:twitter.com OR site:facebook.com OR site:instagram.com'
+        )
         c = await _client()
         r = await c.get(f"https://html.duckduckgo.com/html/?q={query}", timeout=10.0)
         if r.status_code == 200:
             # Extract links from DuckDuckGo HTML results
-            links = re.findall(r'href="(https?://(?:linkedin|twitter|facebook|instagram)\.com/[^"]+)"', r.text)
+            links = re.findall(
+                r'href="(https?://(?:linkedin|twitter|facebook|instagram)\.com/[^"]+)"',
+                r.text,
+            )
             if links:
                 report.add("WebSearch", "social", f"Found {len(links)} social profiles")
                 for url in links[:8]:
@@ -308,8 +396,10 @@ async def collect_social_web_search(target: str, report: InvestigationReport):
 async def collect_geolocation_name(name: str, report: InvestigationReport):
     """GeoNames: geographic entity lookup."""
     try:
-        data = await _fetch_json("http://api.geonames.org/searchJSON",
-                                 params={"q": name, "maxRows": 5, "username": "demo"})
+        data = await _fetch_json(
+            "http://api.geonames.org/searchJSON",
+            params={"q": name, "maxRows": 5, "username": "demo"},
+        )
         geonames = data.get("geonames", [])
         if geonames:
             for g in geonames[:3]:
@@ -317,7 +407,11 @@ async def collect_geolocation_name(name: str, report: InvestigationReport):
                 lat = g.get("lat", "")
                 lng = g.get("lng", "")
                 pop = g.get("population", "")
-                report.add("GeoNames", "location", f"{g.get('name', name)}: {country} ({lat},{lng}) pop={pop}")
+                report.add(
+                    "GeoNames",
+                    "location",
+                    f"{g.get('name', name)}: {country} ({lat},{lng}) pop={pop}",
+                )
     except Exception as e:
         report.errors.append(f"GeoNames: {e}")
 
@@ -325,16 +419,21 @@ async def collect_geolocation_name(name: str, report: InvestigationReport):
 async def collect_company_opencorporates(name: str, report: InvestigationReport):
     """OpenCorporates: company search."""
     try:
-        data = await _fetch_json(f"https://api.opencorporates.com/v0.4/companies/search",
-                                 params={"q": name, "per_page": 5})
+        data = await _fetch_json(
+            f"https://api.opencorporates.com/v0.4/companies/search",
+            params={"q": name, "per_page": 5},
+        )
         companies = data.get("results", {}).get("companies", [])
         if companies:
             for co in companies[:5]:
                 c = co.get("company", {})
                 jurisdiction = c.get("jurisdiction_code", "")
                 status = c.get("current_status", "")
-                report.add("OpenCorporates", "corporate",
-                           f"{c.get('name', '')} ({jurisdiction}) — {status}")
+                report.add(
+                    "OpenCorporates",
+                    "corporate",
+                    f"{c.get('name', '')} ({jurisdiction}) — {status}",
+                )
     except Exception as e:
         report.errors.append(f"OpenCorporates: {e}")
 
@@ -342,9 +441,15 @@ async def collect_company_opencorporates(name: str, report: InvestigationReport)
 async def collect_crypto_etherscan(address: str, report: InvestigationReport):
     """Etherscan: Ethereum wallet lookup."""
     try:
-        data = await _fetch_json(f"https://api.etherscan.io/api",
-                                 params={"module": "account", "action": "balance",
-                                         "address": address, "tag": "latest"})
+        data = await _fetch_json(
+            f"https://api.etherscan.io/api",
+            params={
+                "module": "account",
+                "action": "balance",
+                "address": address,
+                "tag": "latest",
+            },
+        )
         result = data.get("result", "")
         if result and result != "0":
             balance_eth = int(result) / 1e18
@@ -355,13 +460,23 @@ async def collect_crypto_etherscan(address: str, report: InvestigationReport):
 
 # ── Investigation Workflows ─────────────────────────────────────────────────
 
-async def _investigate_person(name: str, location: str = "", username: str = "",
-                               email: str = "", photo_url: str = "") -> InvestigationReport:
+
+async def _investigate_person(
+    name: str,
+    location: str = "",
+    username: str = "",
+    email: str = "",
+    photo_url: str = "",
+) -> InvestigationReport:
     """Full person investigation — runs all available tools in parallel."""
     report = InvestigationReport(target=name, category="person")
 
     # Determine search targets
-    search_username = username or name.split()[0].lower() + name.split()[-1].lower() if " " in name else name.lower()
+    search_username = (
+        username or name.split()[0].lower() + name.split()[-1].lower()
+        if " " in name
+        else name.lower()
+    )
     search_email = email
     search_queries = [name]
     if location:
@@ -375,11 +490,13 @@ async def _investigate_person(name: str, location: str = "", username: str = "",
     ]
 
     if search_email:
-        tasks.extend([
-            collect_email_holehe(search_email, report),
-            collect_email_haveibeenpwned(search_email, report),
-            collect_email_rep(search_email, report),
-        ])
+        tasks.extend(
+            [
+                collect_email_holehe(search_email, report),
+                collect_email_haveibeenpwned(search_email, report),
+                collect_email_rep(search_email, report),
+            ]
+        )
 
     if location:
         tasks.append(collect_geolocation_name(location, report))
@@ -468,6 +585,7 @@ async def _investigate_crypto(address: str) -> InvestigationReport:
 
 # ── Report Formatter ────────────────────────────────────────────────────────
 
+
 def format_report(report: InvestigationReport) -> str:
     """Format an InvestigationReport into a clean chat-ready report."""
     lines = []
@@ -487,8 +605,18 @@ def format_report(report: InvestigationReport) -> str:
             categories[cat] = []
         categories[cat].append(f)
 
-    cat_order = ["username", "social", "email", "breach", "phone", "domain",
-                 "infrastructure", "location", "corporate", "crypto"]
+    cat_order = [
+        "username",
+        "social",
+        "email",
+        "breach",
+        "phone",
+        "domain",
+        "infrastructure",
+        "location",
+        "corporate",
+        "crypto",
+    ]
     for cat in cat_order:
         if cat in categories:
             findings = categories[cat]
@@ -516,12 +644,15 @@ def format_report(report: InvestigationReport) -> str:
         lines.append("")
 
     if not report.has_findings():
-        lines.append("No findings across any tool. The target may not have a public digital footprint.")
+        lines.append(
+            "No findings across any tool. The target may not have a public digital footprint."
+        )
 
     return "\n".join(lines)
 
 
 # ── Main Entry Point ────────────────────────────────────────────────────────
+
 
 async def investigate(category: str, **kwargs) -> str:
     """
@@ -611,8 +742,12 @@ async def investigate(category: str, **kwargs) -> str:
         "username": lambda: _investigate_username(kwargs.get("username", target)),
         "domain": lambda: _investigate_domain(kwargs.get("domain", target)),
         "phone": lambda: _investigate_phone(kwargs.get("phone", target)),
-        "company": lambda: _investigate_company(kwargs.get("company", kwargs.get("name", target))),
-        "crypto": lambda: _investigate_crypto(kwargs.get("address", kwargs.get("wallet", target))),
+        "company": lambda: _investigate_company(
+            kwargs.get("company", kwargs.get("name", target))
+        ),
+        "crypto": lambda: _investigate_crypto(
+            kwargs.get("address", kwargs.get("wallet", target))
+        ),
     }
 
     fn = workflow.get(resolved)
@@ -627,7 +762,9 @@ async def investigate(category: str, **kwargs) -> str:
 # ── Standalone test ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+
     async def test():
         result = await investigate("username", target="test")
         print(result)
+
     asyncio.run(test())

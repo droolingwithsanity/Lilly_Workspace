@@ -102,8 +102,8 @@ class SSOTokenManager:
         email: str,
         name: str,
         role: str,
-        oauth_tokens: Dict[str, Any] = None,
-    ) -> Dict[str, str]:
+        oauth_tokens: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Create access and refresh tokens."""
         now = datetime.utcnow()
 
@@ -187,7 +187,7 @@ class SSOTokenManager:
         if not payload or payload.get("type") != "refresh":
             return None
 
-        user_id = payload.get("sub")
+        user_id = str(payload.get("sub") or "")
         session_data = self.sessions.get(user_id)
 
         if not session_data:
@@ -464,7 +464,7 @@ class SSOAuthenticationMiddleware:
                 if not user_info:
                     return {"error": "Unauthorized"}, 401
 
-                user_id = user_info.get("sub")
+                user_id = str(user_info.get("sub") or "")
                 if not self.sso.check_permission(user_id, permission):
                     return {"error": "Forbidden", "required": permission}, 403
 
@@ -478,9 +478,9 @@ class SSOAuthenticationMiddleware:
 
 
 # Global SSO manager instance
-sso_manager = None
-oauth_refresher = None
-sso_middleware = None
+sso_manager: Optional[SSOTokenManager] = None
+oauth_refresher: Optional[OAuthTokenRefresher] = None
+sso_middleware: Optional[SSOAuthenticationMiddleware] = None
 
 
 def init_sso(data_dir: str = "/app/data/sso"):
@@ -503,7 +503,7 @@ def get_current_user(authorization: str) -> Optional[Dict[str, Any]]:
     return sso_middleware.authenticate_request(authorization)
 
 
-def require_auth(permission: str = None):
+def require_auth(permission: Optional[str] = None):
     """Decorator for requiring authentication."""
 
     def decorator(func):
@@ -516,8 +516,10 @@ def require_auth(permission: str = None):
                     status_code=401, content={"error": "Authentication required"}
                 )
 
-            if permission and not sso_manager.check_permission(
-                user_info["sub"], permission
+            if (
+                permission
+                and sso_manager
+                and not sso_manager.check_permission(user_info["sub"], permission)
             ):
                 return JSONResponse(
                     status_code=403,
