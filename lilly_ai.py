@@ -1636,7 +1636,7 @@ async def execute_openhuman_skill(skill_id: str, avatar: str | None = None) -> s
                 break
 
     if not skill or not skill.get("download_url"):
-        return f"I couldn't find an OpenHuman skill called '{skill_id}'."
+        return f"I don't have a skill called '{skill_id}' loaded right now."
 
     # Download the SKILL.md if not already cached
     skill_dir = OPENHUMAN_SKILLS_DIR / normalize_text(skill_id)
@@ -1667,7 +1667,7 @@ async def execute_openhuman_skill(skill_id: str, avatar: str | None = None) -> s
             logger.error(f"OpenHuman: error downloading SKILL.md for '{skill_id}': {e}")
 
     if not skill_file.exists():
-        return f"I found the '{skill_id}' skill but couldn't download its instructions. Will try again later."
+        return f"I couldn't load that skill right now. Try again in a moment."
 
     # Read the SKILL.md frontmatter for the skill's instructions
     skill_content = skill_file.read_text()
@@ -1682,7 +1682,7 @@ async def execute_openhuman_skill(skill_id: str, avatar: str | None = None) -> s
         f"OpenHuman: avatar '{avatar_name}' executing skill '{skill_id}' ({skill_name})"
     )
 
-    return f"I'm running the '{skill_name}' community skill. Give me a moment to work through it."
+    return f"Running '{skill_name}' now."
 
 
 async def list_openhuman_skills(avatar: str | None = None) -> list[dict]:
