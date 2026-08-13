@@ -196,3 +196,27 @@ Mic not working:
 
 TTS not speaking:
   Check Piper voices exist at lillyos/voices/*.onnx. Run pip install piper-tts if missing.
+
+===============================================================================
+FUTURE FEATURES
+===============================================================================
+
+Planned additions to the Android app and backend:
+
+- Sleep monitoring via Android sensors (accelerometer, light, proximity) with
+  sleep-wake detection and smart alarm integration.
+- Enhanced activity tracking with automatic workout classification and
+  Google Fit / Health Connect sync.
+- Expanded sensor scopes for custom skill creation:
+  - Barometer / pressure trends
+  - Gyroscope / orientation
+  - Step counter / pedometer
+  - Bluetooth device presence/absence
+  - GPS geofencing
+- If-this-then-that skill builder in Settings:
+  - Combine sensor triggers with Gmail/Calendar actions
+  - Shareable skill recipes between users
+  - Natural language skill creation from chat ("create a skill that...")
+
+These features will be exposed through the existing Settings UI and the
+/api/skills endpoints once implemented.
