@@ -388,9 +388,12 @@ body.expanded{
   <div id="pairingSection" style="position:absolute;top:10px;right:10px;z-index:1000;">
     <div style="background:rgba(255,255,255,0.95);border-radius:8px;padding:12px;box-shadow:0 2px 10px rgba(0,0,0,0.1);max-width:280px">
       <h3 style="margin:0 0 8px 0;font-size:14px;color:#333;">Pair Device</h3>
-      <div style="margin-bottom:8px;font-size:12px;color:#666;">Enter the 8-character pairing code:</div>
+      <div style="margin-bottom:6px;font-size:12px;color:#666;">Your 8-character pairing code:</div>
+      <div id="pairingCodeDisplay" style="font-size:22px;font-weight:bold;color:#3D2E52;text-align:center;padding:8px;background:#f0f0f0;border-radius:8px;margin-bottom:8px;letter-spacing:2px;">------</div>
+      <button id="refreshPairingBtn" style="width:100%;padding:8px;background:#7DD3FC;color:#0f172a;border:none;border-radius:8px;cursor:pointer;font-size:13px;margin-bottom:10px;">Refresh Code</button>
+      <div style="margin-bottom:6px;font-size:12px;color:#666;">Enter phone's 8-character code:</div>
       <input type="text" id="pairingInput" maxlength="8" placeholder="XXXX XXXX" style="width:100%;padding:8px;font-size:14px;border:1px solid #ddd;border-radius:4px;margin-bottom:8px;">
-      <button id="pairingVerifyBtn" style="width:100%;padding:8px;background:#4CAF50;color:white;border:none;border-radius:4px;cursor:pointer;font-size:14px;">Pair</button>
+      <button id="pairingVerifyBtn" style="width:100%;padding:8px;background:#4ADE80;color:#0f172a;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:bold;">Pair</button>
       <div id="pairingStatus" style="margin-top:8px;font-size:12px;color:#666;text-align:center;"></div>
     </div>
   </div>
@@ -1818,6 +1821,52 @@ function firstRunTour(){
   setTimeout(tour,1800);
 }
 
+// ─── Pairing ────────────────────────────────────────────────────
+async function refreshPairingCode(){
+  const display=document.getElementById('pairingCodeDisplay');
+  const status=document.getElementById('pairingStatus');
+  if(display)display.textContent='...';
+  if(status)status.textContent='';
+  try{
+    const srv=await _getServer();
+    const r=await fetch(srv+'/api/pair/code',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const data=await r.json();
+    if(data.code){
+      const code=String(data.code).slice(0,8);
+      if(display)display.textContent=code;
+      if(status)status.textContent='New code generated';
+    }else{
+      if(status)status.textContent='Could not generate code';
+    }
+  }catch(e){
+    if(status)status.textContent='Error generating code';
+  }
+}
+async function verifyPairingCode(){
+  const input=document.getElementById('pairingInput');
+  const status=document.getElementById('pairingStatus');
+  const code=(input?input.value:'').trim().toUpperCase();
+  if(!code||code.length!==8){
+    if(status)status.textContent='Enter the full 8-character code';
+    return;
+  }
+  if(status)status.textContent='Pairing...';
+  try{
+    const srv=await _getServer();
+    const r=await fetch(srv+'/api/pair/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});
+    const data=await r.json();
+    if(data.token){
+      localStorage.setItem('lilly_device_token',data.token);
+      if(status)status.textContent='Paired!';
+      if(input)input.value='';
+    }else{
+      if(status)status.textContent='Pairing failed: '+(data.detail||'unknown');
+    }
+  }catch(e){
+    if(status)status.textContent='Error pairing';
+  }
+}
+
 // ─── Input handlers ───
 if (!isAndroidBridge) {
   micBtn.addEventListener('click',toggleOverlayMic);
@@ -1827,6 +1876,11 @@ chatInput.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDe
 (function(){
   const rb=document.getElementById('radarBtn');
   if(rb)rb.addEventListener('click',function(){openRadar();});
+  const refreshBtn=document.getElementById('refreshPairingBtn');
+  if(refreshBtn)refreshBtn.addEventListener('click',refreshPairingCode);
+  const verifyBtn=document.getElementById('pairingVerifyBtn');
+  if(verifyBtn)verifyBtn.addEventListener('click',verifyPairingCode);
+  refreshPairingCode();
   placeHelpBadges();
   firstRunTour();
 })();

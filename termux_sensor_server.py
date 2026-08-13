@@ -33,6 +33,24 @@ LATEST_LOCATION: dict = {}
 LAST_UPDATE: float = 0.0
 LIST_AVAILABLE: list[str] = []
 
+# ─── GAME STATE ──────────────────────────────────────────────────
+_CAR_GAME_ACTIVE = False
+_CAR_GAME_START = 0.0
+_CAR_GAME_DISTANCE_KM = 0.0
+_CAR_GAME_LAST_SPEED_MPS = 0.0
+_CAR_GAME_DIRECTION = ""
+_CAR_GAME_PLAYER = "Driver"
+_CAR_GAME_POLL_TASK = None
+
+_FETCH_GAME_ACTIVE = False
+_FETCH_GAME_START = 0.0
+_FETCH_GAME_THROWS = 0
+_FETCH_GAME_CATCHES = 0
+_FETCH_GAME_SCORE = 0
+_FETCH_GAME_LAST_FORCE = 0.0
+_FETCH_GAME_DIRECTION = ""
+_FETCH_GAME_POLL_TASK = None
+
 # ─── ASYNC SUBPROCESS HELPERS ───────────────────────────────────
 
 
@@ -589,6 +607,229 @@ async def foreground_app():
     """Return the currently foreground app package name."""
     pkg = await get_foreground_app()
     return {"package": pkg, "timestamp": time.time()}
+
+
+# ─── GAME HELPERS ───────────────────────────────────────────────
+
+
+def _get_accel_magnitude() -> float:
+    vals = LATEST_SENSORS.get("Accelerometer Sensor", [])
+    if not vals:
+        vals = LATEST_SENSORS.get("Linear Acceleration Sensor", [])
+    if not vals:
+        return 9.8
+    x, y, z = vals[:3]
+    return (x * x + y * y + z * z) ** 0.5
+
+
+def _get_light_lux() -> float:
+    vals = LATEST_SENSORS.get("Light Sensor", [])
+    return float(vals[0]) if vals else 0.0
+
+
+def _get_heading_deg() -> float:
+    vals = LATEST_SENSORS.get("Rotation Vector Sensor", [])
+    if not vals:
+        vals = LATEST_SENSORS.get("Game Rotation Vector Sensor", [])
+    if not vals:
+        return 0.0
+    # alpha is the compass heading in radians
+    import math
+
+    alpha = vals[0] if len(vals) > 0 else 0.0
+    return math.degrees(alpha) % 360.0
+
+
+def _get_speed_mps() -> float:
+    loc = LATEST_LOCATION
+    if not loc:
+        return 0.0
+    return float(loc.get("speed", 0.0))
+
+
+def _direction_name(heading: float) -> str:
+    dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    idx = int(((heading + 22.5) % 360.0) / 45.0)
+    return dirs[idx]
+
+
+# ─── CAR RIDE GAME ──────────────────────────────────────────────
+
+
+@app.post("/api/game_guide/car_ride/start")
+async def car_ride_start(request: dict | None = None):
+    global \
+        _CAR_GAME_ACTIVE, \
+        _CAR_GAME_START, \
+        _CAR_GAME_DISTANCE_KM, \
+        _CAR_GAME_LAST_SPEED_MPS, \
+        _CAR_GAME_PLAYER
+    _CAR_GAME_ACTIVE = True
+    _CAR_GAME_START = time.time()
+    _CAR_GAME_DISTANCE_KM = 0.0
+    _CAR_GAME_LAST_SPEED_MPS = 0.0
+    _CAR_GAME_PLAYER = (
+        (request or {}).get("player_name", "Driver")
+        if isinstance(request, dict)
+        else "Driver"
+    )
+    return {"status": "started", "player": _CAR_GAME_PLAYER}
+
+
+@app.get("/api/car_game")
+async def car_game_state():
+    global \
+        _CAR_GAME_DISTANCE_KM, \
+        _CAR_GAME_LAST_SPEED_MPS, \
+        _CAR_GAME_DIRECTION, \
+        _CAR_GAME_ACTIVE
+    if not _CAR_GAME_ACTIVE:
+        return {"active": False}
+
+    speed = _get_speed_mps()
+    now = time.time()
+    dt = 2.0  # polling interval
+    if now - _CAR_GAME_START > 0:
+        dt = min(now - _CAR_GAME_START, 2.0)
+    _CAR_GAME_DISTANCE_KM += speed * dt / 1000.0
+    _CAR_GAME_LAST_SPEED_MPS = speed
+    heading = _get_heading_deg()
+    _CAR_GAME_DIRECTION = _direction_name(heading)
+
+    return {
+        "active": True,
+        "speed": round(speed, 1),
+        "direction": _CAR_GAME_DIRECTION,
+        "heading": round(heading, 1),
+        "light": round(_get_light_lux(), 1),
+        "position_km": round(_CAR_GAME_DISTANCE_KM, 3),
+        "score": round(_CAR_GAME_DISTANCE_KM * 100, 0),
+        "player": _CAR_GAME_PLAYER,
+    }
+
+
+@app.post("/api/car_game/narrate")
+async def car_game_narrate():
+    if not _CAR_GAME_ACTIVE:
+        return {"narrative": "Start a drive first!"}
+    state = await car_game_state()
+    speed = state.get("speed", 0.0)
+    direction = state.get("direction", "")
+    light = state.get("light", 0.0)
+    pos = state.get("position_km", 0.0)
+
+    if speed < 1.0:
+        narrative = f"Stopped at {pos:.2f} km. {direction} ahead."
+    elif speed < 10.0:
+        narrative = f"Cruising {direction} at {speed:.0f} m/s. {pos:.2f} km traveled."
+    else:
+        narrative = f"Zooming {direction} — {speed:.0f} m/s! {pos:.2f} km on the clock."
+
+    if light > 10000:
+        narrative += " Sunny out there."
+    elif light < 10:
+        narrative += " Dark now."
+
+    return {"narrative": narrative, **state}
+
+
+@app.post("/api/car_game/stop")
+async def car_game_stop():
+    global _CAR_GAME_ACTIVE
+    if not _CAR_GAME_ACTIVE:
+        return {"trip_km": 0.0}
+    state = await car_game_state()
+    _CAR_GAME_ACTIVE = False
+    return {"trip_km": round(state.get("position_km", 0.0), 2)}
+
+
+# ─── FETCH GAME ─────────────────────────────────────────────────
+
+
+@app.post("/api/game_guide/fetch/start")
+async def fetch_start(request: dict | None = None):
+    global \
+        _FETCH_GAME_ACTIVE, \
+        _FETCH_GAME_START, \
+        _FETCH_GAME_THROWS, \
+        _FETCH_GAME_CATCHES, \
+        _FETCH_GAME_SCORE
+    _FETCH_GAME_ACTIVE = True
+    _FETCH_GAME_START = time.time()
+    _FETCH_GAME_THROWS = 0
+    _FETCH_GAME_CATCHES = 0
+    _FETCH_GAME_SCORE = 0
+    return {"status": "started"}
+
+
+@app.get("/api/fetch_game")
+async def fetch_state():
+    global \
+        _FETCH_GAME_ACTIVE, \
+        _FETCH_GAME_THROWS, \
+        _FETCH_GAME_CATCHES, \
+        _FETCH_GAME_SCORE, \
+        _FETCH_GAME_LAST_FORCE, \
+        _FETCH_GAME_DIRECTION
+    if not _FETCH_GAME_ACTIVE:
+        return {"active": False}
+
+    accel = _get_accel_magnitude()
+    heading = _get_heading_deg()
+    direction = _direction_name(heading)
+    light = _get_light_lux()
+
+    # Auto-detect throw: sudden acceleration spike
+    if accel > 15.0 and _FETCH_GAME_LAST_FORCE < 12.0:
+        _FETCH_GAME_THROWS += 1
+        _FETCH_GAME_LAST_FORCE = accel
+    elif accel < 12.0:
+        _FETCH_GAME_LAST_FORCE = accel
+
+    return {
+        "active": True,
+        "force": round(accel, 1),
+        "throws": _FETCH_GAME_THROWS,
+        "catches": _FETCH_GAME_CATCHES,
+        "score": _FETCH_GAME_SCORE,
+        "heading": round(heading, 1),
+        "direction": direction,
+        "light": round(light, 1),
+        "wind_speed_ms": round(abs(accel - 9.8) * 0.5, 1),
+        "wind_direction": heading,
+        "weather_desc": "clear"
+        if light > 100
+        else "overcast"
+        if light > 10
+        else "dark",
+    }
+
+
+@app.post("/api/fetch_game/catch")
+async def fetch_catch():
+    global _FETCH_GAME_CATCHES, _FETCH_GAME_SCORE
+    if not _FETCH_GAME_ACTIVE:
+        return {"narrative": "Start the fetch game first!"}
+    state = await fetch_state()
+    force = state.get("force", 0.0)
+    _FETCH_GAME_CATCHES += 1
+    _FETCH_GAME_SCORE += max(1, int(force * 10))
+    narrative = f"Caught it! Force {force:.1f} m/s². Score {_FETCH_GAME_SCORE}."
+    return {"narrative": narrative, **state}
+
+
+@app.post("/api/fetch_game/stop")
+async def fetch_stop():
+    global _FETCH_GAME_ACTIVE
+    if not _FETCH_GAME_ACTIVE:
+        return {"throws": 0, "catches": 0, "score": 0}
+    state = await fetch_state()
+    _FETCH_GAME_ACTIVE = False
+    return {
+        "throws": _FETCH_GAME_THROWS,
+        "catches": _FETCH_GAME_CATCHES,
+        "score": _FETCH_GAME_SCORE,
+    }
 
 
 # ─── MAIN ───────────────────────────────────────────────────────

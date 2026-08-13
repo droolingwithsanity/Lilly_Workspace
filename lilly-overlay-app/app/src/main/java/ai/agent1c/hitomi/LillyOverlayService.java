@@ -475,7 +475,7 @@ public class LillyOverlayService extends Service {
 
         lillyWebView.addJavascriptInterface(new LillyBridge(), "LillyBridge");
 
-        lillyWebView.loadUrl("file:///android_res/raw/overlay_local.html");
+        lillyWebView.loadUrl("file:///android_res/raw/overlay_local");
     }
 
     private String getServerUrl() {

@@ -118,7 +118,7 @@ def get_pair_token() -> str:
 
 
 PAIR_TOKEN = get_pair_token()
-logger.info(f"Pair token: {PAIR_TOKEN}")
+logger.info("Pair token loaded")
 
 
 def _run_async(coro):
@@ -614,7 +614,6 @@ def status():
             "version": "3.5",
             "llama_available": _llama_available(),
             "llama_url": LLAMA_URL,
-            "pair_token": PAIR_TOKEN,
             "port": 8097,
             "bt_profiles_loaded": _BT_PROFILES_LOADED,
         }
