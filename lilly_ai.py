@@ -8167,7 +8167,7 @@ async def handle_intent(text: str, from_text: bool = False) -> dict:
     reply = _filter_hallucination_patterns(reply)
 
     if not reply or len(reply) < 5:
-        reply = "Not sure where to go with that one — try coming at it differently."
+        reply = "Didn't follow that."
 
     # WAITING_FOR_YES: if reply ends with a question, set up shadow answer
     follow_up_phrases = [
