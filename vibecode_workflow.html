@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>DroolingWithSanity — VibeCode Workflow</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#f0e6ef;color:#5d4e6d;font-family:'Segoe UI',system-ui,sans-serif;padding:20px;overflow-x:hidden}
+  h1{color:#8b7a9e;font-size:22px;margin-bottom:4px}
+  h2{color:#8b7a9e;font-size:16px;margin:24px 0 12px;border-bottom:1px solid rgba(139,122,158,.2);padding-bottom:6px}
+  h3{color:#8b7a9e;font-size:13px;margin:16px 0 8px}
+  .sub{color:rgba(93,78,109,.55);font-size:12px;margin-bottom:16px}
+  .flow{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+  .node{
+    background:rgba(255,255,255,.6);border:1px solid rgba(139,122,158,.22);
+    border-radius:10px;padding:8px 14px;font-size:11px;min-width:140px;max-width:220px;
+    transition:all .2s;cursor:default;
+  }
+  .node:hover{background:rgba(139,122,158,.18);border-color:rgba(139,122,158,.45)}
+  .node .fn{color:#7a5a8a;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600}
+  .node .desc{color:rgba(93,78,109,.65);font-size:10px;margin-top:3px;line-height:1.4}
+  .node .tag{display:inline-block;font-size:9px;padding:1px 5px;border-radius:4px;margin-top:3px}
+  .tag-init{background:rgba(74,222,128,.18);color:#2f9e5e}
+  .tag-chat{background:rgba(139,122,158,.2);color:#6d4a8a}
+  .tag-agent{background:rgba(251,191,36,.18);color:#a06a00}
+  .tag-ui{background:rgba(96,165,250,.18);color:#3a6ea5}
+  .tag-api{background:rgba(248,113,113,.18);color:#b04a4a}
+  .tag-mode{background:rgba(139,122,158,.2);color:#6d4a8a}
+  .arrow{color:rgba(93,78,109,.3);font-size:16px;align-self:center;margin:0 4px}
+  .row{display:flex;align-items:flex-start;gap:0;margin:4px 0;flex-wrap:wrap}
+  .row .arrow{transform:rotate(90deg);margin:0 8px}
+  .section-box{
+    background:rgba(255,255,255,.55);border:1px solid rgba(139,122,158,.2);
+    border-radius:12px;padding:12px 16px;margin:8px 0;
+  }
+  .section-box h3{margin-top:0}
+  .legend{display:flex;gap:12px;flex-wrap:wrap;margin:8px 0;font-size:10px}
+  .legend-item{display:flex;align-items:center;gap:4px}
+  .legend-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .flow-arrow{display:flex;align-items:center;gap:4px;margin:4px 0;font-size:10px;color:rgba(93,78,109,.45)}
+  .flow-arrow::before{content:'→';font-size:12px}
+  .badge{display:inline-block;font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600}
+  .badge-green{background:rgba(74,222,128,.2);color:#2f9e5e}
+  .badge-purple{background:rgba(139,122,158,.22);color:#6d4a8a}
+  .badge-yellow{background:rgba(251,191,36,.2);color:#a06a00}
+  .badge-red{background:rgba(248,113,113,.2);color:#b04a4a}
+  .badge-blue{background:rgba(96,165,250,.2);color:#3a6ea5}
+  table{width:100%;border-collapse:collapse;font-size:11px;margin:8px 0}
+  th,td{padding:6px 10px;text-align:left;border-bottom:1px solid rgba(139,122,158,.15)}
+  th{color:#8b7a9e;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+  td{color:rgba(93,78,109,.7)}
+  tr:hover td{background:rgba(139,122,158,.12)}
+  code{font-family:'JetBrains Mono',monospace;font-size:10px;background:rgba(139,122,158,.12);padding:1px 4px;border-radius:3px}
+  .highlight{color:#8b7a9e;font-weight:600}
+  .path{color:#2f9e5e}
+  .event{color:#a06a00}
+</style>
+</head>
+<body>
+
+<h1>🧬 VibeCode — Panel & Chat Workflow</h1>
+<p class="sub">Complete function map for vibecode.html — all 94 functions across the IDE panel and chat system</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#4ade80"></div> Init / Lifecycle</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#c4b5fd"></div> Chat Core</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#fbbf24"></div> Agent / Avatar</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#93c5fd"></div> UI / Panel</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f87171"></div> API / Backend</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#a78bfa"></div> Mode / Section</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 1. INIT & LIFECYCLE -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>1. Init &amp; Lifecycle</h2>
+<div class="section-box">
+  <div class="flow">
+    <div class="node"><span class="fn">init()</span><div class="desc">IIFE — entry point on page load</div><span class="badge badge-green">init</span></div>
+    <span class="arrow">→</span>
+    <div class="node"><span class="fn">refreshProjectSelect()</span><div class="desc">Populates project dropdown from /api/vibecode/projects</div><span class="badge badge-api">API</span></div>
+    <span class="arrow">→</span>
+    <div class="node"><span class="fn">loadProjectListOverlay()</span><div class="desc">Loads existing projects for the drop overlay</div><span class="badge badge-api">API</span></div>
+    <span class="arrow">→</span>
+    <div class="node"><span class="fn">openDropOverlay()</span><div class="desc">Shows repo picker if no projects exist</div><span class="badge badge-ui">UI</span></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 2. PROJECT MANAGEMENT -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>2. Project Management</h2>
+<div class="section-box">
+  <div class="flow">
+    <div class="node"><span class="fn">openDropOverlay()</span><div class="desc">Show repo clone / open overlay</div><span class="badge badge-ui">UI</span></div>
+    <div class="flow-arrow">→ <span class="fn">cloneRepo()</span> → <span class="fn">/api/vibecode/clone</span> → <span class="fn">selectProject()</span></div>
+    <div class="flow-arrow">→ <span class="fn">switchProject(slug)</span> → <span class="fn">selectProject(slug)</span></div>
+    <div class="flow-arrow">→ <span class="fn">loadFileTree('')</span> → <span class="fn">startStatusPoll()</span> → <span class="fn">updateUI()</span></div>
+  </div>
+  <table>
+    <tr><th>Function</th><th>Type</th><th>Description</th></tr>
+    <tr><td><code>cloneRepo()</code></td><td><span class="badge badge-api">API</span></td><td>POST /api/vibecode/clone — clones a Git repo into a Docker container</td></tr>
+    <tr><td><code>selectProject(slug)</code></td><td><span class="badge badge-ui">UI</span></td><td>Sets current project, resets tabs/editor, loads file tree</td></tr>
+    <tr><td><code>switchProject(slug)</code></td><td><span class="badge badge-ui">UI</span></td><td>Dropdown handler — calls selectProject</td></tr>
+    <tr><td><code>refreshProjectSelect()</code></td><td><span class="badge badge-api">API</span></td><td>Refreshes project dropdown from API</td></tr>
+    <tr><td><code>updateUI()</code></td><td><span class="badge badge-ui">UI</span></td><td>Shows/hides build/run/stop/logs buttons based on project state</td></tr>
+    <tr><td><code>buildProject()</code></td><td><span class="badge badge-api">API</span></td><td>POST /api/vibecode/build — builds Docker container</td></tr>
+    <tr><td><code>runProject()</code></td><td><span class="badge badge-api">API</span></td><td>POST /api/vibecode/run — starts container, shows preview URL</td></tr>
+    <tr><td><code>stopProject()</code></td><td><span class="badge badge-api">API</span></td><td>POST /api/vibecode/stop — stops container</td></tr>
+    <tr><td><code>pollStatus()</code></td><td><span class="badge badge-api">API</span></td><td>GET /api/vibecode/status/:slug — polls container status every 6s</td></tr>
+    <tr><td><code>startStatusPoll()</code></td><td><span class="badge badge-ui">UI</span></td><td>Starts status polling interval</td></tr>
+    <tr><td><code>toggleLogs()</code></td><td><span class="badge badge-ui">UI</span></td><td>Toggles container logs panel visibility</td></tr>
+    <tr><td><code>refreshLogs()</code></td><td><span class="badge badge-api">API</span></td><td>GET /api/vibecode/logs/:slug — fetches container logs</td></tr>
+    <tr><td><code>downloadProject()</code></td><td><span class="badge badge-api">API</span></td><td>GET /api/vibecode/download/:slug — downloads project archive</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 3. FILE TREE & EDITOR -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>3. File Tree &amp; Editor</h2>
+<div class="section-box">
+  <div class="flow">
+    <div class="node"><span class="fn">loadFileTree(path)</span><div class="desc">GET /api/vibecode/files/:slug?path= — loads directory entries</div><span class="badge badge-api">API</span></div>
+    <div class="flow-arrow">→ click dir → <span class="fn">loadFileTree(e.path)</span></div>
+    <div class="flow-arrow">→ click file → <span class="fn">openFile(path)</span></div>
+    <div class="flow-arrow">→ <span class="fn">activateTab(idx)</span> → <span class="fn">renderTabs()</span></div>
+    <div class="flow-arrow">→ <span class="fn">onEditorChange()</span> → <span class="fn">autoSaveCurrentFile()</span> (debounced 1.2s)</div>
+    <div class="flow-arrow">→ <span class="fn">saveCurrentFile()</span> → POST /api/vibecode/file/:slug</div>
+  </div>
+  <table>
+    <tr><th>Function</th><th>Type</th><th>Description</th></tr>
+    <tr><td><code>openFile(path)</code></td><td><span class="badge badge-api">API</span></td><td>Fetches file content, opens in new tab</td></tr>
+    <tr><td><code>activateTab(idx)</code></td><td><span class="badge badge-ui">UI</span></td><td>Switches to a tab, populates editor</td></tr>
+    <tr><td><code>renderTabs()</code></td><td><span class="badge badge-ui">UI</span></td><td>Renders tab bar from openTabs array</td></tr>
+    <tr><td><code>closeTab(e, idx)</code></td><td><span class="badge badge-ui">UI</span></td><td>Closes a tab, confirms if dirty</td></tr>
+    <tr><td><code>showPlaceholder()</code></td><td><span class="badge badge-ui">UI</span></td><td>Shows empty editor placeholder</td></tr>
+    <tr><td><code>onEditorChange()</code></td><td><span class="badge badge-ui">UI</span></td><td>Handles editor input, marks dirty, triggers auto-save</td></tr>
+    <tr><td><code>autoSaveCurrentFile()</code></td><td><span class="badge badge-api">API</span></td><td>Silent background save (debounced)</td></tr>
+    <tr><td><code>saveCurrentFile()</code></td><td><span class="badge badge-api">API</span></td><td>Explicit save with toast notification</td></tr>
+    <tr><td><code>handleEditorKey(e)</code></td><td><span class="badge badge-ui">UI</span></td><td>Tab→2 spaces, Ctrl+S→save</td></tr>
+    <tr><td><code>navigateUp()</code></td><td><span class="badge badge-ui">UI</span></td><td>Go up one directory in file tree</td></tr>
+    <tr><td><code>toggleSidebar()</code></td><td><span class="badge badge-ui">UI</span></td><td>Toggle file tree sidebar collapse</td></tr>
+    <tr><td><code>updateCtxBar()</code></td><td><span class="badge badge-ui">UI</span></td><td>Updates context bar with current file name</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 4. CHAT PANEL CONTROLS -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>4. Chat Panel Controls &amp; Sliding</h2>
+<div class="section-box">
+  <div class="flow">
+    <div class="node"><span class="fn">toggleChat()</span><div class="desc">Toggles between slid-down and normal</div><span class="badge badge-mode">Mode</span></div>
+    <div class="flow-arrow">→ <span class="fn">slideUpChat()</span> (if slid-down/collapsed/hidden)</div>
+    <div class="flow-arrow">→ <span class="fn">hideChat()</span> (if normal)</div>
+    <div class="flow-arrow">→ <span class="fn">reduceChat()</span> — narrows to 48px</div>
+    <div class="flow-arrow">→ <span class="fn">expandChat()</span> → <span class="fn">slideUpChat()</span></div>
+    <div class="flow-arrow">→ <span class="fn">chatFullscreen()</span> — opens fullscreen modal</div>
+    <div class="flow-arrow">→ <span class="fn">exitFullscreen()</span> — returns to normal</div>
+  </div>
+  <table>
+    <tr><th>Function</th><th>Type</th><th>Description</th></tr>
+    <tr><td><code>slideDownChat()</code></td><td><span class="badge badge-mode">Mode</span></td><td>Slides chat panel down out of view (idle behavior)</td></tr>
+    <tr><td><code>slideUpChat()</code></td><td><span class="badge badge-mode">Mode</span></td><td>Slides chat panel up into view, resets idle timer, scrolls to bottom</td></tr>
+    <tr><td><code>scrollChatToBottom()</code></td><td><span class="badge badge-ui">UI</span></td><td>Scrolls chat-messages to the latest message</td></tr>
+    <tr><td><code>resetIdleTimer()</code></td><td><span class="badge badge-ui">UI</span></td><td>Resets idle timer; after 6s idle → calls slideDownChat()</td></tr>
+    <tr><td><code>clearIdleTimer()</code></td><td><span class="badge badge-ui">UI</span></td><td>Clears the idle timer</td></tr>
+    <tr><td><code>expandChatIfCollapsed()</code></td><td><span class="badge badge-ui">UI</span></td><td>Called on input focus — slides up if collapsed/slid-down</td></tr>
+    <tr><td><code>hideChat()</code></td><td><span class="badge badge-mode">Mode</span></td><td>Explicitly collapses chat to input-only bar</td></tr>
+    <tr><td><code>reduceChat()</code></td><td><span class="badge badge-mode">Mode</span></td><td>Reduces chat to 48px vertical icon</td></tr>
+    <tr><td><code>chatFullscreen()</code></td><td><span class="badge badge-mode">Mode</span></td><td>Opens fullscreen chat modal</td></tr>
+    <tr><td><code>exitFullscreen()</code></td><td><span class="badge badge-mode">Mode</span></td><td>Closes fullscreen modal, returns to normal</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 5. CHAT MESSAGING -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>5. Chat Messaging Core</h2>
+<div class="section-box">
+  <div class="flow">
+    <div class="node"><span class="fn">sendChat()</span><div class="desc">User hits Enter or clicks send → slides up, sends message</div><span class="badge badge-chat">Chat</span></div>
+    <span class="arrow">→</span>
+    <div class="node"><span class="fn">_doChat(msg)</span><div class="desc">Core chat logic: detect agent switch, POST to API, render reply</div><span class="badge badge-chat">Chat</span></div>
+    <span class="arrow">→</span>
+    <div class="node"><span class="fn">detectAgentSwitch(msg)</span><div class="desc">Wake-word detection: "hey wolf", "switch to fox", "what would wolf suggest"</div><span class="badge badge-agent">Agent</span></div>
+    <span class="arrow">→</span>
+    <div class="node"><span class="fn">switchAgent(agentKey)</span><div class="desc">Switches active agent, updates UI indicator, avatar, header</div><span class="badge badge-agent">Agent</span></div>
+  </div>
+  <div class="flow-arrow" style="margin-top:8px">→ <span class="fn">appendChatMsg('user')</span> + <span class="fn">appendFsChatMsg('user')</span></div>
+  <div class="flow-arrow">→ <span class="fn">appendThinking()</span> — shows "Lilly is thinking…" indicator</div>
+  <div class="flow-arrow">→ <span class="fn">fetch('/api/vibecode/chat')</span> — POST {slug, message, file, agent}</div>
+  <div class="flow-arrow">→ <span class="fn">appendChatMsgWithApply('assistant', reply, emoji, name)</span></div>
+  <div class="flow-arrow">→ <span class="fn">appendFsChatMsg('assistant', reply)</span> — mirrors to fullscreen</div>
+</div>
+
+<table>
+  <tr><th>Function</th><th>Type</th><th>Description</th></tr>
+  <tr><td><code>sendChat()</code></td><td><span class="badge badge-chat">Chat</span></td><td>Reads input, slides up, sends message via _doChat</td></tr>
+  <tr><td><code>sendFsChat()</code></td><td><span class="badge badge-chat">Chat</span></td><td>Fullscreen chat send — same flow as sendChat</td></tr>
+  <tr><td><code>_doChat(msg)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Core: detect agent switch → POST /api/vibecode/chat → render reply</td></tr>
+  <tr><td><code>sendFsChat()</code></td><td><span class="badge badge-chat">Chat</span></td><td>Fullscreen variant of sendChat</td></tr>
+  <tr><td><code>appendChatMsg(role, content)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Creates message bubble with agent badge for assistant</td></tr>
+  <tr><td><code>appendFsChatMsg(role, content)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Mirrors message to fullscreen chat</td></tr>
+  <tr><td><code>appendChatMsgWithApply(role, content, emoji, name)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Assistant message with agent badge + "✨ Apply to editor" buttons</td></tr>
+  <tr><td><code>appendThinking()</code></td><td><span class="badge badge-chat">Chat</span></td><td>Shows "Lilly is thinking…" pulse indicator</td></tr>
+  <tr><td><code>removeThinking(el)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Removes thinking indicator</td></tr>
+  <tr><td><code>addSysMsg(text)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Adds a system message to both chat panels</td></tr>
+  <tr><td><code>renderMarkdown(text)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Minimal markdown: code blocks, inline code, bold, newlines</td></tr>
+  <tr><td><code>escHtml(s)</code></td><td><span class="badge badge-chat">Chat</span></td><td>HTML entity escaping</td></tr>
+  <tr><td><code>chatKeydown(e)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Enter key handler — calls slideUpChat() then sendChat()</td></tr>
+  <tr><td><code>fsChatKeydown(e)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Fullscreen Enter key handler</td></tr>
+  <tr><td><code>autoResize(el)</code></td><td><span class="badge badge-ui">UI</span></td><td>Auto-resizes textarea to fit content (max 120px)</td></tr>
+</table>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 6. AGENT / AVATAR SYSTEM -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>6. Agent / Avatar System</h2>
+<div class="section-box">
+  <h3>9 Agents (HIVE_PERSONAS)</h3>
+  <table>
+    <tr><th>Key</th><th>Emoji</th><th>Name</th><th>Role</th><th>Wake Words</th></tr>
+    <tr><td><code>puppy</code></td><td>🐶</td><td>Lilly</td><td>Alpha Companion</td><td>lilly, hey lilly, lily</td></tr>
+    <tr><td><code>fox</code></td><td>🦊</td><td>Fox</td><td>Creative Strategist</td><td>fox, hey fox</td></tr>
+    <tr><td><code>cat</code></td><td>🐱</td><td>Cat</td><td>Precision Analyst</td><td>cat, hey cat, kitty</td></tr>
+    <tr><td><code>bear</code></td><td>🐻</td><td>Bear</td><td>Steadfast Guardian</td><td>bear, hey bear</td></tr>
+    <tr><td><code>bunny</code></td><td>🐰</td><td>Bunny</td><td>Energetic Scout</td><td>bunny, hey bunny, bun</td></tr>
+    <tr><td><code>owl</code></td><td>🦉</td><td>Owl</td><td>Wisdom Keeper</td><td>owl, hey owl, owly</td></tr>
+    <tr><td><code>deer</code></td><td>🦌</td><td>Deer</td><td>Gentle Healer</td><td>deer, hey deer</td></tr>
+    <tr><td><code>wolf</code></td><td>🐺</td><td>Wolf</td><td>Fierce Protector</td><td>wolf, hey wolf, wolfie</td></tr>
+    <tr><td><code>raccoon</code></td><td>🦝</td><td>Raccoon</td><td>Tech Tinkerer</td><td>raccoon, hey raccoon, coony</td></tr>
+  </table>
+
+  <h3>Agent Switching Flow</h3>
+  <div class="flow">
+    <div class="node"><span class="fn">detectAgentSwitch(msg)</span><div class="desc">Checks message for wake words: "hey wolf", "switch to fox", "what would wolf suggest"</div><span class="badge badge-agent">Agent</span></div>
+    <span class="arrow">→</span>
+    <div class="node"><span class="fn">switchAgent(agentKey)</span><div class="desc">Sets currentAgent, updates indicator, avatar select, canvas, header title</div><span class="badge badge-agent">Agent</span></div>
+    <span class="arrow">→</span>
+    <div class="node"><span class="fn">switchAvatar(name)</span><div class="desc">Syncs avatar canvas + select dropdown, stores in localStorage</div><span class="badge badge-agent">Agent</span></div>
+    <span class="arrow">→</span>
+    <div class="node"><span class="fn">drawAvatar()</span><div class="desc">Animates clay-style avatar on canvas (requestAnimationFrame loop)</div><span class="badge badge-agent">Agent</span></div>
+  </div>
+
+  <h3>Agent Switching Functions</h3>
+  <table>
+    <tr><th>Function</th><th>Type</th><th>Description</th></tr>
+    <tr><td><code>switchAgent(agentKey)</code></td><td><span class="badge badge-agent">Agent</span></td><td>Switches active agent, updates all UI elements, sends system msg</td></tr>
+    <tr><td><code>switchAvatar(name)</code></td><td><span class="badge badge-agent">Agent</span></td><td>Syncs avatar canvas + dropdown, persists to localStorage</td></tr>
+    <tr><td><code>detectAgentSwitch(text)</code></td><td><span class="badge badge-agent">Agent</span></td><td>Wake-word detection: keywords, "hey &lt;name&gt;", "what would &lt;name&gt; suggest"</td></tr>
+    <tr><td><code>drawAvatar()</code></td><td><span class="badge badge-agent">Agent</span></td><td>Animation loop — draws clay-style avatar on 64x64 canvas</td></tr>
+    <tr><td><code>drawAvatarAnimal(c, animal, cx, cy, r)</code></td><td><span class="badge badge-agent">Agent</span></td><td>Draws specific animal face (puppy, fox, cat, bear, bunny, owl, deer, wolf, raccoon)</td></tr>
+    <tr><td><code>flashAvatarName()</code></td><td><span class="badge badge-agent">Agent</span></td><td>Shows temporary emoji+name flash notification</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 7. SECTIONS & MODE PANELS -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>7. Sections &amp; Mode Panels</h2>
+<div class="section-box">
+  <div class="flow">
+    <div class="node"><span class="fn">switchSection(section)</span><div class="desc">Switches between Chat / Review / Fix sections</div><span class="badge badge-mode">Mode</span></div>
+    <span class="arrow">→</span>
+    <div class="node"><span class="fn">sendModeChat(mode)</span><div class="desc">Pre-fills chat input with mode-specific prompt, sends</div><span class="badge badge-mode">Mode</span></div>
+  </div>
+  <table>
+    <tr><th>Section</th><th>Button</th><th>Panel</th><th>Description</th></tr>
+    <tr><td><code>chat</code></td><td>💬 Chat</td><td>—</td><td>Default — shows chat messages</td></tr>
+    <tr><td><code>review</code></td><td>🔍 Review</td><td>#panel-review</td><td>Code review — paste code, click Review</td></tr>
+    <tr><td><code>fix</code></td><td>🔧 Fix</td><td>#panel-fix</td><td>Bug fixer — paste error + code, click Fix it</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 8. MIC & SPEECH -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>8. Microphone &amp; Speech</h2>
+<div class="section-box">
+  <table>
+    <tr><th>Function</th><th>Type</th><th>Description</th></tr>
+    <tr><td><code>toggleMic()</code></td><td><span class="badge badge-chat">Chat</span></td><td>Toggles mic on/off — calls startMic/stopMic</td></tr>
+    <tr><td><code>startMic()</code></td><td><span class="badge badge-chat">Chat</span></td><td>Starts Web Speech API recognition or fallback browser mic</td></tr>
+    <tr><td><code>stopMic()</code></td><td><span class="badge badge-chat">Chat</span></td><td>Stops recognition, removes mic bubble</td></tr>
+    <tr><td><code>startBrowserMic()</code></td><td><span class="badge badge-chat">Chat</span></td><td>Fallback: MediaRecorder → /api/browser_mic endpoint</td></tr>
+    <tr><td><code>addMicBubble(text)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Shows "🎤 Listening…" bubble in chat</td></tr>
+    <tr><td><code>updateMicBubble(text)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Updates mic bubble with transcribed text</td></tr>
+    <tr><td><code>removeMicBubble()</code></td><td><span class="badge badge-chat">Chat</span></td><td>Removes mic bubble from chat</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 9. PROJECT WINDOW -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>9. Project Window (Preview)</h2>
+<div class="section-box">
+  <table>
+    <tr><th>Function</th><th>Type</th><th>Description</th></tr>
+    <tr><td><code>openPreview()</code></td><td><span class="badge badge-ui">UI</span></td><td>Opens project preview in floating window</td></tr>
+    <tr><td><code>openProjectWindow(title, url)</code></td><td><span class="badge badge-ui">UI</span></td><td>Creates floating preview window with iframe</td></tr>
+    <tr><td><code>closeProjectWindow()</code></td><td><span class="badge badge-ui">UI</span></td><td>Closes preview window</td></tr>
+    <tr><td><code>refreshProjectWindow()</code></td><td><span class="badge badge-ui">UI</span></td><td>Reloads preview iframe</td></tr>
+    <tr><td><code>toggleProjectWindowSize()</code></td><td><span class="badge badge-ui">UI</span></td><td>Toggles between normal and fullscreen preview</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 10. UTILITY -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>10. Utility Functions</h2>
+<div class="section-box">
+  <table>
+    <tr><th>Function</th><th>Type</th><th>Description</th></tr>
+    <tr><td><code>toast(msg, type)</code></td><td><span class="badge badge-ui">UI</span></td><td>Shows a temporary toast notification</td></tr>
+    <tr><td><code>applyAISuggestion()</code></td><td><span class="badge badge-chat">Chat</span></td><td>Applies last AI code suggestion to editor</td></tr>
+    <tr><td><code>applyCodeToEditor(code)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Inserts code into active editor tab</td></tr>
+    <tr><td><code>askAboutFile()</code></td><td><span class="badge badge-chat">Chat</span></td><td>Pre-fills chat with "Explain this file: &lt;path&gt;"</td></tr>
+    <tr><td><code>speakText(text)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Web Speech API TTS for chat messages</td></tr>
+    <tr><td><code>addTTSButton(el, text)</code></td><td><span class="badge badge-chat">Chat</span></td><td>Adds 🔊 Listen button to assistant messages</td></tr>
+    <tr><td><code>downloadProject()</code></td><td><span class="badge badge-api">API</span></td><td>Downloads project as archive</td></tr>
+    <tr><td><code>toggleIDE()</code></td><td><span class="badge badge-ui">UI</span></td><td>Toggles IDE layout mode</td></tr>
+    <tr><td><code>openProjectWindow()</code></td><td><span class="badge badge-ui">UI</span></td><td>Floating preview window with drag/resize</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 11. COMPLETE CHAT FLOW -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>11. Complete Chat Interaction Flow</h2>
+<div class="section-box">
+  <div class="flow">
+    <div class="node"><span class="fn">User types message</span><span class="badge badge-chat">Chat</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">chatKeydown(e)</span> or <span class="fn">sendChat()</span><span class="badge badge-chat">Chat</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">slideUpChat()</span> — ensures chat is visible<span class="badge badge-mode">Mode</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">detectAgentSwitch(msg)</span> — check for "hey wolf" etc.<span class="badge badge-agent">Agent</span></div>
+    <div class="flow-arrow">→ if match: <span class="fn">switchAgent(agentKey)</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">appendChatMsg('user', msg)</span> — show user bubble<span class="badge badge-chat">Chat</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">appendThinking()</span> — show "thinking…" indicator<span class="badge badge-chat">Chat</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">POST /api/vibecode/chat</span> {slug, message, file, agent}<span class="badge badge-api">API</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">removeThinking()</span> — remove indicator<span class="badge badge-chat">Chat</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">appendChatMsgWithApply('assistant', reply, emoji, name)</span><span class="badge badge-chat">Chat</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">appendFsChatMsg('assistant', reply)</span> — mirror to fullscreen<span class="badge badge-chat">Chat</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">resetIdleTimer()</span> — restart 6s idle countdown<span class="badge badge-mode">Mode</span></div>
+  </div>
+
+  <h3>Idle → Slide Down Flow</h3>
+  <div class="flow">
+    <div class="node"><span class="fn">User stops interacting</span><span class="badge badge-chat">Chat</span></div>
+    <span class="arrow">↓ (6s)</span>
+    <div class="node"><span class="fn">resetIdleTimer() fires</span><span class="badge badge-mode">Mode</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">slideDownChat()</span> — CSS transform: translateY(100%)<span class="badge badge-mode">Mode</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">Chat panel slides down out of view</span><span class="badge badge-mode">Mode</span></div>
+    <span class="arrow">↓ (user interaction)</span>
+    <div class="node"><span class="fn">slideUpChat()</span> — slides back up with scrollable history<span class="badge badge-mode">Mode</span></div>
+  </div>
+
+  <h3>Agent Switch Flow</h3>
+  <div class="flow">
+    <div class="node"><span class="fn">User says "hey wolf what would you suggest"</span><span class="badge badge-agent">Agent</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">detectAgentSwitch(msg)</span> → returns <code>'wolf'</code><span class="badge badge-agent">Agent</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">switchAgent('wolf')</span><span class="badge badge-agent">Agent</span></div>
+    <span class="arrow">↓</span>
+    <div class="node" style="border-color:rgba(248,113,113,.3)"><span class="fn">Updates:</span> agent indicator, avatar select, avatar canvas, chat header title<span class="badge badge-agent">Agent</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">addSysMsg('Switched to Wolf (Fierce Protector)')</span><span class="badge badge-chat">Chat</span></div>
+    <span class="arrow">↓</span>
+    <div class="node"><span class="fn">Next AI reply uses Wolf persona via /api/vibecode/chat {agent: 'wolf'}</span><span class="badge badge-api">API</span></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 12. BACKEND API -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>12. Backend API Endpoints</h2>
+<div class="section-box">
+  <table>
+    <tr><th>Endpoint</th><th>Method</th><th>Body</th><th>Response</th></tr>
+    <tr><td><code>/api/vibecode/chat</code></td><td>POST</td><td>{slug, message, file, agent}</td><td>{reply, code_blocks, agent, agent_name, agent_emoji}</td></tr>
+    <tr><td><code>/api/vibecode/projects</code></td><td>GET</td><td>—</td><td>{projects: [{slug, status, port}]}</td></tr>
+    <tr><td><code>/api/vibecode/clone</code></td><td>POST</td><td>{url, name}</td><td>{slug, message}</td></tr>
+    <tr><td><code>/api/vibecode/build</code></td><td>POST</td><td>{slug}</td><td>{log}</td></tr>
+    <tr><td><code>/api/vibecode/run</code></td><td>POST</td><td>{slug}</td><td>{url}</td></tr>
+    <tr><td><code>/api/vibecode/stop</code></td><td>POST</td><td>{slug}</td><td>—</td></tr>
+    <tr><td><code>/api/vibecode/status/:slug</code></td><td>GET</td><td>—</td><td>{status, url}</td></tr>
+    <tr><td><code>/api/vibecode/logs/:slug</code></td><td>GET</td><td>?lines=100</td><td>{log}</td></tr>
+    <tr><td><code>/api/vibecode/file/:slug</code></td><td>GET/POST</td><td>?path= — GET: {path, lang, content} / POST: {content}</td><td>file data</td></tr>
+    <tr><td><code>/api/vibecode/files/:slug</code></td><td>GET</td><td>?path=</td><td>{entries: [{name, type, size, path}]}</td></tr>
+    <tr><td><code>/api/vibecode/preview/:slug</code></td><td>GET</td><td>—</td><td>proxied container HTML</td></tr>
+    <tr><td><code>/api/vibecode/download/:slug</code></td><td>GET</td><td>—</td><td>project archive</td></tr>
+  </table>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- 13. STATE -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<h2>13. Global State</h2>
+<div class="section-box">
+  <table>
+    <tr><th>Variable</th><th>Type</th><th>Description</th></tr>
+    <tr><td><code>currentProject</code></td><td>string|null</td><td>Active project slug</td></tr>
+    <tr><td><code>currentFile</code></td><td>string|null</td><td>Currently open file path</td></tr>
+    <tr><td><code>openTabs</code></td><td>array</td><td>Open editor tabs [{path, lang, dirty, content}]</td></tr>
+    <tr><td><code>activeTab</code></td><td>number</td><td>Index of active tab (-1 if none)</td></tr>
+    <tr><td><code>lastAISuggestion</code></td><td>string|null</td><td>Last code block from AI for "Apply to editor"</td></tr>
+    <tr><td><code>chatMode</code></td><td>string</td><td>'collapsed' | 'normal' | 'reduced' | 'hidden' | 'fullscreen' | 'slid-down'</td></tr>
+    <tr><td><code>currentAgent</code></td><td>string</td><td>Active chat agent: 'puppy', 'fox', 'cat', etc.</td></tr>
+    <tr><td><code>currentAvatar</code></td><td>string</td><td>Avatar character for canvas: same keys as agents</td></tr>
+    <tr><td><code>cwd</code></td><td>string</td><td>Current directory in file tree</td></tr>
+    <tr><td><code>_autosaveTimer</code></td><td>timeout</td><td>Debounced auto-save timer</td></tr>
+    <tr><td><code>chatIdleTimer</code></td><td>timeout</td><td>Idle timer for slide-down behavior</td></tr>
+    <tr><td><code>statusPollTimer</code></td><td>interval</td><td>Container status polling interval</td></tr>
+    <tr><td><code>logsPollTimer</code></td><td>interval</td><td>Logs polling interval</td></tr>
+    <tr><td><code>logsOpen</code></td><td>boolean</td><td>Whether logs panel is visible</td></tr>
+  </table>
+</div>
+
+<p style="text-align:center;margin-top:32px;color:rgba(255,255,255,.2);font-size:10px">VibeCode Workflow Diagram — vibecode.html</p>
+
+</body>
+</html>

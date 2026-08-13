@@ -1,0 +1,39 @@
+{
+  "issues": [
+    {
+      "id": "issue_20260807_224700",
+      "type": "sensors_failure",
+      "description": "Component sensors failed: Cannot connect to host 100.115.234.87:8099 ssl:default [Connect call failed ('100.115.234.87', 8099)]",
+      "severity": "low",
+      "status": "detected",
+      "reported_at": "2026-08-07T22:47:00.398109",
+      "detected_by": "automator"
+    }
+  ],
+  "fixes": [
+    {
+      "task_id": "tts_voice_fixer",
+      "status": "completed",
+      "details": "Puppy voice prosody adjusted - no longer chipmunk, sounds like medium Amy",
+      "timestamp": "2026-08-07T22:47:00.398719"
+    }
+  ],
+  "approvals": {},
+  "notifications_sent": [
+    {
+      "id": "support_224700",
+      "title": "Issue Detected: sensors_failure",
+      "message": "Component sensors failed: Cannot connect to host 100.115.234.87:8099 ssl:default [Connect call failed ('100.115.234.87', 8099)]",
+      "priority": "normal",
+      "timestamp": "2026-08-07T22:47:00.398551"
+    },
+    {
+      "id": "support_224700",
+      "title": "Lilly Fix Complete",
+      "message": "Puppy voice prosody adjusted - no longer chipmunk, sounds like medium Amy",
+      "priority": "high",
+      "timestamp": "2026-08-07T22:47:00.399008"
+    }
+  ],
+  "last_check": "2026-08-07T22:47:00.397902"
+}

@@ -7,7 +7,7 @@ Architecture:
   ├── Piper TTS (10 voice profiles)
   ├── 9 hive-mind avatars (Puppy, Fox, Cat, Bear, Bunny, Owl, Deer, Wolf, Raccoon)
   ├── Notification priority engine (OS + app tiers)
-  ├── Auth0 OIDC auth (replaces Clerk)
+  ├── Auth0 OIDC auth
   ├── OpenHuman community skills (deferred execution via SKILL.md injection)
   ├── OpenLive voice/natural-style bridge (VAD, barge-in, fillers)
   └── Open Connector (:3002) for Gmail/Outlook/Calendar
@@ -79,14 +79,13 @@ from pydantic import BaseModel
 import uvicorn
 import httpx
 
-# Auth system — Auth0 (replaces Clerk.com)
+# Auth system — Auth0
 try:
     from auth0_auth import (
         add_auth0_routes,
         get_current_user,
         load_user_memory,
         save_user_memory,
-        fetch_google_tokens_from_clerk,
         get_google_access_token,
         gmail_list_messages,
         calendar_list_events,
@@ -19978,10 +19977,8 @@ def _generate_clarification_questions(query: str) -> list:
         )
     if any(w in q for w in ["chart", "graph", "visualize", "plot"]):
         questions.append("What kind of charts? (e.g. D3, Chart.js, Plotly)")
-    if any(w in q for w in ["auth", "login", "auth0", "clerk"]):
-        questions.append(
-            "Authentication provider? (e.g. Auth0, Clerk, Supabase, Firebase)"
-        )
+    if any(w in q for w in ["auth", "login", "auth0"]):
+        questions.append("Authentication provider? (e.g. Auth0, Supabase, Firebase)")
     if any(w in q for w in ["game", "game", "pygame"]):
         questions.append("Game engine or framework? (e.g. pygame, godot, three.js)")
     if any(w in q for w in ["bot", "chatbot", "agent"]):

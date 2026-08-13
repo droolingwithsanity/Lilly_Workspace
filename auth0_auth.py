@@ -1,6 +1,6 @@
 """
 Auth0 authentication for FastAPI.
-Replaces clerk_auth.py with proper OIDC login, per-user sessions,
+Provides proper OIDC login, per-user sessions,
 and per-user data isolation (memory, contacts, profile, etc).
 """
 
@@ -241,10 +241,6 @@ def load_google_tokens(user_id: str) -> Optional[Dict[str, Any]]:
         except Exception:
             pass
     return None
-
-
-async def fetch_google_tokens_from_clerk(user_id: str) -> Optional[Dict[str, Any]]:
-    return load_google_tokens(user_id)
 
 
 async def get_google_access_token(user_id: str) -> Optional[str]:

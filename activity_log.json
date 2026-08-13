@@ -1,0 +1,11 @@
+[
+  {
+    "type": "walk",
+    "date": "2026-08-11 21:07",
+    "duration_sec": 2617,
+    "distance_m": 3765.3,
+    "avg_speed_kph": 5.2,
+    "max_speed_kph": 9.9,
+    "points": 342
+  }
+]

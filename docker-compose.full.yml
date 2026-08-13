@@ -1,0 +1,121 @@
+services:
+  # ====================================
+  # Lilly AI - Main Companion Service
+  # (Includes OpenLive Agent, Web, and Lilly Bridge)
+  # ====================================
+  lilly:
+    build: .
+    container_name: lilly-ai
+    network_mode: host
+    volumes:
+      - .:/app
+      - /home/labhrasd/.ssh:/root/.ssh:ro
+      - /home/labhrasd/Lilly_Workspace/Lilly_Workspace:/root/lilly_termux_key:ro
+      - /root/ai-server:/root/ai-server:rw
+      - lilly-data:/app/data
+      - connector-data:/app/data/connect
+      - openlive-data:/opt/openlive-agent/data
+      - openlive-voice:/opt/openlive-agent/voice
+      - openlive-data:/opt/openlive-web/data
+    env_file:
+      - .env
+      - .env.openconnector
+    environment:
+      - PORT=8098
+      - OLLAMA_URL=${OLLAMA_URL:-http://127.0.0.1:11434}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+      - PREFER_BACKEND=${PREFER_BACKEND:-ollama}
+      - SENSOR_SERVER_URL=${SENSOR_SERVER_URL:-http://100.115.234.87:8099}
+      - TERMUX_SSH_HOST=${TERMUX_SSH_HOST}
+      - TERMUX_SSH_PORT=${TERMUX_SSH_PORT:-8022}
+      - TERMUX_SSH_USER=${TERMUX_SSH_USER}
+      - TERMUX_SSH_KEY=/root/lilly_termux_key
+      # Auth0 OIDC
+      - AUTH0_DOMAIN=${AUTH0_DOMAIN}
+      - AUTH0_CLIENT_ID=${AUTH0_CLIENT_ID}
+      - AUTH0_CLIENT_SECRET=${AUTH0_CLIENT_SECRET}
+      - AUTH0_SECRET=${AUTH0_SECRET}
+      - APP_BASE_URL=https://droolingwithsanity.ca
+      - OWNER_EMAIL=${OWNER_EMAIL:-laurencekidney@gmail.com}
+      - AUTH0_ADMIN_EMAILS=${AUTH0_ADMIN_EMAILS:-}
+      # Whisper STT server
+      - WHISPER_SERVER_URL=${WHISPER_SERVER_URL:-http://lilly-whisper-stt:8000}
+      # Open Connector settings
+      - OC_BASE_URL=http://localhost:3002
+      # TTS voice
+      - LILLY_WORKSPACE=/app
+      - PIPER_VOICE=/voices/lilly_voice.onnx
+      # Cascade model tiers
+      - SMALL_MODEL=${SMALL_MODEL:-qwen2.5:1.5b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
+      - FAST_MODEL=${FAST_MODEL:-qwen2.5:7b}
+      # OpenLive settings (runs inside same container)
+      - OPENLIVE_AGENT_SECRET=${OPENLIVE_AGENT_SECRET:-lilly-openlive-secret-2026}
+      # OpenLive Web → Lilly Bridge proxy URL (for /api/voice/tts/piper etc.)
+      - LILLY_BRIDGE_URL=${LILLY_BRIDGE_URL:-http://127.0.0.1:8788}
+      # Bridge → Lilly AI URL
+      - LILLY_AI_URL=${LILLY_AI_URL:-http://127.0.0.1:8098}
+      # OpenHuman skill registry bridge (runs inside same container on :8790)
+      - OPENHUMAN_BRIDGE_URL=${OPENHUMAN_BRIDGE_URL:-http://127.0.0.1:8790}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8098/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ====================================
+  # Autensa (Mission Control) - Product Automation
+  # ====================================
+  autensa:
+    build:
+      context: ./mission-control
+      dockerfile: Dockerfile
+    container_name: autensa
+    network_mode: host
+    volumes:
+      - autensa-data:/app/data
+      # Mount the full workspace (read-write for git operations)
+      - .:/app/workspace
+      # Mount SSH keys for git access
+      - /home/labhrasd/.ssh:/home/node/.ssh:ro
+    environment:
+      - NODE_ENV=production
+      - PORT=4000
+      - DATABASE_PATH=/app/data/mission-control.db
+      - WORKSPACE_BASE_PATH=/app/workspace
+      - PROJECTS_PATH=/app/workspace/projects
+      # Git SSH configuration
+      - GIT_SSH_COMMAND=ssh -i /home/node/.ssh/id_ed25519 -o StrictHostKeyChecking=no
+      # LLM API - Ollama's OpenAI-compatible endpoint
+      - LLM_API_URL=http://127.0.0.1:11434
+      - LLM_MODEL=qwen2.5:7b
+      # OpenClaw Gateway
+      - OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-e387e90310c20aa154ab4442dba51f96d37c1489a325da7c}
+      - MODEL_DISCOVERY=auto
+      - MISSION_CONTROL_URL=http://localhost:4000
+      # Auth0 (optional — when set, Mission Control requires Auth0 login)
+      - AUTH0_DOMAIN=${AUTH0_DOMAIN:-}
+      - AUTH0_CLIENT_ID=${AUTH0_CLIENT_ID:-}
+      - AUTH0_CLIENT_SECRET=${AUTH0_CLIENT_SECRET:-}
+      - AUTH0_SECRET=${AUTH0_SECRET:-}
+      - APP_BASE_URL=${APP_BASE_URL:-http://localhost:4000}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/events').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  lilly-data:
+  connector-data:
+  autensa-data:
+  autensa-workspace:
+  openlive-data:
+  openlive-voice:

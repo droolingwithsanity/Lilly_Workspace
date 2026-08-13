@@ -1010,7 +1010,7 @@ In kid mode, the avatar never gives direct answers — only guiding questions an
 | `lilly_skills.json` | 35+ Android skill definitions |
 | `sensor_skills.json` | 5 sensor-triggered reactive skills |
 | `email_integration.py` | Gmail/Outlook/Calendar |
-| `clerk_auth.py` | Clerk.com OAuth |
+| `auth0_auth.py` | Auth0 OIDC |
 | `requirements.txt` | Python dependencies |
 | `Dockerfile` | Multi-stage Docker build |
 | `docker-compose.yml` | Docker Compose config |

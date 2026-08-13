@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=coverage">
+<title>DroolingWithSanity — Alpha</title>
+<style>
+:root{
+  --frost-bg:rgba(240,230,239,0.78);
+  --frost-surface:rgba(255,255,255,0.55);
+  --frost-border:rgba(93,78,109,0.18);
+  --frost-glow:rgba(139,122,158,0.22);
+  --accent:#8b7a9e;
+  --accent2:#8b7a9e;
+  --green:#3a8a6a;
+  --red:#c05555;
+  --yellow:#b58900;
+  --text:#5d4e6d;
+  --text-dim:rgba(93,78,109,0.55);
+  --radius:14px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{
+  font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  background:
+    radial-gradient(1200px 700px at 15% -10%, rgba(167,139,250,.18), transparent 60%),
+    radial-gradient(1000px 600px at 110% 20%, rgba(240,198,224,.28), transparent 55%),
+    radial-gradient(900px 700px at 50% 120%, rgba(158,209,212,.22), transparent 60%),
+    linear-gradient(160deg,#f5eef6,#efe8f5 55%,#e8eef4);
+  color:var(--text);
+  display:flex;align-items:center;justify-content:center;
+  padding:14px;
+}
+.window{
+  width:min(420px,94vw);height:min(660px,92vh);
+  background:var(--frost-surface);
+  backdrop-filter:blur(18px) saturate(1.15);
+  -webkit-backdrop-filter:blur(18px) saturate(1.15);
+  border:1.5px solid var(--frost-border);
+  border-radius:var(--radius);
+  box-shadow:0 18px 50px rgba(93,78,109,.22),0 0 0 1px rgba(255,255,255,.35) inset;
+  display:flex;flex-direction:column;overflow:hidden;
+}
+header{
+  display:flex;align-items:center;gap:12px;padding:14px 16px;
+  background:rgba(255,255,255,.4);border-bottom:1.5px solid var(--frost-border);
+}
+.orb{
+  width:54px;height:54px;border-radius:50%;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:28px;
+  background:linear-gradient(140deg,rgba(167,139,250,.35),rgba(240,198,224,.4));
+  border:2px solid rgba(167,139,250,.5);
+  box-shadow:0 0 0 4px rgba(255,255,255,.4),0 0 22px var(--frost-glow);
+  position:relative;
+}
+.dot{position:absolute;right:1px;bottom:1px;width:12px;height:12px;border-radius:50%;
+  background:var(--green);border:2px solid #fff;box-shadow:0 0 8px var(--green)}
+.id{flex:1;min-width:0}
+.id .nm{font-weight:700;font-size:16px;color:var(--text)}
+.id .rl{font-size:12px;color:var(--text-dim)}
+.sub{font-size:11px;color:var(--text-dim);margin-top:2px}
+.close{background:transparent;border:1.5px solid var(--frost-border);border-radius:10px;color:var(--text-dim);
+  width:30px;height:30px;font-size:15px;cursor:pointer;transition:.15s}
+.close:hover{background:rgba(192,85,85,.12);color:var(--red)}
+.roster{display:flex;gap:6px;padding:10px 14px;border-bottom:1.5px solid var(--frost-border);
+  background:rgba(255,255,255,.25);overflow-x:auto;scrollbar-width:thin}
+.roster::-webkit-scrollbar{height:5px}
+.rc{flex-shrink:0;width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:19px;cursor:pointer;background:var(--frost-surface);border:1.5px solid var(--frost-border);
+  transition:.15s;position:relative}
+.rc:hover{transform:translateY(-2px);box-shadow:0 4px 12px var(--frost-glow)}
+.rc.sel{border-color:var(--accent);box-shadow:0 0 0 3px rgba(139,122,158,.18)}
+.rc .tip{position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%) translateY(4px);
+  background:rgba(93,78,109,.95);color:#fff;font-size:11px;padding:4px 8px;border-radius:8px;white-space:nowrap;
+  opacity:0;pointer-events:none;transition:.15s;z-index:5}
+.rc:hover .tip{opacity:1;transform:translateX(-50%) translateY(0)}
+.ctxrow{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1.5px solid var(--frost-border);
+  background:rgba(255,255,255,.25)}
+.ctxrow label{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em}
+.ctxrow select{flex:1;font:inherit;font-size:12px;color:var(--text);padding:6px 8px;border-radius:10px;
+  border:1.5px solid var(--frost-border);background:var(--frost-surface);outline:none}
+.msg{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;scrollbar-width:thin}
+.msg::-webkit-scrollbar{width:6px}
+.cmsg{display:flex;gap:8px;max-width:92%;animation:in .18s ease}
+.cmsg.user{align-self:flex-end;flex-direction:row-reverse}
+@keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.av{width:28px;height:28px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  font-size:15px;background:var(--frost-surface);border:1.5px solid var(--frost-border)}
+.cmsg.user .av{background:rgba(167,139,250,.15);border-color:rgba(167,139,250,.35)}
+.bub{background:rgba(255,255,255,.65);border:1.5px solid var(--frost-border);border-radius:12px;
+  padding:9px 11px;font-size:13px;line-height:1.5;color:var(--text);min-width:0;word-break:break-word}
+.cmsg.user .bub{background:rgba(167,139,250,.16);border-color:rgba(167,139,250,.3)}
+.bub pre{background:rgba(93,78,109,.08);border:1px solid var(--frost-border);border-radius:8px;padding:8px;
+  margin:6px 0;font:11px/1.5 ui-monospace,Consolas,monospace;overflow-x:auto;color:var(--text)}
+.bub code{background:rgba(93,78,109,.1);padding:1px 5px;border-radius:6px;font:11px ui-monospace,Consolas,monospace}
+.bub pre code{background:none;padding:0}
+.bub strong{color:var(--text)}
+.bub em{color:var(--text-dim)}
+.sys{align-self:center;font-size:11px;color:var(--text-dim);background:rgba(93,78,109,.08);
+  border-radius:10px;padding:5px 10px}
+.think{display:flex;gap:4px;align-items:center;padding:4px 2px}
+.think span{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:b .9s infinite}
+.think span:nth-child(2){animation-delay:.15s}.think span:nth-child(3){animation-delay:.3s}
+@keyframes b{0%,80%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
+.inbar{display:flex;gap:8px;padding:12px 14px;border-top:1.5px solid var(--frost-border);
+  background:rgba(255,255,255,.4)}
+.inbar textarea{flex:1;resize:none;font:inherit;font-size:13px;line-height:1.4;color:var(--text);
+  border:1.5px solid var(--frost-border);border-radius:12px;padding:9px 11px;outline:none;
+  background:var(--frost-surface);max-height:96px}
+.inbar textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(139,122,158,.15)}
+.send{background:linear-gradient(140deg,var(--accent),var(--accent2));color:#fff;border:none;border-radius:12px;
+  width:42px;flex-shrink:0;font-size:16px;cursor:pointer;transition:.15s;box-shadow:0 4px 14px var(--frost-glow)}
+.send:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.send:disabled{opacity:.5;cursor:default;transform:none}
+footer{text-align:center;padding:6px;font-size:10px;color:var(--text-dim);background:rgba(255,255,255,.3)}
+</style>
+</head>
+<body>
+  <div class="window">
+    <header>
+      <div class="orb" id="orb"><span id="orbEmoji">🐶</span><span class="dot"></span></div>
+      <div class="id">
+        <div class="nm" id="name">Lilly</div>
+        <div class="rl" id="role">Alpha Companion</div>
+        <div class="sub" id="status">online · using VibeCode chat</div>
+      </div>
+      <button class="close" id="closeBtn" title="Close">✕</button>
+    </header>
+    <div class="roster" id="roster"></div>
+    <div class="ctxrow">
+      <label for="ctxProject">Project</label>
+      <select id="ctxProject"><option value="">— no project —</option></select>
+    </div>
+    <div class="msg" id="messages"></div>
+    <div class="inbar">
+      <textarea id="input" rows="1" placeholder="Ask the Alpha…"></textarea>
+      <button class="send" id="sendBtn" title="Send">➤</button>
+    </div>
+    <footer>Alpha popout · droolingwithsanity.ca</footer>
+  </div>
+
+<script>
+// Same 9-avatar roster as VibeCode
+const ROSTER = [
+  { key:'puppy',   name:'Lilly',   emoji:'🐶', role:'Alpha Companion' },
+  { key:'fox',     name:'Fox',     emoji:'🦊', role:'Creative Strategist' },
+  { key:'cat',     name:'Cat',     emoji:'🐱', role:'Precision Analyst' },
+  { key:'bear',    name:'Bear',    emoji:'🐻', role:'Steadfast Guardian' },
+  { key:'bunny',   name:'Bunny',   emoji:'🐰', role:'Energetic Scout' },
+  { key:'owl',     name:'Owl',     emoji:'🦉', role:'Wisdom Keeper' },
+  { key:'deer',    name:'Deer',    emoji:'🦌', role:'Gentle Healer' },
+  { key:'wolf',    name:'Wolf',    emoji:'🐺', role:'Fierce Protector' },
+  { key:'raccoon', name:'Raccoon', emoji:'🦝', role:'Tech Tinkerer' },
+];
+let agent = 'puppy';
+let busy = false;
+
+const $ = id => document.getElementById(id);
+
+function renderRoster() {
+  const box = $('roster');
+  box.innerHTML = '';
+  ROSTER.forEach(p => {
+    const s = document.createElement('div');
+    s.className = 'rc' + (p.key === agent ? ' sel' : '');
+    s.dataset.key = p.key;
+    s.innerHTML = p.emoji + '<span class="tip">' + p.name + '<br>' + p.role + '</span>';
+    s.onclick = () => selectAgent(p.key);
+    box.appendChild(s);
+  });
+}
+
+function selectAgent(key) {
+  agent = key;
+  const p = ROSTER.find(x => x.key === key) || ROSTER[0];
+  $('orbEmoji').textContent = p.emoji;
+  $('name').textContent = p.name;
+  $('role').textContent = p.role;
+  document.querySelectorAll('.rc').forEach(c => c.classList.toggle('sel', c.dataset.key === key));
+}
+
+// Mirrors VibeCode chat rendering
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function renderMarkdown(text) {
+  let out = escHtml(text);
+  out = out.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => {
+    const l = lang || '';
+    return '<pre><code class="lang-'+l+'">' + code.trimEnd() + '</code></pre>';
+  });
+  out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+  out = out.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  out = out.replace(/\n/g, '<br>');
+  return out;
+}
+
+function appendMsg(role, content) {
+  const box = $('messages');
+  const div = document.createElement('div');
+  div.className = 'cmsg ' + role;
+  const p = role === 'user' ? ROSTER.find(x => x.key === 'user') || {} : ROSTER.find(x => x.key === agent);
+  const emoji = role === 'user' ? '🙂' : (p ? p.emoji : '🤖');
+  div.innerHTML = '<div class="av">' + emoji + '</div><div class="bub">' + renderMarkdown(content) + '</div>';
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function appendSys(content) {
+  const box = $('messages');
+  const div = document.createElement('div');
+  div.className = 'sys';
+  div.textContent = content;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function appendThinking() {
+  const box = $('messages');
+  const div = document.createElement('div');
+  div.className = 'cmsg assistant';
+  const p = ROSTER.find(x => x.key === agent) || ROSTER[0];
+  div.innerHTML = '<div class="av">' + p.emoji + '</div><div class="bub"><div class="think"><span></span><span></span><span></span></div></div>';
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+  return div;
+}
+
+async function loadProjects() {
+  try {
+    const r = await fetch('/api/vibecode/projects');
+    const d = await r.json();
+    const sel = $('ctxProject');
+    sel.innerHTML = '<option value="">— no project —</option>';
+    (d.projects || []).forEach(p => {
+      const o = document.createElement('option');
+      o.value = p.slug;
+      o.textContent = p.slug + (p.status === 'running' ? ' ●' : '');
+      sel.appendChild(o);
+    });
+  } catch (e) { /* project list optional */ }
+}
+
+async function send() {
+  if (busy) return;
+  const input = $('input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  appendMsg('user', msg);
+  const thinking = appendThinking();
+  busy = true;
+  $('sendBtn').disabled = true;
+  try {
+    const r = await fetch('/api/vibecode/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        slug: $('ctxProject').value || '',
+        message: msg,
+        file: '',
+        agent: agent,
+        session_id: 'alpha-popout',
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'unknown error');
+    thinking.remove();
+    const p = ROSTER.find(x => x.key === agent) || ROSTER[0];
+    if (d.agent_name) $('name').textContent = d.agent_name;
+    appendMsg('assistant', d.reply || '');
+    if (d.alpha_mode === 'asking') appendSys('Alpha is asking a few clarifying questions.');
+  } catch (e) {
+    thinking.remove();
+    appendSys('Error: ' + (e.message || 'unknown'));
+  } finally {
+    busy = false;
+    $('sendBtn').disabled = false;
+    input.focus();
+  }
+}
+
+$('sendBtn').onclick = send;
+$('closeBtn').onclick = () => window.close();
+$('input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$('input').addEventListener('input', e => {
+  e.target.style.height = 'auto';
+  e.target.style.height = Math.min(e.target.scrollHeight, 96) + 'px';
+});
+
+renderRoster();
+loadProjects();
+appendSys('Hi, I\'m Lilly — pick an avatar and a project, then say hello.');
+$('input').focus();
+</script>
+</body>
+</html>
