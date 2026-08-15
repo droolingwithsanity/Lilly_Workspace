@@ -460,12 +460,11 @@ public class OverlaySettingsActivity extends AppCompatActivity {
             });
         }
 
-        EditTextPreference pairingCode = findPreference("pairing_code");
+        Preference pairingCode = findPreference("pairing_code");
         if (pairingCode != null) {
             pairingCode.setOnPreferenceClickListener(p -> {
-                // Copy to clipboard when tapped
-                String code = pairingCode.getText();
-                if (code != null && !code.isEmpty()) {
+                String code = pairingCode.getSummary().toString();
+                if (code != null && !code.isEmpty() && !code.contains("Loading") && !code.contains("not running")) {
                     android.content.ClipboardManager cm =
                         (android.content.ClipboardManager) requireContext().getSystemService(android.content.Context.CLIPBOARD_SERVICE);
                     if (cm != null) {
@@ -490,10 +489,9 @@ public class OverlaySettingsActivity extends AppCompatActivity {
                     if (token.isEmpty()) {
                         updateSummary("pairing_code", "Phone server not running");
                     } else {
-                        EditTextPreference pairingCode = findPreference("pairing_code");
+                        Preference pairingCode = findPreference("pairing_code");
                         if (pairingCode != null) {
-                            pairingCode.setText(token);
-                            pairingCode.setSummary("Tap to copy");
+                            pairingCode.setSummary(token);
                         }
                     }
                 });

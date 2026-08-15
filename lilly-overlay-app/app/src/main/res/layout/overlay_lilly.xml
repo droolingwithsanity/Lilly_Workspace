@@ -4,6 +4,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@drawable/watch_face_bg"
+    android:foreground="#00FFFFFF"
     android:clipChildren="false"
     android:clipToPadding="false">
 

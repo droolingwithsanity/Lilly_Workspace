@@ -59,7 +59,7 @@ public class LillyOverlayService extends Service {
     public static final String ACTION_STOP = "ai.agent1c.hitomi.STOP_LILLY_OVERLAY";
     private static final String CHANNEL_ID = "lilly_overlay_channel";
     private static final int NOTIF_ID = 1018;
-    private static final int COLLAPSED_SIZE_DP = 64;  // head size (dp) — smaller to fit the sphere; override via lilly_head_size pref
+    private static final int COLLAPSED_SIZE_DP = 80;  // head size (dp) — larger default for visibility; override via lilly_head_size pref
     private static final int EXPANDED_WIDTH_DP = 300;   // width for expanded overlay (frosty glass)
     private static final int EXPANDED_HEIGHT_DP = 420;  // height for expanded overlay — increased so chat isn't hidden by IME/apps
 
@@ -327,6 +327,7 @@ public class LillyOverlayService extends Service {
         loadSkills();
         initSpeechRecognizer();
         startStatePolling();
+        Log.i(TAG, "Overlay created: overlayView=" + overlayView + " quickActionsView=" + quickActionsView);
     }
 
     private void setupCloseTarget() {

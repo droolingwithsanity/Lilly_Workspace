@@ -168,18 +168,16 @@
     <!-- Pairing -->
     <PreferenceCategory app:title="Pairing">
 
-        <EditTextPreference
+        <Preference
             app:key="pairing_code"
-            app:title="Pairing Code"
-            app:summary="Tap to view/copy the current pairing code"
-            app:defaultValue=""
-            app:enabled="false"
-            app:dialogTitle="Pairing Code" />
+            app:title="Local Pairing Code"
+            app:summary="Tap to copy the local phone server pairing code"
+            app:icon="@android:drawable/ic_dialog_info" />
 
         <Preference
             app:key="refresh_pairing"
             app:title="Refresh Pairing Code"
-            app:summary="Generate a new pairing code"
+            app:summary="Generate a new local pairing code"
             app:icon="@android:drawable/ic_menu_upload" />
 
     </PreferenceCategory>
