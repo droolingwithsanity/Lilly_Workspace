@@ -1,0 +1,353 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Radial quick-actions menu — smart watch complications style -->
+<!-- All buttons are centered in the FrameLayout and offset radially in code -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="@android:color/transparent"
+    android:elevation="8dp"
+    android:visibility="gone">
+
+    <!-- Chat / Expand -->
+    <LinearLayout
+        android:id="@+id/lillyQuickChat"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="💬"
+            android:textSize="18sp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_chat"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Mic toggle -->
+    <LinearLayout
+        android:id="@+id/lillyQuickMic"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:id="@+id/lillyMicIcon"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🎤"
+            android:textSize="18sp" />
+        <TextView
+            android:id="@+id/lillyMicLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_mic"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Transcript -->
+    <LinearLayout
+        android:id="@+id/lillyQuickTranscript"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="📋"
+            android:textSize="18sp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_transcript"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Avatar picker -->
+    <LinearLayout
+        android:id="@+id/lillyQuickAvatar"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:id="@+id/lillyAvatarIcon"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🐶"
+            android:textSize="18sp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_avatar"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Gaming Mode (car ride game) -->
+    <LinearLayout
+        android:id="@+id/lillyQuickGame"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🎮"
+            android:textSize="18sp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_game"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Fetch Mini-Game -->
+    <LinearLayout
+        android:id="@+id/lillyQuickFetch"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🐕"
+            android:textSize="18sp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_fetch"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Sensors / Scan -->
+    <LinearLayout
+        android:id="@+id/lillyQuickSensors"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="📡"
+            android:textSize="18sp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_sensors"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Map: pin current location on Google Maps -->
+    <LinearLayout
+        android:id="@+id/lillyQuickMap"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="📍"
+            android:textSize="18sp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_map"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Termux Bridge -->
+    <LinearLayout
+        android:id="@+id/lillyQuickTermux"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="📱"
+            android:textSize="18sp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_termux"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Settings -->
+    <LinearLayout
+        android:id="@+id/lillyQuickSettings"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="⚙️"
+            android:textSize="18sp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_settings"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Share pairing code -->
+    <LinearLayout
+        android:id="@+id/lillyQuickPairing"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🔗"
+            android:textSize="18sp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_pair"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Mode toggle (local ↔ online) -->
+    <LinearLayout
+        android:id="@+id/lillyQuickMode"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🌐"
+            android:textSize="18sp" />
+        <TextView
+            android:id="@+id/lillyModeLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_mode"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Minimize (collapse but keep running) -->
+    <LinearLayout
+        android:id="@+id/lillyQuickMinimize"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="➖"
+            android:textSize="18sp"
+            android:textColor="#5D4E6D" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_minimize"
+            android:textSize="8sp"
+            android:textColor="#5D4E6D" />
+    </LinearLayout>
+
+    <!-- Close overlay -->
+    <LinearLayout
+        android:id="@+id/lillyQuickClose"
+        android:layout_width="48dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true">
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="✕"
+            android:textSize="18sp"
+            android:textColor="#F472B6" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/quick_close"
+            android:textSize="8sp"
+            android:textColor="#F472B6" />
+    </LinearLayout>
+
+</FrameLayout>

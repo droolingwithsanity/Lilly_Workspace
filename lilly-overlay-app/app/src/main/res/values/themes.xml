@@ -48,11 +48,19 @@
 
         <!-- Text appearances matching website -->
         <item name="textAppearanceOverlaySmall">@style/TextAppearance.OverlaySmall</item>
+        <item name="preferenceTheme">@style/Theme.LillyOverlay.Preferences</item>
     </style>
 
     <style name="TextAppearance.OverlaySmall" parent="TextAppearance.AppCompat.Small">
         <item name="android:textColor">@color/glass_text_primary</item>
         <item name="android:fontFamily">sans-serif</item>
+    </style>
+
+    <style name="Theme.LillyOverlay.Preferences" parent="PreferenceThemeOverlay">
+        <item name="android:background">@drawable/main_frosty_bg</item>
+        <item name="android:textColorPrimary">@color/glass_text_primary</item>
+        <item name="android:textColorSecondary">@color/glass_text_secondary</item>
+        <item name="android:divider">@color/glass_text_tertiary</item>
     </style>
 
     <!-- Overlay window style -->

@@ -24,10 +24,12 @@ import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.ConsoleMessage;
 import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -50,7 +52,6 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 public class LillyOverlayService extends Service {
     private static final String TAG = "LillyOverlay";
@@ -58,9 +59,28 @@ public class LillyOverlayService extends Service {
     public static final String ACTION_STOP = "ai.agent1c.hitomi.STOP_LILLY_OVERLAY";
     private static final String CHANNEL_ID = "lilly_overlay_channel";
     private static final int NOTIF_ID = 1018;
-    private static final int COLLAPSED_SIZE_DP = 96;
+    private static final int COLLAPSED_SIZE_DP = 64;  // head size (dp) — smaller to fit the sphere; override via lilly_head_size pref
     private static final int EXPANDED_WIDTH_DP = 300;   // width for expanded overlay (frosty glass)
     private static final int EXPANDED_HEIGHT_DP = 420;  // height for expanded overlay — increased so chat isn't hidden by IME/apps
+
+    // Watch Together: video apps Lilly can watch along with you. When one of
+    // these is in the foreground (or the server says we launched one), the
+    // overlay docks to the side and STT pauses so the video's audio is never
+    // transcribed as speech.
+    private static final String[] WATCH_VIDEO_PACKAGES = {
+        "com.google.android.youtube",
+        "com.google.android.apps.youtube.music",
+        "com.netflix.mediaclient",
+        "com.spotify.music",
+        "com.amazon.avod.thirdpartyclient",
+        "com.disney.disneyplus",
+        "com.hulu.plus",
+        "com.primevideo",
+        "com.crunchyroll.crunchyroid",
+        "com.mxtech.videoplayer.ad",
+        "org.videolan.vlc",
+        "com.google.android.videos",
+    };
 
     static {
         Thread.setDefaultUncaughtExceptionHandler((thread, ex) -> {
@@ -72,7 +92,7 @@ public class LillyOverlayService extends Service {
 
     private WindowManager windowManager;
     private View overlayView;
-    private View quickActionsView;
+    private ViewGroup quickActionsView;
     private View dragHandle;
     private WebView lillyWebView;
     private WindowManager.LayoutParams overlayParams;
@@ -80,6 +100,12 @@ public class LillyOverlayService extends Service {
     private ImageButton quickMicBtn, quickCloseBtn;
     private boolean quickActionsVisible = false;
     private boolean alwaysListeningEnabled = false;
+    private boolean watchTogether = false;           // Watch Together active (docked + STT paused)
+    private String watchAppPkg = "";                 // foreground video package while watching
+    private long watchSince = 0;                     // when watch mode started
+    private int watchSavedX = Integer.MIN_VALUE;     // restore position on exit
+    private int watchSavedY = Integer.MIN_VALUE;
+    private int watchMisses = 0;                     // consecutive polls without video evidence
     private boolean overlayExpanded = false;
     private boolean overlayDragging = false;
     private boolean overlayClosing = false;
@@ -114,7 +140,9 @@ public class LillyOverlayService extends Service {
     private boolean longPressTriggered = false;
     private float touchDownX, touchDownY;
     private static final int LONG_PRESS_THRESHOLD_MS = 400;
-    private static final int LONG_PRESS_MOVE_THRESHOLD_DP = 12;
+    // Small dead-zone so the overlay tracks the finger almost immediately
+    // (4dp ≈ 1.3mm) while still distinguishing taps from drags.
+    private static final int LONG_PRESS_MOVE_THRESHOLD_DP = 4;
 
     private static volatile boolean overlayRunning = false;
 
@@ -178,10 +206,8 @@ public class LillyOverlayService extends Service {
             phoneClient = new LocalPhoneClient();
             ensureOverlay();
             overlayRunning = true;
-            // Auto-start the phone server if Termux is available
-            startLillyPhoneServer();
-            // In-process HTTP sensor server (replaces termux_sensor_server.py)
-            startLillyHttpServer();
+            // Auto-prompt critical permissions on first start
+            mainHandler.postDelayed(this::autoPromptCriticalPermissions, 1500);
         } catch (Exception e) {
             Log.e(TAG, "Failed to start overlay service", e);
             stopSelf();
@@ -227,129 +253,13 @@ public class LillyOverlayService extends Service {
         }
     }
 
-    /**
-     * Auto-start the Lilly phone server (lilly_phone_server.py) in Termux
-     * if it is not already running. Uses TermuxCommandBridge to launch
-     * the server in the background.
-     */
-    private void startLillyPhoneServer() {
-        if (termuxBridge == null) {
-            termuxBridge = new TermuxCommandBridge(this);
-        }
-        if (!termuxBridge.isTermuxInstalled()) {
-            Log.d(TAG, "Termux not installed — cannot auto-start phone server");
-            return;
-        }
-        // Check if already running
-        termuxBridge.runCommand(
-            "/data/data/com.termux/files/usr/bin/sh",
-            new String[]{"-c",
-                "pgrep -f lilly_phone_server.py > /dev/null 2>&1 && echo 'RUNNING' || echo 'STOPPED'"},
-            null,
-            new TermuxCommandBridge.Callback() {
-                @Override
-                public void onResult(TermuxCommandBridge.Result result) {
-                    String out = result.stdout != null ? result.stdout.trim() : "";
-                    if (out.contains("RUNNING")) {
-                        Log.d(TAG, "Phone server already running on :8097");
-                    } else {
-                        Log.d(TAG, "Starting phone server in Termux...");
-                        // Deploy the raw resource version to ~/Lilly_Workspace/
-                        // and start it if lilly_phone_server.py exists
-                        String deployScript =
-                            "mkdir -p ~/Lilly_Workspace && " +
-                            "if [ -f ~/Lilly_Workspace/lilly_phone_server.py ]; then " +
-                            "  pkill -f lilly_phone_server.py 2>/dev/null; " +
-                            "  sleep 0.3; " +
-                            "  nohup python ~/Lilly_Workspace/lilly_phone_server.py" +
-                            " > /tmp/lilly_phone.log 2>&1 & " +
-                            "  sleep 1; " +
-                            "  pgrep -f lilly_phone_server.py > /dev/null && echo 'SERVER_STARTED' || echo 'SERVER_FAILED'; " +
-                            "else " +
-                            "  echo 'NO_SERVER_FILE'; " +
-                            "fi";
-                        termuxBridge.runCommand(
-                            "/data/data/com.termux/files/usr/bin/sh",
-                            new String[]{"-c", deployScript},
-                            null,
-                            new TermuxCommandBridge.Callback() {
-                                @Override
-                                public void onResult(TermuxCommandBridge.Result r) {
-                                    String o = r.stdout != null ? r.stdout.trim() : "";
-                                    if (o.contains("SERVER_STARTED")) {
-                                        Log.i(TAG, "Phone server started on :8097");
-                                        Toast.makeText(LillyOverlayService.this,
-                                            "Phone server started on :8097", Toast.LENGTH_SHORT).show();
-                                    } else if (o.contains("NO_SERVER_FILE")) {
-                                        Log.w(TAG, "No phone server file — deploy via settings first");
-                                    } else {
-                                        Log.w(TAG, "Phone server start result: " + o);
-                                    }
-                                }
-                            }
-                        );
-                    }
-                }
-            }
-        );
-    }
-
-    /**
-     * Start the in-process HTTP sensor server that replaces termux_sensor_server.py.
-     * It binds 0.0.0.0:8099 and proxies /api/* to lilly_phone_server.py on :8097.
-     */
-    private void startLillyHttpServer() {
-        startHttpServer(this, null);
-    }
-
-    /** Callback invoked once the shared HTTP server has been started (or failed). */
-    public interface HttpServerStartCallback {
-        void onDone(LillyHttpServer server, Exception error);
-    }
-
-    private static final ExecutorService httpServerStarter = Executors.newSingleThreadExecutor();
-    private static final AtomicBoolean httpServerStarting = new AtomicBoolean(false);
-
-    /** Shared server is alive and accepting connections. */
-    public static boolean isHttpServerRunning() {
-        return lillyHttpServer != null && lillyHttpServer.isAlive();
-    }
-
-    /**
-     * Starts the shared in-process HTTP sensor server (idempotent). Safe to call from
-     * MainActivity on app open and from the overlay service. If the legacy Termux
-     * sensor server (termux_sensor_server.py) still holds :8099 it is killed first.
-     */
-    public static void startHttpServer(Context ctx, HttpServerStartCallback cb) {
-        synchronized (LillyOverlayService.class) {
-            if (isHttpServerRunning()) {
-                if (cb != null) cb.onDone(lillyHttpServer, null);
-                return;
-            }
-            if (httpServerStarting.get()) {
-                return;
-            }
-            httpServerStarting.set(true);
-        }
-        httpServerStarter.execute(() -> {
-            LillyHttpServer server = null;
-            Exception failure = null;
-            try {
-                TermuxCommandBridge bridge = new TermuxCommandBridge(ctx.getApplicationContext());
-                server = new LillyHttpServer(ctx, bridge);
-                server.freeLegacyPort();
-                server.start();
-                synchronized (LillyOverlayService.class) {
-                    lillyHttpServer = server;
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to start Lilly HTTP sensor server", e);
-                failure = e;
-            } finally {
-                httpServerStarting.set(false);
-            }
-            if (cb != null) cb.onDone(server, failure);
-        });
+    /** Head size in dp, overridable via the lilly_head_size pref (48–160dp).
+     *  The canvas-drawn head scales with the window, so this shrinks the
+     *  whole avatar. */
+    private int getCollapsedSizeDp() {
+        int size = getSharedPreferences("lilly_prefs", MODE_PRIVATE)
+            .getInt("lilly_head_size", COLLAPSED_SIZE_DP);
+        return Math.max(48, Math.min(160, size));
     }
 
     private void ensureOverlay() {
@@ -357,7 +267,6 @@ public class LillyOverlayService extends Service {
             windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         }
         if (overlayView != null) return;
-
         int overlayType = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             : WindowManager.LayoutParams.TYPE_PHONE;
@@ -365,8 +274,8 @@ public class LillyOverlayService extends Service {
         // Main overlay view
         overlayView = LayoutInflater.from(this).inflate(R.layout.overlay_lilly, null);
         overlayParams = new WindowManager.LayoutParams(
-            dp(COLLAPSED_SIZE_DP),
-            dp(COLLAPSED_SIZE_DP),
+            dp(getCollapsedSizeDp()),
+            dp(getCollapsedSizeDp()),
             overlayType,
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
@@ -379,11 +288,11 @@ public class LillyOverlayService extends Service {
         overlayParams.y = dp(120);
         overlayExpanded = false;
 
-        // Quick actions menu (long-press)
-        quickActionsView = LayoutInflater.from(this).inflate(R.layout.overlay_lilly_actions, null);
+        // Quick actions menu (long-press) — radial smart-watch complications
+        quickActionsView = (ViewGroup) LayoutInflater.from(this).inflate(R.layout.overlay_lilly_radial, null);
         quickActionsParams = new WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            dp(56),
+            dp(180),
+            dp(180),
             overlayType,
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                 | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -457,6 +366,32 @@ public class LillyOverlayService extends Service {
                 Log.d("LillyWebView", cm.message() + " -- line " + cm.lineNumber() + " of " + cm.sourceId());
                 return true;
             }
+
+            @Override
+            public void onPermissionRequest(final PermissionRequest request) {
+                mainHandler.post(() -> {
+                    String[] requested = request.getResources();
+                    ArrayList<String> granted = new ArrayList<>();
+                    for (String r : requested) {
+                        if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)
+                                || PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r)) {
+                            if (ContextCompat.checkSelfPermission(LillyOverlayService.this,
+                                    Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                                    || ContextCompat.checkSelfPermission(LillyOverlayService.this,
+                                    Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                granted.add(r);
+                            }
+                        } else {
+                            granted.add(r);
+                        }
+                    }
+                    if (granted.isEmpty()) {
+                        request.deny();
+                    } else {
+                        request.grant(granted.toArray(new String[0]));
+                    }
+                });
+            }
         });
 
         lillyWebView.setBackgroundColor(Color.TRANSPARENT);
@@ -483,29 +418,15 @@ public class LillyOverlayService extends Service {
             .getString("lilly_server_url", "https://droolingwithsanity.ca");
     }
 
-    private boolean isOsintEnabled() {
-        return getSharedPreferences("lilly_prefs", Context.MODE_PRIVATE)
-            .getBoolean("osint_enabled", true);
-    }
-
-    private boolean isOsintAutoOpen() {
-        return getSharedPreferences("lilly_prefs", Context.MODE_PRIVATE)
-            .getBoolean("osint_auto_open", false);
-    }
-
     private void injectAndroidBridge() {
         if (lillyWebView == null) return;
         String serverUrl = getServerUrl();
-        boolean osintOn = isOsintEnabled();
-        boolean autoOpen = isOsintAutoOpen();
         String escaped = escapeJs(serverUrl);
         lillyWebView.evaluateJavascript(
             "(function(){" +
             "if(typeof setServerUrl==='function'){setServerUrl(" + escaped + ");}" +
             "if(typeof _resolveServer==='function'){_resolveServer();}" +
             "if(typeof setAvatar==='function'){setAvatar('puppy');}" +
-            "if(typeof setOsintEnabled==='function'){setOsintEnabled(" + osintOn + ");}" +
-            "if(typeof setOsintAutoOpen==='function'){setOsintAutoOpen(" + autoOpen + ");}" +
             "})()", null);
     }
 
@@ -772,6 +693,25 @@ public class LillyOverlayService extends Service {
             Log.w(TAG, "Termux not available for command bridge");
             return;
         }
+        if (!termuxBridge.isTermuxRunning()) {
+            Log.w(TAG, "Termux not running — launching it first");
+            termuxBridge.ensureTermuxRunning(new TermuxCommandBridge.Callback() {
+                @Override
+                public void onResult(TermuxCommandBridge.Result result) {
+                    mainHandler.post(() -> {
+                        if (result.exitCode == 0) {
+                            Log.d(TAG, "Termux started, retrying command");
+                            // Retry the original command after a delay
+                            mainHandler.postDelayed(() -> runTermuxViaBridge(cmd), 3000);
+                        } else {
+                            Toast.makeText(LillyOverlayService.this,
+                                result.errorMessage, Toast.LENGTH_LONG).show();
+                        }
+                    });
+                }
+            });
+            return;
+        }
         String binary = cmd.optString("binary", "echo");
         String text = cmd.optString("text", "");
         String path = "/data/data/com.termux/files/usr/bin/" + binary;
@@ -874,8 +814,7 @@ public class LillyOverlayService extends Service {
         View fetchBtn      = quickActionsView.findViewById(R.id.lillyQuickFetch);
          View sensorsBtn    = quickActionsView.findViewById(R.id.lillyQuickSensors);
          View mapBtn        = quickActionsView.findViewById(R.id.lillyQuickMap);
-         View termuxBtn     = quickActionsView.findViewById(R.id.lillyQuickTermux);
-        View downloadBtn   = quickActionsView.findViewById(R.id.lillyQuickDownload);
+          View termuxBtn     = quickActionsView.findViewById(R.id.lillyQuickTermux);
         modeLabelView      = quickActionsView.findViewById(R.id.lillyModeLabel);
 
         // ── Chat: expand overlay and focus input ──
@@ -1046,24 +985,29 @@ public class LillyOverlayService extends Service {
                     });
             });
         }
+    }
 
-        // ── Download APK: open download URL ──
-        if (downloadBtn != null) {
-            downloadBtn.setOnClickListener(v -> {
-                hideQuickActions();
-                // Try to fetch the latest APK download link from the server
-                if (phoneClient != null) {
-                    try {
-                        phoneClient.get("/api/app/download_url");
-                    } catch (Exception e) {
-                        Log.d(TAG, "APK download URL fetch failed: " + e.getMessage());
-                    }
-                }
-                // Fallback: open known URL
-                String apkUrl = "https://100.93.131.114:8098/lilly-overlay-v3.7-debug.apk";
-                openUrl(apkUrl);
-                Toast.makeText(this, "Opening APK download…", Toast.LENGTH_SHORT).show();
-            });
+    private void autoPromptCriticalPermissions() {
+        if (termuxBridge == null || !termuxBridge.isTermuxInstalled()) return;
+        String[] perms = {
+            Manifest.permission.CAMERA,
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.BODY_SENSORS,
+            Manifest.permission.ACTIVITY_RECOGNITION,
+            Manifest.permission.POST_NOTIFICATIONS,
+        };
+        boolean anyMissing = false;
+        for (String p : perms) {
+            if (!termuxBridge.hasTermuxPermission(p)) {
+                anyMissing = true;
+                termuxBridge.requestTermuxPermission(p);
+            }
+        }
+        if (anyMissing) {
+            Toast.makeText(this,
+                "Lilly needs sensor permissions — check the system prompts",
+                Toast.LENGTH_LONG).show();
         }
     }
 
@@ -1241,34 +1185,11 @@ public class LillyOverlayService extends Service {
         }
     }
 
-    // ── Drag: Choreographer-throttled for smooth 60fps ──────────────────
-    private int pendingDragX = -1, pendingDragY = -1;
-    private boolean dragFramePending = false;
-    private final android.view.Choreographer.FrameCallback dragFrameCallback = frameTimeNanos -> {
-        dragFramePending = false;
-        if (pendingDragX >= 0) {
-            overlayParams.x = pendingDragX;
-            overlayParams.y = pendingDragY;
-            pendingDragX = -1;
-            pendingDragY = -1;
-            try { windowManager.updateViewLayout(overlayView, overlayParams); } catch (Exception ignored) {}
-            repositionQuickActions();
-        }
-    };
-
-    private void scheduleDragUpdate(int newX, int newY) {
-        pendingDragX = newX;
-        pendingDragY = newY;
-        if (!dragFramePending) {
-            dragFramePending = true;
-            android.view.Choreographer.getInstance().postFrameCallback(dragFrameCallback);
-        }
-    }
-
+    // ── Drag: direct layout updates (no frame deferral) for snappy 1:1 tracking ──
     private void setupDrag() {
         overlayView.setOnTouchListener((v, event) -> {
-            int viewW = overlayExpanded ? dp(EXPANDED_WIDTH_DP) : dp(COLLAPSED_SIZE_DP);
-            int viewH = overlayExpanded ? dp(EXPANDED_HEIGHT_DP) : dp(COLLAPSED_SIZE_DP);
+            int viewW = overlayExpanded ? dp(EXPANDED_WIDTH_DP) : dp(getCollapsedSizeDp());
+            int viewH = overlayExpanded ? dp(EXPANDED_HEIGHT_DP) : dp(getCollapsedSizeDp());
             int action = event.getActionMasked();
             switch (action) {
                 case MotionEvent.ACTION_DOWN:
@@ -1309,11 +1230,17 @@ public class LillyOverlayService extends Service {
                     if (newX != draggedLastX || newY != draggedLastY) {
                         draggedLastX = newX;
                         draggedLastY = newY;
-                        scheduleDragUpdate(newX, newY); // throttled to display frame rate
+                        // Direct layout update — no frame deferral, tracks the finger 1:1.
+                        overlayParams.x = newX;
+                        overlayParams.y = newY;
+                        windowManager.updateViewLayout(overlayView, overlayParams);
                     }
-                    overlayClosing = (event.getRawY() > getScreenHeight() - dp(120));
-                    closeTargetView.setScaleX(overlayClosing ? 1.2f : 0.5f);
-                    closeTargetView.setScaleY(overlayClosing ? 1.2f : 0.5f);
+                    boolean nowClosing = (event.getRawY() > getScreenHeight() - dp(120));
+                    if (nowClosing != overlayClosing) {
+                        overlayClosing = nowClosing;
+                        closeTargetView.setScaleX(nowClosing ? 1.2f : 0.5f);
+                        closeTargetView.setScaleY(nowClosing ? 1.2f : 0.5f);
+                    }
                     return true;
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
@@ -1414,10 +1341,10 @@ public class LillyOverlayService extends Service {
 
     private void collapseOverlay() {
         overlayExpanded = false;
-        overlayParams.width = dp(COLLAPSED_SIZE_DP);
-        overlayParams.height = dp(COLLAPSED_SIZE_DP);
-        overlayParams.x = clamp(overlayParams.x, 0, getScreenWidth() - dp(COLLAPSED_SIZE_DP));
-        overlayParams.y = clamp(overlayParams.y, 0, getScreenHeight() - dp(COLLAPSED_SIZE_DP));
+        overlayParams.width = dp(getCollapsedSizeDp());
+        overlayParams.height = dp(getCollapsedSizeDp());
+        overlayParams.x = clamp(overlayParams.x, 0, getScreenWidth() - dp(getCollapsedSizeDp()));
+        overlayParams.y = clamp(overlayParams.y, 0, getScreenHeight() - dp(getCollapsedSizeDp()));
         overlayParams.flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
         windowManager.updateViewLayout(overlayView, overlayParams);
         hideQuickActions();
@@ -1460,6 +1387,7 @@ public class LillyOverlayService extends Service {
         quickActionsView.setAlpha(0f);
         quickActionsView.animate().alpha(1f).setDuration(150).start();
         quickActionsVisible = true;
+        positionRadialButtons();
     }
 
     private void hideQuickActions() {
@@ -1467,49 +1395,156 @@ public class LillyOverlayService extends Service {
         quickActionsVisible = false;
     }
 
+    /** Arrange quick-action buttons in a circle around the center (smart-watch complications). */
+    private void positionRadialButtons() {
+        if (quickActionsView == null) return;
+        quickActionsView.post(() -> {
+            if (quickActionsView == null) return;
+            int count = quickActionsView.getChildCount();
+            if (count == 0) return;
+            int centerX = quickActionsView.getWidth() / 2;
+            int centerY = quickActionsView.getHeight() / 2;
+            float radius = dp(64);
+            for (int i = 0; i < count; i++) {
+                View child = quickActionsView.getChildAt(i);
+                if (child == null) continue;
+                int w = child.getWidth();
+                int h = child.getHeight();
+                double angle = (2 * Math.PI * i) / count - Math.PI / 2;
+                float x = (float) (centerX + radius * Math.cos(angle)) - w / 2;
+                float y = (float) (centerY + radius * Math.sin(angle)) - h / 2;
+                child.setX(x);
+                child.setY(y);
+            }
+        });
+    }
+
     private void repositionQuickActions() {
         if (quickActionsView == null || quickActionsParams == null) return;
-        int qaW = quickActionsView.getWidth() > 0 ? quickActionsView.getWidth() : dp(220);
-        quickActionsParams.x = overlayParams.x + dp(overlayExpanded ? EXPANDED_WIDTH_DP : COLLAPSED_SIZE_DP) - qaW;
-        quickActionsParams.y = overlayParams.y - dp(62);
+        int overlaySize = dp(overlayExpanded ? EXPANDED_WIDTH_DP : getCollapsedSizeDp());
+        int qaW = quickActionsView.getWidth() > 0 ? quickActionsView.getWidth() : dp(180);
+        int qaH = quickActionsView.getHeight() > 0 ? quickActionsView.getHeight() : dp(180);
+        // Center the radial menu on the overlay orb
+        quickActionsParams.x = overlayParams.x + overlaySize / 2 - qaW / 2;
+        quickActionsParams.y = overlayParams.y + overlaySize / 2 - qaH / 2;
         quickActionsParams.x = clamp(quickActionsParams.x, 0, getScreenWidth() - qaW);
-        quickActionsParams.y = Math.max(0, quickActionsParams.y);
+        quickActionsParams.y = Math.max(0, Math.min(quickActionsParams.y, getScreenHeight() - qaH));
         windowManager.updateViewLayout(quickActionsView, quickActionsParams);
+        positionRadialButtons();
     }
 
     private void pollLillyState() {
         executor.execute(() -> {
             try {
-                LillyAIChatClient.UiState state = chatClient.fetchUiState();
-                boolean wasOffline = offlineMode;
-                offlineMode = false;
-                serverConnected = true;
-                lastServerResponse = System.currentTimeMillis();
-                // Auto-pair with remote server so it can push commands to this phone
-                if (wasOffline || lastServerResponse == System.currentTimeMillis()) {
-                    executor.execute(this::autoPairWithRemote);
-                }
-                mainHandler.post(() -> {
-                    boolean wasListening = alwaysListeningEnabled;
-                    alwaysListeningEnabled = state.micActive;
-                    if (wasListening != state.micActive) updateMicButtonAppearance();
-                    updateNotification(state);
-                    handleServerActions(state);
-                    syncAvatarToWebView(state.avatar);
-                    hideLocalFallback();
-                    if (wasOffline) showOnlineToast();
-                });
-            } catch (Exception e) {
-                mainHandler.post(() -> {
-                    if (serverConnected) {
+                // Simple relay mode: just verify the local sensor server is reachable.
+                // The WebView handles its own UI state via JavaScript.
+                if (phoneClient != null) {
+                    try {
+                        phoneClient.get("/api/health");
+                        serverConnected = true;
+                        offlineMode = false;
+                    } catch (Exception e) {
                         serverConnected = false;
                         offlineMode = true;
-                        showLocalFallback();
-                        showOfflineToast();
                     }
-                });
+                }
+            } catch (Exception e) {
+                serverConnected = false;
+                offlineMode = true;
             }
-            mainHandler.postDelayed(statePoller, offlineMode ? 8000 : (overlayExpanded ? 4000 : 6000));
+            mainHandler.postDelayed(statePoller, offlineMode ? 10000 : 6000);
+        });
+    }
+
+    private boolean isWatchPackage(String pkg) {
+        if (pkg == null) return false;
+        for (String p : WATCH_VIDEO_PACKAGES) if (p.equals(pkg)) return true;
+        return false;
+    }
+
+    /** Watch Together state machine. Runs on the main thread from the poller.
+     *  Enter: server launched a video app, or a video app is foreground + playing.
+     *  Exit: 3 consecutive polls (~15–20s) without a foreground video playing. */
+    private void updateWatchTogether(boolean serverWatch, boolean localWatch, String fgPkg) {
+        if (!watchTogether) {
+            if (serverWatch || localWatch) {
+                if (fgPkg != null && isWatchPackage(fgPkg)) watchAppPkg = fgPkg;
+                else watchAppPkg = "video";
+                enterWatchTogether();
+            }
+        } else if (localWatch) {
+            watchMisses = 0;
+        } else {
+            watchMisses++;
+            if (watchMisses >= 3) exitWatchTogether();
+        }
+    }
+
+    private void enterWatchTogether() {
+        if (watchTogether) return;
+        watchTogether = true;
+        watchSince = System.currentTimeMillis();
+        watchMisses = 0;
+        mainHandler.post(() -> {
+            if (overlayExpanded) collapseOverlay();
+            watchSavedX = overlayParams.x;
+            watchSavedY = overlayParams.y;
+            int size = dp(getCollapsedSizeDp());
+            overlayParams.x = getScreenWidth() - size - dp(6);   // dock to right edge
+            overlayParams.y = (getScreenHeight() - size) / 2;    // vertically centered
+            windowManager.updateViewLayout(overlayView, overlayParams);
+            repositionQuickActions();
+            if (lillyWebView != null) {
+                lillyWebView.evaluateJavascript(
+                    "(function(){var b=document.getElementById('watchBadge');if(b)b.classList.add('show');})()",
+                    null);
+            }
+            // Pause on-device STT so the video's audio is never transcribed as speech.
+            // (ui_state.mic_active is also false while watching, so the poller keeps it off.)
+            alwaysListeningEnabled = false;
+            stopSpeech();
+            updateMicButtonAppearance();
+        });
+        notifyWatchServer(true);
+    }
+
+    private void exitWatchTogether() {
+        if (!watchTogether) return;
+        watchTogether = false;
+        watchMisses = 0;
+        mainHandler.post(() -> {
+            if (watchSavedX != Integer.MIN_VALUE) {
+                int size = dp(getCollapsedSizeDp());
+                overlayParams.x = clamp(watchSavedX, 0, getScreenWidth() - size);
+                overlayParams.y = clamp(watchSavedY, 0, getScreenHeight() - size);
+                watchSavedX = watchSavedY = Integer.MIN_VALUE;
+                windowManager.updateViewLayout(overlayView, overlayParams);
+                repositionQuickActions();
+            }
+            if (lillyWebView != null) {
+                lillyWebView.evaluateJavascript(
+                    "(function(){var b=document.getElementById('watchBadge');if(b)b.classList.remove('show');})()",
+                    null);
+            }
+            // The next ui_state poll (mic_active back to its real value) re-enables STT.
+        });
+        notifyWatchServer(false);
+    }
+
+    /** Tell the server watch mode ended (or started) so it clears WATCH_MODE,
+     *  un-suppresses the browser mic, and can log what we watched together. */
+    private void notifyWatchServer(boolean active) {
+        executor.execute(() -> {
+            try {
+                org.json.JSONObject body = new org.json.JSONObject();
+                body.put("active", active);
+                if (active) {
+                    body.put("app", watchAppPkg);
+                    body.put("label", watchAppPkg);
+                }
+                chatClient.makeRequest("POST", "/api/watch_together", body.toString());
+            } catch (Exception ignored) {
+            }
         });
     }
 
@@ -1596,7 +1631,7 @@ public class LillyOverlayService extends Service {
             if (nm != null) {
                 nm.notify(NOTIF_ID, buildNotificationWithText(
                     textOverride != null ? textOverride :
-                    (_killSwitchActive ? "🔴 Cmds disabled" : "Your companion is here")));
+                    (_killSwitchActive ? "🔴 Cmds disabled" : "Your assistant is here")));
             }
         } catch (Exception ignored) {}
     }
@@ -1816,6 +1851,8 @@ public class LillyOverlayService extends Service {
 
     private void startSpeech() {
         if (speechRecognizer == null || speechIntent == null || sttListening) return;
+        // Watch Together: the video is playing — never transcribe its audio.
+        if (watchTogether) return;
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) return;
         try {
@@ -1900,14 +1937,14 @@ public class LillyOverlayService extends Service {
             NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID, "Lilly Overlay",
                 NotificationManager.IMPORTANCE_LOW);
-            channel.setDescription("Lilly companion overlay status");
+            channel.setDescription("Lilly assistant overlay status");
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm != null) nm.createNotificationChannel(channel);
         }
     }
 
     private Notification buildNotification() {
-        return buildNotificationWithText("Your companion is here");
+        return buildNotificationWithText("Your assistant is here");
     }
 
     private Notification buildNotificationWithText(String text) {

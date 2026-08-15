@@ -227,28 +227,6 @@
         </LinearLayout>
 
         <!-- Download APK -->
-        <LinearLayout
-            android:id="@+id/lillyQuickDownload"
-            android:layout_width="52dp"
-            android:layout_height="56dp"
-            android:orientation="vertical"
-            android:gravity="center"
-            android:background="@android:color/transparent"
-            android:clickable="true"
-            android:focusable="true">
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="⬇️"
-                android:textSize="20sp" />
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/quick_download"
-                android:textSize="9sp"
-                android:textColor="#5D4E6D" />
-        </LinearLayout>
-
         <!-- Settings -->
         <LinearLayout
             android:id="@+id/lillyQuickSettings"

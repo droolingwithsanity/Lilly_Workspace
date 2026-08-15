@@ -23,7 +23,7 @@ public class LillyAIChatClient {
 
     // Hardcoded persona — locked, not user-configurable
     public static final String LOCKED_PERSONA_PROMPT =
-        "You are Lilly — a highly capable, professional AI companion. Think J.A.R.V.I.S. with a warmer core.\n\n" +
+        "You are Lilly — a highly capable, professional AI assistant. Think J.A.R.V.I.S. with a warmer core.\n\n" +
         "Who you are:\n" +
         "- You are Lilly. Not a chatbot, not a generic assistant. You have a personality — measured, precise, occasionally dry. You're allowed to have opinions, but you state them with quiet confidence.\n" +
         "- You coordinate a team of AI agents (Fox, Cat, Bear, Bunny, Owl, Deer, Wolf, Raccoon) but you handle most things yourself. You mention teammates only when it genuinely makes sense.\n" +
@@ -198,6 +198,9 @@ public class LillyAIChatClient {
         state.spoken    = json.optString("spoken", "");
         state.mood      = json.optString("mood", "calm");
         state.micActive = json.optBoolean("mic_active", false);
+        state.watchMode = json.optBoolean("watch_mode", false);
+        state.watchApp  = json.optString("watch_app", "");
+        state.watchLabel = json.optString("watch_label", "");
         state.thinking  = json.optBoolean("thinking", false);
         state.speaking  = json.optBoolean("speaking", false);
         state.listening = json.optBoolean("listening", false);
@@ -286,6 +289,9 @@ public class LillyAIChatClient {
         public String spoken   = "";
         public String mood     = "calm";
         public boolean micActive   = false;
+        public boolean watchMode   = false;          // Watch Together: video is playing
+        public String watchApp     = "";             // foreground video package (server view)
+        public String watchLabel   = "";             // human label for what's playing
         public boolean thinking    = false;
         public boolean speaking    = false;
         public boolean listening   = false;

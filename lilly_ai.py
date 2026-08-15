@@ -430,6 +430,7 @@ except ImportError:
 
 
 SENSOR_SERVER_URL = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8099")
+VISION_SERVER_URL = os.environ.get("VISION_SERVER_URL", "")
 WHISPER_SERVER_URL = os.environ.get("WHISPER_SERVER_URL", "http://localhost:8001")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "Systran/faster-whisper-large-v3")
 PUSHBULLET_API_KEY = os.environ.get("PUSHBULLET_API_KEY", "")
@@ -1036,6 +1037,9 @@ LAST_SPOKEN = ""
 LAST_SSML = ""
 SPEAKING_SESSION_ID = 0
 _LAST_SPOKEN_SESSION_ID = 0
+_RECENT_SPEECH: list[tuple[float, str]] = []  # (timestamp, text) of recent speech
+_RECENT_SPEECH_MAX_AGE = 8.0  # seconds to consider speech "recent" for echo detection
+_RECENT_SPEECH_MAX_ENTRIES = 4  # keep last N utterances
 AUDIO_CACHE: dict[int, bytes] = {}
 AUDIO_CACHE_ID: int = 0
 AUDIO_CACHE_LOCK: asyncio.Lock = asyncio.Lock()
@@ -1479,13 +1483,63 @@ def is_self_echo(text: str) -> bool:
     spoke_words = spoke.split()
     if not heard_words or not spoke_words:
         return False
-    # Common overlap ratio (intersection / max(len)) — high = echo
+    # Word overlap ratio — lower threshold catches more echoes
     intersection = set(heard_words) & set(spoke_words)
     ratio = len(intersection) / max(len(heard_words), len(spoke_words), 1)
-    # Full containment either direction is also an echo (e.g. Lilly said a long
-    # sentence, mic caught a fragment of it)
+    # Exact substring containment in either direction
     contained = heard in spoke or spoke in heard
-    return ratio >= 0.35 or contained
+    # Prefix/suffix overlap (e.g. "thank you" at end of longer phrase)
+    prefix = spoke.startswith(heard) or heard.startswith(spoke)
+    suffix = spoke.endswith(heard) or heard.endswith(spoke)
+    return ratio >= 0.20 or contained or prefix or suffix
+
+
+def _record_recent_speech(text: str):
+    """Record a speech utterance for echo detection."""
+    global _RECENT_SPEECH
+    now = time.time()
+    _RECENT_SPEECH.append((now, text))
+    # Prune old entries
+    cutoff = now - _RECENT_SPEECH_MAX_AGE
+    _RECENT_SPEECH = [(t, tx) for (t, tx) in _RECENT_SPEECH if t > cutoff]
+    # Cap size
+    if len(_RECENT_SPEECH) > _RECENT_SPEECH_MAX_ENTRIES:
+        _RECENT_SPEECH = _RECENT_SPEECH[-_RECENT_SPEECH_MAX_ENTRIES:]
+
+
+def is_recent_speech_echo(text: str) -> bool:
+    """Check if text overlaps with anything Lilly said recently."""
+    if not text:
+        return False
+    now = time.time()
+    cutoff = now - _RECENT_SPEECH_MAX_AGE
+    global _RECENT_SPEECH
+    # Prune stale entries on access
+    _RECENT_SPEECH = [(t, tx) for (t, tx) in _RECENT_SPEECH if t > cutoff]
+    heard = normalize_text(text)
+    if not heard:
+        return False
+    heard_words = set(heard.split())
+    if not heard_words:
+        return False
+    for _, spoke in _RECENT_SPEECH:
+        spoke_norm = normalize_text(spoke)
+        if not spoke_norm:
+            continue
+        spoke_words = set(spoke_norm.split())
+        if not spoke_words:
+            continue
+        # Exact match or high word overlap
+        if heard == spoke_norm:
+            return True
+        intersection = heard_words & spoke_words
+        ratio = len(intersection) / max(len(heard_words), len(spoke_words), 1)
+        if ratio >= 0.25:
+            return True
+        # Substring containment
+        if heard in spoke_norm or spoke_norm in heard:
+            return True
+    return False
 
 
 def strip_json_wrapper(text: str) -> str:
@@ -2799,7 +2853,7 @@ async def speak(text: str, use_toast: bool = True, char_key: Optional[str] = Non
         LAST_SPOKEN, \
         PHONEME_QUEUE, \
         MOUTH_OPEN
-    global AUDIO_CACHE, AUDIO_CACHE_ID
+    global AUDIO_CACHE, AUDIO_CACHE_ID, _RECENT_SPEECH
     raw_text = text.replace("\n", " ").strip()
     if not raw_text:
         return 0
@@ -2898,6 +2952,7 @@ async def speak(text: str, use_toast: bool = True, char_key: Optional[str] = Non
     # Set spoken text AFTER caching audio so pollState sees audio_id too
     LAST_SPOKEN = clean
     LAST_SSML = ssml_text
+    _record_recent_speech(clean)
     SPEAKING_SESSION_ID += 1
     _LAST_SPOKEN_SESSION_ID = SPEAKING_SESSION_ID
 
@@ -3721,6 +3776,7 @@ async def background_mic_loop():
                     and text.strip() not in PHANTOMS
                     and not is_hallucination(text.strip())
                     and not is_self_echo(text)  # don't transcribe our own voice
+                    and not is_recent_speech_echo(text)  # don't echo recent speech
                     and mean_vol
                     > -28.0  # extra guard: only accept if audio had real energy
                 ):
@@ -8895,6 +8951,37 @@ def _try_import_ultralytics():
         return None
 
 
+async def _proxy_vision_frame(
+    frame_bytes: bytes, avatar: str = "puppy", sensors: dict | None = None
+) -> dict:
+    """
+    Proxy a JPEG frame to the external YOLO vision server when VISION_SERVER_URL is set.
+    Returns the vision server JSON response, or an empty dict on failure/unconfigured.
+    """
+    global VISION_SERVER_URL
+    if not VISION_SERVER_URL:
+        return {}
+
+    try:
+        payload = {
+            "image_b64": base64.b64encode(frame_bytes).decode("utf-8"),
+            "avatar": avatar,
+            "sensors": sensors or {},
+            "generate_audio": False,
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{VISION_SERVER_URL}/api/vision",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as e:
+        logger.debug(f"Vision proxy error: {e}")
+    return {}
+
+
 def init_vision():
     global _vision_enabled
     cv2 = _try_import_cv2()
@@ -9067,6 +9154,56 @@ def _draw_detections(frame, detections):
 async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
     """Run object detection on a JPEG frame, return labeled JPEG + detections."""
     global _YOLO_MODEL
+
+    # ── External vision server proxy ─────────────────────────────
+    if VISION_SERVER_URL:
+        proxy_resp = await _proxy_vision_frame(frame_bytes)
+        if proxy_resp and proxy_resp.get("detections"):
+            cv2 = _try_import_cv2()
+            detections = []
+            h, w = 1, 1
+            frame = None
+            if cv2 is not None:
+                try:
+                    import numpy as np
+
+                    nparr = np.frombuffer(frame_bytes, np.uint8)
+                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        h, w = frame.shape[:2]
+                except Exception:
+                    pass
+
+            for d in proxy_resp["detections"]:
+                label = d.get("label", "object")
+                conf = float(d.get("conf", d.get("confidence", 0)))
+                nx = float(d.get("x", 0))
+                ny = float(d.get("y", 0))
+                nw = float(d.get("w", 0))
+                nh = float(d.get("h", 0))
+                x1 = nx * w
+                y1 = ny * h
+                x2 = (nx + nw) * w
+                y2 = (ny + nh) * h
+                detections.append(
+                    {
+                        "label": label,
+                        "confidence": conf,
+                        "x1": x1,
+                        "y1": y1,
+                        "x2": x2,
+                        "y2": y2,
+                    }
+                )
+
+            if frame is not None and cv2 is not None:
+                frame = _draw_detections(frame, detections)
+                ret2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if ret2:
+                    return buf.tobytes(), detections
+
+            return frame_bytes, detections
+
     cv2 = _try_import_cv2()
     if cv2 is None:
         return frame_bytes, []
@@ -11929,7 +12066,12 @@ async def browser_mic_upload(request: Request):
     if not text or len(text) <= 2:
         return {"status": "silence"}
     # Filter hallucinations from browser mic too
-    if text in PHANTOMS or is_hallucination(text) or is_self_echo(text):
+    if (
+        text in PHANTOMS
+        or is_hallucination(text)
+        or is_self_echo(text)
+        or is_recent_speech_echo(text)
+    ):
         logger.debug(f"browser_mic: hallucination/echo filtered: '{text[:50]}'")
         return {"status": "noise"}
 
@@ -12149,7 +12291,14 @@ async def describe_vision():
 async def vision_status():
     cv2_ok = _try_import_cv2() is not None
     yolo_ok = _try_import_ultralytics() is not None
-    return {"enabled": _vision_enabled, "opencv": cv2_ok, "yolo": yolo_ok}
+    external = bool(VISION_SERVER_URL)
+    return {
+        "enabled": _vision_enabled or external,
+        "opencv": cv2_ok,
+        "yolo": yolo_ok or external,
+        "external_vision_server": external,
+        "vision_server_url": VISION_SERVER_URL or None,
+    }
 
 
 # ─── BROWSER CAMERA VISION ───────────────────────────────────────
@@ -12163,8 +12312,10 @@ _BROWSER_VISION_TTL: float = 8.0  # seconds
 @app.post("/api/vision/browser")
 async def ingest_browser_frame(file: UploadFile = File(...)):
     """
-    Receive a JPEG frame captured by the browser camera (or PiP feed).
-    Runs the same YOLO detection pipeline as the server webcam path.
+    Receive a JPEG frame captured by the browser camera (or PiP feed),
+    or forwarded from the Android native camera.
+    When VISION_SERVER_URL is set, proxy the frame to the external
+    YOLO vision server. Otherwise run detection locally.
     The resulting detections are merged into the agents' sensor context
     so they can describe what they see in natural language.
     """
@@ -12172,6 +12323,42 @@ async def ingest_browser_frame(file: UploadFile = File(...)):
     data = await file.read()
     if not data or len(data) < 500:
         return JSONResponse({"ok": False, "error": "frame too small"})
+
+    _avatar = current_avatar or "puppy"
+
+    if VISION_SERVER_URL:
+        proxy_resp = await _proxy_vision_frame(data, avatar=_avatar)
+        if proxy_resp and proxy_resp.get("detections"):
+            _browser_vision_detections = [
+                {
+                    "label": d.get("label", "object"),
+                    "confidence": float(d.get("conf", d.get("confidence", 0))),
+                    "x1": float(d.get("x", 0))
+                    * 1,  # normalized, will be normalized on return
+                    "y1": float(d.get("y", 0)) * 1,
+                    "x2": (float(d.get("x", 0)) + float(d.get("w", 0))) * 1,
+                    "y2": (float(d.get("y", 0)) + float(d.get("h", 0))) * 1,
+                }
+                for d in proxy_resp["detections"]
+            ]
+            _browser_vision_ts = time.time()
+            reply_text = proxy_resp.get("reply", "")
+            if not reply_text and _browser_vision_detections:
+                labels = sorted(set(d["label"] for d in _browser_vision_detections))
+                reply_text = "Camera sees: " + ", ".join(labels)
+            _browser_vision_description = reply_text
+
+            return {
+                "ok": True,
+                "detections": [
+                    {
+                        "label": d["label"],
+                        "confidence": round(d.get("confidence", 0), 2),
+                    }
+                    for d in _browser_vision_detections
+                ],
+                "description": _browser_vision_description,
+            }
 
     _, detections = await detect_objects(data)
     _browser_vision_detections = detections
@@ -13171,8 +13358,6 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 .chat-msg .chat-sender{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:#8b7a9e;margin-bottom:4px}
 .chat-msg .chat-content{white-space:pre-wrap;word-wrap:break-word}
 .chat-msg .chat-content.streaming{color:#8b7a9e;opacity:0.6}
-.chat-msg .chat-alpha{font-size:8px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#fff;
-  background:linear-gradient(135deg,#a78bfa,#8b7a9e);border-radius:6px;padding:1px 5px}
 .chat-msg.system{background:rgba(74,222,128,0.08);border:1px solid rgba(74,222,128,0.15);border-radius:12px;
   font-size:11px;color:rgba(58,138,106,0.8);font-style:italic;padding:6px 10px}
 .vc-thinking .chat-sender{display:none}
@@ -13214,7 +13399,6 @@ pre{position:relative;overflow-x:auto}
 .hive-typing-dots span{width:6px;height:6px;border-radius:50%;background:rgba(139,122,158,0.4);animation:thinkBounce 1.2s ease-in-out infinite}
 .hive-typing-dots span:nth-child(2){animation-delay:0.2s}
 .hive-typing-dots span:nth-child(3){animation-delay:0.4s}
-.hive-alpha-badge{display:inline-block;font-size:8px;font-weight:700;color:rgba(139,122,158,0.7);background:rgba(184,169,201,0.2);border:1px solid rgba(184,169,201,0.3);border-radius:6px;padding:1px 6px;margin-left:6px;vertical-align:middle;letter-spacing:0.5px}
 .hive-mode-btn{background:rgba(255,255,255,0.3);border:1px solid rgba(255,255,255,0.4);border-radius:12px;padding:4px 12px;font-size:10px;font-weight:600;color:rgba(93,78,109,0.5);cursor:pointer;transition:all 0.2s;letter-spacing:0.3px}
 .hive-mode-btn:hover{background:rgba(255,255,255,0.5);color:rgba(93,78,109,0.7)}
 .hive-mode-btn.active{background:rgba(139,122,158,0.25);border-color:rgba(139,122,158,0.5);color:#5d4e6d}
@@ -15007,9 +15191,8 @@ function addChatMessage(role,content,meta){
     // Use meta if provided (vibecode chat), otherwise fall back to selectedAvatar
     const avatarKey = (meta && meta.key) || selectedAvatar;
     const avatarMeta = chatAvatarMeta(avatarKey);
-    const emoji = (meta && meta.emoji) || avatarMeta.emoji;
     const name = (meta && meta.name) || avatarMeta.name;
-    html='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+'</div>'+html;
+    html='<div class="chat-sender">'+escapeHtml(name)+'</div>'+html;
   }
   div.innerHTML=html;
   chatMessages.appendChild(div);
@@ -15107,7 +15290,7 @@ async function sendCodingMessage(text){
       addChatMessage('assistant',d.reply, meta);
       displaySpeech(d.reply);
     }
-    if(d.audio_id)playAudio(d.audio_id);
+    if(d.audio_id){playAudio(d.audio_id); _lastPollAudioId = d.audio_id;}
   }catch(e){
     addChatMessage('assistant','Error: '+e.message);
   }
@@ -15162,7 +15345,7 @@ function renderHiveHistory(){
   }
   msgs.forEach(m => {
     if(m.type === 'user') addHiveUserMsg(m.text, true);
-    else if(m.type === 'agent') addHiveAgentMsg(m.char, m.name, m.role, m.text, true, m.alpha);
+    else if(m.type === 'agent') addHiveAgentMsg(m.char, m.name, m.role, m.text, true);
     else if(m.type === 'system') addHiveSystemMsg(m.text);
   });
   hiveMessages.scrollTop = hiveMessages.scrollHeight;
@@ -15370,7 +15553,7 @@ async function reactToCameraView(){
     const r = await fetch('/api/vision/react');
     const d = await r.json();
     if(d.reply) displaySpeech(d.reply);
-    if(d.audio_id) playAudio(d.audio_id);
+    if(d.audio_id){playAudio(d.audio_id); _lastPollAudioId = d.audio_id;}
   }catch(e){}
 }
 
@@ -15660,15 +15843,14 @@ function addHiveUserMsg(text, silent){
   }
 }
 
-function addHiveAgentMsg(char, name, role, text, silent, isAlpha){
+function addHiveAgentMsg(char, name, role, text, silent){
   const div = document.createElement('div');
   div.className = 'hive-msg';
   const colors = HIVE_COLORS[char] || HIVE_COLORS.puppy;
-  const badge = isAlpha ? '<span class="hive-alpha-badge">ALPHA</span>' : '';
   div.innerHTML = `
     <div class="hive-msg-avatar" style="background:${colors.bg};border-color:${colors.border}">${HIVE_EMOJIS[char]||'🐶'}</div>
     <div class="hive-msg-body">
-      <div class="hive-msg-name">${name} · ${role}${badge}</div>
+      <div class="hive-msg-name">${name} · ${role}</div>
       <div class="hive-msg-text" style="background:${colors.bg};border-color:${colors.border}">${renderCodeBlocks(text)}</div>
     </div>`;
   hiveMessages.appendChild(div);
@@ -15720,8 +15902,8 @@ async function sendHiveMessageUnified(text){
         showHiveTyping(resp.char);
         await new Promise(r => setTimeout(r, 400));
         removeHiveTyping();
-        addHiveAgentMsg(resp.char, resp.name, resp.role, resp.text, false, resp.alpha);
-        if(resp.audio_id) playAudio(resp.audio_id);
+        addHiveAgentMsg(resp.char, resp.name, resp.role, resp.text, false);
+        if(resp.audio_id){playAudio(resp.audio_id); _lastPollAudioId = resp.audio_id;}
         if(i < d.responses.length - 1) await new Promise(r => setTimeout(r, 150));
       }
     }
@@ -16001,9 +16183,10 @@ let heardTimer=null;
  }
 function setMouth(val){lastMouthVal=Math.max(0,Math.min(1,val))}
 
- let lastSpoken="",lastHeard="",lastSsml="";
- let isStreaming=false;
- let _firstPoll=true;
+  let lastSpoken="",lastHeard="",lastSsml="";
+  let isStreaming=false;
+  let _firstPoll=true;
+  let _lastPollAudioId=0;
 const inputField=document.getElementById('userInput');
 
 /* ─── Drag-and-drop file support (desktop/Windows) ─── */
@@ -16524,9 +16707,8 @@ async function sendStreamingReply(text){
   const msgDiv=document.createElement('div');
   msgDiv.className='chat-msg assistant';
   const avatarMeta=chatAvatarMeta(selectedAvatar);
-  const emoji=(avatarMeta.emoji||'🐶');
   const name=(avatarMeta.name||'Lilly');
-  msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+
+  msgDiv.innerHTML='<div class="chat-sender">'+escapeHtml(name)+
     '</div><div class="chat-content streaming"></div>';
   const contentEl=msgDiv.querySelector('.chat-content');
   contentEl.textContent='...';
@@ -16547,7 +16729,7 @@ async function sendStreamingReply(text){
         contentEl.textContent=d.reply;
         fullReply=d.reply;
         displaySpeech(d.reply);
-        if(d.audio_id)playAudio(d.audio_id);
+        if(d.audio_id){playAudio(d.audio_id); _lastPollAudioId = d.audio_id;}
       }
       return;
     }
@@ -16575,16 +16757,14 @@ async function sendStreamingReply(text){
             }else if(evt.type==='done'&&hasContent){
               // Use server-filtered reply if available, fall back to accumulated tokens
               const finalText = (evt.reply && evt.reply.trim()) ? evt.reply : fullReply;
-              // Use delegation info if present (Lilly handed off to a teammate)
-              let senderEmoji = emoji;
-              let senderName = name;
-              if(evt.delegate_to){
-                senderEmoji = evt.delegate_emoji || senderEmoji;
-                senderName = evt.delegate_name || senderName;
-              }
-              // Convert to rendered HTML (code blocks etc.) now that the reply is complete
-              msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+senderEmoji+'</span> '+escapeHtml(senderName)+
-                '</div><div class="chat-content">'+renderCodeBlocks(finalText)+'</div>';
+               // Use delegation info if present (Lilly handed off to a teammate)
+               let senderName = name;
+               if(evt.delegate_to){
+                 senderName = evt.delegate_name || senderName;
+               }
+               // Convert to rendered HTML (code blocks etc.) now that the reply is complete
+               msgDiv.innerHTML='<div class="chat-sender">'+escapeHtml(senderName)+
+                 '</div><div class="chat-content">'+renderCodeBlocks(finalText)+'</div>';
               displaySpeech(finalText);
               pupSpeech=finalText;
               speechTimer=999;
@@ -16593,6 +16773,7 @@ async function sendStreamingReply(text){
               if(evt.open_url)window.open(evt.open_url,'_blank','noopener,noreferrer');
             }else if(evt.type==='audio'){
               playAudio(evt.audio_id);
+              _lastPollAudioId = evt.audio_id;
             }else if(evt.type==='error'){
               contentEl.textContent='Sorry, something went wrong. Try again.';
               displaySpeech('Sorry, something went wrong.');
@@ -16614,18 +16795,16 @@ async function sendStreamingReply(text){
       if(d.reply){
         fullReply=d.reply;
         // Use delegation info if present
-        let fallbackEmoji = emoji;
         let fallbackName = name;
         if(d.delegate_to){
-          fallbackEmoji = d.delegate_emoji || fallbackEmoji;
           fallbackName = d.delegate_name || fallbackName;
         }
         // Render as HTML (with code blocks) since it's a complete message
-        msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+fallbackEmoji+'</span> '+escapeHtml(fallbackName)+
+        msgDiv.innerHTML='<div class="chat-sender">'+escapeHtml(fallbackName)+
           '</div><div class="chat-content">'+renderCodeBlocks(d.reply)+'</div>';
         displaySpeech(d.reply);
         lastSpoken=d.reply;
-        if(d.audio_id)playAudio(d.audio_id);
+        if(d.audio_id){playAudio(d.audio_id); _lastPollAudioId = d.audio_id;}
         if(d.look_at)setLookAt(d.look_at,5000);
         if(d.open_url)window.open(d.open_url,'_blank','noopener,noreferrer');
       }
@@ -16689,14 +16868,13 @@ function recordMicChunk(){
           const msgDiv=document.createElement('div');
           msgDiv.className='chat-msg assistant';
           const avatarMeta=chatAvatarMeta(selectedAvatar);
-          const emoji=(avatarMeta.emoji||'🐶');
           const name=(avatarMeta.name||'Lilly');
-          msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+
+          msgDiv.innerHTML='<div class="chat-sender">'+escapeHtml(name)+
             '</div><div class="chat-content">'+renderCodeBlocks(result.reply)+'</div>';
           chatMessages.appendChild(msgDiv);
           chatMessages.scrollTop=chatMessages.scrollHeight;
           displaySpeech(result.reply);
-          if(result.audio_id)playAudio(result.audio_id);
+          if(result.audio_id){playAudio(result.audio_id); _lastPollAudioId = result.audio_id;}
         }
       }
       else if(result.status==='silence'){
@@ -16824,7 +17002,10 @@ async function pollState(){
     if(d.spoken&&d.spoken!==lastSpoken){
       if(!_firstPoll){
         lastSpoken=d.spoken;displaySpeech(d.spoken);
-        if(d.audio_id){playAudio(d.audio_id)}
+        if(d.audio_id && d.audio_id !== _lastPollAudioId){
+          _lastPollAudioId = d.audio_id;
+          playAudio(d.audio_id);
+        }
       }
     }
     if(typeof d.conversation_mode==='boolean'){

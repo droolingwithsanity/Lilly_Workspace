@@ -4,19 +4,55 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Pastel purple background orb -->
     <path
-        android:fillColor="#FF6B9CE3"
-        android:pathData="M54,54m-40,0a40,40 0,1 1,80 0a40,40 0,1 1,-80 0" />
+        android:fillColor="#FFE8E4F0"
+        android:pathData="M54,54m-44,0a44,44 0,1 1,88 0a44,44 0,1 1,-88 0" />
+    <!-- Left ear -->
+    <path
+        android:fillColor="#FFC4C0CC"
+        android:pathData="M28,28 L18,10 Q24,8 30,14 Z" />
+    <!-- Right ear -->
+    <path
+        android:fillColor="#FFC4C0CC"
+        android:pathData="M80,28 L90,10 Q84,8 78,14 Z" />
+    <!-- Left ear inner -->
+    <path
+        android:fillColor="#FFF0D8E8"
+        android:pathData="M26,26 L20,14 Q24,12 28,18 Z" />
+    <!-- Right ear inner -->
+    <path
+        android:fillColor="#FFF0D8E8"
+        android:pathData="M82,26 L88,14 Q84,12 80,18 Z" />
+    <!-- Head -->
+    <path
+        android:fillColor="#FFD4D0DE"
+        android:pathData="M54,28m-24,0a24,24 0,1 1,48 0a24,24 0,1 1,-48 0" />
+    <!-- Left eye white -->
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M40,45m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+        android:pathData="M40,46m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+    <!-- Right eye white -->
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M68,45m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+        android:pathData="M68,46m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+    <!-- Left pupil -->
     <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M38,60 Q54,72 70,60"
+        android:fillColor="#FF3D2E52"
+        android:pathData="M40,46m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0" />
+    <!-- Right pupil -->
+    <path
+        android:fillColor="#FF3D2E52"
+        android:pathData="M68,46m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0" />
+    <!-- Nose -->
+    <path
+        android:fillColor="#FFD4A0B8"
+        android:pathData="M50,58 Q54,62 58,58 Q54,64 50,58 Z" />
+    <!-- Smile -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M46,68 Q54,76 62,68"
         android:strokeWidth="2"
-        android:strokeColor="#FFFFFFFF"
+        android:strokeColor="#FF5D4E6D"
         android:fillType="evenOdd" />
 </vector>

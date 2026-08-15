@@ -1,14 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Smart watch face overlay — circular frosty glass orb -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@android:color/transparent"
-    android:clipToOutline="false">
+    android:background="@drawable/watch_face_bg"
+    android:clipChildren="false"
+    android:clipToPadding="false">
 
     <WebView
         android:id="@+id/lillyWebView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="#00000000" />
+        android:background="#00000000"
+        android:clipChildren="false"
+        android:clipToPadding="false" />
 
 </FrameLayout>

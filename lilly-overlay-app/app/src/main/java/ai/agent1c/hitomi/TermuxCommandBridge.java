@@ -1,5 +1,6 @@
 package ai.agent1c.hitomi;
 
+import android.app.ActivityManager;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
@@ -87,6 +88,46 @@ public class TermuxCommandBridge {
         }
     }
 
+    public boolean isTermuxRunning() {
+        ActivityManager am = (ActivityManager) appContext.getSystemService(Context.ACTIVITY_SERVICE);
+        if (am == null) return false;
+        List<ActivityManager.RunningAppProcessInfo> procs = am.getRunningAppProcesses();
+        if (procs == null) return false;
+        for (ActivityManager.RunningAppProcessInfo p : procs) {
+            if (p.processName != null && p.processName.contains(TERMUX_PACKAGE)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public void ensureTermuxRunning(Callback callback) {
+        if (isTermuxRunning()) {
+            if (callback != null) {
+                Result r = new Result();
+                r.exitCode = 0;
+                r.stdout = "RUNNING";
+                callback.onResult(r);
+            }
+            return;
+        }
+        try {
+            Intent launch = appContext.getPackageManager().getLaunchIntentForPackage(TERMUX_PACKAGE);
+            if (launch != null) {
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                launch.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                appContext.startActivity(launch);
+            }
+        } catch (Exception ignored) {
+        }
+        if (callback != null) {
+            Result r = new Result();
+            r.exitCode = 1;
+            r.errorMessage = "Termux not running — opened Termux, please wait ~3s and try again";
+            callback.onResult(r);
+        }
+    }
+
     public void runTestCommand(Callback callback) {
         runCommand(
             "/data/data/com.termux/files/usr/bin/sh",
@@ -111,10 +152,30 @@ public class TermuxCommandBridge {
         }
         if (!isRunCommandServiceAvailable()) {
             Result r = new Result();
-            r.errorMessage = "RunCommandService unavailable";
+            r.errorMessage = "RunCommandService unavailable — open Termux at least once";
             callback.onResult(r);
             return;
         }
+
+        // If Termux is not running, try to start it and retry once
+        if (!isTermuxRunning()) {
+            ensureTermuxRunning(new Callback() {
+                @Override
+                public void onResult(Result result) {
+                    if (result.exitCode == 0 && isTermuxRunning()) {
+                        // Retry the original command after a short delay
+                        mainHandler.postDelayed(() ->
+                            runCommand(path, args, workDir, timeoutMs, callback), 3000);
+                    } else {
+                        Result r = new Result();
+                        r.errorMessage = "Termux is not running — please open Termux first";
+                        callback.onResult(r);
+                    }
+                }
+            });
+            return;
+        }
+
         final int reqId = nextReqId.incrementAndGet();
         callbacks.put(reqId, callback);
 
@@ -158,6 +219,65 @@ public class TermuxCommandBridge {
             Result r = new Result();
             r.errorMessage = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             callback.onResult(r);
+        }
+    }
+
+    // ─── Termux permission helpers ────────────────────────────────────────
+    // Request a single Android permission via Termux's permission-request helper.
+    // Returns true if Termux launched the permission UI, false on failure.
+    public boolean requestTermuxPermission(String permission) {
+        if (!isTermuxInstalled()) return false;
+        String termuxPerm = mapAndroidToTermuxPermission(permission);
+        if (termuxPerm == null) return false;
+        try {
+            Intent intent = new Intent(ACTION_TERMUX_RUN);
+            intent.setComponent(new ComponentName(TERMUX_PACKAGE, TERMUX_RUN_SERVICE));
+            intent.putExtra(EXTRA_PATH, "termux-permission-request");
+            intent.putExtra(EXTRA_ARGS, new String[]{termuxPerm});
+            intent.putExtra(EXTRA_BG, true);
+            intent.putExtra(EXTRA_SESSION_ACTION, "0");
+            intent.putExtra(EXTRA_STDIN, "");
+            appContext.startService(intent);
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to request Termux permission: " + termuxPerm, e);
+            return false;
+        }
+    }
+
+    // Check whether Termux appears to have a given permission.
+    public boolean hasTermuxPermission(String permission) {
+        String termuxPerm = mapAndroidToTermuxPermission(permission);
+        if (termuxPerm == null) return false;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            return appContext.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
+        }
+        return true;
+    }
+
+    // Map Android runtime permissions to Termux permission-request arguments.
+    private static String mapAndroidToTermuxPermission(String androidPermission) {
+        switch (androidPermission) {
+            case android.Manifest.permission.CAMERA:
+                return "android.permission.CAMERA";
+            case android.Manifest.permission.RECORD_AUDIO:
+                return "android.permission.RECORD_AUDIO";
+            case android.Manifest.permission.ACCESS_FINE_LOCATION:
+                return "android.permission.ACCESS_FINE_LOCATION";
+            case android.Manifest.permission.ACCESS_COARSE_LOCATION:
+                return "android.permission.ACCESS_COARSE_LOCATION";
+            case android.Manifest.permission.BODY_SENSORS:
+                return "android.permission.BODY_SENSORS";
+            case android.Manifest.permission.ACTIVITY_RECOGNITION:
+                return "android.permission.ACTIVITY_RECOGNITION";
+            case android.Manifest.permission.READ_EXTERNAL_STORAGE:
+                return "android.permission.READ_EXTERNAL_STORAGE";
+            case android.Manifest.permission.WRITE_EXTERNAL_STORAGE:
+                return "android.permission.WRITE_EXTERNAL_STORAGE";
+            case android.Manifest.permission.POST_NOTIFICATIONS:
+                return "android.permission.POST_NOTIFICATIONS";
+            default:
+                return null;
         }
     }
 

@@ -118,7 +118,7 @@ def get_pair_token() -> str:
 
 
 PAIR_TOKEN = get_pair_token()
-logger.info(f"Pair token: {PAIR_TOKEN}")
+logger.info("Pair token loaded")
 
 
 def _run_async(coro):
@@ -614,7 +614,6 @@ def status():
             "version": "3.5",
             "llama_available": _llama_available(),
             "llama_url": LLAMA_URL,
-            "pair_token": PAIR_TOKEN,
             "port": 8097,
             "bt_profiles_loaded": _BT_PROFILES_LOADED,
         }
@@ -652,6 +651,113 @@ def read_sensor_endpoint():
     if sensor_name:
         return jsonify(_run_async(read_sensor(sensor_name)))
     return jsonify({"error": "sensor name required"}), 400
+
+
+# ── Sensor server proxy ───────────────────────────────────────────────────────
+# The class-based sensor server runs on :8099. These endpoints proxy requests
+# so the overlay / web UI can pull sensor data without knowing the backend port.
+
+import urllib.request as _urllib_request
+import urllib.error as _urllib_error
+
+_SENSOR_SERVER_URL = os.environ.get("SENSOR_SERVER_URL", "http://127.0.0.1:8099")
+
+
+def _proxy_sensor_request(path: str, timeout: float = 5.0):
+    """Forward a GET request to the sensor server and return the parsed JSON."""
+    url = f"{_SENSOR_SERVER_URL}{path}"
+    try:
+        req = _urllib_request.Request(url, method="GET")
+        with _urllib_request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data
+    except Exception as exc:
+        logger.debug(f"Sensor proxy failed for {path}: {exc}")
+        return {"error": str(exc)}
+
+
+@app.route("/api/sensors/all", methods=["GET"])
+def sensors_all_endpoint():
+    """Proxy to sensor server — all cached sensor readings."""
+    data = _proxy_sensor_request("/sensors/all")
+    return jsonify(data)
+
+
+@app.route("/api/sensors/all/live", methods=["GET"])
+def sensors_all_live_endpoint():
+    """Proxy to sensor server — force fresh read of all sensors."""
+    data = _proxy_sensor_request("/sensors/all/live")
+    return jsonify(data)
+
+
+@app.route("/api/sensors/<path:name>", methods=["GET"])
+def sensors_by_name_endpoint(name):
+    """Proxy to sensor server — single sensor cached or live."""
+    if name.endswith("/live"):
+        path = f"/sensors/{name}"
+    else:
+        path = f"/sensors/{name}"
+    data = _proxy_sensor_request(path)
+    return jsonify(data)
+
+
+@app.route("/api/sensors/list", methods=["GET"])
+def sensors_list_endpoint():
+    """Proxy to sensor server — list available sensors."""
+    data = _proxy_sensor_request("/sensors/list")
+    return jsonify(data)
+
+
+@app.route("/api/battery", methods=["GET"])
+def battery_endpoint():
+    """Proxy to sensor server — battery status."""
+    data = _proxy_sensor_request("/battery")
+    return jsonify(data)
+
+
+@app.route("/api/location", methods=["GET"])
+def location_endpoint():
+    """Proxy to sensor server — location."""
+    data = _proxy_sensor_request("/location")
+    return jsonify(data)
+
+
+@app.route("/api/bluetooth/scan", methods=["GET"])
+def bluetooth_scan_endpoint():
+    """Proxy to sensor server — Bluetooth scan."""
+    data = _proxy_sensor_request("/bluetooth/scan")
+    return jsonify(data)
+
+
+@app.route("/api/wifi/scan", methods=["GET"])
+def wifi_scan_endpoint():
+    """Proxy to sensor server — WiFi scan."""
+    data = _proxy_sensor_request("/wifi/scan")
+    return jsonify(data)
+
+
+@app.route("/api/notification/list", methods=["GET"])
+def notification_list_endpoint():
+    """Proxy to sensor server — notifications."""
+    data = _proxy_sensor_request("/notification/list")
+    return jsonify(data)
+
+
+@app.route("/api/data", methods=["GET"])
+def data_files_endpoint():
+    """Proxy to sensor server — list pullable data files."""
+    data = _proxy_sensor_request("/data")
+    return jsonify(data)
+
+
+@app.route("/api/data/<path:filename>", methods=["GET"])
+def data_file_endpoint(filename):
+    """Proxy to sensor server — pull raw JSON data file."""
+    data = _proxy_sensor_request(f"/data/{filename}")
+    return jsonify(data)
+
+
+# ── Mic data ──────────────────────────────────────────────────────────────────
 
 
 @app.route("/api/mic/data", methods=["GET"])
@@ -956,5 +1062,75 @@ def internal_error(error):
 
 
 if __name__ == "__main__":
-    logger.info("Starting Lilly Phone Server on :8097 (overlay APK owns :8099)")
-    app.run(host="0.0.0.0", port=8097, debug=False, threaded=True)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Lilly Phone Server")
+    parser.add_argument("--port", type=int, default=8097, help="Port to listen on")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="run",
+        choices=["run", "start", "stop", "restart", "status"],
+    )
+    args = parser.parse_args()
+
+    PID_FILE = Path.home() / "lilly_phone_server" / ".phone_server.pid"
+
+    def is_running():
+        if PID_FILE.exists():
+            try:
+                pid = int(PID_FILE.read_text().strip())
+                os.kill(pid, 0)
+                return True
+            except (OSError, ValueError):
+                PID_FILE.unlink(missing_ok=True)
+        return False
+
+    def stop_server():
+        if is_running():
+            pid = int(PID_FILE.read_text().strip())
+            try:
+                os.kill(pid, 15)  # SIGTERM
+                import time
+
+                for _ in range(10):
+                    try:
+                        os.kill(pid, 0)
+                        time.sleep(0.3)
+                    except OSError:
+                        break
+                PID_FILE.unlink(missing_ok=True)
+                logger.info("Phone server stopped.")
+            except OSError:
+                PID_FILE.unlink(missing_ok=True)
+        else:
+            logger.info("Phone server not running.")
+
+    if args.command == "stop":
+        stop_server()
+        exit(0)
+
+    if args.command == "status":
+        if is_running():
+            logger.info(f"Phone server running (PID: {PID_FILE.read_text().strip()})")
+        else:
+            logger.info("Phone server stopped.")
+        exit(0)
+
+    if args.command == "restart":
+        stop_server()
+        import time
+
+        time.sleep(1)
+
+    if args.command in ("run", "start", "restart"):
+        # Stop any existing instance on the same port
+        if is_running():
+            logger.info("Stopping existing instance...")
+            stop_server()
+
+        logger.info(
+            f"Starting Lilly Phone Server on {args.host}:{args.port} (overlay APK owns :8099)"
+        )
+        app.run(host=args.host, port=args.port, debug=False, threaded=True)

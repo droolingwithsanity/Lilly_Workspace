@@ -472,6 +472,12 @@ public class LillyHttpServer extends NanoHTTPD {
         return m.find() ? m.group(0) : null;
     }
 
+    /** Public accessor so the overlay service can self-detect Watch Together
+     *  (which video app is in the foreground) without a remote round-trip. */
+    public String getForegroundPackage() {
+        return foregroundPkg();
+    }
+
     // ─── Background poller (mirrors termux_sensor_server.py loop) ─
 
     private void pollLoop() {

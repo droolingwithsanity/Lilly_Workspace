@@ -31,13 +31,13 @@ body{
 #container{
   width:96px;height:96px;
   position:relative;
-  /* Collapsed: transparent so the avatar floats over any app */
-  background:transparent;
-  backdrop-filter:blur(0);
-  -webkit-backdrop-filter:blur(0);
+  /* Collapsed: smart watch face — subtle frosted glass orb */
+  background:radial-gradient(circle at 35% 30%,rgba(255,255,255,0.35),rgba(255,255,255,0.08) 70%,rgba(255,255,255,0.02));
+  backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
   border-radius:50%;
-  border:none;
-  box-shadow:none;
+  border:2px solid rgba(255,255,255,0.45);
+  box-shadow:0 4px 20px rgba(180,140,180,0.18), inset 0 1px 2px rgba(255,255,255,0.4);
   transition:all 0.3s;
   overflow:hidden;
 }
@@ -320,6 +320,27 @@ body.expanded #aurora{opacity:1}
 }
 #avatarFlash.show{opacity:1}
 
+/* ─── Watch Together badge (video playing, Lilly watching with you) ─── */
+#watchBadge{
+  position:absolute;top:10px;right:10px;
+  font-size:9px;color:rgba(255,255,255,0.92);
+  background:rgba(17,24,39,0.55);
+  border:1px solid rgba(255,255,255,0.18);
+  padding:3px 7px;border-radius:999px;
+  letter-spacing:0.4px;
+  display:flex;align-items:center;gap:4px;
+  opacity:0;transform:translateY(-4px);
+  transition:opacity 0.35s,transform 0.35s;
+  z-index:8;pointer-events:none;white-space:nowrap;
+}
+#watchBadge.show{opacity:1;transform:translateY(0)}
+#watchBadge .wb-dot{
+  width:5px;height:5px;border-radius:50%;
+  background:#f87171;box-shadow:0 0 6px #f87171;
+  animation:wbPulse 1.6s ease-in-out infinite;
+}
+@keyframes wbPulse{0%,100%{opacity:1}50%{opacity:0.35}}
+
 /* ─── Emergency Kill Switch ─── */
 #killSwitchBtn{
   position:absolute;top:8px;right:8px;
@@ -450,6 +471,94 @@ body.expanded #aurora{opacity:1}
   box-shadow:0 8px 40px var(--bubble-shadow);
 }
 #fetchGamePanel.show{display:flex;opacity:1}
+
+/* ─── Radial Menu (watch-face style) ─── */
+#radialMenu{
+  position:absolute;top:0;left:0;width:100%;height:100%;
+  pointer-events:none;z-index:15;opacity:0;
+  transition:opacity 0.3s;
+}
+#radialMenu.open{opacity:1;pointer-events:auto}
+.radial-arm{
+  position:absolute;top:48%;left:50%;
+  width:0;height:0;
+}
+.radial-item{
+  position:absolute;top:-24px;left:-24px;
+  width:48px;height:48px;border-radius:50%;
+  background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);
+  display:flex;align-items:center;justify-content:center;
+  flex-direction:column;gap:1px;
+  cursor:pointer;pointer-events:auto;
+  box-shadow:0 4px 16px var(--bubble-shadow);
+  opacity:0;
+  transform:rotate(var(--angle)) translate(72px) rotate(calc(-1 * var(--angle))) scale(0.3);
+  transition:all 0.35s cubic-bezier(0.175,0.885,0.32,1.275);
+  font-size:10px;color:var(--text-primary);text-align:center;
+}
+#radialMenu.open .radial-item{
+  opacity:1;
+  transform:rotate(var(--angle)) translate(72px) rotate(calc(-1 * var(--angle))) scale(1);
+}
+#radialMenu.open .radial-arm:nth-child(1) .radial-item{transition-delay:0.00s}
+#radialMenu.open .radial-arm:nth-child(2) .radial-item{transition-delay:0.04s}
+#radialMenu.open .radial-arm:nth-child(3) .radial-item{transition-delay:0.08s}
+#radialMenu.open .radial-arm:nth-child(4) .radial-item{transition-delay:0.12s}
+#radialMenu.open .radial-arm:nth-child(5) .radial-item{transition-delay:0.16s}
+#radialMenu.open .radial-arm:nth-child(6) .radial-item{transition-delay:0.20s}
+.radial-item .ri-icon{font-size:18px;line-height:1}
+.radial-item .ri-label{font-size:8px;letter-spacing:0.3px;text-transform:uppercase}
+.radial-item:active{filter:brightness(1.1);background:rgba(255,255,255,0.7)}
+
+/* ─── Feature Cards (slide-up panels) ─── */
+#featurePanel{
+  position:absolute;bottom:0;left:0;width:100%;height:100%;
+  background:var(--glass-bg);
+  backdrop-filter:var(--glass-blur);
+  -webkit-backdrop-filter:var(--glass-blur);
+  border:1px solid var(--glass-border);
+  border-radius:22px;padding:12px;
+  display:none;flex-direction:column;gap:10px;z-index:25;
+  box-shadow:0 8px 40px var(--bubble-shadow);
+  overflow-y:auto;
+}
+#featurePanel.show{display:flex;opacity:1}
+.feat-header{
+  display:flex;justify-content:space-between;align-items:center;
+  font-size:11px;font-weight:600;color:var(--text-primary);
+  text-transform:uppercase;letter-spacing:0.5px;
+}
+#featureCloseBtn{
+  width:22px;height:22px;border-radius:50%;border:none;
+  background:rgba(239,68,68,0.3);color:#ef4444;
+  font-size:10px;cursor:pointer;display:flex;
+  align-items:center;justify-content:center;transition:all 0.2s;
+}
+#featureCloseBtn:hover{background:rgba(239,68,68,0.5)}
+.feat-grid{
+  display:grid;grid-template-columns:1fr 1fr;gap:8px;
+}
+.feat-card{
+  background:rgba(255,255,255,0.3);
+  border:1px solid var(--glass-border);
+  border-radius:14px;padding:10px;
+  display:flex;flex-direction:column;gap:4px;
+}
+.feat-card .fc-icon{font-size:20px}
+.feat-card .fc-title{font-size:10px;font-weight:600;color:var(--text-primary);text-transform:uppercase;letter-spacing:0.4px}
+.feat-card .fc-value{font-size:16px;font-weight:700;color:var(--text-primary);font-family:monospace}
+.feat-card .fc-sub{font-size:9px;color:var(--text-secondary)}
+.feat-card.wide{grid-column:span 2}
+.feat-advice{
+  background:rgba(255,255,255,0.25);
+  border:1px solid var(--glass-border);
+  border-radius:14px;padding:10px;
+  font-size:11px;line-height:1.45;color:var(--text-primary);
+  font-style:italic;
+}
 </style>
 </head>
 <body>
@@ -457,6 +566,7 @@ body.expanded #aurora{opacity:1}
   <canvas id="pupCanvas" width="320" height="240"></canvas>
   <div id="dragHandle"></div>
   <div id="avatarFlash"></div>
+  <div id="watchBadge"><span class="wb-dot"></span>watching with you</div>
   <div id="closeHint">✕</div>
   <!-- Emergency kill switch button (hidden by default, triple-tap avatar to enable) -->
   <button id="killSwitchBtn" onclick="toggleKillSwitch()" style="display:none">
@@ -610,6 +720,27 @@ body.expanded #aurora{opacity:1}
     <div id="frisbeeSprite" style="position:absolute;width:16px;height:16px;border-radius:50%;background:#4ADE80;box-shadow:0 0 6px rgba(74,222,128,0.5);pointer-events:none;display:none"></div>
     <!-- Target marker -->
     <div id="arTarget" style="position:absolute;width:20px;height:20px;border:2px dashed rgba(244,114,182,0.5);border-radius:50%;pointer-events:none;display:none"></div>
+  </div>
+
+  <!-- ─── Radial Menu (long-press to open, auto-dismiss on select) ─── -->
+  <div id="radialMenu">
+    <div class="radial-arm" style="--angle:0deg"><button class="radial-item" onclick="openFeature('vision')"><span class="ri-icon">👁️</span><span class="ri-label">Vision</span></button></div>
+    <div class="radial-arm" style="--angle:45deg"><button class="radial-item" onclick="openFeature('orientation')"><span class="ri-icon">🧭</span><span class="ri-label">Motion</span></button></div>
+    <div class="radial-arm" style="--angle:90deg"><button class="radial-item" onclick="openFeature('acoustics')"><span class="ri-icon">🎤</span><span class="ri-label">Sound</span></button></div>
+    <div class="radial-arm" style="--angle:135deg"><button class="radial-item" onclick="openFeature('touch')"><span class="ri-icon">👆</span><span class="ri-label">Touch</span></button></div>
+    <div class="radial-arm" style="--angle:180deg"><button class="radial-item" onclick="openFeature('proximity')"><span class="ri-icon">📡</span><span class="ri-label">Proximity</span></button></div>
+    <div class="radial-arm" style="--angle:225deg"><button class="radial-item" onclick="openFeature('ambient')"><span class="ri-icon">💡</span><span class="ri-label">Ambient</span></button></div>
+    <div class="radial-arm" style="--angle:270deg"><button class="radial-item" onclick="openFeature('chat')"><span class="ri-icon">💬</span><span class="ri-label">Chat</span></button></div>
+    <div class="radial-arm" style="--angle:315deg"><button class="radial-item" onclick="openFeature('games')"><span class="ri-icon">🎮</span><span class="ri-label">Games</span></button></div>
+  </div>
+
+  <!-- ─── Feature Detail Panel ─── -->
+  <div id="featurePanel">
+    <div class="feat-header">
+      <span id="featTitle">Feature</span>
+      <button id="featureCloseBtn" onclick="closeFeature()">✕</button>
+    </div>
+    <div id="featContent"></div>
   </div>
 </div>
 <script>
@@ -1076,6 +1207,18 @@ function _heardIsSpurious(text){
   const s=text.toLowerCase().replace(/[.!?,]+$/,' ').trim();
   if(/^(thank|thanks|thankyou|ty)\b/.test(s))return true;
   if(/\b(subscribe|like\s+and\s+subscribe|please\s+subscribe|smash\s+(the\s+)?subscribe)\b/.test(s))return true;
+  // Reject if it overlaps with what Lilly just said on the server
+  if(typeof spoken==='string' && spoken.trim().length>2){
+    const spoke=spoken.toLowerCase().replace(/[.!?,]+$/,' ').trim();
+    if(spoke.includes(s) || s.includes(spoke))return true;
+    const sWords=s.split(/\s+/).filter(Boolean);
+    const spokeWords=spoke.split(/\s+/).filter(Boolean);
+    if(sWords.length && spokeWords.length){
+      const intersection=sWords.filter(w=>spokeWords.includes(w));
+      const ratio=intersection.length/Math.max(sWords.length, spokeWords.length, 1);
+      if(ratio>=0.25)return true;
+    }
+  }
   return false;
 }
 
@@ -2555,6 +2698,655 @@ async function pollPhoneState(){
 }
 setInterval(pollPhoneState,15000);
 pollPhoneState();
+
+// ─── Radial Menu (double-tap head to open) ──────────────────────
+const radialMenu=document.getElementById('radialMenu');
+const featurePanel=document.getElementById('featurePanel');
+const featTitle=document.getElementById('featTitle');
+const featContent=document.getElementById('featContent');
+let lastTapTime=0;
+let radialOpen=false;
+let featureHideTimer=null;
+
+function showRadial(){
+  if(radialOpen)return;
+  radialOpen=true;
+  radialMenu.classList.add('open');
+}
+function hideRadial(){
+  radialOpen=false;
+  radialMenu.classList.remove('open');
+}
+function toggleRadial(){
+  radialOpen?hideRadial():showRadial();
+}
+
+// Double-tap detection on the head/dragHandle
+document.getElementById('dragHandle').addEventListener('touchend',function(e){
+  const now=Date.now();
+  if(now-lastTapTime<300){
+    // Double tap
+    e.preventDefault();
+    e.stopPropagation();
+    toggleRadial();
+  }
+  lastTapTime=now;
+});
+document.getElementById('pupCanvas').addEventListener('touchend',function(e){
+  const now=Date.now();
+  if(now-lastTapTime<300){
+    e.preventDefault();
+    e.stopPropagation();
+    toggleRadial();
+  }
+  lastTapTime=now;
+});
+// Mouse double-click for browser preview
+document.getElementById('dragHandle').addEventListener('dblclick',function(e){
+  e.preventDefault();e.stopPropagation();toggleRadial();
+});
+document.getElementById('pupCanvas').addEventListener('dblclick',function(e){
+  e.preventDefault();e.stopPropagation();toggleRadial();
+});
+
+// Close radial when tapping outside
+document.addEventListener('touchstart',function(e){
+  if(!radialMenu.contains(e.target)&&!featurePanel.contains(e.target))hideRadial();
+});
+document.addEventListener('mousedown',function(e){
+  if(!radialMenu.contains(e.target)&&!featurePanel.contains(e.target))hideRadial();
+});
+
+// ─── Feature Panels ──────────────────────────────────────────────
+const FEATURE_PERMS={
+  vision:['android.permission.CAMERA'],
+  orientation:['android.permission.BODY_SENSORS','android.permission.ACTIVITY_RECOGNITION'],
+  acoustics:['android.permission.RECORD_AUDIO'],
+  touch:[],
+  proximity:['android.permission.BODY_SENSORS'],
+  ambient:[],
+  chat:['android.permission.RECORD_AUDIO'],
+  games:['android.permission.CAMERA','android.permission.RECORD_AUDIO','android.permission.ACCESS_FINE_LOCATION']
+};
+
+async function ensureFeaturePermissions(name){
+  const needed=(FEATURE_PERMS[name]||[]);
+  if(!needed.length)return true;
+  if(typeof LillyBridge==='undefined')return false;
+  const missing=needed.filter(p=>!LillyBridge.hasPermission(p));
+  if(!missing.length)return true;
+  const labels=missing.map(p=>LillyBridge.getPermissionLabel(p)).join(', ');
+  if(!confirm('Lilly needs ' + labels + ' permission for this feature. Allow?'))return false;
+  let ok=true;
+  for(const p of missing){
+    if(!LillyBridge.requestPermission(p)){ok=false;break;}
+  }
+  return ok;
+}
+
+function openFeature(name){
+  hideRadial();
+  showFeaturePanel(name);
+}
+function closeFeature(){
+  featurePanel.classList.remove('show');
+  if(featureHideTimer)clearTimeout(featureHideTimer);
+}
+function autoHideFeature(delay){
+  if(featureHideTimer)clearTimeout(featureHideTimer);
+  featureHideTimer=setTimeout(closeFeature,delay||8000);
+}
+
+async function showFeaturePanel(name){
+  featTitle.textContent=name.charAt(0).toUpperCase()+name.slice(1);
+  featContent.innerHTML='<div style="text-align:center;padding:20px;color:var(--text-secondary)">Loading...</div>';
+  featurePanel.classList.add('show');
+  autoHideFeature(15000);
+  if(!await ensureFeaturePermissions(name)){
+    featContent.innerHTML='<div style="text-align:center;padding:20px;color:#ef4444">Permission required — try again later</div>';
+    return;
+  }
+  try{
+    const r=await apiFetch('/api/features?panel='+encodeURIComponent(name));
+    const d=await r.json();
+    renderFeatureCard(name,d);
+  }catch(e){
+    featContent.innerHTML='<div style="text-align:center;padding:20px;color:#ef4444">Unavailable right now</div>';
+  }
+}
+
+function renderFeatureCard(name,data){
+  let html='';
+  if(name==='fitness'){
+    html=`
+      <div class="feat-grid">
+        <div class="feat-card">
+          <span class="fc-icon">👣</span>
+          <span class="fc-title">Steps</span>
+          <span class="fc-value">${data.steps||0}</span>
+          <span class="fc-sub">today</span>
+        </div>
+        <div class="feat-card">
+          <span class="fc-icon">🔥</span>
+          <span class="fc-title">Active</span>
+          <span class="fc-value">${data.active_min||0} min</span>
+          <span class="fc-sub">${data.calories||0} kcal</span>
+        </div>
+        <div class="feat-card wide">
+          <span class="fc-icon">⚡</span>
+          <span class="fc-title">Energy</span>
+          <span class="fc-value" style="font-size:13px">${data.energy_note||'Keep moving!'}</span>
+          <span class="fc-sub">Based on motion + battery</span>
+        </div>
+      </div>`;
+  }else if(name==='sleep'){
+    html=`
+      <div class="feat-grid">
+        <div class="feat-card">
+          <span class="fc-icon">😴</span>
+          <span class="fc-title">Last Sleep</span>
+          <span class="fc-value">${data.sleep_hours||'--'}h</span>
+          <span class="fc-sub">${data.sleep_quality||'no data'}</span>
+        </div>
+        <div class="feat-card">
+          <span class="fc-icon">⏰</span>
+          <span class="fc-title">Wake</span>
+          <span class="fc-value">${data.wake_time||'--'}</span>
+          <span class="fc-sub">${data.bedtime||'estimate'}</span>
+        </div>
+        <div class="feat-card wide">
+          <span class="fc-icon">🌙</span>
+          <span class="fc-title">Tonight</span>
+          <span class="fc-value" style="font-size:13px">${data.sleep_tip||'Try winding down without screens 30 min before bed.'}</span>
+        </div>
+      </div>`;
+  }else if(name==='mental'){
+    html=`
+      <div class="feat-grid">
+        <div class="feat-card">
+          <span class="fc-icon">😊</span>
+          <span class="fc-title">Mood</span>
+          <span class="fc-value">${data.mood||'neutral'}</span>
+          <span class="fc-sub">last 24h</span>
+        </div>
+        <div class="feat-card">
+          <span class="fc-icon">🧘</span>
+          <span class="fc-title">Focus</span>
+          <span class="fc-value">${data.focus||'--'} min</span>
+          <span class="fc-sub">deep work</span>
+        </div>
+        <div class="feat-card wide">
+          <span class="fc-icon">💭</span>
+          <span class="fc-title">Thought</span>
+          <span class="fc-value" style="font-size:13px">${data.mental_note||'You\'re doing fine. One small win today?'}</span>
+        </div>
+      </div>`;
+  }else if(name==='conversation'){
+    html=`
+      <div class="feat-grid">
+        <div class="feat-card wide">
+          <span class="fc-icon">💬</span>
+          <span class="fc-title">Recent Chat</span>
+          <span class="fc-value" style="font-size:12px;font-family:inherit">${data.recent||'No recent messages.'}</span>
+        </div>
+        <div class="feat-card wide">
+          <span class="fc-icon">📌</span>
+          <span class="fc-title">Topics</span>
+          <span class="fc-value" style="font-size:12px;font-family:inherit">${data.topics||'General conversation'}</span>
+        </div>
+      </div>`;
+  }else if(name==='advice'){
+    html=`
+      <div class="feat-advice">${data.advice||'Take a breath. You\'ve got this.'}</div>
+      <div style="font-size:9px;color:var(--text-tertiary);text-align:right;margin-top:4px">— ${data.source||'Lilly'}</div>`;
+  }else if(name==='sensors'){
+    const sensors=data.sensors||{};
+    const entries=Object.entries(sensors).slice(0,8).map(([k,v])=>`<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid rgba(93,78,109,0.08)"><span style="color:var(--text-secondary);font-size:10px;text-transform:capitalize">${k.replace(/_/g,' ')}</span><span style="color:var(--text-primary);font-size:10px;font-family:monospace">${Array.isArray(v)?v.map(x=>typeof x==='number'?x.toFixed(2):x).join(', '):v}</span></div>`).join('');
+    html=`<div class="feat-card wide" style="background:transparent;border:none;box-shadow:none;padding:0"><div style="max-height:200px;overflow-y:auto">${entries||'No sensor data yet'}</div></div>`;
+  }else if(name==='vision'){
+    html=`<div class="feat-card wide" style="padding:0;overflow:hidden">
+      <div style="position:relative;width:100%;aspect-ratio:4/3;background:#000;border-radius:12px;overflow:hidden">
+        <video id="visionCamera" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:block"></video>
+        <canvas id="visionAR" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none"></canvas>
+        <div id="visionDepth" style="position:absolute;bottom:6px;left:6px;font-size:9px;color:#fff;background:rgba(0,0,0,0.55);padding:3px 8px;border-radius:999px;backdrop-filter:blur(6px)">Depth: --</div>
+      </div>
+      <div style="padding:8px 6px 0">
+        <div style="font-size:9px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.4px;margin-bottom:4px">Live Camera</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="iconBtn" id="visionSnapBtn" style="background:rgba(74,222,128,0.2);color:#4ade80;width:auto;height:auto;padding:6px 10px;border-radius:10px;font-size:10px">📸 Snap</button>
+          <button class="iconBtn" id="visionARModeBtn" style="background:rgba(56,189,248,0.2);color:#7dd3fc;width:auto;height:auto;padding:6px 10px;border-radius:10px;font-size:10px">🧭 AR</button>
+        </div>
+      </div>
+    </div>`;
+    visionPanelReady=true;
+  }else if(name==='orientation'){
+    html=`<div class="feat-grid"><div class="feat-card"><span class="fc-icon">🧭</span><span class="fc-title">Gyroscope</span><span class="fc-value">${data.gyro||'--'}</span><span class="fc-sub">rad/s</span></div><div class="feat-card"><span class="fc-icon">📐</span><span class="fc-title">Accel</span><span class="fc-value">${data.accel||'--'}</span><span class="fc-sub">m/s²</span></div></div>`;
+  }else if(name==='acoustics'){
+    html=`<div class="feat-card wide" style="padding:0;overflow:hidden">
+      <div style="position:relative;width:100%;height:120px;background:linear-gradient(180deg,rgba(15,23,42,0.9),rgba(15,23,42,0.75));border-radius:12px;overflow:hidden">
+        <canvas id="audioVisCanvas" style="width:100%;height:100%;display:block"></canvas>
+        <div id="audioLevel" style="position:absolute;top:6px;right:6px;font-size:9px;color:#4ade80;background:rgba(0,0,0,0.55);padding:3px 8px;border-radius:999px;backdrop-filter:blur(6px)">Level: --</div>
+      </div>
+      <div style="padding:8px 6px 0">
+        <div style="font-size:9px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.4px;margin-bottom:4px">Live Microphone</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="iconBtn" id="audioStartBtn" style="background:rgba(74,222,128,0.2);color:#4ade80;width:auto;height:auto;padding:6px 10px;border-radius:10px;font-size:10px">🎤 Start</button>
+          <button class="iconBtn" id="audioStopBtn" style="background:rgba(239,68,68,0.2);color:#ef4444;width:auto;height:auto;padding:6px 10px;border-radius:10px;font-size:10px;display:none">⏹ Stop</button>
+        </div>
+      </div>
+    </div>`;
+    audioPanelReady=true;
+  }else if(name==='touch'){
+    html=`<div class="feat-card wide"><span class="fc-icon">👆</span><span class="fc-title">Touch & Pressure</span><span class="fc-value" style="font-size:12px">${data.touch||'Touchscreen active'}</span><span class="fc-sub">${data.fingerprint||'Fingerprint sensor'}</span></div>`;
+  }else if(name==='proximity'){
+    html=`<div class="feat-grid"><div class="feat-card"><span class="fc-icon">📡</span><span class="fc-title">Proximity</span><span class="fc-value">${data.proximity||'--'}</span><span class="fc-sub">cm</span></div><div class="feat-card"><span class="fc-icon">🧲</span><span class="fc-title">Magnetometer</span><span class="fc-value">${data.magnet||'--'}</span><span class="fc-sub">µT</span></div></div>`;
+  }else if(name==='ambient'){
+    html=`<div class="feat-grid"><div class="feat-card"><span class="fc-icon">💡</span><span class="fc-title">Light</span><span class="fc-value">${data.light||'--'}</span><span class="fc-sub">lux</span></div><div class="feat-card"><span class="fc-icon">🚪</span><span class="fc-title">Hall</span><span class="fc-value">${data.hall||'--'}</span><span class="fc-sub">magnetic field</span></div></div>`;
+  }else if(name==='chat'){
+    html=`<div class="feat-card wide"><span class="fc-icon">💬</span><span class="fc-title">Chat</span><span class="fc-value" style="font-size:12px">Tap the sphere to open chat</span><span class="fc-sub">Voice + text supported</span></div>`;
+  }else if(name==='games'){
+    html=`<div class="feat-grid"><div class="feat-card"><span class="fc-icon">🚗</span><span class="fc-title">Car Ride</span><span class="fc-value" style="font-size:11px">Sensors + narration</span><span class="fc-sub">Gyro + GPS</span></div><div class="feat-card"><span class="fc-icon">🐕</span><span class="fc-title">Fetch</span><span class="fc-value" style="font-size:11px">AR + trajectory</span><span class="fc-sub">Camera + IMU</span></div></div>`;
+  }
+  featContent.innerHTML=html;
+  autoHideFeature(12000);
+  if(name==='vision') initVisionPanel();
+  if(name==='acoustics') initAcousticsPanel();
+}
+
+// ─── Vision Panel: Real Camera + AR + YOLO Detection ────────────
+let visionStream=null, visionARMode=false, visionAnimFrame=null;
+let visionPanelReady=false, visionDetections=[], visionLastDetection=0;
+
+async function initVisionPanel(){
+  const video=document.getElementById('visionCamera');
+  const arCanvas=document.getElementById('visionAR');
+  const depthEl=document.getElementById('visionDepth');
+  const snapBtn=document.getElementById('visionSnapBtn');
+  const arBtn=document.getElementById('visionARModeBtn');
+  if(!video) return;
+
+  try {
+    if(!visionStream){
+      visionStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false
+      });
+    }
+    video.srcObject = visionStream;
+    await video.play();
+  } catch(e) {
+    const fc = video.closest('.feat-card');
+    if(fc){
+      fc.innerHTML = '<div style="padding:20px;text-align:center;color:#ef4444">Camera unavailable: ' + e.message + '</div>';
+    }
+    return;
+  }
+
+  if(snapBtn){
+    snapBtn.onclick = function(){
+      if(!video.videoWidth) return;
+      const c = document.createElement('canvas');
+      c.width = video.videoWidth; c.height = video.videoHeight;
+      c.getContext('2d').drawImage(video, 0, 0);
+      const link = document.createElement('a');
+      link.download = 'lilly-vision-' + Date.now() + '.png';
+      link.href = c.toDataURL('image/png');
+      link.click();
+    };
+  }
+
+  if(arBtn){
+    arBtn.onclick = function(){
+      visionARMode = !visionARMode;
+      arBtn.style.background = visionARMode ? 'rgba(56,189,248,0.45)' : 'rgba(56,189,248,0.2)';
+    };
+  }
+
+  // Start detection loop: send frames to server YOLO every 500ms
+  startVisionDetectionLoop();
+
+  function drawVisionAR(){
+    if(!arCanvas || !video) return;
+    const parent = arCanvas.parentElement;
+    if(!parent) return;
+    arCanvas.width = parent.clientWidth || 300;
+    arCanvas.height = parent.clientHeight || 225;
+    const actx = arCanvas.getContext('2d');
+    actx.clearRect(0, 0, arCanvas.width, arCanvas.height);
+
+    // Map detections from frame coordinates to canvas coordinates
+    const vw = video.videoWidth || 640;
+    const vh = video.videoHeight || 480;
+    const scaleX = arCanvas.width / vw;
+    const scaleY = arCanvas.height / vh;
+
+    const now = Date.now();
+    // Keep detections for 2s
+    if(now - visionLastDetection > 2000) visionDetections = [];
+
+    for(const det of visionDetections){
+      const x = det.x1 * scaleX;
+      const y = det.y1 * scaleY;
+      const w = (det.x2 - det.x1) * scaleX;
+      const h = (det.y2 - det.y1) * scaleY;
+      const conf = (det.confidence || 0) * 100;
+
+      actx.strokeStyle = 'rgba(74,222,128,0.9)';
+      actx.lineWidth = 2;
+      actx.strokeRect(x, y, w, h);
+
+      actx.fillStyle = 'rgba(74,222,128,0.85)';
+      actx.font = 'bold 10px sans-serif';
+      const label = (det.label || '?') + ' ' + Math.round(conf) + '%';
+      const tw = actx.measureText ? actx.measureText(label).width : 60;
+      actx.fillRect(x, y - 14, tw + 8, 14);
+      actx.fillStyle = '#000';
+      actx.fillText(label, x + 4, y - 3);
+    }
+
+    if(visionARMode){
+      // Crosshair
+      const cx = arCanvas.width / 2;
+      const cy = arCanvas.height / 2;
+      actx.strokeStyle = 'rgba(125,211,252,0.9)';
+      actx.lineWidth = 2;
+      actx.beginPath(); actx.moveTo(cx-20, cy); actx.lineTo(cx+20, cy); actx.stroke();
+      actx.beginPath(); actx.moveTo(cx, cy-20); actx.lineTo(cx, cy+20); actx.stroke();
+      actx.beginPath(); actx.arc(cx, cy, 12, 0, Math.PI*2); actx.stroke();
+    }
+
+    if(visionDetections.length > 0 && depthEl){
+      depthEl.textContent = visionDetections.length + ' object' + (visionDetections.length > 1 ? 's' : '');
+    } else if(depthEl){
+      depthEl.textContent = 'Scanning...';
+    }
+
+    visionAnimFrame = requestAnimationFrame(drawVisionAR);
+  }
+  visionAnimFrame = requestAnimationFrame(drawVisionAR);
+}
+
+async function startVisionDetectionLoop(){
+  const video = document.getElementById('visionCamera');
+  if(!video || !visionStream) return;
+
+  let lastSent = 0;
+  async function tick(){
+    if(!visionStream || !video || video.readyState < 2){
+      setTimeout(tick, 500);
+      return;
+    }
+    const now = Date.now();
+    if(now - lastSent < 600){
+      setTimeout(tick, 200);
+      return;
+    }
+    lastSent = now;
+
+    try {
+      const c = document.createElement('canvas');
+      c.width = 320; c.height = 240;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(video, 0, 0, 320, 240);
+      const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.7));
+      if(!blob) { setTimeout(tick, 500); return; }
+
+      const srv = await _getServer();
+      const form = new FormData();
+      form.append('file', blob, 'frame.jpg');
+
+      const r = await fetch(srv + '/api/vision/browser', {
+        method: 'POST',
+        body: form
+      });
+      if(!r.ok) { setTimeout(tick, 500); return; }
+      const data = await r.json();
+      if(data && data.detections){
+        visionDetections = data.detections;
+        visionLastDetection = Date.now();
+      }
+    } catch(e) {
+      // silently continue
+    }
+    setTimeout(tick, 500);
+  }
+  tick();
+}
+
+function stopVisionPanel(){
+  if(visionStream){
+    visionStream.getTracks().forEach(t => t.stop());
+    visionStream = null;
+  }
+  if(visionAnimFrame){
+    cancelAnimationFrame(visionAnimFrame);
+    visionAnimFrame = null;
+  }
+  visionARMode = false;
+  visionPanelReady = false;
+  visionDetections = [];
+}
+
+// ─── Acoustics Panel: Real Microphone Stream + Direction ─────────
+let audioCtx=null, audioStream=null, audioAnalyser=null, audioAnimFrame=null;
+let audioPanelReady=false, audioDirection=null, audioPeakFreq=0;
+
+async function initAcousticsPanel(){
+  const canvas = document.getElementById('audioVisCanvas');
+  const levelEl = document.getElementById('audioLevel');
+  const startBtn = document.getElementById('audioStartBtn');
+  const stopBtn = document.getElementById('audioStopBtn');
+  if(!canvas) return;
+
+  // Try to get device orientation for direction estimation
+  if(typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function'){
+    try {
+      const perm = await DeviceOrientationEvent.requestPermission();
+      if(perm === 'granted'){
+        window.addEventListener('deviceorientation', updateAudioDirection);
+      }
+    } catch(e) {}
+  } else if('DeviceOrientationEvent' in window){
+    window.addEventListener('deviceorientation', updateAudioDirection);
+  }
+
+  async function startAudio(){
+    try {
+      if(!audioStream){
+        audioStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        });
+      }
+      if(!audioCtx){
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const source = audioCtx.createMediaStreamSource(audioStream);
+      audioAnalyser = audioCtx.createAnalyser();
+      audioAnalyser.fftSize = 256;
+      audioAnalyser.smoothingTimeConstant = 0.6;
+      source.connect(audioAnalyser);
+
+      if(startBtn) startBtn.style.display = 'none';
+      if(stopBtn) stopBtn.style.display = 'inline-flex';
+      drawAudioVis();
+    } catch(e) {
+      const fc = canvas.closest('.feat-card');
+      if(fc){
+        fc.innerHTML = '<div style="padding:20px;text-align:center;color:#ef4444">Microphone unavailable: ' + e.message + '</div>';
+      }
+    }
+  }
+
+  function stopAudio(){
+    if(audioStream){
+      audioStream.getTracks().forEach(t => t.stop());
+      audioStream = null;
+    }
+    if(audioAnimFrame){
+      cancelAnimationFrame(audioAnimFrame);
+      audioAnimFrame = null;
+    }
+    if(audioCtx){
+      audioCtx.close().catch(()=>{});
+      audioCtx = null;
+    }
+    audioAnalyser = null;
+    if(startBtn) startBtn.style.display = 'inline-flex';
+    if(stopBtn) stopBtn.style.display = 'none';
+    if(levelEl) levelEl.textContent = 'Level: --';
+    const ctx2 = canvas.getContext('2d');
+    if(ctx2) ctx2.clearRect(0, 0, canvas.width, canvas.height);
+  }
+
+  if(startBtn) startBtn.onclick = startAudio;
+  if(stopBtn) stopBtn.onclick = stopAudio;
+
+  // Auto-start acoustics panel if permission already granted
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    stream.getTracks().forEach(t => t.stop());
+    startAudio();
+  }).catch(() => {});
+}
+
+function updateAudioDirection(event){
+  // Use compass heading (alpha) as the device facing direction
+  // When a sound peak is detected, we'll correlate it with this heading
+  if(event.alpha !== null){
+    audioDirection = event.alpha; // 0-360 degrees
+  }
+}
+
+function stopAcousticsPanel(){
+  if(audioStream){
+    audioStream.getTracks().forEach(t => t.stop());
+    audioStream = null;
+  }
+  if(audioAnimFrame){
+    cancelAnimationFrame(audioAnimFrame);
+    audioAnimFrame = null;
+  }
+  if(audioCtx){
+    audioCtx.close().catch(()=>{});
+    audioCtx = null;
+  }
+  audioAnalyser = null;
+  audioPanelReady = false;
+  audioDirection = null;
+  window.removeEventListener('deviceorientation', updateAudioDirection);
+}
+
+function drawAudioVis(){
+  if(!audioAnalyser) return;
+  const canvas = document.getElementById('audioVisCanvas');
+  if(!canvas) return;
+  const ctx2 = canvas.getContext('2d');
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width || 280;
+  canvas.height = rect.height || 120;
+
+  const bufferLength = audioAnalyser.frequencyBinCount;
+  const dataArray = new Uint8Array(bufferLength);
+  const levelEl = document.getElementById('audioLevel');
+
+  // Frequency bins for direction estimation (low freq = bass/direction)
+  const lowFreqEnd = Math.floor(bufferLength * 0.1); // ~0-2kHz
+  const midFreqEnd = Math.floor(bufferLength * 0.5);  // ~2-10kHz
+
+  function draw(){
+    audioAnimFrame = requestAnimationFrame(draw);
+    audioAnalyser.getByteFrequencyData(dataArray);
+
+    ctx2.fillStyle = 'rgba(15,23,42,0.25)';
+    ctx2.fillRect(0, 0, canvas.width, canvas.height);
+
+    const barWidth = (canvas.width / bufferLength) * 2.5;
+    let x = 0;
+    let sum = 0;
+    let lowSum = 0, midSum = 0, highSum = 0;
+
+    for(let i = 0; i < bufferLength; i++){
+      const barHeight = (dataArray[i] / 255) * canvas.height * 0.9;
+      const hue = 160 + (i / bufferLength) * 60;
+      ctx2.fillStyle = 'hsla(' + hue + ',80%,60%,0.85)';
+      ctx2.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+      sum += dataArray[i];
+      if(i < lowFreqEnd) lowSum += dataArray[i];
+      else if(i < midFreqEnd) midSum += dataArray[i];
+      else highSum += dataArray[i];
+      x += barWidth + 1;
+    }
+
+    const avg = sum / bufferLength;
+
+    // Peak frequency
+    let maxVal = 0, maxIdx = 0;
+    for(let i = 0; i < bufferLength; i++){
+      if(dataArray[i] > maxVal){ maxVal = dataArray[i]; maxIdx = i; }
+    }
+    if(maxVal > 30){
+      audioPeakFreq = maxIdx * (audioCtx.sampleRate / audioAnalyser.fftSize);
+    }
+
+    // Direction indicator: use low-frequency energy + device heading
+    const levelPct = Math.round((avg / 255) * 100);
+    if(levelEl){
+      levelEl.textContent = 'Level: ' + levelPct + '%';
+      levelEl.style.color = levelPct > 70 ? '#ef4444' : levelPct > 40 ? '#fbbf24' : '#4ade80';
+    }
+
+    // Draw direction compass at the top-right
+    const compassX = canvas.width - 30;
+    const compassY = 20;
+    const compassR = 12;
+    ctx2.strokeStyle = 'rgba(255,255,255,0.4)';
+    ctx2.lineWidth = 1;
+    ctx2.beginPath(); ctx2.arc(compassX, compassY, compassR, 0, Math.PI*2); ctx2.stroke();
+
+    // Direction needle based on device heading + low freq bias
+    let dirDeg = audioDirection || 0;
+    if(lowSum > midSum && lowSum > highSum){
+      // Bass-heavy: direction is more reliable
+      dirDeg = (dirDeg + (lowSum / Math.max(1, sum)) * 360) % 360;
+    }
+    const rad = (dirDeg - 90) * Math.PI / 180;
+    const nx = compassX + Math.cos(rad) * (compassR - 3);
+    const ny = compassY + Math.sin(rad) * (compassR - 3);
+    ctx2.strokeStyle = '#4ade80';
+    ctx2.lineWidth = 2;
+    ctx2.beginPath(); ctx2.moveTo(compassX, compassY); ctx2.lineTo(nx, ny); ctx2.stroke();
+    ctx2.fillStyle = '#4ade80';
+    ctx2.beginPath(); ctx2.arc(nx, ny, 2, 0, Math.PI*2); ctx2.fill();
+
+    // Peak frequency label
+    if(audioPeakFreq > 0){
+      ctx2.fillStyle = 'rgba(255,255,255,0.7)';
+      ctx2.font = '9px sans-serif';
+      ctx2.fillText(Math.round(audioPeakFreq) + 'Hz', 4, 10);
+    }
+  }
+  draw();
+}
+
+// ─── Panel cleanup ───────────────────────────────────────────────
+const _origCloseFeature = closeFeature;
+closeFeature = function(){
+  stopVisionPanel();
+  stopAcousticsPanel();
+  _origCloseFeature();
+};
+
+// Poll features every 30s when panel is open (skip real-time media panels)
+setInterval(async function(){
+  if(!featurePanel.classList.contains('show'))return;
+  const title=(featTitle.textContent||'').toLowerCase();
+  if(!title)return;
+  if(['vision','acoustics'].includes(title))return;
+  try{
+    const r=await apiFetch('/api/features?panel='+encodeURIComponent(title));
+    const d=await r.json();
+    renderFeatureCard(title,d);
+  }catch(e){}
+},30000);
 </script>
 <div id="phoneState" style="display:none;position:absolute;top:100px;left:4px;right:4px;font-size:9px;color:rgba(255,255,255,0.5);text-align:center;z-index:6;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
 </body>
