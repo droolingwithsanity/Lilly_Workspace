@@ -13617,6 +13617,15 @@ pre{position:relative;overflow-x:auto}
     <div id="apk-dl-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
   </div>
 
+  <!-- Skills List -->
+  <div style="margin-bottom:16px">
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Skills Reference</div>
+    <a href="/api/files/SKILLS.txt" target="_blank" rel="noopener" style="font-size:12px;color:#5d4e6d;text-decoration:none;display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:10px;background:rgba(139,122,158,0.12);border:1px solid rgba(139,122,158,0.25);transition:all 0.2s">
+      <span style="font-size:14px">📄</span>
+      <span>View all skills (SKILLS.txt)</span>
+    </a>
+  </div>
+
   <!-- Pairing -->
   <div style="margin-bottom:16px">
     <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Pairing</div>

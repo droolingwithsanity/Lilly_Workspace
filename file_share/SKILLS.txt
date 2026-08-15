@@ -1,0 +1,844 @@
+LILLY SKILLS
+========================================
+
+[youtube]
+  Label: YouTube
+  Action Type: intent_launch
+  Aliases: yt
+
+[settings]
+  Label: Settings
+  Action Type: intent_launch
+  Aliases: system settings, preferences, android settings, phone settings, configure
+
+[search]
+  Label: Web Search
+  Action Type: prompt_argument
+  Aliases: google, look up, find, google search, search the web, browse, internet search
+
+[calculator]
+  Label: Calculator
+  Action Type: intent_launch
+  Aliases: calc, math, calculate, calculator app
+
+[calendar]
+  Label: Calendar
+  Action Type: intent_launch
+  Aliases: schedule, date, events, calendar app, my calendar, show calendar, calendars
+
+[maps]
+  Label: Google Maps
+  Action Type: intent_launch
+  Aliases: google maps, maps
+
+[camera]
+  Label: Camera
+  Action Type: intent_launch
+  Aliases: photo, picture, snap, camera app, take a photo, take a picture, open camera, cameras, came
+
+[music]
+  Label: YouTube Music
+  Action Type: intent_launch
+  Aliases: songs, play music, audio, music player, listen to music, play some music, music
+
+[gmail]
+  Label: Gmail
+  Action Type: intent_launch
+  Aliases: email, mail, gmail app, open gmail, my email, check email, check my email, inbox, my inbox, open mail, read email, gmails
+
+[ssh]
+  Label: SSH Remote Shell
+  Description: Connect to a remote server via SSH. Usage: ssh user@hostname -p port
+  Action Type: shell_command
+  Aliases: remote, shell, terminal, secure shell, ssh into, connect to, hell
+
+[package_install]
+  Label: Package Install
+  Description: Install a package using apt (Debian/Ubuntu package manager).
+  Action Type: shell_command
+  Aliases: install package, install app, install software, apt install, install, package, tall, pack
+
+[package_update]
+  Label: Package Update
+  Description: Update the package list from repositories.
+  Action Type: shell_command
+  Aliases: update packages, update system, update apt, refresh packages, update, package, pack
+
+[package_upgrade]
+  Label: Package Upgrade
+  Description: Upgrade all installed packages to latest versions.
+  Action Type: shell_command
+  Aliases: upgrade packages, upgrade system, upgrade all, system update, upgrade, package
+
+[process_list]
+  Label: Process List
+  Description: List all running processes on the system.
+  Action Type: shell_command
+  Aliases: running processes, whats running, processes, ps aux, top, show processes, what is running, list
+
+[disk_usage]
+  Label: Disk Usage
+  Description: Show disk space usage for all mounted filesystems.
+  Action Type: shell_command
+  Aliases: disk space, storage, free space, df, disk usage, how much space, storage info
+
+[network_check]
+  Label: Network Ping
+  Description: Check network connectivity to a remote host via ping.
+  Action Type: shell_command
+  Aliases: ping, network test, check connection, is it online, test ping, check internet, work
+
+[skip_ad]
+  Label: Skip Ad
+  Action Type: shell_command
+  Aliases: skip ad, skip this ad, dismiss ad, close ad, ad skip, skip commercial, skip advertisement, skip
+
+[netflix]
+  Label: Netflix
+  Action Type: intent_launch
+  Aliases: netflix, open netflix, launch netflix, start netflix, open netflix for me
+
+[_context_aware]
+  Label: _context_aware
+  Description: Context-aware command routing. Lilly detects the foreground app via Termux dumpsys and routes commands accordingly. Works in ALL apps — no need to say 'on YouTube' or 'in Maps'.
+  Action Type: 
+  Aliases: make, dashboard, need, panel, react, admin, build, console, create, project, lily, morning, good, okay, yeah, yesterday, heard, toilet, water, five, please, minutes, ultra, 23rd, chapter, serious, changing, keep, your, strong, move, about, talking, dare, fucking, plugging, brian, happy, shut, fine, just, sleep, care, mean, what, give, lost, have, look, months, again, road, going, hear, dogs, that, pretty, cool, doing, cooled, emmet, there, little, break, here, well, opinion, today, story, tell, forest, alex, remember, name, weather, working, stupid, cant, piper, deployed, successfully, server, avatar, approve, 0daa, a86e, 464e, idea, 5a4f36b0, 719bba2727a6, light_sensor_server, from, other, avatars, updates, team, also, call, overlay, concept, created, happened, chat, ideas, comment, anyone, puppy, approved, bear, comments, leave, approvals, with, larry, verbatim, sense, missed, really, noticed, words, transcribing, raise, like, would, issue, ticket, live, simple, talk, want, fields, pending, automation, role, borrow, husband, these, fillers, looking, steal, sorry, possible, paraphrase, problems, where, maybe, best, natural, repeated, false, starts, however, twenty, chances, stir, continue, hard, wrong, least, some, miss, ends, below, every, alright, frowny, dude, starting, supposed, dumb, made, years, those, reds, even, doesn, millions, makes, maximum, amount, them, fighting, country, hats, type, guys, beard, very, difficult, repeat, else, lady, seen, interval, sitting, floor, fact, beautiful, easier, having, more, trailer, expecting, seems, found, death, noise, replace, tagging, baraday, argue, youth, great, this, chose, bushing, people, packet, only, average, yourself, watch, prove, impossible, thing, they, think, explain, mistakes, afghans, take, quite, safe, place, casting, evening, eventually, ones, will, whole, time, learned, pass, case, important, kind, which, porch, side, after, movie, fancy, change, hello, much, thank, everybody, ring, bell, never, many, love, thanks, send, note, their, coming, fill, wait, because, emma, gross, when, something, looks, game, swore, help, then, sweat, cover, tomorrow, point, young, gonna, above, rate, heart, link, needs, butter, coconut, bother, lauren, kiss, close, ambulance, feel, reach, behind, chasing, names, include, laurence, frighting, getting, nails, thought, following, were, calendars, should, under, first, liam, tommy, once, talked, caliber, didn, three, things, count, both, tells, points, baby, fall, word, holding, ahead, woman, does, could, gets, seat, forward, marcia, bandage, conversation, lilly, casual, spoken, shit, night, most, partner, come, advantage, sure, wake
+
+[media_controls]
+  Label: Media Controls
+  Description: Send media keyevents. Automatically routed based on foreground app.
+  Action Type: keyevent
+  Aliases: play, pause, resume, stop, next, next track, skip, skip track, previous, previous track, last track, rewind, fast forward, mute, unmute
+
+[navigation_controls]
+  Label: Navigation Controls
+  Description: Send navigation keyevents. Works in any app.
+  Action Type: keyevent
+  Aliases: scroll up, scroll down, scroll left, scroll right, swipe up, swipe down, swipe left, swipe right, back, go back, home, go home, up, down, left, right, enter, select, tap, control
+
+[tab_navigation]
+  Label: Tab Navigation
+  Description: Move between UI elements in ANY app using Tab. Works in Maps, Chrome, YouTube, Settings, document editors, forms, etc.
+  Action Type: keyevent
+  Aliases: tab, next field, next, previous field, shift tab, select, enter, ok, confirm, done
+
+[voice_text_input]
+  Label: Voice Text Input
+  Description: Dictate text into any focused text field. Activates STT, captures your speech, and types it into the current field.
+  Action Type: voice_dictation
+  Aliases: enter text, type this, input by voice, voice type, dictate, speak and type, say and type, voice
+
+[youtube_search]
+  Label: YouTube Search
+  Description: Search YouTube for a query. Opens YouTube with search results.
+  Action Type: context_launch
+  Aliases: youtube search, search youtube, find on youtube, look up on youtube, search for on youtube
+
+[app_context]
+  Label: App Context
+  Description: Report what app is currently in the foreground.
+  Action Type: info
+  Aliases: what app am i in, where am i, what's open, what am i looking at, which app, what app is this
+
+[app_install]
+  Label: Install App (Termux)
+  Description: Install a package via Termux pkg/apt.
+  Action Type: shell_command
+  Aliases: install app, install package, install tool, get app, add app, need app, download app, install program
+
+[app_uninstall]
+  Label: Uninstall App (Termux)
+  Description: Uninstall a package via Termux pkg/apt.
+  Action Type: shell_command
+  Aliases: uninstall app, remove app, delete app, remove package, uninstall package, get rid of, tall
+
+[app_list_installed]
+  Label: List Installed Apps
+  Description: List all installed Termux packages.
+  Action Type: shell_command
+  Aliases: list apps, what apps installed, installed packages, what do i have, show packages, list tools, what's installed, tall
+
+[app_search]
+  Label: Search Apps
+  Description: Search for available Termux packages.
+  Action Type: shell_command
+  Aliases: search app, find app, find package, search packages, look for app, is there an app for
+
+[app_update_all]
+  Label: Update All Apps
+  Description: Upgrade all installed Termux packages.
+  Action Type: shell_command
+  Aliases: update apps, upgrade apps, update all packages, upgrade everything, system update
+
+[app_launch_android]
+  Label: Launch Android App
+  Description: Launch any installed Android app by name.
+  Action Type: am
+  Aliases: launch, open, start, run, fire up, boot up, android
+
+[app_info]
+  Label: App Info
+  Description: Open Android app info/settings for a specific app.
+  Action Type: am
+  Aliases: app info, app details, app settings, app permissions, manage app
+
+[termux_command]
+  Label: Run Shell Command
+  Description: Execute an arbitrary shell command in Termux.
+  Action Type: shell_command
+  Aliases: run command, shell, terminal, execute, bash, command line, cli
+
+[gps_location]
+  Label: GPS Location
+  Description: Get current GPS coordinates via Termux API.
+  Action Type: termux
+  Aliases: where am i, my location, gps, coordinates, location, current position, where are we, find me, locate me
+
+[location_home_set]
+  Label: Set Home Location
+  Description: Save current GPS coordinates as 'home' location.
+  Action Type: shell_command
+  Aliases: set home, this is my home, mark home, remember this location as home, save home location, home base
+
+[location_home_check]
+  Label: Check If Home
+  Description: Check if current GPS location matches saved home.
+  Action Type: shell_command
+  Aliases: am i home, am i at home, is this home, are we home, home check, check
+
+[sensor_read]
+  Label: Read Sensors
+  Description: Read Android sensor data via Termux API.
+  Action Type: termux
+  Aliases: sensor, sensors, read sensors, sensor data, accelerometer, gyroscope, light level, proximity, barometer, temperature, humidity, read
+
+[sensor_list]
+  Label: List Available Sensors
+  Description: List all available sensors on this device.
+  Action Type: termux
+  Aliases: list sensors, what sensors, available sensors, sensor types, sensor capabilities, able, available
+
+[battery_status]
+  Label: Battery Status
+  Description: Get current battery status via Termux API.
+  Action Type: termux
+  Aliases: battery, power, charge, how much battery, battery level, battery percentage, power status
+
+[wifi_info]
+  Label: WiFi Info
+  Description: Get current WiFi connection info via Termux API.
+  Action Type: termux
+  Aliases: wifi, wifi info, network, connection, wifi network, am i connected, internet
+
+[bluetooth_scan]
+  Label: Bluetooth Scan
+  Description: Scan for nearby Bluetooth devices via Termux API.
+  Action Type: termux
+  Aliases: scan bluetooth, bluetooth devices, nearby devices, bt scan, find bluetooth, bluetooth, scan, blue
+
+[clipboard_get]
+  Label: Get Clipboard
+  Description: Get current clipboard content via Termux API.
+  Action Type: termux
+  Aliases: clipboard, paste clipboard, what's copied, what's in clipboard, get clipboard
+
+[clipboard_set]
+  Label: Set Clipboard
+  Description: Set clipboard content via Termux API.
+  Action Type: termux
+  Aliases: copy to clipboard, set clipboard, copy this
+
+[notification_list]
+  Label: List Notifications
+  Description: List current phone notifications via Termux API.
+  Action Type: termux
+  Aliases: notifications, check notifications, what notifications, recent notifications, notification list, phone notifications
+
+[vibrate]
+  Label: Vibrate Phone
+  Description: Vibrate the phone via Termux API.
+  Action Type: termux
+  Aliases: vibrate, buzz, haptic, shake, buzz phone, phone, rate
+
+[torch]
+  Label: Toggle Flashlight
+  Description: Toggle the camera flashlight via Termux API.
+  Action Type: termux
+  Aliases: flashlight, torch, light, turn on light, turn off light, flash
+
+[ringer_mode]
+  Label: Volume Control
+  Description: Control volume/ringer mode via Termux API.
+  Action Type: termux
+  Aliases: volume, volume up, volume down, mute, unmute, silent, loud, quiet
+
+[screen_capture]
+  Label: Screenshot
+  Description: Take a screenshot via Termux API.
+  Action Type: termux
+  Aliases: screenshot, capture screen, take screenshot, screen grab, screen, shot
+
+[contact_list]
+  Label: List Contacts
+  Description: List phone contacts via Termux API.
+  Action Type: termux
+  Aliases: contacts, list contacts, phone book, my contacts, address book
+
+[sms_send]
+  Label: Send SMS
+  Description: Send an SMS via Termux API.
+  Action Type: termux
+  Aliases: send sms, text message, send text, message, sms, send
+
+[call_log]
+  Label: Call Log
+  Description: Get recent call log via Termux API.
+  Action Type: termux
+  Aliases: call log, recent calls, who called, call history, phone log, call
+
+[skill_discover]
+  Label: Discover New Skills
+  Description: Scan Termux for available tools and suggest new skills to learn.
+  Action Type: shell_command
+  Aliases: discover skills, find new skills, what can you do, new abilities, learn skills, skill scan, scan for skills, cover
+
+[skill_list]
+  Label: List Known Skills
+  Description: List all currently known skills.
+  Action Type: info
+  Aliases: list skills, show skills, what skills, your skills, capabilities, what can you learn, know, kill
+
+[skill_self_upgrade]
+  Label: Skill Self-Upgrade
+  Description: Scan for improvements to existing skills and apply updates.
+  Action Type: shell_command
+  Aliases: upgrade skills, update skills, refresh skills, improve skills, optimize skills, kill
+
+[osint_people_search]
+  Label: People Search
+  Description: Search for a person across IDCrawl, TruePeopleSearch, ThatsThem.
+  Action Type: prompt_argument
+  Aliases: find person, who is, lookup person, search person, person search, people lookup, osint people, people
+
+[osint_username_check]
+  Label: Username Check
+  Description: Check username availability across 3000+ sites via WhatsMyName/maigret.
+  Action Type: prompt_argument
+  Aliases: check username, username search, find username, user lookup, name check, osint username, name, check
+
+[osint_email_lookup]
+  Label: Email Lookup
+  Description: Investigate email: breaches, social profiles, owner info via Epieos, HIBP, EmailRep.
+  Action Type: prompt_argument
+  Aliases: email lookup, email search, email check, breach check, email osint, check email
+
+[osint_phone_lookup]
+  Label: Phone Lookup
+  Description: Look up phone number owner, carrier, location via PhoneInfoga, Nuwber.
+  Action Type: prompt_argument
+  Aliases: phone lookup, phone search, who called, number check, phone osint, lookup number
+
+[osint_domain_recon]
+  Label: Domain Recon
+  Description: Domain recon: DNS, hosting, certificates, exposure via Shodan, Censys, SecurityTrails.
+  Action Type: prompt_argument
+  Aliases: domain recon, domain lookup, dns lookup, website info, ip lookup, osint domain, recon domain
+
+[osint_ip_lookup]
+  Label: IP Lookup
+  Description: Investigate IP: geolocation, ASN, open ports, abuse via Shodan, ipinfo, AbuseIPDB.
+  Action Type: prompt_argument
+  Aliases: ip lookup, ip search, ip info, geo ip, osint ip, check ip
+
+[osint_hash_crack]
+  Label: Hash Crack
+  Description: Look up or crack MD5/SHA1/SHA256 hashes via CrackStation, Hashes.com.
+  Action Type: prompt_argument
+  Aliases: crack hash, hash lookup, hash decrypt, hash reverse, osint hash, decrypt hash
+
+[osint_social_profiles]
+  Label: Social Profiles
+  Description: Find social media profiles across platforms via SocialSearcher, IDCrawl.
+  Action Type: prompt_argument
+  Aliases: social search, social profiles, find profiles, social media search, osint social, find social, social, file
+
+[osint_twitter_search]
+  Label: Twitter Search
+  Description: Search Twitter/X for users, tweets, trends via Nitter, BirdHunt.
+  Action Type: prompt_argument
+  Aliases: twitter search, tweet search, x search, osint twitter, search twitter
+
+[osint_reddit_search]
+  Label: Reddit Search
+  Description: Search Reddit for users, posts, comments via Camas, RedditMetis.
+  Action Type: prompt_argument
+  Aliases: reddit search, subreddit search, osint reddit, search reddit
+
+[osint_linkedin_search]
+  Label: LinkedIn Search
+  Description: Search LinkedIn for professional profiles via RecruitIn, LiSearcher.
+  Action Type: prompt_argument
+  Aliases: linkedin search, professional search, work search, osint linkedin, link
+
+[osint_instagram_search]
+  Label: Instagram Search
+  Description: Search Instagram profiles via Bibliogram, Gramho.
+  Action Type: prompt_argument
+  Aliases: instagram search, insta search, ig search, osint instagram
+
+[osint_youtube_search]
+  Label: YouTube OSINT
+  Description: Search YouTube channels, videos, geolocation via Invidious, yt-dlp.
+  Action Type: prompt_argument
+  Aliases: youtube search, yt search, video search, osint youtube
+
+[osint_telegram_search]
+  Label: Telegram Search
+  Description: Search Telegram channels, groups, bots via TGStat, Lyzem.
+  Action Type: prompt_argument
+  Aliases: telegram search, tg search, osint telegram
+
+[osint_discord_search]
+  Label: Discord Search
+  Description: Search Discord servers and users via DiscordHub, Disboard.
+  Action Type: prompt_argument
+  Aliases: discord search, disc search, osint discord
+
+[osint_threat_intel]
+  Label: Threat Intel
+  Description: Check threat intel for IPs, domains, hashes via Pulsedive, VirusTotal, AlienVault.
+  Action Type: prompt_argument
+  Aliases: threat check, threat intel, malware check, ioc lookup, osint threat, check threat
+
+[osint_breach_check]
+  Label: Breach Check
+  Description: Check if email/password appeared in data breaches via HIBP, h8mail.
+  Action Type: prompt_argument
+  Aliases: breach check, password leak, was i hacked, data breach, osint breach
+
+[osint_archive_page]
+  Label: Archive Page
+  Description: View archived/cached versions of webpages via Wayback Machine, archive.is.
+  Action Type: prompt_argument
+  Aliases: archive page, cached page, wayback, old version, osint archive, page
+
+[osint_url_scan]
+  Label: URL Scan
+  Description: Scan URL for phishing, malware, redirects via urlscan.io, CheckPhish.
+  Action Type: prompt_argument
+  Aliases: url scan, link check, phishing check, safe url, osint url, scan
+
+[osint_geolocation]
+  Label: Geolocation
+  Description: Find location from image, IP, or description via Google Maps, OpenCelliD.
+  Action Type: prompt_argument
+  Aliases: geo locate, find location, where is, geo guess, osint geo
+
+[osint_image_search]
+  Label: Image Search
+  Description: Reverse image search via Google Images, Yandex, TinEye.
+  Action Type: prompt_argument
+  Aliases: reverse image, image search, photo search, who is in photo, osint image
+
+[osint_crypto_lookup]
+  Label: Crypto Lookup
+  Description: Look up cryptocurrency wallets and transactions via Blockchain.com, Etherscan.
+  Action Type: prompt_argument
+  Aliases: crypto lookup, bitcoin search, wallet lookup, blockchain search, osint crypto, look
+
+[osint_weather_check]
+  Label: Weather OSINT
+  Description: Get weather data and historical weather via Wunderground, OpenWeatherMap.
+  Action Type: prompt_argument
+  Aliases: weather check, weather lookup, forecast, osint weather, weather
+
+[osint_news_verify]
+  Label: News Verify
+  Description: Verify news claims and check misinformation via Snopes, FactCheck.org, Hoaxy.
+  Action Type: prompt_argument
+  Aliases: verify news, fact check, fake check, is this real, osint news, factcheck
+
+[osint_data_decoder]
+  Label: Data Decoder
+  Description: Decode/encode data: base64, hex, URL, hash analysis via CyberChef.
+  Action Type: prompt_argument
+  Aliases: decode, encode, base64, cyberchef, hash tool, osint decode, code, data
+
+[osint_steganography]
+  Label: Steganography
+  Description: Hide or reveal hidden data in images/audio via Steganography Online, StegOnline.
+  Action Type: prompt_argument
+  Aliases: steganography, steg, hidden data, hide in image, osint steg
+
+[osint_temp_email]
+  Label: Temporary Email
+  Description: Generate a temporary disposable email address.
+  Action Type: prompt_argument
+  Aliases: temp email, temporary email, disposable email, burner email, throwaway email, fake email
+
+[osint_fake_identity]
+  Label: Fake Identity Generator
+  Description: Generate a realistic fake identity with name, address, and details.
+  Action Type: prompt_argument
+  Aliases: fake identity, fake name, generate identity, create persona, fake profile, generate name, fake
+
+[osint_company_lookup]
+  Label: Company Lookup
+  Description: Look up company info, registration, employees via OpenCorporates, GLEIF.
+  Action Type: prompt_argument
+  Aliases: company search, business lookup, corporate info, company check, osint company, look, company
+
+[osint_dark_web_search]
+  Label: Dark Web Search
+  Description: Search dark web mentions and onion links via Ahmia, DarkNetLive.
+  Action Type: prompt_argument
+  Aliases: dark web, onion search, tor search, deep web, osint dark
+
+[osint_subdomain_enum]
+  Label: Subdomain Enum
+  Description: Enumerate subdomains via Shodan, Censys, theHarvester.
+  Action Type: prompt_argument
+  Aliases: subdomain find, subdomain search, dns enum, osint subdomain
+
+[osint_ssl_cert]
+  Label: SSL Cert Check
+  Description: Check SSL certificate details via crt.sh, SSL Labs.
+  Action Type: prompt_argument
+  Aliases: ssl check, cert lookup, certificate search, osint ssl, check
+
+[osint_whois_lookup]
+  Label: WHOIS Lookup
+  Description: WHOIS lookup for domain registration details.
+  Action Type: prompt_argument
+  Aliases: whois, domain owner, registrant, osint whois, look
+
+[osint_metadata_extract]
+  Label: Metadata Extract
+  Description: Extract EXIF metadata from images and documents.
+  Action Type: prompt_argument
+  Aliases: metadata, exif, image metadata, photo info, osint metadata, extra, data
+
+[osint_wifi_recon]
+  Label: WiFi Recon
+  Description: WiFi network reconnaissance via WiGLE.
+  Action Type: prompt_argument
+  Aliases: wifi search, wifi lookup, network recon, osint wifi
+
+[osint_aircraft_track]
+  Label: Aircraft Track
+  Description: Track aircraft by callsign via FlightRadar24, OpenSky Network.
+  Action Type: prompt_argument
+  Aliases: flight track, aircraft search, plane tracker, osint flight, track flight, track
+
+[osint_ship_track]
+  Label: Ship Track
+  Description: Track ships and vessels via VesselFinder, MarineTraffic.
+  Action Type: prompt_argument
+  Aliases: ship track, vessel search, boat tracker, osint ship, track ship, track
+
+[osint_satellite_imagery]
+  Label: Satellite Imagery
+  Description: Access satellite imagery via NASA Worldview, Copernicus Browser.
+  Action Type: prompt_argument
+  Aliases: satellite view, satellite image, space view, earth view, osint satellite, tell
+
+[osint_leaked_data]
+  Label: Leaked Data
+  Description: Search leaked data and exposed credentials via IntelligenceX, DeHashed.
+  Action Type: prompt_argument
+  Aliases: leak search, credential leak, exposed data, paste search, osint leak, data
+
+[osint_canary_token]
+  Label: Canary Token
+  Description: Create canary tokens to detect unauthorized access.
+  Action Type: prompt_argument
+  Aliases: canary token, honey token, trap, detect breach, osint canary
+
+[osint_toolset]
+  Label: OSINT Toolkit
+  Description: Open the OSINT investigation toolkit panel with all available tools.
+  Action Type: info
+  Aliases: osint tools, osint toolkit, investigation tools, intel tools, open source intelligence
+
+[osint_news_search]
+  Label: News Search
+  Description: Search for news articles and current events, including in other countries.
+  Action Type: prompt_argument
+  Aliases: news, what's in the news, latest news, headlines, current events, news from, news about, news in another country, world news, show me news
+
+[osint_account_create]
+  Label: Account Creation
+  Description: Create accounts on various platforms using generated or disposable credentials.
+  Action Type: prompt_argument
+  Aliases: create account, make account, sign up, register, new account, open account, create profile, count
+
+[osint_anonymous_sms]
+  Label: Anonymous SMS
+  Description: Send free SMS to any number worldwide via smstome.com and alternatives.
+  Action Type: prompt_argument
+  Aliases: anonymous sms, anon sms, send anonymous text, hidden text, untraceable sms, anonymous message
+
+[osint_anonymous_email]
+  Label: Anonymous Email
+  Description: Send anonymous or disposable email messages.
+  Action Type: prompt_argument
+  Aliases: anonymous email, anon email, send anonymous mail, hidden email, untraceable email, anonymous mail
+
+[osint_sherlock]
+  Label: Sherlock (Username Hunt)
+  Description: Hunt down social media accounts by username across 400+ networks. Runs locally via CLI.
+  Action Type: shell_command
+  Aliases: sherlock, hunt username, find username, username hunt, social media search
+
+[osint_holehe]
+  Label: Holehe (Email to Sites)
+  Description: Check which sites an email is registered on (120+ sites). Runs locally.
+  Action Type: shell_command
+  Aliases: holehe, email to sites, check email sites, email presence
+
+[osint_maigret]
+  Label: Maigret (Dossier Builder)
+  Description: Collect a dossier on a person by username from 3000+ sites. Generates HTML/JSON reports.
+  Action Type: shell_command
+  Aliases: maigret, build dossier, username dossier, person dossier, osint dossier
+
+[osint_ghunt]
+  Label: GHunt (Google OSINT)
+  Description: Offensive Google framework — email, Drive files, geolocation, Google Maps history.
+  Action Type: shell_command
+  Aliases: ghunt, google osint, google hunt, gmail lookup, google account lookup
+
+[osint_wayback]
+  Label: Wayback Machine CLI
+  Description: Query Wayback Machine API for archived versions of any URL. Returns timestamps and snapshots.
+  Action Type: shell_command
+  Aliases: wayback, wayback cli, archive url, cached page cli
+
+[osint_instaloader]
+  Label: Instaloader (Instagram DL)
+  Description: Download Instagram profiles, posts, stories, and metadata. Works without login for public profiles.
+  Action Type: shell_command
+  Aliases: instaloader, download instagram, instagram scraper, ig download, load
+
+[osint_urlscan]
+  Label: urlscan.io
+  Description: Submit a URL for rendering, screenshot, DOM/network trace, and redirect analysis.
+  Action Type: prompt_argument
+  Aliases: urlscan, scan url, url analysis, url check, scan
+
+[osint_shodan]
+  Label: Shodan
+  Description: Search engine for internet-connected devices. Find exposed services, ports, banners.
+  Action Type: prompt_argument
+  Aliases: shodan, iot search, device search, port scan, exposed services
+
+[osint_censys]
+  Label: Censys
+  Description: Internet-wide scanning for hosts, certificates, and web properties.
+  Action Type: prompt_argument
+  Aliases: censys, certificate search, host search
+
+[osint_virustotal]
+  Label: VirusTotal
+  Description: Scan files, URLs, IPs, and domains for malware detections.
+  Action Type: prompt_argument
+  Aliases: virustotal, malware check, file scan, url scan vt
+
+[osint_abuseipdb]
+  Label: AbuseIPDB
+  Description: Check IP address reputation and abuse reports.
+  Action Type: prompt_argument
+  Aliases: abuseipdb, ip abuse, ip reputation, ip check
+
+[osint_builtwith]
+  Label: BuiltWith
+  Description: Discover what technologies a website is built with.
+  Action Type: prompt_argument
+  Aliases: builtwith, tech stack, website tech, technology lookup, with
+
+[osint_opencorporates]
+  Label: OpenCorporates
+  Description: Search company information across 100+ jurisdictions worldwide.
+  Action Type: prompt_argument
+  Aliases: opencorporates, company search, business records, corporate lookup
+
+[osint_icij_leaks]
+  Label: ICIJ Offshore Leaks
+  Description: Search ICIJ offshore leaks databases — Panama Papers, Paradise Papers, Pandora Papers.
+  Action Type: prompt_argument
+  Aliases: offshore leaks, panama papers, paradise papers, icij, offshore database
+
+[osint_opensecrets]
+  Label: OpenSecrets
+  Description: Search US political campaign finance, lobbying, and donor data.
+  Action Type: prompt_argument
+  Aliases: opensecrets, campaign finance, political donations, lobbying data, secret
+
+[osint_gdelt]
+  Label: GDELT Project
+  Description: Global events database — monitors world news from 100+ countries in 65+ languages.
+  Action Type: prompt_argument
+  Aliases: gdelt, global events, conflict data, media monitoring, project
+
+[osint_wikidata]
+  Label: Wikidata
+  Description: Structured knowledge base — find entities, relationships, and structured facts.
+  Action Type: prompt_argument
+  Aliases: wikidata, entity search, knowledge graph, data
+
+[osint_suncalc]
+  Label: SunCalc
+  Description: Verify time of day from photo shadows — sun position, azimuth, elevation for any location/time.
+  Action Type: prompt_argument
+  Aliases: suncalc, sun position, shadow check, time of day verify
+
+[osint_geonames]
+  Label: GeoNames
+  Description: Structured geographic database — 12M+ place names with coordinates, populations, admin divisions.
+  Action Type: prompt_argument
+  Aliases: geonames, place search, gazetteer, location data, name
+
+[osint_mapchecking]
+  Label: MapChecking
+  Description: Estimate crowd sizes from mapped areas for protests, rallies, and public gatherings.
+  Action Type: prompt_argument
+  Aliases: mapchecking, crowd estimate, crowd size, protest size, check
+
+[reminder]
+  Label: Set Reminder
+  Action Type: intent_launch
+  Aliases: reminder, remind, set reminder, add reminder, create reminder, set alarm, remind me, reminder app, note reminder, mind
+
+[photos]
+  Label: Google Photos
+  Action Type: intent_launch
+  Aliases: photos, gallery, my photos, google photos, photo library
+
+[clock]
+  Label: Clock
+  Action Type: intent_launch
+  Aliases: clock, alarm, timer, stopwatch, set alarm, set timer
+
+[contacts]
+  Label: Contacts
+  Action Type: intent_launch
+  Aliases: contacts, my contacts, address book, phone book
+
+[files]
+  Label: Files
+  Action Type: intent_launch
+  Aliases: files, file manager, my files, file browser, documents, file
+
+[play_store]
+  Label: Play Store
+  Action Type: intent_launch
+  Aliases: play store, app store, install app, google play
+
+[share]
+  Label: Share
+  Action Type: shell_command
+  Aliases: share, send to, share this, share with
+
+[battery]
+  Label: Battery Status
+  Action Type: termux
+  Aliases: battery
+
+[app_name_key]
+  Label: heard yesterday
+  Action Type: intent_launch
+  Aliases: hearing yesturday
+
+[project_start]
+  Label: Start Project
+  Action Type: intent_launch
+  Aliases: start_project
+
+[admin_dashboard]
+  Label: Admin Dashboard
+  Action Type: intent_launch
+  Aliases: dashboard
+
+[yes_ultra]
+  Label: Yes Ultra App
+  Action Type: intent_launch
+  Aliases: YesUltra
+
+[avatar_update]
+  Label: Avatar Update
+  Action Type: intent_launch
+  Aliases: overlay, apk
+
+[live_app_key]
+  Label: Live App
+  Action Type: intent_launch
+  Aliases: live, stream
+
+[salesforce]
+  Label: Salesforce
+  Action Type: intent_launch
+  Aliases: sales force
+
+[overlay_games]
+  Label: Games for Overlay App
+  Action Type: intent_launch
+  Aliases: games for overlay, overlay game development
+
+[notes_app_key]
+  Label: Notes App
+  Action Type: intent_launch
+  Aliases: notes
+
+[mission_control]
+  Label: Mission Control
+  Action Type: intent_launch
+  Aliases: mission control, mc
+
+
+SENSOR SKILLS
+========================================
+
+[Dark Room Alert]
+  Enabled: True
+  Avatar: puppy
+
+[Phone Pickup Greeting]
+  Enabled: True
+  Avatar: puppy
+
+[Vehicle Motion Alert]
+  Enabled: True
+  Avatar: fox
+
+[Proximity Wave]
+  Enabled: False
+  Avatar: bunny
+
+[Bright Light]
+  Enabled: True
+  Avatar: deer
+
+[Home Detection]
+  Enabled: True
+  Avatar: puppy
+  Description: Detects when you arrive home or leave home via GPS. Uses saved home coordinates from ~/ai-server/config/home_location.json.
+
+[Neighborhood Awareness]
+  Enabled: True
+  Avatar: owl
+  Description: Recognizes named zones (home, work, gym, store). Set zones by saying 'this is my [name]'.
+
+[Movement Speed]
+  Enabled: True
+  Avatar: fox
+  Description: Detects when moving faster than walking speed (likely in vehicle).
+
+[Ambient Environment]
+  Enabled: True
+  Avatar: deer
+  Description: Periodically scans ambient sensors and stores in context. Available when you ask 'what's it like outside?' or 'how's the room?'
+
+[On-Demand Sensor Scan]
+  Enabled: True
+  Avatar: owl
+  Description: Read all available sensors when asked. 'What do you sense?', 'Read sensors', 'Check environment'.
