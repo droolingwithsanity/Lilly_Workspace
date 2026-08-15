@@ -26,6 +26,32 @@ class PersonaModel:
         self._load()
 
     def _load(self):
+        # Unsloth fast path: GPU + adapter present → use FastLanguageModel
+        # (same kernels as training; falls back to PEFT if anything fails).
+        if (
+            not self.use_cpu
+            and torch.cuda.is_available()
+            and self.adapter_path
+            and Path(self.adapter_path).exists()
+        ):
+            try:
+                from unsloth import FastLanguageModel
+
+                logger.info(f"[Unsloth] Loading base + adapter: {self.adapter_path}")
+                model, tokenizer = FastLanguageModel.from_pretrained(
+                    model_name=self.base_model_name,
+                    adapter_name=self.adapter_path,
+                    max_seq_length=2048,
+                    dtype=None,
+                )
+                self.model = model
+                self.tokenizer = tokenizer
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+                self.model.eval()
+                return
+            except Exception as e:
+                logger.warning(f"Unsloth load failed ({e}); falling back to PEFT")
+
         device_map = "cpu" if self.use_cpu else "auto"
         dtype = torch.float32
 
@@ -121,7 +147,7 @@ class PersonaModel:
                 eos_token_id=self.tokenizer.eos_token_id,
             )
 
-        generated = outputs[0][input_ids.shape[-1]:]
+        generated = outputs[0][input_ids.shape[-1] :]
         response = self.tokenizer.decode(generated, skip_special_tokens=True)
 
         # Trim at common stop tokens

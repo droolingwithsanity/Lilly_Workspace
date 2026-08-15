@@ -37,7 +37,7 @@ def make_step1():
     img = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(img)
     status_bar(draw)
-    draw.text((W//2,60), "Pick your companion", fill=TEXT_DARK, font=getfont(16), anchor="mt")
+    draw.text((W//2,60), "Pick your assistant", fill=TEXT_DARK, font=getfont(16), anchor="mt")
     avatars = [("[Puppy]","Puppy"),("[Fox]","Fox"),("[Cat]","Cat"),("[Bear]","Bear"),("[Bunny]","Bunny"),
                ("[Owl]","Owl"),("[Deer]","Deer"),("[Wolf]","Wolf"),("[Raccoon]","Raccoon")]
     cx, cy = W//2, 180

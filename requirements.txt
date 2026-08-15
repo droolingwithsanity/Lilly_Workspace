@@ -15,6 +15,9 @@ peft>=0.8.0
 accelerate>=0.25.0
 sentencepiece>=0.1.99
 tokenizers>=0.15.0
+# Unsloth — fast LoRA/QLoRA on GPU (~2x faster, ~70% less VRAM).
+# Requires CUDA. Falls back to classic PEFT training when no GPU is present.
+unsloth>=2025.1.0
 
 # ─── Auth0 authentication ───
 auth0-server-python>=1.0.0b13

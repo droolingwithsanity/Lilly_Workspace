@@ -220,11 +220,16 @@ function connectToServer(){
   setStatus('connected');
   addMsg('system', `Connected to ${SERVER}`);
 }
-// Auto-connect if URL is pre-filled
+// Auto-connect if served same-origin from the Lilly server
 window.addEventListener('load',()=>{
   const inp = document.getElementById('serverUrl');
   if(inp.value.trim()){
     // Show overlay but let user confirm
+    return;
+  }
+  if(location.origin && /^https?:$/.test(location.protocol)){
+    inp.value = location.origin;
+    connectToServer();
   }
 });
 

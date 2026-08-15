@@ -130,7 +130,7 @@ class EntityIdentity:
     """Lilly's persistent identity — who she is."""
     name: str = "Lilly"
     version: str = "3.0.0"
-    archetype: str = "companion_ai"
+    archetype: str = "assistant_ai"
     created_at: float = field(default_factory=time.time)
     home_workspace: str = str(WORKSPACE)
     personas: list[str] = field(default_factory=lambda: [

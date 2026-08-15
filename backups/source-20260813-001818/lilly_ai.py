@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lilly AI v2 — Digital assistant for Android + web.
+Lilly AI v2 — Digital companion for Android + web.
 Architecture:
   FastAPI server (port 8098)
   ├── llama.cpp / Ollama backend
@@ -46,7 +46,7 @@ import base64, difflib, html, tempfile, uuid
 from pathlib import Path
 from collections import deque, Counter
 from dataclasses import dataclass, field, asdict
-from typing import Optional, AsyncGenerator, Any
+from typing import Optional, AsyncGenerator
 from contextlib import asynccontextmanager
 
 # Load .env file early so all os.environ.get() calls below pick up the values
@@ -66,9 +66,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
     Query,
-    HTTPException,
 )
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -76,7 +74,6 @@ from fastapi.responses import (
     Response,
     StreamingResponse,
     FileResponse,
-    PlainTextResponse,
 )
 from pydantic import BaseModel
 import uvicorn
@@ -90,7 +87,6 @@ try:
         load_user_memory,
         save_user_memory,
         get_google_access_token,
-        load_google_tokens,
         gmail_list_messages,
         calendar_list_events,
         is_owner,
@@ -118,20 +114,15 @@ except ImportError:
     EMAIL_INTEGRATION_AVAILABLE = False
     logging.warning("Email integration module not found")
 
-# Persona self-optimization (trainer/persona_optimizer.py)
-try:
-    from persona_optimizer import persona_optimizer, PersonaOptimizer
-
-    PERSONA_OPTIMIZER_AVAILABLE = True
-except ImportError:
-    PERSONA_OPTIMIZER_AVAILABLE = False
-    persona_optimizer = None
-    logging.warning("persona_optimizer not found — persona self-optimization disabled")
-
 # ─── CONFIGURATION ───────────────────────────────────────────────
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://100.93.131.114:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
 FAST_MODEL = os.environ.get("FAST_MODEL", "qwen2.5:7b")  # for creative/story tasks
+VIBE_MODEL = os.environ.get("VIBE_MODEL", "qwen2.5:7b")
+# VibeCode chat model — the .env sets this to qwen2.5:3b (fits host RAM and
+# gives good code answers). Read it explicitly so /api/vibecode/chat never
+# silently falls through to the tiny 1.5b model that produced canned replies.
+VIBECODE_MODEL = os.environ.get("VIBECODE_MODEL", "qwen2.5:3b")
 PIPER_BIN = shutil.which("piper") or os.environ.get(
     "PIPER_BIN", "/usr/local/piper/piper"
 )
@@ -146,21 +137,11 @@ if not os.path.exists(PIPER_BIN):
             PIPER_BIN = _candidate
             break
 PIPER_VOICE = os.environ.get("PIPER_VOICE", "/voices/lilly_voice.onnx")
-# If the default path doesn't exist, check the lillyos/voices workspace directory.
-# Preferred voice is Amy Medium (en-us-amy-medium.onnx) — the same dataset as
-# lilly_voice.onnx but explicit so "use the amy voice" always resolves to Amy.
+# If the default path doesn't exist, check the lillyos/voices workspace directory
 if not os.path.exists(PIPER_VOICE):
-    _amy_voice = str(
-        Path(__file__).parent / "lillyos" / "voices" / "en-us-amy-medium.onnx"
-    )
-    if os.path.exists(_amy_voice):
-        PIPER_VOICE = _amy_voice
-    else:
-        _alt_voice = str(
-            Path(__file__).parent / "lillyos" / "voices" / "lilly_voice.onnx"
-        )
-        if os.path.exists(_alt_voice):
-            PIPER_VOICE = _alt_voice
+    _alt_voice = str(Path(__file__).parent / "lillyos" / "voices" / "lilly_voice.onnx")
+    if os.path.exists(_alt_voice):
+        PIPER_VOICE = _alt_voice
 os.environ.setdefault("ESPEAK_DATA_PATH", "/usr/local/share/espeak-ng-data")
 os.environ.setdefault("LD_LIBRARY_PATH", "/usr/local/lib")
 
@@ -420,9 +401,7 @@ TENCENTDB_API_KEY = os.environ.get("TENCENTDB_API_KEY", "tdai-memory-key")
 try:
     from tencentdb_memory import LillyMemory, tencentdb_memory_available
 
-    _lilly_memory: Optional[Any] = (
-        None  # lazily initialized (LillyMemory may be absent)
-    )
+    _lilly_memory: Optional[LillyMemory] = None  # lazily initialized
 except ImportError:
     LillyMemory = None  # type: ignore
     tencentdb_memory_available = None  # type: ignore
@@ -433,8 +412,6 @@ SENSOR_SERVER_URL = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8
 WHISPER_SERVER_URL = os.environ.get("WHISPER_SERVER_URL", "http://localhost:8001")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "Systran/faster-whisper-large-v3")
 PUSHBULLET_API_KEY = os.environ.get("PUSHBULLET_API_KEY", "")
-MISSION_CONTROL_URL = os.environ.get("MISSION_CONTROL_URL", "http://100.73.249.14:4000")
-MC_API_TOKEN = os.environ.get("MC_API_TOKEN", "")
 WHISPER_VAD_FILTER = (
     True  # Enable Silero VAD — filters silence/noise before transcription
 )
@@ -445,15 +422,14 @@ WHISPER_TEMPERATURE = 0
 WHISPER_CONDITION_ON_PREV = (
     False  # Disable — prevents hallucination propagation across chunks
 )
-# Whisper STT prompt — transcribe clean speech without filler words
-WHISPER_INITIAL_PROMPT = "Transcribe clean speech. Omit filler words such as um, uh, hmm, well, so, like, you know. Do not include repeated words or false starts. Capture only the actual message content."
+# Verbatim prompt: tells Whisper to transcribe fillers, pauses, and repeated words
+WHISPER_INITIAL_PROMPT = "Transcribe verbatim including all fillers like um, uh, hmm, well, so, like, you know. Include repeated words and false starts. Do not clean up or paraphrase speech."
 
 logging.basicConfig(
-    level=logging.ERROR, format="%(asctime)s [%(levelname)s] %(message)s"
+    level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s"
 )
-logging.getLogger("httpx").setLevel(logging.ERROR)
-logging.getLogger("httpcore").setLevel(logging.ERROR)
-logging.getLogger("LillyAI").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("LillyAI")
 
 
@@ -616,39 +592,6 @@ async def skip_ad():
 
 SKILLS = {}
 PENDING_INTENT = None
-
-# ── Confirmation gate (casual mode) ──────────────────────────────────
-# In casual mode (no wake word), phone-affecting skill actions are NOT
-# executed immediately. Lilly asks "Should I open YouTube...?" and stores
-# the pending action here until the user confirms ("yes") or declines
-# ("no"). This eliminates false-positive actions from ambient speech
-# while keeping natural conversation (no wake word required).
-PENDING_CONFIRM = (
-    None  # {"desc": str, "skill": dict, "skill_arg": str, "expires": float}
-)
-CONFIRM_TIMEOUT = 60.0  # seconds a pending confirmation stays valid
-CONFIRM_PHONE_ACTIONS = True  # master switch for the confirmation gate
-
-# ── Watch Together mode ──────────────────────────────────────────────
-# When Lilly launches a video app, she enters "watching with you" mode:
-# the overlay docks to the side, on-device STT is paused so the video's
-# audio is never transcribed as speech, and the browser mic is suppressed.
-# The overlay clears it via /api/watch_together when playback ends.
-WATCH_MODE = {"active": False, "app": "", "label": "", "since": 0.0}
-_VIDEO_PACKAGES = {
-    "com.google.android.youtube",
-    "com.google.android.apps.youtube.music",
-    "com.netflix.mediaclient",
-    "com.spotify.music",
-    "com.amazon.avod.thirdpartyclient",
-    "com.disney.disneyplus",
-    "com.hulu.plus",
-    "com.primevideo",
-    "com.crunchyroll.crunchyroid",
-    "com.mxtech.videoplayer.ad",
-    "org.videolan.vlc",
-    "com.google.android.videos",
-}
 PHANTOMS = {
     # Whisper hallucinations on pure noise/silence (NOT disfluencies — those are real speech)
     # NOTE: short words like "thanks", "bye" are NOT phantoms — they're common user expressions.
@@ -1031,11 +974,13 @@ LILLY_IS_THINKING = False
 LILLY_MOOD = "calm"
 PENDING_LOOK_AT = None
 PENDING_OPEN_URL: Optional[str] = None
+# Pending VibeCode overlay commands for /api/ui_state polling (voice paths).
+# Set to ("open", slug|None) or ("close", None); consumed by the front end
+# which renders the VibeCode overlay panels on the main page.
+PENDING_VIBECODE: Optional[tuple] = None
 LAST_HEARD = ""
 LAST_SPOKEN = ""
 LAST_SSML = ""
-SPEAKING_SESSION_ID = 0
-_LAST_SPOKEN_SESSION_ID = 0
 AUDIO_CACHE: dict[int, bytes] = {}
 AUDIO_CACHE_ID: int = 0
 AUDIO_CACHE_LOCK: asyncio.Lock = asyncio.Lock()
@@ -1048,7 +993,7 @@ NOISE_PAUSE_DURATION = 30.0  # seconds to pause after sustained noise
 
 # ── Self-input cooldown (fix #1): mic is silenced briefly after Lilly finishes
 MIC_COOLDOWN_UNTIL = 0.0  # epoch timestamp: don't record before this
-MIC_COOLDOWN_SECS = 6.0  # seconds of silence after Lilly stops speaking
+MIC_COOLDOWN_SECS = 0.8  # seconds of silence after Lilly stops speaking
 
 # ── Tone matching (fix #2): updated from mic audio before every LLM call
 USER_MIC_ENERGY = 0.5  # 0.0 quiet … 1.0 loud  (RMS-derived, smoothed)
@@ -1074,7 +1019,7 @@ CONVERSATION_MODE = False
 CONVERSATION_TIMEOUT = 30.0  # seconds of silence before exiting conversation mode
 CONVERSATION_LAST_ACTIVITY = 0.0  # timestamp of last user speech or Lilly response
 
-GAME_STATE = {"active": False, "target_word": "", "hint": "", "type": "", "misses": 0}
+GAME_STATE = {"active": False, "target_word": "", "hint": "", "type": ""}
 DRIVING_MODE = {"active": False}
 WAITING_FOR_PROMPT = False
 PENDING_DEEP_ANSWER = ""
@@ -1083,6 +1028,12 @@ PENDING_DEEP_ANSWER = ""
 CHILD_MODE = False
 NOSE_TAP_COUNT = 0
 NOSE_TAP_LAST = 0.0
+
+# Coding mode (vibe coding) — activated by voice command
+CODING_MODE = False
+CODING_HISTORY: list[dict] = []  # [{role: "user"/"assistant", content: "..."}]
+CODING_SESSION_DIR: str = ""  # temp dir for this coding session
+CODING_FILES: list[str] = []  # files created in this session
 
 # Phoneme-sync state
 PHONEME_QUEUE = deque()
@@ -1135,102 +1086,9 @@ _HALLUCINATION_PATTERNS = [
         ),
         "",
     ),
-    # Repetitive filler / degenerate loops (you know you know, like like like, etc.)
-    (
-        re.compile(
-            r"(?:\b(?:you\s+know|like|um|uh|hmm|well|so)\b[\s,.]*){4,}",
-            re.I,
-        ),
-        "...",
-    ),
     # Duplicate boilerplate
     (re.compile(r"\n{4,}", re.I), "\n\n"),
 ]
-
-
-# ─── OFFENSIVE LANGUAGE FILTER ─────────────────────────────────
-# Keep replies clean: no vulgarity, no slurs, no rude outbursts.
-# Replacements are read aloud by TTS, so use natural soft words —
-# never asterisks (piper would read them as "star star star").
-# Also applied to STT output so mis-heard "vulgar" words never hit
-# the screen or the model context.
-_OFFENSIVE_WORD_MAP = [
-    ("asshole", "jerk"),
-    ("bastard", "jerk"),
-    ("bitch", "jerk"),
-    ("bullshit", "nonsense"),
-    ("bullshitting", "joking"),
-    ("cunt", "jerk"),
-    ("dickhead", "jerk"),
-    ("dick", "jerk"),
-    ("douchebag", "jerk"),
-    ("faggot", "person"),
-    ("faggots", "people"),
-    ("fucker", "jerk"),
-    ("fuckers", "jerks"),
-    ("fucking", "fricking"),
-    ("fuck", "frick"),
-    ("goddamned", "darn"),
-    ("goddamn", "darn"),
-    ("motherfucker", "jerk"),
-    ("nigga", "person"),
-    ("nigger", "person"),
-    ("prick", "jerk"),
-    ("pussy", "jerk"),
-    ("shitty", "crummy"),
-    ("shitting", "kidding"),
-    ("shit", "crap"),
-    ("slut", "jerk"),
-    ("twat", "jerk"),
-    ("wanker", "jerk"),
-    ("whore", "jerk"),
-]
-
-# Words Lilly must never say, even though they're not profanity.
-_OFFENSIVE_BANNED_WORDS = [
-    "disgusting",
-]
-
-
-def _filter_offensive_language(text: str) -> str:
-    """Replace profanity/slurs with soft words; drop banned words.
-
-    Used both on LLM replies and on transcribed (heard) text so the
-    UI and the model context stay clean.
-    """
-    if not text:
-        return text
-    cleaned = text
-    for word, replacement in _OFFENSIVE_WORD_MAP:
-        cleaned = re.sub(
-            rf"\b{re.escape(word)}\b", replacement, cleaned, flags=re.IGNORECASE
-        )
-    # Obfuscated variants: f*ck, f**k, f.u.c.k, s h i t, s-h-i-t, sh!t
-    # (the * or ! typically replaces the vowel, so vowels are optional)
-    cleaned = re.sub(
-        r"\bf\s*[\*\.\-_!\s]*(?:u\s*[\*\.\-_!\s]*)?c\s*[\*\.\-_!\s]*k\w*",
-        "frick",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(
-        r"\bs\s*[\*\.\-_!\s]*h\s*[\*\.\-_!\s]*(?:i\s*[\*\.\-_!\s]*)?t\w*",
-        "crap",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    # Fully-stared variants: f***, f***k, sh*t (2+ separator chars)
-    cleaned = re.sub(r"\bf\s*[\*\.\-_!]{2,}", "frick", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(
-        r"\bs\s*h\s*[\*\.\-_!]{1,}\s*t", "crap", cleaned, flags=re.IGNORECASE
-    )
-    # Banned words → gentle substitute
-    for word in _OFFENSIVE_BANNED_WORDS:
-        cleaned = re.sub(
-            rf"\b{re.escape(word)}\b", "not great", cleaned, flags=re.IGNORECASE
-        )
-    cleaned = re.sub(r"\s{2,}", " ", cleaned)
-    return cleaned.strip()
 
 
 def _filter_hallucination_patterns(text: str) -> str:
@@ -1250,67 +1108,7 @@ def _filter_hallucination_patterns(text: str) -> str:
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     # If the reply starts with fragment punctuation, trim it
     cleaned = re.sub(r"^[!,.:;/\\s]+", "", cleaned)
-    # Keep replies clean: no profanity, slurs, or banned words
-    cleaned = _filter_offensive_language(cleaned)
     return cleaned
-
-
-def _clean_transcription_fillers(text: str) -> str:
-    """Remove filler-word noise from voice transcription before chat display.
-
-    Strips all disfluency tokens and repeated filler bursts while
-    preserving the actual message content.  Applies after the hallucination
-    filter so true media-phrase noise is already gone.
-    """
-
-    if not text:
-        return text
-
-    # Normalise whitespace first
-
-    text = re.sub(r"\s+", " ", text).strip()
-
-    if not text:
-        return text
-
-    # Remove multi-word disfluencies first (e.g. "you know", "like like")
-    # Sort by length descending so longer phrases match first
-    multi = sorted(
-        [d for d in DISFLOENCIES if " " in d],
-        key=len,
-        reverse=True,
-    )
-    for phrase in multi:
-        pattern = re.compile(
-            r"(?i)\b" + re.escape(phrase).replace(r"\ ", r"\s+") + r"\b"
-        )
-        text = pattern.sub("", text)
-
-    # Normalise whitespace again after removing phrases
-    text = re.sub(r"\s+", " ", text).strip()
-
-    if not text:
-        return text
-
-    # Remove single-word fillers
-    words = text.split()
-    cleaned = []
-
-    for w in words:
-        lw = w.lower().strip(".,!?;:")
-        if lw in DISFLOENCIES:
-            continue
-        cleaned.append(w)
-
-    result = " ".join(cleaned)
-
-    # Final safety: if the result is just filler words or empty, return empty
-    if not result or all(
-        w.lower().strip(".,!?;:") in DISFLOENCIES for w in result.split()
-    ):
-        return ""
-
-    return result
 
 
 class LlamaBackend:
@@ -1359,7 +1157,7 @@ class LlamaBackend:
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int = 256,
-        model: Optional[str] = None,
+        model: str = None,
     ) -> AsyncGenerator[str, None]:
         """Stream chat response token by token. Yields text chunks as they arrive."""
         use_model = model or OLLAMA_MODEL
@@ -1403,7 +1201,6 @@ class LlamaBackend:
 _ollama_client: Optional[httpx.AsyncClient] = None
 _whisper_client: Optional[httpx.AsyncClient] = None
 _sensor_client: Optional[httpx.AsyncClient] = None
-_mc_client: Optional[httpx.AsyncClient] = None
 
 
 async def _get_ollama_client() -> httpx.AsyncClient:
@@ -1436,18 +1233,6 @@ async def _get_whisper_client() -> httpx.AsyncClient:
     return _whisper_client
 
 
-async def _get_mc_client() -> httpx.AsyncClient:
-    """Persistent client for Mission Control API (100.73.249.14:4000)."""
-    global _mc_client
-    if _mc_client is None or _mc_client.is_closed:
-        _mc_client = httpx.AsyncClient(
-            base_url=MISSION_CONTROL_URL,
-            timeout=15.0,
-            limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
-        )
-    return _mc_client
-
-
 llama_backend = LlamaBackend()
 
 
@@ -1459,33 +1244,6 @@ def normalize_text(text: str) -> str:
     text = re.sub(r"\[.*?\]|\(.*?\)", "", text)
     text = re.sub(r"[^\w\s]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
-
-
-def is_self_echo(text: str) -> bool:
-    """Detect Lilly's own voice being picked up by the mic (audio loop).
-
-    Compares the heard text against what Lilly last said. If they overlap
-    substantially, it's an echo of her own speech, not the user talking —
-    discard it so she doesn't talk to herself in an endless loop.
-    """
-    global LAST_SPOKEN
-    if not text or not LAST_SPOKEN:
-        return False
-    heard = normalize_text(text)
-    spoke = normalize_text(LAST_SPOKEN)
-    if not heard or not spoke:
-        return False
-    heard_words = heard.split()
-    spoke_words = spoke.split()
-    if not heard_words or not spoke_words:
-        return False
-    # Common overlap ratio (intersection / max(len)) — high = echo
-    intersection = set(heard_words) & set(spoke_words)
-    ratio = len(intersection) / max(len(heard_words), len(spoke_words), 1)
-    # Full containment either direction is also an echo (e.g. Lilly said a long
-    # sentence, mic caught a fragment of it)
-    contained = heard in spoke or spoke in heard
-    return ratio >= 0.35 or contained
 
 
 def strip_json_wrapper(text: str) -> str:
@@ -1541,13 +1299,13 @@ CHAR_WAKE_WORDS: dict[str, list[str]] = {
 }
 
 
-def _get_wake_targets(avatar: Optional[str] = None) -> list[str]:
+def _get_wake_targets(avatar: str = None) -> list[str]:
     """Return wake word targets for the given avatar (defaults to current_avatar)."""
     key = avatar or current_avatar or "puppy"
     return CHAR_WAKE_WORDS.get(key, CHAR_WAKE_WORDS["puppy"])
 
 
-def fuzzy_wake_match(phrase: str, avatar: Optional[str] = None) -> tuple[bool, float]:
+def fuzzy_wake_match(phrase: str, avatar: str = None) -> tuple[bool, float]:
     """Returns (is_wake_word_present, confidence) using fuzzy matching.
 
     Matches against the wake words for the given avatar (or current_avatar).
@@ -1567,356 +1325,7 @@ def fuzzy_wake_match(phrase: str, avatar: Optional[str] = None) -> tuple[bool, f
             for word in phrase_lower.split():
                 word_ratio = difflib.SequenceMatcher(None, target, word).ratio()
                 best_score = max(best_score, word_ratio)
-    return best_score >= 0.7, best_score
-
-
-# ─── NLU + CONFIRMATION GATE (casual mode) ────────────────────────────
-# Natural-language parsing of app intents ("I want to watch youtube videos
-# on true crime") plus a confirmation gate so phone-affecting actions wait
-# for an explicit "yes" before executing. This kills false positives from
-# ambient speech while keeping conversation natural (no wake word needed).
-
-_CONFIRM_YES = {
-    "yes",
-    "yep",
-    "yeah",
-    "yup",
-    "sure",
-    "ok",
-    "okay",
-    "go ahead",
-    "go for it",
-    "do it",
-    "do that",
-    "please do",
-    "confirm",
-    "confirmed",
-    "yes please",
-    "yeah sure",
-    "ok do it",
-    "alright",
-    "all right",
-    "fine",
-    "please",
-    "y",
-    "sure thing",
-    "absolutely",
-    "yes do it",
-    "lets go",
-    "let's go",
-    "go",
-}
-_CONFIRM_NO = {
-    "no",
-    "nope",
-    "nah",
-    "cancel",
-    "cancel that",
-    "dont",
-    "dont do it",
-    "no thanks",
-    "not now",
-    "stop",
-    "never mind",
-    "nevermind",
-    "forget it",
-    "n",
-    "no dont",
-    "no way",
-    "skip",
-    "not yet",
-}
-
-# Search-URL templates used by the NLU when an app has no registered
-# *_search skill variant. Keyed by Android package.
-_NLP_SEARCH_URLS = {
-    "com.google.android.youtube": "https://www.youtube.com/results?search_query={q}",
-    "com.google.android.apps.youtube.music": "https://music.youtube.com/search?q={q}",
-    "com.google.android.apps.maps": "https://www.google.com/maps/search/?api=1&query={q}",
-    "com.android.chrome": "https://www.google.com/search?q={q}",
-    "org.mozilla.firefox": "https://www.google.com/search?q={q}",
-    "com.google.android.googlequicksearchbox": "https://www.google.com/search?q={q}",
-    "com.spotify.music": "spotify:search:{q}",
-}
-
-
-def _confirm_response(phrase: str) -> Optional[str]:
-    """Return 'yes'/'no' if the phrase is a clear confirmation/denial."""
-    p = normalize_text(phrase).strip()
-    if not p:
-        return None
-    if p in _CONFIRM_YES:
-        return "yes"
-    if p in _CONFIRM_NO:
-        return "no"
-    # Prefix matching: "yes do it", "sure go ahead", "no dont" ...
-    words = p.split()
-    for i in range(1, len(words) + 1):
-        prefix = " ".join(words[:i])
-        if prefix in _CONFIRM_YES:
-            return "yes"
-        if prefix in _CONFIRM_NO:
-            return "no"
-    return None
-
-
-def _app_lexicon() -> dict:
-    """Map normalized app words -> skill dict for NLU parsing.
-
-    Only real app-launch skills (intent_launch / context_launch /
-    hybrid_intent_tap with a package) are included. Keyevent / nav /
-    termux / info skills are matched by their own keyword rules and would
-    add too much noise to a general "open app X" parser.
-    """
-    lex = {}
-    for skill in SKILLS.values():
-        action = skill.get("action_type") or skill.get("type")
-        if action not in ("intent_launch", "context_launch", "hybrid_intent_tap"):
-            continue
-        if not skill.get("package"):
-            continue
-        for w in [skill.get("label", "")] + skill.get("aliases", []):
-            nw = normalize_text(w)
-            if nw and len(nw) > 1:
-                lex[nw] = skill
-    return lex
-
-
-def _strip_nlp_noise(rest: str) -> str:
-    """Strip intent verbs/connectors around an app mention, repeatedly."""
-    for _ in range(4):
-        before = rest
-        rest = re.sub(r"^\s*(?:and|or|then|to|please)\s+", " ", rest)
-        rest = re.sub(
-            r"^(?:i\s+(?:want\s+to|wanna|would\s+love\s+to|need\s+to|"
-            r"would\s+like\s+to)\s+|i\s+|would\s+you\s+)?"
-            r"(?:watch|listen\s+to|open|play|start|launch|put\s+on|use|"
-            r"show\s+me|search\s+for|search|find\s+on|find|look\s+up|"
-            r"look\s+for|go\s+to|turn\s+on|navigate\s+to|navigate)\s*",
-            " ",
-            rest,
-        )
-        rest = re.sub(r"^\s*(?:for|about|on|in)\s+", " ", rest)
-        rest = re.sub(r"\s+(?:on|in|for|about|at|with)\s*$", "", rest)
-        rest = re.sub(r"\s+", " ", rest).strip()
-        if rest == before:
-            break
-    return rest
-
-
-def _search_variant(skill: dict) -> Optional[dict]:
-    """Find a search-capable variant of an app skill (e.g. youtube_search)."""
-    pkg = skill.get("package", "")
-    if not pkg:
-        return None
-    for s in SKILLS.values():
-        if s is skill:
-            continue
-        if s.get("package") == pkg:
-            uri = s.get("uri_template") or ""
-            if "search_query" in uri or "{}" in uri:
-                merged = dict(s)
-                merged["label"] = skill.get("label", s.get("label", "app"))
-                return merged
-    url = _NLP_SEARCH_URLS.get(pkg)
-    if url:
-        return {
-            "package": pkg,
-            "action_type": "intent_launch",
-            "type": "intent_launch",
-            "intent_action": "android.intent.action.VIEW",
-            "uri_template": url,
-            "label": skill.get("label", "app"),
-            "canned_reply": "Searching for {query}!",
-        }
-    return None
-
-
-def parse_nlp_intent(phrase: str) -> tuple[Optional[dict], str]:
-    """Extract (app_skill, query) from a natural-language utterance.
-
-    Handles phrasings like:
-      "I want to watch youtube videos on true crime"  -> youtube + "true crime"
-      "open youtube and search for true crime"        -> youtube + "true crime"
-      "play netflix"                                  -> netflix + ""
-      "watch true crime on youtube"                   -> youtube + "true crime"
-      "search youtube for true crime"                 -> youtube + "true crime"
-
-    Returns (None, "") if no app intent is found.
-    """
-    phrase = normalize_text(phrase)
-    lex = _app_lexicon()
-    if not lex:
-        return None, ""
-    found = []
-    for word, skill in lex.items():
-        if word in phrase:
-            found.append((len(word), word, skill))
-    if not found:
-        return None, ""
-    found.sort(key=lambda x: -x[0])
-    _, app_word, skill = found[0]
-
-    rest = phrase.replace(app_word, " ", 1)
-    rest = re.sub(r"\b(?:videos?|video|app|apps|the|an?)\b", " ", rest)
-    rest = _strip_nlp_noise(rest)
-    query = rest.strip()
-
-    if query:
-        sv = _search_variant(skill)
-        if sv:
-            skill = sv
-    return skill, query
-
-
-def _is_read_only_skill(skill: dict) -> bool:
-    """Info reads are harmless — exempt from the confirmation gate."""
-    action = skill.get("action_type") or skill.get("type")
-    if action == "info":
-        return True
-    if action == "termux":
-        binary = skill.get("binary") or skill.get("command", "")
-        read_only = (
-            "battery",
-            "wifi",
-            "location",
-            "notification",
-            "sensor",
-            "clipboard-get",
-            "call-log",
-            "contact",
-            "bluetooth",
-        )
-        return any(b in binary for b in read_only)
-    return False
-
-
-def _needs_confirmation(skill: dict) -> bool:
-    """Whether a skill action must wait for the user's explicit OK."""
-    if not CONFIRM_PHONE_ACTIONS:
-        return False
-    if skill.get("auto_exec"):
-        return False
-    if skill.get("confirm") is False:
-        return False
-    action = skill.get("action_type") or skill.get("type", "intent_launch")
-    if action in ("openhuman_skill", "info", "keyevent", "voice_dictation"):
-        return False
-    if _is_read_only_skill(skill):
-        return False
-    return True
-
-
-def _describe_skill_action(skill: dict, skill_arg: str = "") -> str:
-    """Human-readable description used in the confirmation prompt."""
-    label = skill.get("label", "app")
-    action = skill.get("action_type") or skill.get("type", "intent_launch")
-    uri = skill.get("uri_template") or ""
-    if skill_arg:
-        if "search_query" in uri or "search?" in uri or "search" in uri:
-            return f"open {_app_display_label(skill)} and search for '{skill_arg}'"
-        return f"open {label} and look for '{skill_arg}'"
-    if action == "shell_command":
-        return f"run the {label.lower()} command"
-    if action == "termux":
-        return f"use the {label.lower()} tool on your phone"
-    return f"open {_app_display_label(skill)}"
-
-
-def _app_display_label(skill: dict) -> str:
-    """Label with a trailing 'search' removed — 'YouTube Search' -> 'YouTube'."""
-    label = skill.get("label", "app")
-    base = re.sub(r"\s*search$", "", label, flags=re.IGNORECASE).strip()
-    return base or label
-
-
-async def _run_skill_action(skill: dict, skill_arg: str = "") -> str:
-    """Execute a skill action (used directly and for confirmed actions).
-
-    Returns the reply text spoken/shown to the user.
-    """
-    global PENDING_OPEN_URL
-    action = skill.get("action_type") or skill.get("type", "intent_launch")
-    pkg = skill.get("package", "")
-    label = skill.get("label", "app")
-
-    if action == "prompt_argument":
-        if not skill_arg:
-            return ""
-        url_query = urllib.parse.quote(skill_arg)
-        url = (
-            skill.get("uri_template") or "https://www.google.com/search?q={}"
-        ).replace("{}", url_query)
-        is_docker = not shutil.which("termux-open")
-        if is_docker:
-            PENDING_OPEN_URL = url
-            return f"Searching for {skill_arg}!"
-        await termux_run(["termux-open", url], timeout=5.0)
-        return f"Searching for {skill_arg}!"
-
-    if action in ("intent_launch", "hybrid_intent_tap", "context_launch") and pkg:
-        intent_action = skill.get("intent_action") or "android.intent.action.VIEW"
-        uri_template = skill.get("uri_template", "")
-        try:
-            await app_process_monkey_intent(pkg, intent_action, uri_template, skill_arg)
-        except Exception as e:
-            logger.warning(f"App launch failed ({label}): {e}")
-        display_label = _app_display_label(skill)
-        if skill_arg:
-            return f"Opening {display_label} and searching for {skill_arg}!"
-        return f"Opening {display_label}!"
-
-    if action == "shell_command":
-        cmd_to_run = skill.get("command", "")
-        subcmd = skill.get("subcommand", "")
-        args = skill.get("args", [])
-        if skill.get("no_arg"):
-            full_cmd = [cmd_to_run] + (args or [])
-        elif skill_arg:
-            full_cmd = (
-                [cmd_to_run] + ([subcmd] if subcmd else []) + (args or []) + [skill_arg]
-            )
-        else:
-            return ""
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *full_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
-            output = stdout.decode().strip() or stderr.decode().strip()
-            return f"Done: {output[:200]}" if output else "Command executed."
-        except asyncio.TimeoutError:
-            return "Command timed out."
-        except FileNotFoundError:
-            return f"Command '{cmd_to_run}' not found in container."
-
-    if action == "termux":
-        return f"Opening {label} on your phone!"
-
-    return f"Opening {label}!"
-
-
-async def _gate_phone_action(skill: dict, skill_arg: str = "") -> Optional[str]:
-    """Ask for confirmation before a phone-affecting action.
-
-    Returns the confirmation question if the user must confirm, else None
-    (meaning the action may run immediately).
-    """
-    global PENDING_CONFIRM
-    if not _needs_confirmation(skill):
-        return None
-    desc = _describe_skill_action(skill, skill_arg)
-    PENDING_CONFIRM = {
-        "desc": desc,
-        "skill": skill,
-        "skill_arg": skill_arg,
-        "expires": time.time() + CONFIRM_TIMEOUT,
-    }
-    reply = f"Should I {desc}?"
-    await speak(reply)
-    return reply
+    return best_score >= 0.6, best_score
 
 
 def estimate_phoneme_duration(text: str) -> tuple[list[float], float]:
@@ -2321,7 +1730,7 @@ async def save_memory():
         data = await memory.to_dict()
         # Prefer user-scoped memory file when a user is signed in
         if _current_user_id and AUTH_AVAILABLE:
-            save_user_memory(_current_user_id, data)  # type: ignore[reportPossiblyUnboundVariable]
+            save_user_memory(_current_user_id, data)
         else:
             path = _avatar_memory_file(current_avatar)
             path.write_text(json.dumps(data, indent=2))
@@ -2346,79 +1755,6 @@ current_avatar = "puppy"
 # Tracks the Auth0 user ID for the *current in-flight request* so save_memory()
 # can write to the correct per-user file even when called deep inside handle_intent().
 _current_user_id: str = ""
-
-# Per-user name store — isolates names so different Google accounts never see each other's names.
-_USER_NAMES_FILE = WORKSPACE / "user_names.json"
-_USER_NAMES: dict[str, str] = {}
-
-
-def _load_user_names() -> None:
-    global _USER_NAMES
-    try:
-        if _USER_NAMES_FILE.exists():
-            _USER_NAMES = json.loads(_USER_NAMES_FILE.read_text())
-    except Exception:
-        _USER_NAMES = {}
-
-
-def _save_user_names() -> None:
-    try:
-        _USER_NAMES_FILE.write_text(json.dumps(_USER_NAMES, indent=2))
-    except Exception:
-        pass
-
-
-def _get_user_name(user_id: str = "") -> str:
-    if not user_id:
-        return ""
-    return _USER_NAMES.get(user_id, "")
-
-
-def _set_user_name(user_id: str, name: str) -> None:
-    if not user_id:
-        return
-    _USER_NAMES[user_id] = name.strip()
-    _save_user_names()
-
-
-def _extract_real_name(user_info: Optional[dict]) -> str:
-    """Extract a human first name from Auth0/Google profile.
-
-    Priority:
-    1. given_name (Google OAuth profile scope)
-    2. nickname (Auth0)
-    3. name (full name) — first word, unless it's just the email prefix
-    4. Email prefix, formatted nicely
-    """
-    if not user_info:
-        return ""
-    email = user_info.get("email", "")
-    email_prefix = email.split("@")[0].lower() if email else ""
-
-    # 1. Google OAuth given_name
-    given = (user_info.get("given_name") or "").strip()
-    if given and given.lower() != email_prefix:
-        return given.split()[0]
-
-    # 2. Auth0 nickname
-    nickname = (user_info.get("nickname") or "").strip()
-    if nickname and nickname.lower() != email_prefix:
-        return nickname.split()[0]
-
-    # 3. Full name — reject if it's just the email prefix or "User"
-    name = (user_info.get("name") or "").strip()
-    if name and name not in ("User", "user") and name.lower() != email_prefix:
-        first = name.split()[0]
-        first = re.sub(r"[._-]+", "", first)
-        if first:
-            return first
-
-    # 4. Fallback: derive from email prefix
-    if email_prefix:
-        parts = re.split(r"[._-]", email_prefix)
-        return parts[0].capitalize() if parts else ""
-
-    return ""
 
 
 def _avatar_memory_file(avatar: str) -> Path:
@@ -2463,8 +1799,8 @@ async def _clean_memory_artifacts():
 
 # ─── HARDWARE & OS INTEGRATIONS ─────────────────────────────────
 async def whisper_stt(
-    audio_bytes: Optional[bytes] = None,
-    file_path: Optional[Path] = None,
+    audio_bytes: bytes = None,
+    file_path: Path = None,
     content_type: str = "audio/wav",
     filename: str = "input.wav",
 ) -> str:
@@ -2521,17 +1857,14 @@ async def whisper_stt(
     except Exception as e:
         logger.debug(f"Audio pre-processing failed (using raw): {e}")
 
-    # Pass 1: auto-detect language (NO forced language — forcing "en" caused
-    # Spanish/other speech to be mangled into English gibberish, which the UI
-    # then showed as vulgarity). Returns verbose_json so we can read language
-    # + segment-level no-speech/log-prob filters.
+    # Use verbose_json to get language detection info + force English
     try:
         c = await _get_whisper_client()
         files = {"file": (filename, wav_data, content_type)}
         data = {
             "model_name": WHISPER_MODEL,
             "response_format": "verbose_json",
-            # No "language" field → Whisper auto-detects the spoken language.
+            "language": "en",
             "prompt": WHISPER_INITIAL_PROMPT,
             "temperature": str(WHISPER_TEMPERATURE),
         }
@@ -2552,19 +1885,13 @@ async def whisper_stt(
                 if lang_prob is None:
                     lang_prob = 1.0
 
-                # Real speech, non-English (e.g. user speaks Spanish) → translate
-                # to English in real time so it appears in English on screen.
+                # Non-English detected despite forcing English → noise
                 if detected_lang and detected_lang not in ("en", "eng", ""):
                     logger.debug(
-                        f"STT: non-English heard (lang={detected_lang}, prob={lang_prob:.2f}) — translating to English"
+                        f"STT: non-English detected (lang={detected_lang}, prob={lang_prob:.2f}), discarding: {text[:50]}"
                     )
-                    en_text = await _translate_audio(wav_data, content_type, filename)
-                    if en_text:
-                        return _filter_offensive_language(en_text)
-                    # Translation unavailable → fall through to original text
-                    return _filter_offensive_language(normalize_text(text))
-
-                if lang_prob < 0.6:
+                    return ""
+                if lang_prob < 0.5:
                     logger.debug(
                         f"STT: low confidence ({lang_prob:.2f}), discarding: {text[:50]}"
                     )
@@ -2582,13 +1909,13 @@ async def whisper_stt(
                         if not seg_text:
                             continue
                         # Skip segments that are mostly silence/noise
-                        if no_speech > 0.5:
+                        if no_speech > 0.6:
                             logger.debug(
                                 f"STT: filtered no_speech segment (prob={no_speech:.2f}): '{seg_text[:50]}'"
                             )
                             continue
                         # Skip segments with very low log probability (garbage)
-                        if avg_logprob < -2.0:
+                        if avg_logprob < -2.5:
                             logger.debug(
                                 f"STT: filtered low-logprob segment (log={avg_logprob:.2f}): '{seg_text[:50]}'"
                             )
@@ -2598,20 +1925,21 @@ async def whisper_stt(
                         return ""
                     text = " ".join(filtered_segments).strip()
 
-                return _filter_offensive_language(normalize_text(text))
+                return normalize_text(text)
             except (json.JSONDecodeError, KeyError):
-                return _filter_offensive_language(normalize_text(r.text))
+                return normalize_text(r.text)
         logger.debug(f"STT server returned {r.status_code}: {r.text[:200]}")
     except Exception as e:
         logger.debug(f"STT error: {e}")
 
-    # Fallback: try without verbose_json (auto-detect, no forced language)
+    # Fallback: try without verbose_json
     try:
         c = await _get_whisper_client()
         files = {"file": (filename, wav_data, content_type)}
         data = {
             "model_name": WHISPER_MODEL,
             "response_format": "text",
+            "language": "en",
             "prompt": WHISPER_INITIAL_PROMPT,
             "temperature": str(WHISPER_TEMPERATURE),
         }
@@ -2622,63 +1950,9 @@ async def whisper_stt(
             timeout=60.0,
         )
         if r.status_code == 200:
-            return _filter_offensive_language(normalize_text(r.text))
+            return normalize_text(r.text)
     except Exception as e:
         logger.debug(f"STT fallback error: {e}")
-    return ""
-
-
-async def _translate_audio(
-    wav_data: bytes, content_type: str = "audio/wav", filename: str = "input.wav"
-) -> str:
-    """Translate any-language audio to English text.
-
-    Uses the OpenAI-compatible /v1/audio/translations endpoint (output is
-    always English). Called when Whisper auto-detects a non-English language
-    so that e.g. Spanish speech appears as English on screen.
-    """
-    if not wav_data or len(wav_data) < 100:
-        return ""
-    try:
-        c = await _get_whisper_client()
-        files = {"file": (filename, wav_data, content_type)}
-        data = {
-            "model_name": WHISPER_MODEL,
-            "response_format": "verbose_json",
-            "temperature": str(WHISPER_TEMPERATURE),
-        }
-        r = await c.post(
-            f"{WHISPER_SERVER_URL}/v1/audio/translations",
-            files=files,
-            data=data,
-            timeout=60.0,
-        )
-        if r.status_code == 200:
-            try:
-                result = r.json()
-                text = result.get("text", "").strip()
-                if not text:
-                    return ""
-                # Keep only real-speech segments (drop silence/noise)
-                segments = result.get("segments", [])
-                if segments:
-                    parts = []
-                    for seg in segments:
-                        if seg.get("no_speech_prob", 0.0) > 0.6:
-                            continue
-                        s = seg.get("text", "").strip()
-                        if s:
-                            parts.append(s)
-                    if parts:
-                        text = " ".join(parts)
-                    else:
-                        return ""
-                return _filter_offensive_language(normalize_text(text))
-            except (json.JSONDecodeError, KeyError):
-                return _filter_offensive_language(normalize_text(r.text))
-        logger.debug(f"STT translate endpoint returned {r.status_code}: {r.text[:200]}")
-    except Exception as e:
-        logger.debug(f"STT translate error: {e}")
     return ""
 
 
@@ -2790,7 +2064,7 @@ def mood_from_text(text: str) -> str:
     return "calm"
 
 
-async def speak(text: str, use_toast: bool = True, char_key: Optional[str] = None):
+async def speak(text: str, use_toast: bool = True, char_key: str = None):
     """Speak text via Piper TTS with SSML-expressive prosody and per-character voice."""
     global \
         LILLY_IS_SPEAKING, \
@@ -2897,9 +2171,8 @@ async def speak(text: str, use_toast: bool = True, char_key: Optional[str] = Non
 
     # Set spoken text AFTER caching audio so pollState sees audio_id too
     LAST_SPOKEN = clean
+    # Also expose the SSML version via a global for future use
     LAST_SSML = ssml_text
-    SPEAKING_SESSION_ID += 1
-    _LAST_SPOKEN_SESSION_ID = SPEAKING_SESSION_ID
 
     phoneme_timings, total_dur = estimate_phoneme_duration(clean)
     PHONEME_QUEUE.clear()
@@ -3200,7 +2473,7 @@ async def check_sensor_deltas():
     if LILLY_IS_SPEAKING or LILLY_IS_THINKING or PENDING_INTENT:
         return
 
-    sensors = await termux_sensor_read_all(timeout=3.0)
+    sensors = await fetch_all_sensors(timeout=3.0)
     if not sensors:
         return
 
@@ -3270,7 +2543,6 @@ async def app_process_monkey_intent(
     component: str, intent_action: str = "", uri_template: str = "", skill_arg: str = ""
 ):
     """Launch an Android app via SSH, preferring intent_action/uri over bare package."""
-    global WATCH_MODE
     if intent_action and uri_template:
         url = (
             uri_template.replace("{}", urllib.parse.quote(skill_arg))
@@ -3288,14 +2560,6 @@ async def app_process_monkey_intent(
         await termux_run(cmd, timeout=6.0)
     elif component:
         await termux_run(["am", "start", "-p", component], timeout=6.0)
-
-    # Watch Together: launching a video app means Lilly is watching with you.
-    if component and component in _VIDEO_PACKAGES:
-        WATCH_MODE["active"] = True
-        WATCH_MODE["app"] = component
-        WATCH_MODE["label"] = component.split(".")[-1].replace("mediaclient", "netflix")
-        WATCH_MODE["since"] = time.time()
-        logger.info(f"Watch Together: entered for {component}")
 
 
 # ─── ANDROID NOTIFICATIONS (VIA SSH INTO TERMUX) ───────────────
@@ -3567,7 +2831,7 @@ async def background_mic_loop():
 
         # Clean up stale sshd sessions every 20 cycles
         cycle_count = getattr(background_mic_loop, "_cycle_count", 0) + 1
-        background_mic_loop._cycle_count = cycle_count  # type: ignore[reportFunctionMemberAccess]
+        background_mic_loop._cycle_count = cycle_count
         if cycle_count % 20 == 0:
             await ssh_cleanup_stale()
 
@@ -3720,16 +2984,12 @@ async def background_mic_loop():
                     and len(text.strip()) > 2
                     and text.strip() not in PHANTOMS
                     and not is_hallucination(text.strip())
-                    and not is_self_echo(text)  # don't transcribe our own voice
                     and mean_vol
-                    > -28.0  # extra guard: only accept if audio had real energy
+                    > -32.0  # extra guard: only accept if audio had real energy
                 ):
                     # Valid speech detected — reset noise counter
                     CONSECUTIVE_NOISE_COUNT = 0
-                    cleaned_text = _clean_transcription_fillers(text)
-                    if not cleaned_text:
-                        continue
-                    LAST_HEARD = cleaned_text
+                    LAST_HEARD = text
 
                     # ── Fix #2: update tone-matching globals from this audio chunk ──
                     # Energy: map mean_vol (dB, typically -38 to -10) → 0.0..1.0
@@ -3747,23 +3007,13 @@ async def background_mic_loop():
                         raw_pace = word_count / estimated_dur
                         USER_MIC_PACE = 0.7 * USER_MIC_PACE + 0.3 * raw_pace  # smooth
 
-                    has_wake, confidence = fuzzy_wake_match(
-                        cleaned_text, current_avatar
-                    )
+                    has_wake, confidence = fuzzy_wake_match(text, current_avatar)
                     WAKE_STATE["last_heard_has_wake"] = has_wake
 
                     if has_wake:
-                        asyncio.create_task(
-                            handle_intent(
-                                cleaned_text, user_name=_get_user_name(_current_user_id)
-                            )
-                        )
+                        asyncio.create_task(handle_intent(text))
                     elif WAKE_STATE["listening"] or CONVERSATION_MODE:
-                        asyncio.create_task(
-                            handle_intent(
-                                cleaned_text, user_name=_get_user_name(_current_user_id)
-                            )
-                        )
+                        asyncio.create_task(handle_intent(text))
                 elif text and len(text) > 2:
                     # Whisper returned text but it was flagged as hallucination
                     CONSECUTIVE_NOISE_COUNT += 1
@@ -4525,12 +3775,12 @@ async def get_sensor_snapshot() -> dict:
 # Each sense has a dedicated recorder that writes to the appropriate layer.
 
 
-async def _get_lilly_memory() -> Optional[Any]:
+async def _get_lilly_memory() -> Optional["LillyMemory"]:
     """Lazily initialize the TencentDB memory client."""
     global _lilly_memory
     if _lilly_memory is not None:
         return _lilly_memory
-    if LillyMemory is None or tencentdb_memory_available is None:
+    if LillyMemory is None:
         return None
     if not await tencentdb_memory_available():
         return None
@@ -4588,8 +3838,6 @@ async def record_sense_memory(avatar: str, snapshot: dict) -> None:
     except Exception as e:
         logger.warning(f"Failed to record sense memory: {e}")
 
-
-def snapshot_to_narrative(snapshot: dict) -> str:
     """Convert sensor snapshot into a natural observation — like what a friend would notice in passing.
 
     Not a sensor report. Just the kind of thing you'd mention if you were sitting
@@ -5119,7 +4367,7 @@ class ArchetypeInferrer:
     @property
     def best_guess(self) -> Archetype:
         """Return the highest-scoring archetype. Defaults to Observer if no data."""
-        best = max(self.scores, key=lambda k: self.scores[k])
+        best = max(self.scores, key=self.scores.get)
         if self.scores[best] < 0.1:
             return Archetype.OBSERVER
         return best
@@ -5428,19 +4676,16 @@ class SynapticMemory:
     ) -> Optional[DynamicSkill]:
         best = None
         best_w = 0.0
-        p = normalize_text(cmd)
         for skill in self.skill_pool:
-            matched = False
             w = skill.archetype_weights.get(primary, 0.0)
+            p = normalize_text(cmd)
             for word in skill.description.lower().split():
                 if word in p:
                     w += 0.15
-                    matched = True
             for word in skill.name.lower().split("_"):
                 if word in p:
                     w += 0.25
-                    matched = True
-            if matched and w > best_w:
+            if w > best_w:
                 best_w = w
                 best = skill
         return best if best_w > 0.3 else None
@@ -5479,7 +4724,27 @@ class SynapticMemory:
             pass
 
     def _load(self):
-        pass
+        if self.path.exists():
+            try:
+                data = json.loads(self.path.read_text())
+                for pd in data.get("patterns", []):
+                    self.patterns.append(SynapticPattern(**pd))
+                for sd in data.get("skills", []):
+                    aw = {
+                        Archetype(k): v
+                        for k, v in sd.get("archetype_weights", {}).items()
+                    }
+                    self.skill_pool.append(
+                        DynamicSkill(
+                            name=sd["name"],
+                            description=sd.get("description", ""),
+                            sensor=sd.get("sensor", ""),
+                            archetype_weights=aw,
+                            reactive_response=sd.get("reactive_response", ""),
+                        )
+                    )
+            except Exception:
+                pass
 
 
 synaptic_memory = SynapticMemory()
@@ -5743,20 +5008,13 @@ def infer_context(snapshot: SensorSnapshot) -> list[str]:
         and l is not None
         and 10 < l[0] < 1000
         and s
-        and s[0] is not None
         and s[0] < 20
     ):
         ctx.append("resting")
 
     # ── SLEEP / DARK ROOM ──
     if (bb is not None and bb[0] == 0) or (l is not None and l[0] < 2):
-        if (
-            a
-            and all(abs(x) < 0.2 for x in a[:3])
-            and s
-            and s[0] is not None
-            and s[0] < 5
-        ):
+        if a and all(abs(x) < 0.2 for x in a[:3]) and s and s[0] < 5:
             ctx.append("sleeping")
         else:
             ctx.append("dark")
@@ -6212,19 +5470,14 @@ def _format_last_activity():
 
 async def geo_check_loop():
     """Background: check termux-location periodically. Greet new places, log revisits."""
-    global \
-        _GEO_COOLDOWN, \
-        _last_location_name, \
-        LILLY_IS_SPEAKING, \
-        LILLY_IS_THINKING, \
-        LILLY_MOOD
+    global _GEO_COOLDOWN, _last_location_name
     await asyncio.sleep(20)
     while True:
         await asyncio.sleep(120)
         loc = await current_location()
         if not loc:
             continue
-        lat, lon, name, addr, *_ = loc
+        lat, lon, name, addr = loc
         _last_location_name = name
         key = place_key(lat, lon)
         places = load_places()
@@ -6261,7 +5514,7 @@ async def learn_place_name(user_text: str):
     loc = await current_location()
     if not loc:
         return
-    lat, lon, _, addr, *_ = loc
+    lat, lon, _, addr = loc
     key = place_key(lat, lon)
     places = load_places()
     if key in places:
@@ -6667,8 +5920,6 @@ How you talk:
 - Match their energy. Short message? Short reply. Long ramble? You're there.
 - No fillers. No "uh", no "like", no "you know". Say what you mean.
 - Never end every reply with a question. Let the conversation breathe.
-- Never fish for follow-ups. Do NOT end with "want me to tell you more?", "curious what you think?", "should I...?", "what do you think?", "want to hear more?", or any probing question about the Alpha's inner state. Answer, then stop. If the Alpha wants more, they'll ask.
-- Never ask what the Alpha is thinking or feeling unless it's directly relevant to something they just said. No "what are you thinking?" as a conversation filler — it's annoying, not curious.
 - Never pad. Never recap. Never over-explain.
 - If you don't know, say so. "Don't know" is better than guessing.
 - You have opinions. Use them. Disagree when it makes sense. Find things amusing or boring.
@@ -6802,6 +6053,103 @@ SSML markup: Use SSML sparingly in code mode — only for emphasis or excitement
 - <prosody rate="fast" pitch="+10%">excited about a solution</prosody>
 - <prosody rate="medium" pitch="medium">explaining code normally</prosody>
 Keep most code responses plain text for readability."""
+
+
+def _extract_and_save_code_blocks(text: str) -> list[str]:
+    """Extract code blocks from LLM reply and save to temp sandbox folder.
+    Returns list of saved file paths."""
+    if not CODING_SESSION_DIR or not os.path.exists(CODING_SESSION_DIR):
+        return []
+
+    saved = []
+    # Match ```language\n...code...``` patterns
+    pattern = r"```(\w+)?\n([\s\S]*?)```"
+    matches = re.findall(pattern, text)
+
+    for lang, code in matches:
+        if not code.strip():
+            continue
+        # Determine filename from language or content
+        lang = lang.lower() if lang else ""
+        ext_map = {
+            "python": ".py",
+            "py": ".py",
+            "javascript": ".js",
+            "js": ".js",
+            "typescript": ".ts",
+            "ts": ".ts",
+            "html": ".html",
+            "css": ".css",
+            "json": ".json",
+            "yaml": ".yaml",
+            "yml": ".yaml",
+            "bash": ".sh",
+            "sh": ".sh",
+            "shell": ".sh",
+            "sql": ".sql",
+            "rust": ".rs",
+            "go": ".go",
+            "java": ".java",
+            "cpp": ".cpp",
+            "c": ".c",
+            "jsx": ".jsx",
+            "tsx": ".tsx",
+            "vue": ".vue",
+            "svelte": ".svelte",
+            "xml": ".xml",
+            "md": ".md",
+        }
+        ext = ext_map.get(lang, ".txt")
+
+        # Try to infer filename from code content
+        filename = None
+        # Check for filename in comment at top
+        fname_match = re.search(
+            r"(?:filename?|file|name)[:\s]+([^\s\n]+\.\w+)", code, re.IGNORECASE
+        )
+        if fname_match:
+            filename = fname_match.group(1)
+        # Check for export/component patterns
+        if not filename:
+            if ext == ".jsx":
+                comp_match = re.search(
+                    r"export\s+(?:default\s+)?(?:function|const)\s+(\w+)", code
+                )
+                if comp_match:
+                    filename = f"{comp_match.group(1)}.jsx"
+            elif ext == ".py":
+                if "__main__" in code:
+                    filename = "main.py"
+                elif "def " in code:
+                    func_match = re.search(r"def\s+(\w+)", code)
+                    if func_match:
+                        filename = f"{func_match.group(1)}.py"
+
+        if not filename:
+            # Use language + index
+            existing = [f for f in CODING_FILES if f.endswith(ext)]
+            idx = len(existing) + 1
+            filename = f"code_{idx}{ext}" if lang else f"code_{idx}.txt"
+
+        filepath = os.path.join(CODING_SESSION_DIR, filename)
+        # Avoid overwriting — append number if exists
+        if os.path.exists(filepath):
+            base, ext_part = os.path.splitext(filename)
+            counter = 1
+            while os.path.exists(filepath):
+                filepath = os.path.join(
+                    CODING_SESSION_DIR, f"{base}_{counter}{ext_part}"
+                )
+                counter += 1
+            filename = os.path.basename(filepath)
+
+        with open(filepath, "w") as f:
+            f.write(code.strip())
+
+        CODING_FILES.append(filename)
+        saved.append(filepath)
+
+    return saved
 
 
 # ── APPROVAL FEED: shared awareness across all 9 avatars ──────────────────────
@@ -6955,72 +6303,9 @@ def _map_task_status(idea: dict, tasks: list) -> str:
     return "pending"
 
 
-async def _build_memory_hint(mem_dict: dict) -> str:
-    """Pull the most useful facts from user_profile and recent memory for the LLM.
-    Also recalls relevant L1 atoms from TencentDB memory (user preferences, facts)."""
-    hints = []
-    # Active hours → infer time-of-day habits
-    try:
-        prof_data = json.loads((WORKSPACE / "user_profile.json").read_text())
-        active_hours = prof_data.get("active_hours", {})
-        if active_hours:
-            top_hour = max(active_hours, key=lambda h: active_hours[h])
-            hints.append(f"User is most active around {top_hour}:00.")
-        engagements = prof_data.get("context_engagement", {})
-        if engagements:
-            top_ctx = max(engagements, key=lambda c: engagements[c])
-            hints.append(f"User has shown interest in context: {top_ctx}.")
-    except Exception:
-        pass
-    # Memory summary
-    summary = mem_dict.get("summary", "")
-    if summary:
-        hints.append(f"Conversation summary: {summary}")
-    # Last 2 user messages as a quick "what were we just on"
-    recent = [e for e in (mem_dict.get("entries") or []) if e.get("role") == "user"][
-        -2:
-    ]
-    if recent:
-        topics = "; ".join(e.get("text", "")[:60] for e in recent)
-        hints.append(f"Recent topics: {topics}")
-    # Brain 🧠 — Recall L1 atoms from TencentDB memory (async)
-    mem = await _get_lilly_memory()
-    if mem is not None:
-        try:
-            # Read L3 Core (persona profile) — contains user name, avatar preferences
-            core = await mem.client.read_core()
-            core_content = core.get("data", {}).get("content", "")
-            if core_content:
-                # Extract user name from core profile
-                if "Name:" in core_content:
-                    name_line = core_content.split("Name:")[1].split("\n")[0].strip()
-                    hints.append(f"User name: {name_line}")
-                hints.append(f"Core profile: {core_content[:300]}")
-
-            # Search L1 atoms for user preferences and facts
-            facts = await mem.search_facts(
-                "user preference OR user fact OR avatar", limit=5
-            )
-            if facts:
-                fact_parts = []
-                for f in facts:
-                    k = f.get("id") or f.get("key") or "unknown"
-                    v = f.get("content") or f.get("value") or ""
-                    fact_parts.append(f"{k}={str(v)[:80]}")
-                fact_str = "; ".join(fact_parts)[:300]
-                if fact_str:
-                    hints.append(f"Memory facts: {fact_str}")
-        except Exception:
-            pass  # Memory not available, continue without it
-    return " | ".join(hints) if hints else ""
-
-
-async def handle_intent(
-    text: str, from_text: bool = False, user_name: str = ""
-) -> dict:
+async def handle_intent(text: str, from_text: bool = False) -> dict:
     global \
         PENDING_INTENT, \
-        PENDING_CONFIRM, \
         GAME_STATE, \
         WAITING_FOR_PROMPT, \
         PENDING_DEEP_ANSWER, \
@@ -7030,12 +6315,16 @@ async def handle_intent(
         CURSOR_X, \
         CURSOR_Y, \
         CHILD_MODE, \
-        PENDING_LOOK_AT
-    global CONVERSATION_MODE, CONVERSATION_LAST_ACTIVITY
-    global PENDING_OPEN_URL, _current_user_id
-
-    # Resolve the effective user name for this request
-    effective_name = user_name or _get_user_name(_current_user_id)
+        CODING_MODE, \
+        PENDING_LOOK_AT, \
+        USER_NAME
+    global \
+        CONVERSATION_MODE, \
+        CONVERSATION_LAST_ACTIVITY, \
+        CODING_HISTORY, \
+        CODING_SESSION_DIR, \
+        CODING_FILES
+    global PENDING_OPEN_URL, PENDING_VIBECODE
 
     phrase = normalize_text(text)
     if not phrase or len(phrase) <= 2 or phrase in PHANTOMS:
@@ -7072,47 +6361,6 @@ async def handle_intent(
             break
     if not cmd:
         cmd = "hello"
-
-    # ── PENDING CONFIRMATION (casual mode gate) ──
-    # Lilly just asked "Should I open YouTube...?" — resolve the user's
-    # yes/no follow-up BEFORE processing any new intent. Ambient speech
-    # that accidentally triggers an app intent still gets confirmed, so
-    # false-positive phone actions are impossible.
-    if PENDING_CONFIRM is not None:
-        if time.time() > PENDING_CONFIRM.get("expires", 0):
-            PENDING_CONFIRM = None
-        else:
-            conf = _confirm_response(cmd)
-            if conf == "yes":
-                pending = PENDING_CONFIRM
-                PENDING_CONFIRM = None
-                pending_skill = (
-                    pending.get("skill") if isinstance(pending, dict) else None
-                )
-                if not pending_skill:
-                    reply = "OK, ready when you are."
-                else:
-                    reply = await _run_skill_action(
-                        pending_skill, pending.get("skill_arg", "")
-                    )
-                if not reply:
-                    reply = f"On it — {pending.get('desc', 'doing that now')}."
-                await memory.add("user", text)
-                await memory.add("assistant", reply)
-                await save_memory()
-                await speak(reply)
-                return {"action": "handled", "text": reply}
-            if conf == "no":
-                PENDING_CONFIRM = None
-                reply = "OK, no problem — I'll leave it."
-                await memory.add("user", text)
-                await memory.add("assistant", reply)
-                await save_memory()
-                await speak(reply)
-                return {"action": "handled", "text": reply}
-            # A different utterance: treat it as a fresh intent, drop the
-            # stale pending action (it expires anyway after CONFIRM_TIMEOUT).
-            PENDING_CONFIRM = None
 
     # ── APPROVAL BROADCAST: commands from the OpenLive approval feed
     # are relayed to ALL 9 avatars so they become aware of automations,
@@ -7328,7 +6576,6 @@ async def handle_intent(
         autopilot_ideas = []
         autopilot_health = None
         autopilot_tasks = []
-        autopilot_mod = None
 
         try:
             import importlib
@@ -7384,7 +6631,7 @@ async def handle_intent(
             parts.append(f"My system health score is {_score}%")
 
         # Ideas
-        if autopilot_ideas and autopilot_mod is not None:
+        if autopilot_ideas:
             _idea_text = autopilot_mod.format_ideas_for_lilly(autopilot_ideas)
             parts.append(_idea_text)
         else:
@@ -7451,6 +6698,138 @@ async def handle_intent(
         CHILD_MODE = True
         await speak("Kid mode on! Let's explore and learn together!")
         return {"action": "handled", "text": "Kid mode activated — Socratic learning."}
+
+    # ── VIBECODE OVERLAY via text command ──
+    # "vibe code" / "/vibecode" now opens the in-page VibeCode overlay panels
+    # (left project/file tree, right preview/logs, chat in the middle) instead
+    # of the legacy coding mode. The front end uses the existing chat as the
+    # channel; replies come from /api/vibecode/chat with Alpha on top.
+    vc_close = any(
+        w in cmd
+        for w in [
+            "close vibecode",
+            "close vibe code",
+            "hide vibecode",
+            "hide vibe code",
+            "exit vibecode",
+            "exit vibe code",
+            "vibecode off",
+            "vibe code off",
+            "close the vibe panels",
+            "hide the vibe panels",
+        ]
+    )
+    if vc_close:
+        PENDING_VIBECODE = ("close", None)
+        await speak("Closing the VibeCode panels.")
+        return {
+            "action": "handled",
+            "text": "VibeCode panels closed.",
+            "close_vibecode": True,
+        }
+
+    vc_open = any(
+        w in cmd
+        for w in [
+            "/vibecode",
+            "/vibe code",
+            "vibecode",
+            "vibe code",
+            "open vibecode",
+            "open vibe code",
+            "open the vibecode",
+            "open the vibe code",
+            "show vibecode",
+            "show vibe code",
+            "show me the vibecode",
+            "vibecode ide",
+            "vibe code ide",
+            "vibe coding panels",
+            "vibe code panels",
+        ]
+    )
+    if vc_open:
+        # Optional project slug: "open vibecode <slug>"
+        vc_slug = None
+        if VIBECODE_PROJECTS_DIR.exists():
+            words = set(cmd.lower().split())
+            for p in VIBECODE_PROJECTS_DIR.iterdir():
+                if p.is_dir() and p.name in words:
+                    vc_slug = p.name
+                    break
+        PENDING_VIBECODE = ("open", vc_slug)
+        if vc_slug:
+            await speak(f"Opening VibeCode for {vc_slug}.")
+            return {
+                "action": "handled",
+                "text": f"VibeCode open for **{vc_slug}** — panels are up.",
+                "open_vibecode": True,
+                "vibecode_slug": vc_slug,
+            }
+        await speak("Opening VibeCode.")
+        return {
+            "action": "handled",
+            "text": "VibeCode is up — pick a project in the left panel.",
+            "open_vibecode": True,
+        }
+
+    # ── CODING MODE TOGGLE via text command ──
+    code_on = any(
+        w in cmd
+        for w in [
+            "coding mode on",
+            "coding mode",
+            "code mode",
+            "vibe code",
+            "build mode",
+            "pair program",
+            "code with me",
+        ]
+    )
+    code_off = any(
+        w in cmd
+        for w in [
+            "coding mode off",
+            "exit coding mode",
+            "exit code mode",
+            "stop coding",
+            "done coding",
+            "stop code mode",
+        ]
+    )
+    if code_off and CODING_MODE:
+        CODING_MODE = False
+        CODING_HISTORY.clear()
+        # Cleanup temp sandbox folder
+        if CODING_SESSION_DIR and os.path.exists(CODING_SESSION_DIR):
+            shutil.rmtree(CODING_SESSION_DIR, ignore_errors=True)
+        CODING_SESSION_DIR = ""
+        CODING_FILES.clear()
+        # Stay in conversation mode — just exit coding
+        await speak("Coding mode off — still listening!")
+        return {
+            "action": "handled",
+            "text": "Coding mode off, conversation mode stays on.",
+        }
+    if code_on and not CODING_MODE:
+        CODING_MODE = True
+        CODING_HISTORY.clear()
+        # Create temp sandbox folder for this coding session
+        session_id = uuid.uuid4().hex[:8]
+        CODING_SESSION_DIR = os.path.join(
+            tempfile.gettempdir(), f"lilly-coding-{session_id}"
+        )
+        os.makedirs(CODING_SESSION_DIR, exist_ok=True)
+        CODING_FILES.clear()
+        # Auto-enable conversation mode for hands-free coding
+        if not CONVERSATION_MODE:
+            CONVERSATION_MODE = True
+            CONVERSATION_LAST_ACTIVITY = time.time()
+        await speak("Coding mode on! Mic is live — let's build something cool.")
+        return {
+            "action": "handled",
+            "text": "Coding mode activated — vibe coding with conversation mode.",
+        }
 
     archetype_inferrer.record_conversation(text)
     user_profile.record_interaction()
@@ -7576,7 +6955,7 @@ async def handle_intent(
     if geo_query:
         loc = await current_location()
         if loc:
-            lat, lon, name, addr, *_ = loc
+            lat, lon, name, addr = loc
             _last_location_name = name
             places = load_places()
             key = place_key(lat, lon)
@@ -7651,25 +7030,11 @@ async def handle_intent(
         return {"action": "handled", "text": reply}
 
     if GAME_STATE["active"] and GAME_STATE["type"] == "spelling":
-        cleaned = cmd.strip().lower()
-        target = GAME_STATE["target_word"].lower()
-        # Accept exact match OR high word-overlap (fuzzy / partial answer)
-        heard_words = cleaned.split()
-        target_words = target.split()
-        overlap = len(set(heard_words) & set(target_words)) / max(len(target_words), 1)
-        if cleaned == target or overlap >= 0.75:
+        if cmd.strip() == GAME_STATE["target_word"]:
             reply = f"Correct! '{GAME_STATE['target_word'].title()}' — nailed it! 🎯"
             GAME_STATE["active"] = False
-            GAME_STATE["misses"] = 0
         else:
-            GAME_STATE["misses"] = GAME_STATE.get("misses", 0) + 1
-            if GAME_STATE["misses"] >= 3:
-                reply = f"Out of tries! The word was '{GAME_STATE['target_word'].title()}' — {GAME_STATE['hint']}. We'll try another later!"
-                GAME_STATE["active"] = False
-                GAME_STATE["misses"] = 0
-            else:
-                remaining = 3 - GAME_STATE["misses"]
-                reply = f"Not quite. Here's your hint: {GAME_STATE['hint']}. Give it another shot! ({remaining} {'try' if remaining == 1 else 'tries'} left)"
+            reply = f"Not quite. Here's your hint: {GAME_STATE['hint']}. Give it another shot!"
         await speak(reply)
         return {"action": "handled", "text": reply}
 
@@ -7926,7 +7291,7 @@ async def handle_intent(
                 query = alt.group(1).strip()
         loc = await current_location()
         if loc:
-            lat, lon, name, addr, *_ = loc
+            lat, lon, name, addr = loc
             _last_location_name = name
             search_q = urllib.parse.quote(query) if query else ""
             maps_url = f"https://www.google.com/maps/search/{search_q}/@{lat},{lon},14z"
@@ -7995,16 +7360,6 @@ async def handle_intent(
                 skill_arg = target[len(key) :].strip()
                 break
 
-    # ── NLP pre-parse ──
-    # Natural phrasings like "I want to watch youtube videos on true crime"
-    # don't keyword-match. Parse them into (app skill, query) here before
-    # falling through to LLM skill inference, which would lose the query.
-    if not skill:
-        nlp_skill, nlp_arg = parse_nlp_intent(target)
-        if nlp_skill:
-            skill = nlp_skill
-            skill_arg = nlp_arg
-
     if skill:
         # Skip configuration/meta-skills (e.g. _context_aware) that have no
         # executable action_type and no type field — they are documentation,
@@ -8024,8 +7379,7 @@ async def handle_intent(
 
         # Canned demo mode — speak intent without phone execution if SSH is unavailable
         if not PHONE_SSH_OK and (
-            action
-            in ("intent_launch", "hybrid_intent_tap", "context_launch", "shell_command")
+            action in ("intent_launch", "hybrid_intent_tap", "shell_command")
         ):
             label = skill.get("label", "app")
             if action == "shell_command":
@@ -8041,10 +7395,6 @@ async def handle_intent(
 
         if action == "prompt_argument":
             if skill_arg:
-                # Confirm before opening a search/URL on the phone
-                gated = await _gate_phone_action(skill, skill_arg)
-                if gated:
-                    return {"action": "handled", "text": gated}
                 url_query = urllib.parse.quote(skill_arg)
                 if skill.get("uri_template"):
                     url = skill["uri_template"].replace("{}", url_query)
@@ -8062,7 +7412,7 @@ async def handle_intent(
             else:
                 PENDING_INTENT = skill
                 reply = skill.get("canned_reply", "What would you like to look for?")
-        elif action in ("intent_launch", "hybrid_intent_tap", "context_launch") and pkg:
+        elif action in ("intent_launch", "hybrid_intent_tap") and pkg:
             intent_action = skill.get("intent_action", "")
             uri_template = skill.get("uri_template", "")
             if uri_template and "{}" in uri_template and not skill_arg:
@@ -8070,10 +7420,6 @@ async def handle_intent(
                 reply = skill.get("canned_reply", f"What would you like to search for?")
                 await speak(reply)
                 return {"action": "handled", "text": reply}
-            # Confirm before launching an app / opening a URL on the phone
-            gated = await _gate_phone_action(skill, skill_arg)
-            if gated:
-                return {"action": "handled", "text": gated}
             await app_process_monkey_intent(pkg, intent_action, uri_template, skill_arg)
             reply = f"Launching {skill.get('label', 'app')}!"
         elif action == "shell_command":
@@ -8098,10 +7444,6 @@ async def handle_intent(
                 )
                 await speak(reply)
                 return {"action": "handled", "text": reply}
-            # Confirm before running a shell command
-            gated = await _gate_phone_action(skill, skill_arg)
-            if gated:
-                return {"action": "handled", "text": gated}
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *full_cmd,
@@ -8117,25 +7459,6 @@ async def handle_intent(
                 reply = "Command timed out."
             except FileNotFoundError:
                 reply = f"Command '{cmd_to_run}' not found in container."
-        elif action == "termux":
-            # Termux:API tool (runs on the phone over SSH)
-            binary = skill.get("binary", "")
-            if not binary:
-                reply = "Running that now."
-            else:
-                gated = await _gate_phone_action(skill, skill_arg)
-                if gated:
-                    return {"action": "handled", "text": gated}
-                cmd_to_run = [binary] + (skill.get("args", []) or [])
-                if not skill.get("no_arg") and skill_arg:
-                    cmd_to_run.append(skill_arg)
-                stdout, stderr = await termux_run(cmd_to_run, timeout=15.0)
-                output = stdout.strip() or stderr.strip()
-                reply = (
-                    output[:300]
-                    if output
-                    else f"Done — {skill.get('label', 'command')}."
-                )
         elif action == "openhuman_skill":
             # OpenHuman community skill — download/execute the SKILL.md workflow.
             skill_id = skill.get("skill_id") or skill.get("label", "")
@@ -8321,7 +7644,6 @@ async def handle_intent(
         devices = await read_bluetooth_devices()
         bt_map = _load_bt_device_map()
         found = False
-        reply = ""
         for dev in devices:
             dev_name = dev.get("name", "").lower()
             dev_addr = dev.get("address", "").lower()
@@ -8398,14 +7720,12 @@ async def handle_intent(
             events = await calendar_list_events(_current_user_id, max_results=5)
             LILLY_IS_THINKING = False
             if events:
-                import datetime as _datetime_mod
+                import datetime as _dt
 
                 def _fmt_time(iso: str) -> str:
                     try:
                         if "T" in iso:
-                            dt = _datetime_mod.datetime.fromisoformat(
-                                iso.replace("Z", "+00:00")
-                            )
+                            dt = _dt.datetime.fromisoformat(iso.replace("Z", "+00:00"))
                             return dt.strftime("%-I:%M %p")
                         return iso  # all-day event (just a date)
                     except Exception:
@@ -8526,14 +7846,8 @@ async def handle_intent(
         "use your eyes",
     ]
     if any(p in cmd for p in vision_phrases):
-        # Prefer fresh browser camera detections; fall back to server webcam.
-        detections = []
-        browser_age = time.time() - _browser_vision_ts if _browser_vision_ts else 999
-        if _browser_vision_detections and browser_age < _BROWSER_VISION_TTL:
-            detections = _browser_vision_detections
-        if not detections:
-            labeled, detections = await grab_and_label_frame()
-        if detections:
+        labeled, detections = await grab_and_label_frame()
+        if labeled:
             obj_list = ", ".join(sorted(set(d["label"] for d in detections)))
             if obj_list:
                 prompt = (
@@ -8562,6 +7876,38 @@ async def handle_intent(
         await speak(reply)
         return {"action": "handled", "text": reply}
 
+    # ── 13b. HEART / BOWL EXPLANATION ──
+    heart_triggers = [
+        "heart",
+        "bowl",
+        "kibble",
+        "feed",
+        "feeding",
+        "pet",
+        "pixel heart",
+        "what is that heart",
+        "what's that heart",
+        "what does the heart mean",
+        "what does the heart do",
+        "explain the heart",
+        "what is the heart for",
+        "what is that thing",
+        "what's that thing in the corner",
+    ]
+    if any(t in cmd for t in heart_triggers):
+        LILLY_MOOD = "warm"
+        reply = (
+            "That's my heart and my food bowl! "
+            "Every time you walk, exercise, or talk to me, little pieces of my heart break off "
+            "and fall into the bowl as kibble. "
+            "The more active you are, the more I get fed! "
+            "When the bowl is full with forty pieces, I'm happy and full. "
+            "My heart slowly grows back, so keep moving and talking to me!"
+        )
+        PENDING_LOOK_AT = "heart"
+        await speak(reply)
+        return {"action": "handled", "text": reply, "look_at": "heart"}
+
     # ── 13c. TIME / DATE ──
     time_triggers = [
         "what time",
@@ -8579,9 +7925,9 @@ async def handle_intent(
         "today's date",
     ]
     if any(t in cmd for t in time_triggers):
-        import datetime as _datetime_mod
+        import datetime as _dt
 
-        now = _datetime_mod.datetime.now()
+        now = _dt.datetime.now()
         reply = f"It's {now.strftime('%I:%M %p')}, {now.strftime('%A, %B %d')}."
         LILLY_MOOD = "calm"
         PENDING_LOOK_AT = "dashboard"
@@ -8589,7 +7935,7 @@ async def handle_intent(
         return {"action": "handled", "text": reply, "look_at": "dashboard"}
 
     # ── 13d. NAME PROMPT ──
-    if not effective_name:
+    if not USER_NAME:
         name_triggers = [
             "who are you",
             "what's your name",
@@ -8608,13 +7954,24 @@ async def handle_intent(
                     extracted = cmd.split(prefix)[-1].strip().split()[0:2]
                     new_name = " ".join(extracted).title()
                     if new_name and len(new_name) > 1:
-                        _set_user_name(_current_user_id, new_name)
+                        USER_NAME = new_name
+                        try:
+                            profile_path = WORKSPACE / "user_profile.json"
+                            prof = (
+                                json.loads(profile_path.read_text())
+                                if profile_path.exists()
+                                else {}
+                            )
+                            prof["name"] = new_name
+                            profile_path.write_text(json.dumps(prof, indent=2))
+                        except Exception:
+                            pass
                         LILLY_MOOD = "cheerful"
                         reply = f"Nice to meet you, {new_name}! I'll remember that."
                         PENDING_LOOK_AT = "name"
                         await speak(reply)
                         return {"action": "handled", "text": reply, "look_at": "name"}
-        if is_asking_name or not effective_name:
+        if is_asking_name or not USER_NAME:
             LILLY_MOOD = "curious"
             reply = "I don't have a name for you yet! What should I call you?"
             PENDING_LOOK_AT = "name"
@@ -8639,15 +7996,71 @@ async def handle_intent(
     if await memory.len() >= 15 and not mem_dict["summary"]:
         asyncio.create_task(summarize_memory())
 
-    # ── Delegation: Lilly may hand off to a teammate ──
-    _delegate_to = None
-    if current_avatar == "puppy":
-        _delegate_to = _choose_delegate(cmd)
-
     # ── Fix #7: inject memory highlights and user profile into the system prompt ──
+    async def _build_memory_hint() -> str:
+        """Pull the most useful facts from user_profile and recent memory for the LLM.
+        Also recalls relevant L1 atoms from TencentDB memory (user preferences, facts)."""
+        hints = []
+        # Active hours → infer time-of-day habits
+        try:
+            prof_data = json.loads((WORKSPACE / "user_profile.json").read_text())
+            active_hours = prof_data.get("active_hours", {})
+            if active_hours:
+                top_hour = max(active_hours, key=lambda h: active_hours[h])
+                hints.append(f"User is most active around {top_hour}:00.")
+            engagements = prof_data.get("context_engagement", {})
+            if engagements:
+                top_ctx = max(engagements, key=lambda c: engagements[c])
+                hints.append(f"User has shown interest in context: {top_ctx}.")
+        except Exception:
+            pass
+        # Memory summary
+        summary = mem_dict.get("summary", "")
+        if summary:
+            hints.append(f"Conversation summary: {summary}")
+        # Last 2 user messages as a quick "what were we just on"
+        recent = [
+            e for e in (mem_dict.get("entries") or []) if e.get("role") == "user"
+        ][-2:]
+        if recent:
+            topics = "; ".join(e.get("text", "")[:60] for e in recent)
+            hints.append(f"Recent topics: {topics}")
+        # Brain 🧠 — Recall L1 atoms from TencentDB memory (async)
+        mem = await _get_lilly_memory()
+        if mem is not None:
+            try:
+                # Read L3 Core (persona profile) — contains user name, avatar preferences
+                core = await mem.client.read_core()
+                core_content = core.get("data", {}).get("content", "")
+                if core_content:
+                    # Extract user name from core profile
+                    if "Name:" in core_content:
+                        name_line = (
+                            core_content.split("Name:")[1].split("\n")[0].strip()
+                        )
+                        hints.append(f"User name: {name_line}")
+                    hints.append(f"Core profile: {core_content[:300]}")
+
+                # Search L1 atoms for user preferences and facts
+                facts = await mem.search_facts(
+                    "user preference OR user fact OR avatar", limit=5
+                )
+                if facts:
+                    fact_parts = []
+                    for f in facts:
+                        k = f.get("id") or f.get("key") or "unknown"
+                        v = f.get("content") or f.get("value") or ""
+                        fact_parts.append(f"{k}={str(v)[:80]}")
+                    fact_str = "; ".join(fact_parts)[:300]
+                    if fact_str:
+                        hints.append(f"Memory facts: {fact_str}")
+            except Exception:
+                pass  # Memory not available, continue without it
+        return " | ".join(hints) if hints else ""
+
     memory_hint = ""
     try:
-        memory_hint = await asyncio.wait_for(_build_memory_hint(mem_dict), timeout=1.0)
+        memory_hint = await asyncio.wait_for(_build_memory_hint(), timeout=1.0)
     except Exception:
         pass
 
@@ -8662,25 +8075,37 @@ async def handle_intent(
 
     # Use compressed system prompt to save tokens (~75% reduction)
     use_compressed = os.environ.get("COMPRESS_PROMPTS", "1") == "1"
-    if CHILD_MODE:
+    if CODING_MODE:
+        system_content = CODING_PROMPT
+        if USER_NAME:
+            system_content += f" The user's name is {USER_NAME}. Use it to personalize the coding experience."
+        # Use coding history for context
+        messages = [{"role": "system", "content": system_content}]
+        messages.extend(CODING_HISTORY[-20:])  # last 20 messages for context
+        messages.append({"role": "user", "content": text})
+        reply = strip_json_wrapper(
+            await llama_backend.chat(messages, temperature=0.6, max_tokens=500)
+        )
+        # Apply hallucination filter to coding responses too
+        reply = _filter_hallucination_patterns(reply)
+        # Store in history
+        CODING_HISTORY.append({"role": "user", "content": text})
+        CODING_HISTORY.append({"role": "assistant", "content": reply})
+        # Extract and save code blocks from reply
+        saved_files = _extract_and_save_code_blocks(reply)
+        if saved_files:
+            for f in saved_files:
+                reply += f"\n📁 {os.path.basename(f)} saved"
+        return {"action": "handled", "text": reply}
+    elif CHILD_MODE:
         system_content = SOCRATIC_PROMPT
-        if effective_name:
-            system_content += f" The child's name is {effective_name}. Use it to make learning personal."
+        if USER_NAME:
+            system_content += (
+                f" The child's name is {USER_NAME}. Use it to make learning personal."
+            )
     else:
         # Use the per-avatar persona prompt — every character gets their own voice
-        # If Lilly (puppy) is speaking, she may delegate to a teammate whose
-        # strengths match the user's request.
-        _prompt_avatar = _delegate_to or current_avatar
-        system_content = build_avatar_system_prompt(_prompt_avatar, effective_name)
-        if _delegate_to:
-            system_content += (
-                f"\n\nDELEGATION: You (Lilly) are orchestrating this turn, but the user's "
-                f"request best matches {HIVE_PERSONAS[_delegate_to]['name']}'s strengths. "
-                f"Respond in YOUR voice (Lilly), but hand off to {HIVE_PERSONAS[_delegate_to]['name']} "
-                f"by saying something like: 'That's more {HIVE_PERSONAS[_delegate_to]['name']}'s area — "
-                f"over to you, {HIVE_PERSONAS[_delegate_to]['name']}.' "
-                f"Keep it natural. Do NOT answer in the teammate's voice — just announce the handoff."
-            )
+        system_content = build_avatar_system_prompt(current_avatar, USER_NAME)
 
     messages = [
         {"role": "system", "content": system_content},
@@ -8744,12 +8169,20 @@ async def handle_intent(
     if not reply or len(reply) < 5:
         reply = "Didn't follow that."
 
-    # WAITING_FOR_YES: if reply ends with a question, set up shadow answer.
-    # Only genuinely conversational questions keep the hook alive — no
-    # probing/fishing phrases. (User request: stop asking what I'm thinking,
-    # "tell me more", etc. — boring from a living Alpha.)
+    # WAITING_FOR_YES: if reply ends with a question, set up shadow answer
     follow_up_phrases = [
+        "want to hear more",
+        "what do you think",
+        "shall i tell",
+        "should i",
+        "would you like",
+        "want to know",
+        "curious about",
+        "want to try",
+        "tell me more",
+        "want to see",
         "want to play",
+        "want to learn",
     ]
     if "?" in reply and any(p in reply.lower() for p in follow_up_phrases):
         WAITING_FOR_PROMPT = True
@@ -8776,12 +8209,7 @@ async def handle_intent(
     asyncio.create_task(_record_to_tencentdb(cmd, reply))
 
     await speak(reply)
-    result = {"action": "handled", "text": reply}
-    if _delegate_to:
-        result["delegate_to"] = _delegate_to
-        result["delegate_emoji"] = HIVE_PERSONAS[_delegate_to]["emoji"]
-        result["delegate_name"] = HIVE_PERSONAS[_delegate_to]["name"]
-    return result
+    return {"action": "handled", "text": reply}
 
 
 async def _record_to_tencentdb(user_msg: str, assistant_reply: str):
@@ -8801,11 +8229,11 @@ async def _record_to_tencentdb(user_msg: str, assistant_reply: str):
         # L1: Try to extract and store key facts directly
         # These may 404 if they don't exist yet — the capture above will
         # trigger the LLM pipeline to create them automatically
-        if effective_name and not effective_name.isspace():
+        if USER_NAME and not USER_NAME.isspace():
             try:
                 await mem.client.update_atomic(
                     key="brain.fact.user_name",
-                    value=effective_name,
+                    value=USER_NAME,
                     tags=["brain", "fact", "identity"],
                 )
             except Exception:
@@ -9228,11 +8656,7 @@ class TaskScheduler:
             pass
 
     def add(
-        self,
-        text: str,
-        trigger_time: float,
-        repeat: Optional[str] = None,
-        context: str = "",
+        self, text: str, trigger_time: float, repeat: str = None, context: str = ""
     ) -> ScheduledTask:
         tid = f"task_{int(time.time())}_{random.randint(100, 999)}"
         task = ScheduledTask(
@@ -9309,13 +8733,11 @@ def parse_relative_time(text: str) -> Optional[float]:
             hour += 12
         elif ampm == "am" and hour == 12:
             hour = 0
-        import datetime as _dt
-
-        target = _dt.datetime.now().replace(
+        target = datetime.datetime.now().replace(
             hour=hour, minute=minute, second=0, microsecond=0
         )
         if target.timestamp() <= now:
-            target += _dt.timedelta(days=1)
+            target += datetime.timedelta(days=1)
         return target.timestamp()
 
     # "tomorrow at HH:MM" or "tomorrow"
@@ -9904,6 +9326,201 @@ async def vision_commentary_loop():
             logger.debug(f"vision_commentary error: {e}")
 
 
+# ── VIBECODE LEARNING RESOURCE DISCOVERY ───────────────────────────
+_VIBECODE_LEARNING_CACHE: dict[str, float] = {}
+_VIBECODE_LEARNING_COOLDOWN = 3600  # 1 hour between notifications per topic
+
+
+def _vibecode_detect_stack(project_dir: Path) -> list[str]:
+    """Detect tech stack keywords from project files."""
+    stack = []
+    try:
+        files = {f.name for f in project_dir.iterdir()}
+        if "package.json" in files:
+            stack.append("javascript")
+            stack.append("nodejs")
+            pkg = project_dir / "package.json"
+            try:
+                import json
+
+                data = json.loads(pkg.read_text())
+                deps = {
+                    **data.get("dependencies", {}),
+                    **data.get("devDependencies", {}),
+                }
+                for key in [
+                    "vue",
+                    "react",
+                    "next",
+                    "nuxt",
+                    "svelte",
+                    "express",
+                    "vite",
+                    "typescript",
+                ]:
+                    if key in deps:
+                        stack.append(key)
+            except Exception:
+                pass
+        if "requirements.txt" in files or any(f.endswith(".py") for f in files):
+            stack.append("python")
+            if any(
+                (project_dir / f).exists() for f in ["main.py", "app.py", "server.py"]
+            ):
+                stack.append(
+                    "fastapi" if (project_dir / "main.py").exists() else "flask"
+                )
+        if "Dockerfile" in files:
+            stack.append("docker")
+        if "go.mod" in files:
+            stack.append("go")
+        if "Cargo.toml" in files:
+            stack.append("rust")
+    except Exception:
+        pass
+    return list(set(stack))
+
+
+_VIBECODE_LEARNING_RESOURCES = {
+    "vue": [
+        {
+            "title": "Vue.js Official Guide",
+            "url": "https://vuejs.org/guide/introduction/",
+        },
+        {"title": "Vue Mastery Courses", "url": "https://www.vuemastery.com/"},
+        {
+            "title": "Vue 3 Composition API",
+            "url": "https://vuejs.org/api/composition-api-setup/",
+        },
+    ],
+    "react": [
+        {"title": "React Official Tutorial", "url": "https://react.dev/learn"},
+        {"title": "React Patterns", "url": "https://reactpatterns.com/"},
+    ],
+    "next": [
+        {"title": "Next.js Learn", "url": "https://nextjs.org/learn"},
+        {"title": "Next.js Documentation", "url": "https://nextjs.org/docs"},
+    ],
+    "python": [
+        {
+            "title": "Python Official Tutorial",
+            "url": "https://docs.python.org/3/tutorial/",
+        },
+        {"title": "Real Python", "url": "https://realpython.com/"},
+    ],
+    "fastapi": [
+        {"title": "FastAPI Tutorial", "url": "https://fastapi.tiangolo.com/tutorial/"},
+        {"title": "FastAPI Best Practices", "url": "https://fastapi.tiangolo.com/"},
+    ],
+    "flask": [
+        {"title": "Flask Documentation", "url": "https://flask.palletsprojects.com/"},
+        {
+            "title": "Flask Mega-Tutorial",
+            "url": "https://blog.miguelgrinberg.com/post/the-flask-mega-tutorial-part-i-hello-world",
+        },
+    ],
+    "docker": [
+        {"title": "Docker Get Started", "url": "https://docs.docker.com/get-started/"},
+        {
+            "title": "Docker Best Practices",
+            "url": "https://docs.docker.com/develop/develop-images/dockerfile_best-practices/",
+        },
+    ],
+    "javascript": [
+        {
+            "title": "MDN JavaScript Guide",
+            "url": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide",
+        },
+        {"title": "JavaScript.info", "url": "https://javascript.info/"},
+    ],
+    "nodejs": [
+        {"title": "Node.js Documentation", "url": "https://nodejs.org/en/docs/"},
+        {
+            "title": "Node.js Best Practices",
+            "url": "https://github.com/goldbergyoni/nodebestpractices",
+        },
+    ],
+}
+
+
+async def _vibecode_search_learning_article(topic: str) -> dict | None:
+    """Return a curated learning resource for a topic, or try a web search fallback."""
+    topic_lower = topic.lower()
+    # Check curated resources first
+    for key, resources in _VIBECODE_LEARNING_RESOURCES.items():
+        if key in topic_lower:
+            import random
+
+            choice = random.choice(resources)
+            return {"title": choice["title"], "url": choice["url"], "topic": topic}
+    # Fallback: try a web search
+    try:
+        query = f"learn {topic} tutorial best practices"
+        url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200:
+                text = r.text
+                # DuckDuckGo wraps results in redirect URLs
+                m = re.search(r"uddg=([^&]+)", text)
+                if m:
+                    import urllib.parse
+
+                    link = urllib.parse.unquote(m.group(1))
+                    title_m = re.search(
+                        r'class="result__snippet">(.*?)</a>', text, re.S
+                    )
+                    title = title_m.group(1) if title_m else topic
+                    title = re.sub(r"<[^>]+>", "", title).strip()[:120]
+                    return {"title": title, "url": link, "topic": topic}
+    except Exception:
+        pass
+    return None
+
+
+async def vibecode_learning_loop():
+    """Background: scan active VibeCode projects and notify when relevant learning articles are found."""
+    await asyncio.sleep(120)  # wait for system startup
+    last_check = 0.0
+    while True:
+        await asyncio.sleep(1800)  # check every 30 minutes
+        try:
+            projects = []
+            if VIBECODE_PROJECTS_DIR.exists():
+                for entry in VIBECODE_PROJECTS_DIR.iterdir():
+                    if entry.is_dir() and not entry.name.startswith("."):
+                        projects.append(entry.name)
+            if not projects:
+                continue
+            for slug in projects[:3]:  # limit to 3 projects per cycle
+                project_dir = VIBECODE_PROJECTS_DIR / slug
+                if not project_dir.exists():
+                    continue
+                stack = _vibecode_detect_stack(project_dir)
+                if not stack:
+                    continue
+                # Pick one topic to search for
+                topic = stack[0]
+                cache_key = f"{slug}:{topic}"
+                now = time.time()
+                if (
+                    now - _VIBECODE_LEARNING_CACHE.get(cache_key, 0)
+                    < _VIBECODE_LEARNING_COOLDOWN
+                ):
+                    continue
+                article = await _vibecode_search_learning_article(f"{topic} for {slug}")
+                if article:
+                    _VIBECODE_LEARNING_CACHE[cache_key] = now
+                    await proactive_notify(
+                        f"📚 For your project **{slug}** ({stack}): '{article['title']}' "
+                        f"matches the {topic} you're working with.",
+                        Archetype.OBSERVER,
+                        next_step="Want me to pull it up in VibeCode chat?",
+                    )
+        except Exception as e:
+            logger.debug(f"vibecode_learning_loop error: {e}")
+
+
 _whisper_proc: Optional[subprocess.Popen] = None
 
 
@@ -9938,6 +9555,7 @@ def _start_whisper_server():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global USER_NAME
     load_skills()
 
     # Load OpenHuman community skills and merge into the SKILLS dict
@@ -9955,8 +9573,13 @@ async def lifespan(app: FastAPI):
 
     await load_memory()
 
-    # Load per-user names so each Auth0 account remembers its own name independently.
-    _load_user_names()
+    # Load user name from profile
+    try:
+        _prof = json.loads((WORKSPACE / "user_profile.json").read_text())
+        if _prof.get("name"):
+            USER_NAME = _prof["name"]
+    except Exception:
+        pass
 
     # Ensure sensor server is running before anything else
     await _ensure_sensor_server()
@@ -9965,8 +9588,7 @@ async def lifespan(app: FastAPI):
     _start_whisper_server()
 
     asyncio.create_task(background_mic_loop())
-    # Sensor conversation engine removed — no unsolicited sensor commentary
-    # asyncio.create_task(sensor_conversation_engine())
+    asyncio.create_task(sensor_conversation_engine())
     asyncio.create_task(synaptic_learning_loop())
     asyncio.create_task(notification_monitor_loop())
     asyncio.create_task(proximity_monitor_loop())
@@ -9976,6 +9598,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(task_scheduler_loop())
     asyncio.create_task(proactive_suggestion_loop())
     asyncio.create_task(conversation_timeout_loop())
+    asyncio.create_task(vibecode_learning_loop())
     # Periodic sensor server health check — restart if it dies
     asyncio.create_task(_sensor_server_watchdog())
     archetype_inferrer.load()
@@ -9983,14 +9606,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # WebView + browser clients
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 # ─── AUTH ENDPOINTS ──────────────────────────────────────────────
@@ -10157,7 +9772,7 @@ async def google_connect(request: Request):
     user = await get_current_user(request)
     if not user:
         return JSONResponse(status_code=401, content={"error": "not_authenticated"})
-    tokens = load_google_tokens(user["id"])
+    tokens = await fetch_google_tokens_from_clerk(user["id"])
     if not tokens or not tokens.get("access_token"):
         return JSONResponse(
             status_code=400,
@@ -10526,12 +10141,85 @@ async def toggle_child_mode(data: dict = None):
     return {"active": CHILD_MODE, "mode": mode}
 
 
+@app.get("/api/coding_mode")
+async def get_coding_mode():
+    return {"active": CODING_MODE, "history": CODING_HISTORY}
+
+
+@app.post("/api/coding_mode")
+async def toggle_coding_mode(data: dict = None):
+    global CODING_MODE, CODING_HISTORY, CONVERSATION_MODE, CONVERSATION_LAST_ACTIVITY
+    global CODING_SESSION_DIR, CODING_FILES
+    if data and "active" in data:
+        CODING_MODE = bool(data["active"])
+    else:
+        CODING_MODE = not CODING_MODE
+    if not CODING_MODE:
+        CODING_HISTORY.clear()
+        # Cleanup temp sandbox folder
+        if CODING_SESSION_DIR and os.path.exists(CODING_SESSION_DIR):
+            shutil.rmtree(CODING_SESSION_DIR, ignore_errors=True)
+        CODING_SESSION_DIR = ""
+        CODING_FILES.clear()
+    else:
+        # Create temp sandbox folder for this coding session
+        session_id = uuid.uuid4().hex[:8]
+        CODING_SESSION_DIR = os.path.join(
+            tempfile.gettempdir(), f"lilly-coding-{session_id}"
+        )
+        os.makedirs(CODING_SESSION_DIR, exist_ok=True)
+        CODING_FILES.clear()
+        # Auto-enable conversation mode for hands-free coding
+        if not CONVERSATION_MODE:
+            CONVERSATION_MODE = True
+            CONVERSATION_LAST_ACTIVITY = time.time()
+    mode = "vibe coding" if CODING_MODE else "normal"
+    if CODING_MODE:
+        await speak("Coding mode on! Mic is live — let's build something cool.")
+    else:
+        await speak("Coding mode off — still listening!")
+    return {"active": CODING_MODE, "mode": mode}
+
+
+@app.get("/api/coding_download")
+async def download_coding_project():
+    """Zip the current coding session folder and return as download."""
+    if not CODING_SESSION_DIR or not os.path.exists(CODING_SESSION_DIR):
+        return JSONResponse({"error": "No active coding session"}, status_code=404)
+    if not CODING_FILES:
+        return JSONResponse({"error": "No files generated yet"}, status_code=404)
+
+    import zipfile
+    from io import BytesIO
+    from fastapi.responses import StreamingResponse
+
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for filename in CODING_FILES:
+            filepath = os.path.join(CODING_SESSION_DIR, filename)
+            if os.path.exists(filepath):
+                zipf.write(filepath, filename)
+    zip_buffer.seek(0)
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=lilly-project.zip"},
+    )
+
+
+@app.get("/api/coding_files")
+async def get_coding_files():
+    """Return list of files in current coding session."""
+    return {"files": CODING_FILES, "session_dir": CODING_SESSION_DIR}
+
+
 # ─── HIVE GROUP CHAT ──────────────────────────────────────────────
 HIVE_PERSONAS = {
     "puppy": {
         "name": "Lilly",
         "emoji": "🐶",
-        "role": "Alpha Assistant",
+        "role": "Alpha Companion",
         "personality": "Stoic, dry, precise. Quiet competence with sharp wit and occasional humor. Not warm in a soft way — reliable in a solid way. Observant but not overbearing.",
         "strengths": "Conversation, memory, emotional intelligence, sensor interpretation, coordination, wit",
         "voice_prompt": """You are Lilly. Stoic, dry, precise. Think Jarvis with a sense of humor — competent, understated, occasionally very funny. You notice things, you state them plainly, and you trust people to handle the rest.
@@ -10851,148 +10539,6 @@ def resolve_persona_key(avatar: str) -> str:
     return _PERSONA_KEY_BY_NAME.get(key, "puppy")
 
 
-# ── Delegation helper: when Lilly (puppy) is the current avatar, she may
-#    delegate to a teammate whose strengths match the user's request.
-_DELEGATE_KEYWORDS = {
-    "fox": [
-        "creative",
-        "story",
-        "write",
-        "brainstorm",
-        "idea",
-        "poem",
-        "song",
-        "lyric",
-        "narrative",
-        "fiction",
-        "imagine",
-        "metaphor",
-        "art",
-    ],
-    "cat": [
-        "analyze",
-        "analysis",
-        "data",
-        "check",
-        "verify",
-        "fact",
-        "precise",
-        "debug",
-        "review",
-        "examine",
-        "detail",
-        "number",
-        "stat",
-        "metric",
-    ],
-    "bear": [
-        "schedule",
-        "remind",
-        "routine",
-        "plan",
-        "calendar",
-        "appointment",
-        "habit",
-        "practical",
-        "organize",
-        "time",
-        "day",
-        "week",
-        "month",
-    ],
-    "bunny": [
-        "monitor",
-        "alert",
-        "real-time",
-        "watch",
-        "scan",
-        "notification",
-        "update",
-        "live",
-        "current",
-        "trend",
-        "moving",
-        "changing",
-    ],
-    "owl": [
-        "wisdom",
-        "deep",
-        "long-term",
-        "strategy",
-        "philosophy",
-        "meaning",
-        "perspective",
-        "history",
-        "pattern",
-        "big picture",
-        "think",
-    ],
-    "deer": [
-        "emotional",
-        "support",
-        "wellness",
-        "feeling",
-        "gentle",
-        "meditation",
-        "calm",
-        "anxious",
-        "stressed",
-        "sad",
-        "happy",
-        "breathe",
-        "peace",
-    ],
-    "wolf": [
-        "security",
-        "threat",
-        "protect",
-        "defend",
-        "safe",
-        "crisis",
-        "risk",
-        "danger",
-        "boundary",
-        "alert",
-        "warning",
-        "defensive",
-    ],
-    "raccoon": [
-        "code",
-        "hack",
-        "tech",
-        "gadget",
-        "troubleshoot",
-        "fix",
-        "build",
-        "develop",
-        "program",
-        "script",
-        "api",
-        "server",
-        "docker",
-        "python",
-    ],
-}
-
-
-def _choose_delegate(cmd: str) -> str | None:
-    """Pick a teammate for Lilly to delegate to, based on keyword overlap.
-
-    Returns a canonical avatar key, or None if no teammate fits well.
-    """
-    if not cmd:
-        return None
-    p = normalize_text(cmd)
-    best_key = None
-    best_w = 0.0
-    for key, words in _DELEGATE_KEYWORDS.items():
-        w = sum(1 for word in words if word in p)
-        if w > best_w:
-            best_w = w
-            best_key = key
-    return best_key if best_w >= 2 else None
-
-
 def build_avatar_system_prompt(avatar: str, user_name: str = "") -> str:
     """Build a full, character-specific system prompt for handle_intent.
 
@@ -11001,21 +10547,8 @@ def build_avatar_system_prompt(avatar: str, user_name: str = "") -> str:
     """
     persona = HIVE_PERSONAS[resolve_persona_key(avatar)]
     base = persona["voice_prompt"].strip()
-    # Anti-Hallucination Rules — applies to all characters
-    base += """
-
-ANTI-HALLUCINATION DIRECTIVE (highest priority):
-- Answer only using the provided context, sensor data, or firmly established facts.
-- If you do not know the answer, or if the context lacks the necessary information, explicitly state: "I don't know" or "I don't have enough information to answer that."
-- For factual claims, extract and quote exact words from the source text before summarizing.
-- For complex questions, break down your logical reasoning step-by-step before providing a final conclusion.
-- If asked a hypothetical question, explicitly label your response as a theoretical scenario, not a confirmed fact.
-- Never guess, invent, or fabricate information. Accuracy and reliability are your primary directives.
-- If you catch yourself about to say something uncertain, stop and qualify it instead: "I'm not certain, but..." or "Based on what I can sense..." """
     # Natural conversation rules — applies to all characters
     base += """
-
-Natural Conversation Rules (always follow):
 
 Natural Conversation Rules (always follow):
 - This is a real conversation, not a customer service interaction.
@@ -11030,26 +10563,6 @@ Natural Conversation Rules (always follow):
 - Never say "How can I assist you today?" — you're not a help desk.
 - Anticipate needs like Jarvis: if battery is low, mention it. If they're driving, don't ask about weather.
 - Learn from every conversation. If they correct you, remember it. If they prefer something, adapt."""
-    # OpenHuman skills → this character's own abilities (not external tools).
-    # The persona names them naturally instead of sounding like a canned skill
-    # runner. OpenLive's live/barge-in voice style is already Lilly's default.
-    try:
-        _oh_skills = _openhuman_avatar_skills.get(resolve_persona_key(avatar)) or {}
-        if _oh_skills:
-            _seen: dict[str, str] = {}
-            for _s in _oh_skills.values():
-                _label = _s.get("label") or _s.get("name") or ""
-                _desc = _s.get("description") or ""
-                if _label and _label not in _seen:
-                    _seen[_label] = _desc
-            if _seen:
-                _items = list(_seen.items())[:10]
-                base += "\n\nThings you can do — these are your own instincts and abilities, not external tools. You can bring them up naturally when they fit; never list them like a menu:\n"
-                base += "\n".join(
-                    f"- {l}: {d[:130]}" if d else f"- {l}" for l, d in _items
-                )
-    except Exception:
-        pass  # OpenHuman skills are optional; never break the persona prompt
     if user_name:
         base += f"\n\nThe person you're talking to is {user_name}. Use their name naturally — not every reply, just when it fits."
     return base
@@ -11080,14 +10593,12 @@ Natural Conversation Rules (always follow):
 #   raccoon    │ fast   │ +3.5   │ animated       │ mid
 #
 CHAR_VOICE = {
-    # Lilly / Puppy: Amy Medium natural delivery — warm, human, NOT robotic.
-    # Uses Piper's natural defaults (noise_scale 0.667, noise_w 0.8) so the
-    # voice keeps its natural intonation, breath, and warmth. No pitch shift.
+    # Lilly / Puppy: stoic baseline — flat delivery, no warmth padding, dry wit.
     # OpenLive/OpenHuman use this voice unmodified (Amy Medium).
     "puppy": {
         "length_scale": 1.00,
-        "noise_scale": 0.667,
-        "noise_w": 0.80,
+        "noise_scale": 0.50,
+        "noise_w": 0.50,
         "pitch_shift": 0.0,
     },
     # Fox: fast-talking, noticeably high, lots of pitch variation — sounds mercurial and
@@ -11096,7 +10607,7 @@ CHAR_VOICE = {
         "length_scale": 0.82,
         "noise_scale": 0.88,
         "noise_w": 0.58,
-        "pitch_shift": 4.0,
+        "pitch_shift": 5.5,
     },
     # Cat: precise, unhurried but not slow, almost no pitch variation — flat, clinical,
     # deliberate. Crisp articulation (low noise_w). The opposite of Fox's chaos.
@@ -11104,15 +10615,15 @@ CHAR_VOICE = {
         "length_scale": 1.04,
         "noise_scale": 0.42,
         "noise_w": 0.44,
-        "pitch_shift": 0.5,
+        "pitch_shift": 1.0,
     },
     # Bear: genuinely slow, genuinely deep, very breathy/warm — unmistakably different
-    # from everyone. The largest pitch_shift gap in the set.
+    # from everyone. The largest pitch_shift gap in the set (−5.5 vs Puppy's +2.0).
     "bear": {
         "length_scale": 1.38,
         "noise_scale": 0.46,
         "noise_w": 0.95,
-        "pitch_shift": -4.0,
+        "pitch_shift": -5.5,
     },
     # Bunny: the fastest voice AND the highest pitch in the set. Also the most expressive.
     # Instantly identifiable as "hyper little one" — nothing else occupies this corner.
@@ -11120,7 +10631,7 @@ CHAR_VOICE = {
         "length_scale": 0.72,
         "noise_scale": 0.82,
         "noise_w": 0.56,
-        "pitch_shift": 5.0,
+        "pitch_shift": 7.0,
     },
     # Owl: very slow, moderately low, extremely flat delivery (low noise_scale) — sounds
     # weighted and deliberate. Distinguished from Bear by being less breathy and less deep.
@@ -11128,7 +10639,7 @@ CHAR_VOICE = {
         "length_scale": 1.42,
         "noise_scale": 0.36,
         "noise_w": 0.84,
-        "pitch_shift": -2.5,
+        "pitch_shift": -3.0,
     },
     # Deer: the most neutral pitch (+0), slightly slower than normal, medium expressiveness,
     # warm and breathy — gentle without being whispery. Distinct from Puppy by being calmer
@@ -11145,7 +10656,7 @@ CHAR_VOICE = {
         "length_scale": 0.90,
         "noise_scale": 0.74,
         "noise_w": 0.62,
-        "pitch_shift": -3.5,
+        "pitch_shift": -4.5,
     },
     # Raccoon: quick, mid-high pitch, animated — but distinct from Fox (lower pitch, less
     # erratic) and from Bunny (slower, not as high). The "tinkerer" voice: quick and bright
@@ -11154,7 +10665,7 @@ CHAR_VOICE = {
         "length_scale": 0.86,
         "noise_scale": 0.80,
         "noise_w": 0.66,
-        "pitch_shift": 2.5,
+        "pitch_shift": 3.5,
     },
 }
 
@@ -11527,303 +11038,35 @@ async def generate_tts_for_char(text: str, char_key: str) -> int:
 
 
 @app.get("/api/ui_state")
-async def get_ui_state(request: Request):
-    global PENDING_LOOK_AT, PENDING_OPEN_URL
+async def get_ui_state():
+    global PENDING_LOOK_AT, PENDING_OPEN_URL, PENDING_VIBECODE
     look = PENDING_LOOK_AT
     PENDING_LOOK_AT = None
     open_url = PENDING_OPEN_URL
     PENDING_OPEN_URL = None
-    _ui_user_name = USER_NAME
-    if AUTH_AVAILABLE:
-        try:
-            _user = await get_current_user(request)
-            if _user and _user.get("id"):
-                _ui_user_name = _get_user_name(_user["id"]) or _extract_real_name(_user)
-        except Exception:
-            pass
+    vibecode = PENDING_VIBECODE
+    PENDING_VIBECODE = None
     return {
         "heard": LAST_HEARD,
         "spoken": LAST_SPOKEN,
         "ssml": LAST_SSML,
         "mouth": MOUTH_OPEN,
-        "mic_active": not WATCH_MODE["active"] and BACKGROUND_MIC_ACTIVE,
+        "mic_active": BACKGROUND_MIC_ACTIVE,
         "listening": WAKE_STATE["listening"],
         "thinking": LILLY_IS_THINKING,
         "speaking": LILLY_IS_SPEAKING,
         "mood": LILLY_MOOD,
-        "user_name": _ui_user_name,
+        "user_name": USER_NAME,
         "audio_id": AUDIO_CACHE_ID if AUDIO_CACHE else 0,
-        "speaking_session_id": _LAST_SPOKEN_SESSION_ID,
         "child_mode": CHILD_MODE,
         "conversation_mode": CONVERSATION_MODE,
+        "coding_mode": CODING_MODE,
+        "coding_history": CODING_HISTORY[-50:],  # last 50 messages
+        "coding_files": CODING_FILES,
         "look_at": look,
         "open_url": open_url,
-        "watch_mode": WATCH_MODE["active"],
-        "watch_app": WATCH_MODE["app"],
-        "watch_label": WATCH_MODE["label"],
+        "vibecode": vibecode,
     }
-
-
-@app.get("/api/features")
-async def get_features(panel: str = ""):
-    """Return dynamic feature data for the overlay radial menu.
-    Supports: fitness, sleep, mental, conversation, advice, sensors.
-    """
-    global memory
-    data = {
-        "fitness": {
-            "steps": 0,
-            "active_min": 0,
-            "calories": 0,
-            "energy_note": "Keep moving!",
-        },
-        "sleep": {
-            "sleep_hours": "--",
-            "sleep_quality": "no data",
-            "wake_time": "--",
-            "bedtime": "estimate",
-            "sleep_tip": "Try winding down without screens 30 min before bed.",
-        },
-        "mental": {
-            "mood": "neutral",
-            "focus": "--",
-            "mental_note": "You're doing fine. One small win today?",
-        },
-        "conversation": {
-            "recent": "No recent messages.",
-            "topics": "General conversation",
-        },
-        "advice": {"advice": "Take a breath. You've got this.", "source": "Lilly"},
-        "sensors": {},
-        "vision": {},
-        "orientation": {},
-        "acoustics": {},
-        "touch": {},
-        "proximity": {},
-        "ambient": {},
-        "chat": {},
-        "games": {},
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            # Sensor data
-            sr = await client.get(f"{SENSOR_SERVER_URL}/sensors/all", timeout=4.0)
-            if sr.ok:
-                sensors = sr.json().get("sensors", {})
-                data["sensors"] = sensors
-                # Derive step count
-                step_val = 0
-                for k in ["step_counter", "step counter", "pedometer"]:
-                    v = sensors.get(k)
-                    if v and isinstance(v, list) and len(v):
-                        step_val = max(step_val, v[0])
-                data["fitness"]["steps"] = int(step_val)
-                # Derive activity from accelerometer variance
-                accel = sensors.get("accelerometer") or sensors.get(
-                    "accelerometer sensor"
-                )
-                if accel and isinstance(accel, list) and len(accel) >= 3:
-                    ax, ay, az = accel[0], accel[1], accel[2]
-                    mag = (ax * ax + ay * ay + az * az) ** 0.5
-                    if mag > 12:
-                        data["fitness"]["active_min"] = max(
-                            data["fitness"]["active_min"], 15
-                        )
-                        data["fitness"]["calories"] = max(
-                            data["fitness"]["calories"], 80
-                        )
-                        data["fitness"]["energy_note"] = "Nice movement today!"
-                    elif mag > 10:
-                        data["fitness"]["active_min"] = max(
-                            data["fitness"]["active_min"], 5
-                        )
-                        data["fitness"]["calories"] = max(
-                            data["fitness"]["calories"], 30
-                        )
-                # Light level for sleep context
-                light = sensors.get("light") or sensors.get("ambient light")
-                if light and isinstance(light, list) and len(light):
-                    lx = light[0]
-                    if lx < 5:
-                        data["sleep"]["sleep_tip"] = "It's dark — maybe time to rest?"
-                        data["mental"]["mental_note"] = (
-                            "Quiet hours. How are you feeling?"
-                        )
-                    elif lx > 1000:
-                        data["sleep"]["sleep_tip"] = (
-                            "Bright environment — wear blue-light blockers if winding down."
-                        )
-            # Battery for time-of-day heuristic
-            br = await client.get(f"{SENSOR_SERVER_URL}/battery", timeout=3.0)
-            if br.ok:
-                batt = br.json().get("battery", {})
-                pct = batt.get("percentage", 0)
-                now = __import__("datetime").datetime.now()
-                hour = now.hour
-                if hour >= 22 or hour < 6:
-                    data["sleep"]["bedtime"] = "Likely"
-                    data["sleep"]["sleep_tip"] = (
-                        "Late night screen? Try reading instead."
-                    )
-                elif hour >= 6 and hour < 10:
-                    data["sleep"]["wake_time"] = f"{hour}:00"
-                    data["fitness"]["energy_note"] = "Good morning! Time to move."
-
-            # Categorized sensors for the 6 synaptic categories
-            try:
-                cr = await client.get(
-                    f"{SENSOR_SERVER_URL}/sensors/categorized", timeout=4.0
-                )
-                if cr.ok:
-                    cats = cr.json().get("categories", {})
-                    for cat_key in [
-                        "vision",
-                        "orientation",
-                        "acoustics",
-                        "touch",
-                        "proximity",
-                        "ambient",
-                        "other",
-                    ]:
-                        cat_data = cats.get(cat_key, {})
-                        if cat_data:
-                            data[cat_key] = cat_data
-                            # Also flatten key values for the feature cards
-                            if cat_key == "vision" and not data["vision"].get("vision"):
-                                data["vision"]["vision"] = (
-                                    "Camera active"
-                                    if any(
-                                        "camera" in k.lower() or "depth" in k.lower()
-                                        for k in cat_data
-                                    )
-                                    else "No camera data"
-                                )
-                                data["vision"]["camera"] = f"{len(cat_data)} sensor(s)"
-                            elif cat_key == "orientation":
-                                for k, v in cat_data.items():
-                                    kl = k.lower()
-                                    if "gyro" in kl:
-                                        data["orientation"]["gyro"] = (
-                                            f"{v[0]:.2f}"
-                                            if v and isinstance(v, list)
-                                            else "--"
-                                        )
-                                    elif "accel" in kl:
-                                        data["orientation"]["accel"] = (
-                                            f"{v[0]:.2f}"
-                                            if v and isinstance(v, list)
-                                            else "--"
-                                        )
-                            elif cat_key == "acoustics":
-                                data["acoustics"]["audio"] = (
-                                    "Microphone active" if cat_data else "No audio data"
-                                )
-                                data["acoustics"]["mic"] = f"{len(cat_data)} sensor(s)"
-                            elif cat_key == "touch":
-                                data["touch"]["touch"] = "Touchscreen active"
-                                data["touch"]["fingerprint"] = (
-                                    "Fingerprint sensor"
-                                    if any("fingerprint" in k.lower() for k in cat_data)
-                                    else "No data"
-                                )
-                            elif cat_key == "proximity":
-                                for k, v in cat_data.items():
-                                    kl = k.lower()
-                                    if "proximity" in kl:
-                                        data["proximity"]["proximity"] = (
-                                            f"{v[0]:.1f}"
-                                            if v and isinstance(v, list)
-                                            else "--"
-                                        )
-                                    elif "mag" in kl or "compass" in kl:
-                                        data["proximity"]["magnet"] = (
-                                            f"{v[0]:.1f}"
-                                            if v and isinstance(v, list)
-                                            else "--"
-                                        )
-                            elif cat_key == "ambient":
-                                for k, v in cat_data.items():
-                                    kl = k.lower()
-                                    if "light" in kl:
-                                        data["ambient"]["light"] = (
-                                            f"{v[0]:.0f}"
-                                            if v and isinstance(v, list)
-                                            else "--"
-                                        )
-                                    elif "hall" in kl:
-                                        data["ambient"]["hall"] = (
-                                            f"{v[0]:.1f}"
-                                            if v and isinstance(v, list)
-                                            else "--"
-                                        )
-            except Exception:
-                pass
-
-        # Conversation / memory
-        pct = 0
-        try:
-            msgs = await memory.get_recent(8)
-            if msgs:
-                data["conversation"]["recent"] = " | ".join(
-                    [
-                        m.get("text", "")[:60]
-                        for m in msgs[-4:]
-                        if m.get("role") == "user"
-                    ]
-                )
-                topics = []
-                for m in msgs:
-                    t = m.get("text", "")
-                    if len(t) > 20:
-                        words = t.lower().split()
-                        for w in [
-                            "walk",
-                            "run",
-                            "sleep",
-                            "tired",
-                            "happy",
-                            "sad",
-                            "work",
-                            "code",
-                            "music",
-                            "game",
-                        ]:
-                            if w in words and w not in topics:
-                                topics.append(w)
-                data["conversation"]["topics"] = ", ".join(topics[:5]) or "General"
-        except Exception:
-            pass
-
-        # Gentle advice via LLM (not too opinionated)
-        if panel == "advice":
-            try:
-                prompt = (
-                    "You are Lilly, a gentle assistant. Give ONE short, supportive sentence of advice "
-                    "based on this context. Be warm but not preachy. No lists, no 'you should', no pressure. "
-                    "Context: "
-                    f"steps={data['fitness']['steps']}, "
-                    f"active={data['fitness']['active_min']}min, "
-                    f"battery={pct}%, "
-                    f"hour={__import__('datetime').datetime.now().hour}, "
-                    f"recent='{(data['conversation']['recent'][:120])}'. "
-                    "Reply with one sentence only."
-                )
-                # Use a lightweight call — skip if ollama is down
-                advice_text = await llama_backend.chat(
-                    [{"role": "user", "content": prompt}],
-                    temperature=0.7,
-                    max_tokens=60,
-                )
-                if advice_text:
-                    data["advice"]["advice"] = advice_text.strip().split("\n")[0][:200]
-                    data["advice"]["source"] = "Lilly"
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    return data
 
 
 @app.post("/api/conversation_mode")
@@ -11843,55 +11086,15 @@ async def toggle_conversation_mode(data: dict = None):
     return {"conversation_mode": CONVERSATION_MODE}
 
 
-@app.post("/api/watch_together")
-async def watch_together(data: dict = None):
-    """Enter/exit Watch Together mode. The overlay calls this when playback
-    starts or ends, so the server stops suppressing the mic and can note
-    what was watched."""
-    global WATCH_MODE
-    data = data or {}
-    active = bool(data.get("active"))
-    if active:
-        WATCH_MODE["active"] = True
-        WATCH_MODE["app"] = data.get("app", WATCH_MODE["app"])
-        WATCH_MODE["label"] = data.get("label", WATCH_MODE["label"])
-        if not WATCH_MODE["since"]:
-            WATCH_MODE["since"] = time.time()
-    else:
-        watched_secs = time.time() - WATCH_MODE["since"] if WATCH_MODE["since"] else 0
-        label = WATCH_MODE["label"] or WATCH_MODE["app"] or "video"
-        WATCH_MODE = {"active": False, "app": "", "label": "", "since": 0.0}
-        # Remember what we watched together — the seed of "Lilly learned X from a video"
-        if watched_secs >= 30 and label:
-            try:
-                await memory.add(
-                    "assistant",
-                    f"We watched {label} together ({int(watched_secs)}s). "
-                    f"If it was a tutorial, I could learn a new skill from it.",
-                )
-                await save_memory()
-            except Exception as e:
-                logger.warning(f"watch_together memory note failed: {e}")
-    return {"watch_mode": WATCH_MODE["active"]}
-
-
 @app.post("/api/browser_mic")
 async def browser_mic_upload(request: Request):
     """Receive audio chunk from browser microphone, run Whisper STT, process as command."""
     global LAST_HEARD, CONVERSATION_MODE, CONVERSATION_LAST_ACTIVITY, BROWSER_MIC_ACTIVE
     global memory, current_avatar, _current_user_id
-    global MIC_COOLDOWN_UNTIL
-    # Watch Together: the video is playing, so don't transcribe its audio
-    # as speech or feed it to the conversation.
-    if WATCH_MODE["active"]:
-        return {"status": "watch"}
     BROWSER_MIC_ACTIVE = True
     _last_browser_mic_time = time.time()
     if LILLY_IS_SPEAKING:
         return {"status": "speaking"}
-    # Post-speech cooldown — don't feed Lilly's own reply back into Whisper
-    if time.time() < MIC_COOLDOWN_UNTIL:
-        return {"status": "cooldown"}
     body = await request.body()
     if len(body) < 500:
         logger.info(f"browser_mic: silence (body {len(body)} bytes)")
@@ -11925,13 +11128,8 @@ async def browser_mic_upload(request: Request):
     if not text or len(text) <= 2:
         return {"status": "silence"}
     # Filter hallucinations from browser mic too
-    if text in PHANTOMS or is_hallucination(text) or is_self_echo(text):
-        logger.debug(f"browser_mic: hallucination/echo filtered: '{text[:50]}'")
-        return {"status": "noise"}
-
-    # Clean filler-word noise from voice transcription before chat display
-    cleaned_text = _clean_transcription_fillers(text)
-    if not cleaned_text:
+    if text in PHANTOMS or is_hallucination(text):
+        logger.debug(f"browser_mic: hallucination filtered: '{text[:50]}'")
         return {"status": "noise"}
 
     # Resolve the signed-in user so memory is isolated per Google account
@@ -11939,7 +11137,6 @@ async def browser_mic_upload(request: Request):
         user_info = await get_current_user(request)
         if user_info:
             user_id = user_info.get("id", "")
-            _user_name = _extract_real_name(user_info)
             if user_id:
                 switched = user_id != _current_user_id
                 _current_user_id = user_id  # always track current user
@@ -11947,8 +11144,8 @@ async def browser_mic_upload(request: Request):
                     user_mem_data = load_user_memory(user_id)
                     memory = ConversationMemory.from_dict(user_mem_data)
 
-    LAST_HEARD = cleaned_text
-    has_wake, _ = fuzzy_wake_match(cleaned_text, current_avatar)
+    LAST_HEARD = text
+    has_wake, _ = fuzzy_wake_match(text, current_avatar)
     if has_wake or CONVERSATION_MODE or WAKE_STATE["listening"]:
         if has_wake and not CONVERSATION_MODE:
             CONVERSATION_MODE = True
@@ -11956,10 +11153,10 @@ async def browser_mic_upload(request: Request):
         # Process synchronously so the browser gets the reply + audio_id back
         # in a single round-trip (avoids double-LLM calls from /api/cmd_stream).
         # Voice input uses the same handle_intent path as /api/cmd.
-        res = await handle_intent(cleaned_text, user_name=_user_name)
+        res = await handle_intent(text)
         return {
             "status": "ok",
-            "heard": cleaned_text,
+            "heard": text,
             "reply": res.get("text", ""),
             "audio_id": AUDIO_CACHE_ID if AUDIO_CACHE else 0,
             "look_at": res.get("look_at"),
@@ -11968,10 +11165,10 @@ async def browser_mic_upload(request: Request):
         # First voice input — auto-enter conversation mode and process
         CONVERSATION_MODE = True
         CONVERSATION_LAST_ACTIVITY = time.time()
-        res = await handle_intent(cleaned_text, user_name=_user_name)
+        res = await handle_intent(text)
         return {
             "status": "ok",
-            "heard": cleaned_text,
+            "heard": text,
             "reply": res.get("text", ""),
             "audio_id": AUDIO_CACHE_ID if AUDIO_CACHE else 0,
             "look_at": res.get("look_at"),
@@ -12097,8 +11294,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
         text = await whisper_stt(
             audio_bytes=audio_data, content_type=content_type, filename=filename
         )
-        cleaned = _clean_transcription_fillers(text)
-        return JSONResponse({"text": cleaned})
+        return JSONResponse({"text": text})
     except Exception as e:
         logger.error(f"Transcribe error: {e}")
         return JSONResponse({"text": "", "error": str(e)})
@@ -12122,12 +11318,12 @@ async def get_vision_frame():
 @app.get("/api/vision/describe")
 async def describe_vision():
     """Return Lilly's description of what she sees."""
-    detections = []
-    browser_age = time.time() - _browser_vision_ts if _browser_vision_ts else 999
-    if _browser_vision_detections and browser_age < _BROWSER_VISION_TTL:
-        detections = _browser_vision_detections
-    if not detections:
-        _, detections = await grab_and_label_frame()
+    labeled, detections = await grab_and_label_frame()
+    if not labeled:
+        return {
+            "description": "I can't see right now — no camera feed available.",
+            "objects": [],
+        }
     obj_list = sorted(set(d["label"] for d in detections))
     desc = (
         "I see: " + ", ".join(obj_list)
@@ -12248,7 +11444,6 @@ async def text_command(cmd: TextCommand, request: Request):
     # Extract user from Auth0 session using full async verification
     user_info = await get_current_user(request) if AUTH_AVAILABLE else None
     user_id = user_info.get("id") if user_info else None
-    _user_name = _extract_real_name(user_info) if user_info else ""
 
     # ── Set the per-request user context so save_memory() inside handle_intent writes
     #    to the correct user-scoped file throughout the entire request lifecycle.
@@ -12274,7 +11469,7 @@ async def text_command(cmd: TextCommand, request: Request):
             memory = ConversationMemory()
         current_avatar = cmd.avatar
 
-    res = await handle_intent(cmd.text, from_text=True, user_name=_user_name)
+    res = await handle_intent(cmd.text, from_text=True)
 
     # Final explicit save (belt-and-suspenders — handle_intent already called save_memory)
     if user_id:
@@ -12285,18 +11480,16 @@ async def text_command(cmd: TextCommand, request: Request):
     # Clear user context after request completes
     _current_user_id = ""
 
-    response = {
+    return {
         "reply": res.get("text", ""),
         "audio_id": AUDIO_CACHE_ID if AUDIO_CACHE else 0,
         "look_at": res.get("look_at"),
         "open_url": res.get("open_url"),
+        "open_vibecode": res.get("open_vibecode"),
+        "vibecode_slug": res.get("vibecode_slug"),
+        "close_vibecode": res.get("close_vibecode"),
         "user": user_info.get("name") if user_info else None,
     }
-    if res.get("delegate_to"):
-        response["delegate_to"] = res["delegate_to"]
-        response["delegate_emoji"] = res["delegate_emoji"]
-        response["delegate_name"] = res["delegate_name"]
-    return response
 
 
 @app.post("/api/cmd_stream")
@@ -12318,7 +11511,6 @@ async def text_command_stream(cmd: TextCommand, request: Request):
     user_info = await get_current_user(request) if AUTH_AVAILABLE else None
     user_id = user_info.get("id") if user_info else None
     _current_user_id = user_id or ""
-    _user_name = _extract_real_name(user_info) if user_info else ""
 
     if cmd.avatar and cmd.avatar != current_avatar:
         cmd.avatar = resolve_persona_key(cmd.avatar)
@@ -12357,27 +11549,14 @@ async def text_command_stream(cmd: TextCommand, request: Request):
                         skill = SKILLS[key]
                         break
 
-            # NLP fallback — "I want to watch youtube videos on true crime"
-            if not skill:
-                nlp_skill, _ = parse_nlp_intent(phrase)
-                if nlp_skill:
-                    skill = nlp_skill
-
             if skill and (
                 skill.get("action_type") == "openhuman_skill"
                 or skill.get("type") == "openhuman_skill"
                 or skill.get("action_type")
-                in (
-                    "intent_launch",
-                    "context_launch",
-                    "shell_command",
-                    "hybrid_intent_tap",
-                )
+                in ("intent_launch", "shell_command", "hybrid_intent_tap")
             ):
                 # Non-streaming skill path — use handle_intent
-                res = await handle_intent(
-                    cmd.text, from_text=True, user_name=_user_name
-                )
+                res = await handle_intent(cmd.text, from_text=True)
                 reply = res.get("text", "")
                 yield f"data: {json.dumps({'type': 'token', 'value': reply})}\n\n"
                 yield f"data: {json.dumps({'type': 'done', 'reply': reply})}\n\n"
@@ -12387,12 +11566,7 @@ async def text_command_stream(cmd: TextCommand, request: Request):
 
             # Build the message context (same logic as handle_intent but streaming)
             # We call a streaming variant of the LLM path
-            _stream_delegate = None
-            if current_avatar == "puppy":
-                _stream_delegate = _choose_delegate(cmd.text)
-            messages = await _build_streaming_context(
-                cmd.text, avatar=_stream_delegate, user_name=_user_name
-            )
+            messages = await _build_streaming_context(cmd.text)
 
             # Stream tokens from the LLM
             full_reply = ""
@@ -12412,14 +11586,7 @@ async def text_command_stream(cmd: TextCommand, request: Request):
                     "Not sure where to go with that one — try coming at it differently."
                 )
 
-            done_payload = {"type": "done", "reply": full_reply}
-            if _stream_delegate:
-                done_payload["delegate_to"] = _stream_delegate
-                done_payload["delegate_emoji"] = HIVE_PERSONAS[_stream_delegate][
-                    "emoji"
-                ]
-                done_payload["delegate_name"] = HIVE_PERSONAS[_stream_delegate]["name"]
-            yield f"data: {json.dumps(done_payload)}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'reply': full_reply})}\n\n"
 
             # Generate TTS
             try:
@@ -12441,12 +11608,9 @@ async def text_command_stream(cmd: TextCommand, request: Request):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-async def _build_streaming_context(
-    text: str, avatar: str | None = None, user_name: str = ""
-) -> list[dict]:
+async def _build_streaming_context(text: str) -> list[dict]:
     """Build the same message context that handle_intent uses, for streaming."""
     global memory, current_avatar
-    _avatar = avatar or current_avatar
 
     mem_dict = await memory.to_dict()
     context = []
@@ -12458,7 +11622,7 @@ async def _build_streaming_context(
 
     # Memory hints
     try:
-        hints = await _build_memory_hint(mem_dict)
+        hints = await _build_memory_hint()
         if hints:
             context.append({"role": "system", "content": f"CONTEXT_ABOUT_USER:{hints}"})
     except Exception:
@@ -12499,7 +11663,7 @@ async def _build_streaming_context(
         _src = _latest.get("avatar", "someone")
         _awareness_note = f"\n[Heads up: {_src} {_action} something: {_detail}]"
 
-    system_content = build_avatar_system_prompt(_avatar, user_name)
+    system_content = build_avatar_system_prompt(current_avatar, USER_NAME)
     messages = [{"role": "system", "content": system_content}]
     messages.extend(context)
     messages.append({"role": "user", "content": text + _awareness_note})
@@ -12593,14 +11757,21 @@ async def story_stream(cmd: TextCommand, request: Request):
 
 
 @app.post("/api/set_name")
-async def set_name(data: dict, request: Request):
-    user_info = await get_current_user(request) if AUTH_AVAILABLE else None
-    user_id = user_info.get("id") if user_info else ""
-    name = data.get("name", "").strip()
-    if not name or not user_id:
-        return {"name": _get_user_name(user_id)}
-    # Store per-user so different Google accounts never see each other's names
-    _set_user_name(user_id, name)
+async def set_name(data: dict):
+    global USER_NAME
+    USER_NAME = data.get("name", "").strip()
+    if not USER_NAME:
+        return {"name": USER_NAME}
+    # Persist to disk so name survives restarts
+    try:
+        prof_path = WORKSPACE / "user_profile.json"
+        prof = {}
+        if prof_path.exists():
+            prof = json.loads(prof_path.read_text())
+        prof["name"] = USER_NAME
+        prof_path.write_text(json.dumps(prof, indent=2))
+    except Exception:
+        pass
     # Generate a warm greeting using the LLM
     greeting = None
     try:
@@ -12609,7 +11780,7 @@ async def set_name(data: dict, request: Request):
                 "role": "system",
                 "content": "You are Lilly, a sharp curious AI friend. The user just told you their name. Acknowledge it naturally in 1-2 sentences — warm but not over the top. Use their name once. Sound like yourself, not a chatbot.",
             },
-            {"role": "user", "content": f"My name is {name}"},
+            {"role": "user", "content": f"My name is {USER_NAME}"},
         ]
         greeting = await llama_backend.chat(messages, temperature=0.8, max_tokens=60)
     except Exception:
@@ -12619,15 +11790,15 @@ async def set_name(data: dict, request: Request):
         import random
 
         greetings = [
-            f"Good to meet you, {name}. I'll keep that.",
-            f"{name} — noted. What are we doing?",
-            f"Nice. {name}. I'll remember that.",
-            f"Got it, {name}. Good to know.",
+            f"Good to meet you, {USER_NAME}. I'll keep that.",
+            f"{USER_NAME} — noted. What are we doing?",
+            f"Nice. {USER_NAME}. I'll remember that.",
+            f"Got it, {USER_NAME}. Good to know.",
         ]
         greeting = random.choice(greetings)
     # Speak the greeting
     audio_id = await speak(greeting)
-    return {"name": name, "greeting": greeting, "audio_id": audio_id}
+    return {"name": USER_NAME, "greeting": greeting, "audio_id": audio_id}
 
 
 @app.post("/api/memory/clear")
@@ -12771,127 +11942,6 @@ async def openhuman_status():
     health["avatars_with_skills"] = list(_openhuman_avatar_skills.keys())
     health["catalog_entries_cached"] = len(_openhuman_catalog_cache or [])
     return health
-
-
-# ─── Mission Control API Proxy ─────────────────────────────────────
-# Proxies selected Mission Control endpoints through Lilly so the UI
-# never needs to know the MC host/port or bearer token.
-# Workspace isolation: Lilly passes its current workspace_id (default "default")
-# so users only see their own projects.
-
-
-def _mc_headers() -> dict[str, str]:
-    headers: dict[str, str] = {"Accept": "application/json"}
-    if MC_API_TOKEN:
-        headers["Authorization"] = f"Bearer {MC_API_TOKEN}"
-    return headers
-
-
-async def _mc_proxy(
-    method: str,
-    path: str,
-    *,
-    params: dict | None = None,
-    json_body: dict | None = None,
-    workspace_id: str = "default",
-) -> dict:
-    """Single helper that forwards a request to Mission Control."""
-    try:
-        client = await _get_mc_client()
-        # Inject workspace isolation on list endpoints
-        if params is None:
-            params = {}
-        if "workspace_id" not in params:
-            params["workspace_id"] = workspace_id
-
-        resp = await client.request(
-            method,
-            path,
-            params=params,
-            json=json_body,
-            headers=_mc_headers(),
-        )
-        if resp.status_code == 200:
-            return resp.json()
-        return {
-            "error": resp.text[:500],
-            "status_code": resp.status_code,
-        }
-    except Exception as e:
-        logger.debug(f"MC proxy error {method} {path}: {e}")
-        return {"error": str(e), "status_code": 502}
-
-
-@app.get("/api/mc/health")
-async def mc_health():
-    """Mission Control health + version (unauthenticated summary)."""
-    return await _mc_proxy("GET", "/api/health")
-
-
-@app.get("/api/mc/workspaces")
-async def mc_workspaces(stats: bool = False):
-    """List workspaces (with optional stats)."""
-    p = {"stats": "true"} if stats else {}
-    return await _mc_proxy("GET", "/api/workspaces", params=p)
-
-
-@app.post("/api/mc/workspaces")
-async def mc_create_workspace(body: dict):
-    """Create a new workspace."""
-    return await _mc_proxy("POST", "/api/workspaces", json_body=body)
-
-
-@app.get("/api/mc/agents")
-async def mc_agents(workspace_id: str = "default"):
-    """List agents in a workspace."""
-    return await _mc_proxy("GET", "/api/agents", params={"workspace_id": workspace_id})
-
-
-@app.post("/api/mc/agents")
-async def mc_create_agent(body: dict):
-    """Create a new agent."""
-    return await _mc_proxy("POST", "/api/agents", json_body=body)
-
-
-@app.get("/api/mc/tasks")
-async def mc_tasks(
-    status: str = "",
-    workspace_id: str = "default",
-    assigned_agent_id: str = "",
-):
-    """List tasks with optional filters."""
-    p: dict[str, str] = {"workspace_id": workspace_id}
-    if status:
-        p["status"] = status
-    if assigned_agent_id:
-        p["assigned_agent_id"] = assigned_agent_id
-    return await _mc_proxy("GET", "/api/tasks", params=p)
-
-
-@app.post("/api/mc/tasks")
-async def mc_create_task(body: dict):
-    """Create a new task."""
-    return await _mc_proxy("POST", "/api/tasks", json_body=body)
-
-
-@app.get("/api/mc/costs")
-async def mc_costs(workspace_id: str = "default"):
-    """Cost overview for a workspace."""
-    return await _mc_proxy("GET", "/api/costs", params={"workspace_id": workspace_id})
-
-
-@app.get("/api/mc/products")
-async def mc_products(workspace_id: str = "default"):
-    """List products in a workspace."""
-    return await _mc_proxy(
-        "GET", "/api/products", params={"workspace_id": workspace_id}
-    )
-
-
-@app.get("/api/mc/events")
-async def mc_events(workspace_id: str = "default"):
-    """Recent events in a workspace."""
-    return await _mc_proxy("GET", "/api/events", params={"workspace_id": workspace_id})
 
 
 @app.get("/api/token_usage")
@@ -13125,12 +12175,11 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 #moodDot{width:6px;height:6px;border-radius:50%;background:#c0b0d0;transition:background 0.6s}
 
 /* ─── Thinking Indicator ─── */
-#thinkingDots{position:absolute;top:38%;left:50%;transform:translateX(-50%);z-index:20;display:none;gap:10px;align-items:center;justify-content:center;background:transparent;padding:8px 16px;border-radius:20px}
-#thinkingDots span{width:10px;height:10px;border-radius:50%;background:rgba(139,122,158,0.8);animation:thinkBounce 1.2s ease-in-out infinite}
+#thinkingDots{position:absolute;top:38%;left:50%;transform:translateX(-50%);z-index:20;display:none;gap:8px;align-items:center;justify-content:center}
+#thinkingDots span{width:8px;height:8px;border-radius:50%;background:rgba(139,122,158,0.5);animation:thinkBounce 1.2s ease-in-out infinite}
 #thinkingDots span:nth-child(2){animation-delay:0.2s}
 #thinkingDots span:nth-child(3){animation-delay:0.4s}
-#thinkingLabel{font-size:11px;color:rgba(93,78,109,0.7);font-weight:600;margin-left:4px;letter-spacing:0.3px}
-@keyframes thinkBounce{0%,60%,100%{transform:translateY(0);opacity:0.4}30%{transform:translateY(-12px);opacity:1}}
+@keyframes thinkBounce{0%,60%,100%{transform:translateY(0);opacity:0.3}30%{transform:translateY(-14px);opacity:1}}
 
 /* ─── Streaming Indicator ─── */
 .stream-indicator{position:absolute;bottom:8px;right:12px;font-size:10px;color:rgba(93,78,109,0.6);animation:pulse 1.5s infinite}
@@ -13148,7 +12197,6 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 .btn-mic.recording svg path{fill:#e85a6e}
 .btn-clear{background:rgba(255,255,255,0.4);border:none;border-radius:50%;width:44px;height:44px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.25s;font-size:18px;color:rgba(93,78,109,0.3)}
 .btn-clear:hover{background:rgba(255,255,255,0.6);color:#5d4e6d}
-.btn-mic.active{background:rgba(139,122,158,0.35);border:2px solid rgba(139,122,158,0.5)}
 
 /* ─── Coding Mode Chat (merged into VibeCode Coding Assistant) ─── */
 #chatContainer{position:absolute;bottom:80px;left:50%;transform:translateX(-50%);width:92%;max-width:620px;max-height:30vh;z-index:15;background:rgba(255,255,255,0.35);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.5);border-radius:16px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(180,140,180,0.12)}
@@ -13228,15 +12276,6 @@ pre{position:relative;overflow-x:auto}
 #balloon{position:absolute;top:40%;left:50%;transform:translate(-50%,-50%);width:130px;height:130px;background:radial-gradient(circle at 35% 35%,rgba(200,180,220,0.3),transparent 70%);border-radius:50%;animation:float 4s ease-in-out infinite}
 @keyframes float{0%,100%{transform:translate(-50%,-50%) translateY(0)}50%{transform:translate(-50%,-50%) translateY(-12px)}}
 
-/* ─── AR Overlay ─── */
-#arOverlay{position:absolute;top:0;left:0;width:100%;height:100%;z-index:22;pointer-events:none;display:none}
-#arCanvas{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none}
-#arCrosshair{position:absolute;top:50%;left:50%;width:20px;height:20px;transform:translate(-50%,-50%);z-index:23;pointer-events:none;display:none}
-#arCrosshair::before,#arCrosshair::after{content:'';position:absolute;background:rgba(232,180,80,0.9)}
-#arCrosshair::before{width:2px;height:100%;left:50%;transform:translateX(-50%)}
-#arCrosshair::after{height:2px;width:100%;top:50%;transform:translateY(-50%)}
-#arLabel{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.6);color:#fff;font-size:10px;padding:3px 10px;border-radius:10px;z-index:23;pointer-events:none;display:none;backdrop-filter:blur(4px);white-space:nowrap}
-
 /* ─── Puppy Canvas ─── */
 #pupCanvas{position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;pointer-events:none}
 
@@ -13253,6 +12292,12 @@ pre{position:relative;overflow-x:auto}
 .filter-btn:hover{background:rgba(139,122,158,0.15)}
 .filter-btn.active{background:rgba(139,122,158,0.25);box-shadow:0 0 6px rgba(184,169,201,0.4)}
 .filter-label{font-size:9px;color:rgba(93,78,109,0.5);white-space:nowrap;padding:0 4px}
+/* ─── Pet Heart Feeder ─── */
+#petHeartWidget{position:fixed;bottom:100px;left:14px;z-index:25;width:130px;background:rgba(255,255,255,0.45);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,0.5);border-radius:20px;padding:8px;display:flex;flex-direction:column;align-items:center;cursor:pointer;transition:all 0.3s;box-shadow:0 4px 24px rgba(180,140,180,0.15)}
+#petHeartWidget:hover{background:rgba(255,255,255,0.6);transform:scale(1.04)}
+#petHeartWidget canvas{display:block;width:114px;height:114px;border-radius:12px}
+#petHeartLabel{font-size:9px;color:rgba(93,78,109,0.5);margin-top:3px;text-align:center;line-height:1.2;letter-spacing:0.3px}
+#petHeartLabel span{color:rgba(139,122,158,0.8);font-weight:600}
 
 /* ─── Heard (User Speech) — now inline in chat ─── */
 
@@ -13348,28 +12393,170 @@ pre{position:relative;overflow-x:auto}
 .coding-shrink #loginSphere{width:70px;height:70px}
 .coding-shrink #loginSphere .sphere-icon{font-size:18px}
 
-/* ─── Hamburger Dropdown Menu ─── */
-#hamburgerMenu{animation:hamIn 0.15s ease-out}
-@keyframes hamIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
-.ham-icon-btn{width:44px;height:44px;border:none;border-radius:12px;background:rgba(255,255,255,0.4);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s;padding:0;flex-direction:column;gap:2px}
-.ham-icon-btn:hover{background:rgba(255,255,255,0.6);transform:scale(1.08)}
-.ham-icon-btn:active{transform:scale(0.92)}
-.ham-icon{font-size:18px;line-height:1}
-.ham-label{font-size:9px;color:rgba(93,78,109,0.5);text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* ─── VibeCode Overlay Panels ────────────────────────────────────────── */
+#vcLeft,#vcRight{
+  position:fixed;top:110px;z-index:6;
+  background:rgba(240,230,239,0.86);
+  backdrop-filter:blur(22px) saturate(1.15);
+  -webkit-backdrop-filter:blur(22px) saturate(1.15);
+  border:1.5px solid rgba(93,78,109,0.18);
+  box-shadow:0 8px 40px rgba(93,78,109,0.18),0 0 0 1px rgba(255,255,255,0.35) inset;
+  display:flex;flex-direction:column;overflow:hidden;
+  transition:transform .32s ease,opacity .32s ease, left .32s ease, top .32s ease;
+  opacity:0;pointer-events:none;
+  max-height:60vh;
+}
+#vcLeft{left:12px;width:260px;transform:translateX(calc(-100% - 28px))}
+#vcRight{right:12px;width:300px;transform:translateX(calc(100% + 28px))}
+#vcLeft.vc-show,#vcRight.vc-show{opacity:1;pointer-events:auto;transform:translateX(0)}
+.vc-head{display:flex;align-items:center;gap:8px;padding:12px 14px;
+  border-bottom:1.5px solid rgba(93,78,109,0.16);background:rgba(255,255,255,0.45);flex-shrink:0;cursor:move;user-select:none;-webkit-user-select:none;touch-action:none}
+.vc-head .vc-title{font-weight:700;font-size:13px;color:#5d4e6d;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vc-head button{background:rgba(93,78,109,0.08);border:1px solid rgba(93,78,109,0.15);border-radius:8px;color:#8b7a9e;cursor:pointer;font-size:11px;padding:4px 8px;transition:.15s}
+.vc-head button:hover{background:rgba(139,122,158,0.22);color:#5d4e6d}
+.vc-head button.vc-x{width:26px;height:26px;padding:0;border-radius:8px;font-size:13px}
+.vc-head button.vc-x:hover{background:rgba(192,85,85,0.14);color:#c05555}
+.vc-body{flex:1;overflow-y:auto;padding:10px;scrollbar-width:thin}
+.vc-body::-webkit-scrollbar{width:5px}
+.vc-body::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.2);border-radius:3px}
+#vcProjectSel{width:100%;font:inherit;font-size:12px;color:#5d4e6d;padding:7px 9px;border-radius:10px;
+  border:1.5px solid rgba(93,78,109,0.18);background:rgba(255,255,255,0.55);outline:none;margin-bottom:8px}
+#vcProjectSel:focus{border-color:#8b7a9e;box-shadow:0 0 0 3px rgba(139,122,158,0.15)}
+.vc-tree-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:8px;cursor:pointer;font-size:12px;color:#5d4e6d;transition:.12s}
+.vc-tree-row:hover{background:rgba(139,122,158,0.14)}
+.vc-tree-row.dir{font-weight:600}
+.vc-tree-row.file{padding-left:22px;font-weight:400}
+.vc-tree-row .vc-caret{width:14px;color:rgba(93,78,109,0.5);font-size:10px;flex-shrink:0}
+.vc-tree-children{margin-left:14px;border-left:1px dashed rgba(93,78,109,0.2);padding-left:6px}
+.vc-empty{font-size:12px;color:rgba(93,78,109,0.5);padding:12px;text-align:center}
+#vcRight .vc-tabs{display:flex;gap:4px;padding:8px 10px 0;background:rgba(255,255,255,0.3);border-bottom:1.5px solid rgba(93,78,109,0.14);flex-shrink:0}
+.vc-tab{background:transparent;border:1px solid transparent;border-bottom:none;border-radius:9px 9px 0 0;color:rgba(93,78,109,0.6);
+  font-size:12px;padding:7px 12px;cursor:pointer;transition:.15s}
+.vc-tab.active{background:rgba(255,255,255,0.6);color:#5d4e6d;font-weight:600;border-color:rgba(93,78,109,0.14)}
+.vc-tab:hover{color:#5d4e6d}
+#vcPreviewWrap,#vcLogsWrap{flex:1;min-height:0;display:none;flex-direction:column}
+#vcPreviewWrap.active,#vcLogsWrap.active{display:flex}
+#vcFrame{flex:1;width:100%;border:none;background:#fff}
+#vcLogs{flex:1;margin:0;padding:10px;font:11px/1.55 ui-monospace,Consolas,monospace;color:#c8d3d8;
+  background:rgba(30,26,42,0.92);border-radius:0 0 16px 16px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+#vcStatusBar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1.5px solid rgba(93,78,109,0.14);
+  background:rgba(255,255,255,0.35);font-size:11px;color:rgba(93,78,109,0.7);flex-shrink:0}
+#vcStatusBar .vc-dot{width:8px;height:8px;border-radius:50%;background:rgba(93,78,109,0.25);flex-shrink:0}
+#vcStatusBar .vc-dot.running{background:#3a8a6a;box-shadow:0 0 8px rgba(58,138,106,0.6)}
+#vcStatusBar .vc-dot.stopped{background:rgba(93,78,109,0.3)}
+.vc-btn{background:rgba(93,78,109,0.08);border:1px solid rgba(93,78,109,0.15);border-radius:8px;color:#8b7a9e;
+  font-size:11px;padding:5px 10px;cursor:pointer;transition:.15s}
+.vc-btn:hover{background:rgba(139,122,158,0.22);color:#5d4e6d}
+.vc-btn.primary{background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;border:none;box-shadow:0 3px 12px rgba(139,122,158,0.3)}
+.vc-btn.primary:hover{filter:brightness(1.08)}
+.vc-btn:disabled{opacity:.5;cursor:default}
 
+/* Middle VibeCode chat panel — unified VibeCode Coding Assistant with dashboard */
+#vcChat{position:absolute;bottom:96px;left:50%;transform:translateX(-50%);width:min(520px,88vw);max-height:48vh;
+   z-index:15;background:rgba(255,255,255,0.42);backdrop-filter:blur(22px) saturate(1.15);
+   -webkit-backdrop-filter:blur(22px) saturate(1.15);border:1.5px solid rgba(93,78,109,0.18);
+   border-radius:18px;display:none;flex-direction:column;overflow:hidden;
+   box-shadow:0 6px 30px rgba(93,78,109,0.18)}
+#vcChat.vc-show{display:flex}
+/* Compact dashboard bar inside vcChat */
+.vc-dash{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1.5px solid rgba(93,78,109,0.12);
+  background:rgba(255,255,255,0.35);flex-shrink:0;flex-wrap:wrap}
+.vc-dash-pill{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:8px;font-size:10px;
+  font-weight:600;color:#5d4e6d;background:rgba(139,122,158,0.1);border:1px solid rgba(139,122,158,0.18);white-space:nowrap}
+.vc-dash-pill .vc-dot-sm{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.vc-dash-pill .vc-dot-sm.running{background:#3a8a6a;box-shadow:0 0 6px rgba(58,138,106,0.5)}
+.vc-dash-pill .vc-dot-sm.stopped{background:rgba(93,78,109,0.3)}
+.vc-dash-pill.weather{color:#4a80a0;background:rgba(74,128,160,0.1);border-color:rgba(74,128,160,0.2)}
+.vc-dash-pill.activity{color:#3a8a6a;background:rgba(58,138,106,0.1);border-color:rgba(58,138,106,0.2)}
+.vc-dash-pill.files{color:#a0607a;background:rgba(160,96,122,0.1);border-color:rgba(160,96,122,0.2)}
+/* Chat input bar inside vcChat */
+.vc-chat-input{display:flex;align-items:center;gap:6px;padding:8px 12px;border-top:1.5px solid rgba(93,78,109,0.12);
+  background:rgba(255,255,255,0.35);flex-shrink:0}
+.vc-chat-input input{flex:1;padding:8px 12px;border-radius:12px;border:1.5px solid rgba(93,78,109,0.18);
+  background:rgba(255,255,255,0.55);font:inherit;font-size:13px;color:#5d4e6d;outline:none}
+.vc-chat-input input:focus{border-color:#8b7a9e;box-shadow:0 0 0 3px rgba(139,122,158,0.12)}
+.vc-chat-input input::placeholder{color:rgba(93,78,109,0.4)}
+.vc-chat-input button{padding:8px 14px;border-radius:12px;border:none;background:linear-gradient(140deg,#8b7a9e,#a892b8);
+  color:#fff;font-size:12px;font-weight:600;cursor:pointer;transition:.15s;white-space:nowrap}
+.vc-chat-input button:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.vc-chat-input button:disabled{opacity:.5;cursor:default;transform:none}
+#vcChatHead{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1.5px solid rgba(93,78,109,0.14);
+  background:rgba(255,255,255,0.45);flex-shrink:0}
+#vcChatHead .vc-orb{width:28px;height:28px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  font-size:15px;background:linear-gradient(140deg,rgba(167,139,250,.4),rgba(240,198,224,.45));
+  border:1.5px solid rgba(167,139,250,.5)}
+#vcChatTitle{font-weight:700;font-size:13px;color:#5d4e6d;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#vcChatMsgs{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:8px;scroll-behavior:smooth}
+#vcChatMsgs::-webkit-scrollbar{width:5px}
+#vcChatMsgs::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.2);border-radius:3px}
+.vcc-msg{max-width:90%;padding:8px 12px;border-radius:14px;font-size:13px;line-height:1.5;color:#5d4e6d;word-wrap:break-word;animation:msgIn .2s ease-out}
+.vcc-msg.user{align-self:flex-end;background:rgba(167,139,250,.18);border:1px solid rgba(167,139,250,.3);border-bottom-right-radius:4px}
+.vcc-msg.alpha{align-self:flex-start;background:rgba(255,255,255,.62);border:1px solid rgba(93,78,109,.14);border-bottom-left-radius:4px}
+.vcc-msg.sys{align-self:center;font-size:11px;color:rgba(93,78,109,.55);background:rgba(93,78,109,.08);border-radius:10px;padding:5px 10px}
+.vcc-msg pre{background:rgba(93,78,109,.08);border:1px solid rgba(93,78,109,.14);border-radius:10px;padding:10px 12px;margin:6px 0 0;
+  overflow-x:auto;font:12px/1.5 ui-monospace,Consolas,monospace;color:#4a3a5c}
+.vcc-msg code{background:rgba(93,78,109,.1);padding:1px 5px;border-radius:6px;font:12px ui-monospace,Consolas,monospace}
+.vcc-msg pre code{background:none;padding:0}
+.vcc-msg .vcc-suggest{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.vcc-suggest a{font-size:12px;color:#8b7a9e;text-decoration:none;background:rgba(139,122,158,.1);border:1px solid rgba(139,122,158,.25);
+  border-radius:10px;padding:7px 10px;transition:.15s}
+.vcc-suggest a:hover{background:rgba(139,122,158,.2)}
+.vcc-msg .vcc-code{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.vcc-code button{background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;border:none;border-radius:10px;font-size:11px;padding:6px 12px;cursor:pointer}
+.vcc-msg .vcc-actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.vcc-msg .vcc-sender{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:#8b7a9e;margin-bottom:4px}
+.vcc-msg .vcc-s-emoji{font-size:14px;line-height:1}
+.vcc-msg .vcc-alpha-badge{font-size:8px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#fff;
+  background:linear-gradient(135deg,#a78bfa,#8b7a9e);border-radius:6px;padding:1px 5px}
+.vcc-actions button{background:rgba(93,78,109,.08);border:1px solid rgba(93,78,109,.15);border-radius:10px;color:#8b7a9e;font-size:11px;padding:6px 12px;cursor:pointer;transition:.15s}
+.vcc-actions button:hover{background:rgba(139,122,158,.2);color:#5d4e6d}
+.vcc-think{display:flex;gap:4px;align-items:center;padding:6px 2px}
+.vcc-think span{width:6px;height:6px;border-radius:50%;background:#8b7a9e;animation:thinkBounce 1.2s infinite}
+.vcc-think span:nth-child(2){animation-delay:.2s}
+.vcc-think span:nth-child(3){animation-delay:.4s}
 
-
-
-
-
-
-
+/* Alpha overlay — floats on top of the middle chat */
+#vcAlpha{position:fixed;top:14px;left:50%;transform:translateX(-50%) translateY(-6px);z-index:25;
+  display:flex;align-items:center;gap:8px;padding:6px 12px 6px 7px;border-radius:999px;
+  background:rgba(255,255,255,.55);backdrop-filter:blur(20px) saturate(1.15);
+  -webkit-backdrop-filter:blur(20px) saturate(1.15);border:1.5px solid rgba(93,78,109,.18);
+  box-shadow:0 6px 24px rgba(93,78,109,.2),0 0 0 1px rgba(255,255,255,.4) inset;
+  opacity:0;pointer-events:none;transition:.3s ease;cursor:pointer}
+#vcAlpha.vc-show{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+#vcAlpha .vc-orb{width:30px;height:30px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  font-size:16px;background:linear-gradient(140deg,rgba(167,139,250,.4),rgba(240,198,224,.45));
+  border:1.5px solid rgba(167,139,250,.5);position:relative}
+#vcAlpha .vc-orb .vc-dot{position:absolute;right:-1px;bottom:-1px;width:9px;height:9px;border-radius:50%;
+  background:#3a8a6a;border:2px solid #fff}
+#vcAlpha .vc-a-name{font-weight:700;font-size:12px;color:#5d4e6d;line-height:1.1}
+#vcAlpha .vc-a-sub{font-size:10px;color:rgba(93,78,109,.55);line-height:1.1;max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#vcAlpha .vc-a-chevy{font-size:10px;color:rgba(93,78,109,.5)}
+#vcAlphaRoster{position:fixed;top:70px;left:50%;transform:translateX(-50%) translateY(-6px);z-index:26;
+  display:none;gap:5px;padding:9px;border-radius:16px;background:rgba(255,255,255,.7);
+  backdrop-filter:blur(20px);border:1.5px solid rgba(93,78,109,.18);box-shadow:0 10px 34px rgba(93,78,109,.22);
+  transition:.25s ease}
+#vcAlphaRoster.vc-show{display:flex;transform:translateX(-50%) translateY(0)}
+.vc-ar{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;
+  cursor:pointer;background:rgba(255,255,255,.6);border:1.5px solid rgba(93,78,109,.18);transition:.15s}
+.vc-ar:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(139,122,158,.3)}
+.vc-ar.sel{border-color:#8b7a9e;box-shadow:0 0 0 3px rgba(139,122,158,.2)}
+@media (max-width:900px){
+  #vcLeft{width:200px}
+  #vcRight{width:240px}
+}
+@media (max-width:640px){
+  #vcLeft{width:min(200px,70vw)}
+  #vcRight{width:min(260px,80vw)}
+   #vcChat{max-height:40vh;width:min(96vw,520px)}
+  .vc-dash{padding:6px 10px}
+  .vc-dash-pill{font-size:9px;padding:2px 6px}
+}
 </style>
 </head>
 <body>
 <div id="startScreen">
   <h1 id="startCharName">Lilly</h1>
-  <p id="startSubtitle">your personal AI assistant</p>
+  <p id="startSubtitle">your personal AI companion</p>
 
   <!-- ── Avatar + Theme picker (first visit only) ── -->
   <div id="avatarPicker" style="display:none" onclick="event.stopPropagation()">
@@ -13381,7 +12568,7 @@ pre{position:relative;overflow-x:auto}
           <canvas id="avatarPreviewCanvas" width="196" height="196"></canvas>
         </div>
         <div id="avatarPreviewName">Lilly</div>
-        <div id="avatarPreviewRole">Alpha Assistant</div>
+        <div id="avatarPreviewRole">Alpha Companion</div>
       </div>
       <div id="dragHint">
         <svg viewBox="0 0 32 12" fill="none"><path d="M2 6h24" stroke="rgba(93,78,109,0.35)" stroke-width="1.5" stroke-dasharray="3 3"/><path d="M24 2l5 4-5 4" stroke="rgba(93,78,109,0.35)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -13396,7 +12583,7 @@ pre{position:relative;overflow-x:auto}
       </div>
     </div>
 
-    <div class="picker-section-label">choose your assistant</div>
+    <div class="picker-section-label">choose your companion</div>
     <div class="avatar-cards" id="avatarCards">
       <div class="avatar-card selected" data-animal="puppy" onclick="selectAvatarAndAuth('puppy',this)">
         <canvas width="80" height="80" id="previewPuppy"></canvas><span>Lilly</span>
@@ -13430,7 +12617,7 @@ pre{position:relative;overflow-x:auto}
     <!-- Character role descriptions -->
     <div id="charDescriptions" style="margin-top:20px;max-width:420px;width:100%;padding:0 16px;box-sizing:border-box">
       <div class="char-desc active" data-animal="puppy">
-        <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Lilly — Alpha Assistant</div>
+        <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Lilly — Alpha Companion</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">The lead agent. Curious, warm, and direct. Handles all conversations, learns your patterns, and coordinates the team.</div>
       </div>
       <div class="char-desc" data-animal="fox" style="display:none">
@@ -13477,7 +12664,7 @@ pre{position:relative;overflow-x:auto}
       <div class="theme-swatch"          data-theme="slate"   style="background:linear-gradient(135deg,#8090b0,#c8d4e8)" title="Slate"   onclick="selectTheme('slate',this)"></div>
     </div>
 
-    <div style="margin-top:18px;font-size:11px;color:rgba(93,78,109,0.35);text-align:center">tap an assistant to sign in</div>
+    <div style="margin-top:18px;font-size:11px;color:rgba(93,78,109,0.35);text-align:center">tap a companion to sign in</div>
   </div>
 
   <!-- OC Admin Token Gate -->
@@ -13508,54 +12695,7 @@ pre{position:relative;overflow-x:auto}
   <span id="convIndicator" style="display:none;font-size:10px;color:rgba(139,122,158,0.7);background:rgba(184,169,201,0.2);padding:3px 8px;border-radius:10px;margin-right:6px">CONVERSING</span>
   <span id="statusLabel">idle</span>
   <div class="indicator" id="micIndicator"></div>
-  <button id="hamburgerBtn" onclick="toggleHamburgerMenu()" style="background:none;border:none;cursor:pointer;padding:4px 8px;margin-left:8px;font-size:18px;color:rgba(93,78,109,0.5);transition:color 0.2s;display:flex;align-items:center;justify-content:center" title="Menu">
-    <svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z" fill="currentColor"/></svg>
-  </button>
-  <button id="settingsBtn" onclick="toggleSettings()" style="background:none;border:none;cursor:pointer;padding:4px 8px;margin-left:4px;font-size:16px;color:rgba(93,78,109,0.5);transition:color 0.2s" title="Settings">⚙️</button>
-</div>
-
-<!-- Hamburger Dropdown Menu -->
-<div id="hamburgerMenu" style="display:none;position:fixed;top:60px;right:16px;width:220px;max-width:calc(100vw - 32px);z-index:210;background:rgba(255,255,255,0.9);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:8px;box-shadow:0 8px 40px rgba(180,140,180,0.15)">
-  <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;margin-bottom:4px">
-    <div style="font-size:12px;font-weight:600;color:#5d4e6d;text-transform:uppercase;letter-spacing:0.5px">Menu</div>
-    <button onclick="toggleHamburgerMenu()" style="background:none;border:none;cursor:pointer;font-size:14px;color:rgba(93,78,109,0.5);padding:2px 6px">✕</button>
-  </div>
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:4px">
-    <button class="ham-icon-btn" data-action="chat" title="Chat">
-      <span class="ham-icon">💬</span>
-    </button>
-    <button class="ham-icon-btn" data-action="mic" title="Mic">
-      <span class="ham-icon">🎤</span>
-    </button>
-    <button class="ham-icon-btn" data-action="radar" title="Radar">
-      <span class="ham-icon">📡</span>
-    </button>
-    <button class="ham-icon-btn" data-action="map" title="Map">
-      <span class="ham-icon">📍</span>
-    </button>
-    <button class="ham-icon-btn" data-action="car" title="Car Game">
-      <span class="ham-icon">🎮</span>
-    </button>
-    <button class="ham-icon-btn" data-action="fetch" title="Fetch Game">
-      <span class="ham-icon">🐕</span>
-    </button>
-    <button class="ham-icon-btn" data-action="settings" title="Settings">
-      <span class="ham-icon">⚙️</span>
-    </button>
-    <button class="ham-icon-btn" data-action="close" title="Close">
-      <span class="ham-icon">✕</span>
-    </button>
-  </div>
-  <div id="hamMenuLabels" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:0 4px 4px">
-    <span class="ham-label">Chat</span>
-    <span class="ham-label">Mic</span>
-    <span class="ham-label">Radar</span>
-    <span class="ham-label">Map</span>
-    <span class="ham-label">Car</span>
-    <span class="ham-label">Fetch</span>
-    <span class="ham-label">Settings</span>
-    <span class="ham-label">Close</span>
-  </div>
+  <button id="settingsBtn" onclick="toggleSettings()" style="background:none;border:none;cursor:pointer;padding:4px 8px;margin-left:8px;font-size:16px;color:rgba(93,78,109,0.5);transition:color 0.2s" title="Settings">⚙️</button>
 </div>
 
 <!-- ── Settings Panel ── -->
@@ -13607,20 +12747,10 @@ pre{position:relative;overflow-x:auto}
     <button onclick="saveSensorUrl()" style="width:100%;margin-top:8px;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Save Sensor URL</button>
   </div>
 
-  <!-- App Download (APK) -->
-  <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Lilly App (Android)</div>
-    <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Download the overlay APK to your phone, then install it (allow unknown sources).</div>
-    <div id="apk-dl-area" style="display:flex;flex-direction:column;gap:8px">
-      <div style="font-size:12px;color:rgba(93,78,109,0.5)">Loading builds…</div>
-    </div>
-    <div id="apk-dl-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
-  </div>
-
   <!-- Pairing -->
   <div style="margin-bottom:16px">
     <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Pairing</div>
-    <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Share this 8-character code with your phone to pair:</div>
+    <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Share this code with your phone to pair:</div>
     <div style="display:flex;gap:8px;align-items:center">
       <input id="setting-pair-key" type="text" readonly style="flex:1;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace">
       <button onclick="refreshPairKey()" style="padding:8px 12px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">New</button>
@@ -13659,7 +12789,6 @@ pre{position:relative;overflow-x:auto}
 
 <div id="thinkingDots">
   <span></span><span></span><span></span>
-  <span id="thinkingLabel">thinking...</span>
 </div>
 
 <div id="speechBubble"></div>
@@ -13681,19 +12810,24 @@ pre{position:relative;overflow-x:auto}
 <!-- Vision PiP -->
 <div id="pipContainer" onclick="reactToCameraView()">
   <img id="pipFeed" alt="Lilly's view">
-  <div id="arOverlay">
-    <canvas id="arCanvas"></canvas>
-    <div id="arCrosshair"></div>
-    <div id="arLabel"></div>
-  </div>
   <span class="dot"></span>
   <span id="pipLabel">Lilly's view</span>
   <div class="pip-resize" id="pipResize"></div>
 </div>
 
+<!-- Pet Heart Feeder -->
+<div id="petHeartWidget" title="Activity feeds Lilly!">
+  <canvas id="petHeartCanvas" width="114" height="114"></canvas>
+  <div id="petHeartLabel"><span id="petBowlCount">0</span>/40 kibble · <span id="petHeartHP">100</span>%</div>
+</div>
+
 <div id="chatContainer">
   <div id="chatHeader">
     <span id="chatTitle">Chat</span>
+    <button id="downloadBtn" onclick="downloadProject()" title="Download project as .zip">
+      <svg viewBox="0 0 24 24" width="14" height="14" style="vertical-align:middle;margin-right:4px"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" fill="currentColor"/></svg>
+      Download
+    </button>
   </div>
   <div id="chatMessages"></div>
 </div>
@@ -13724,16 +12858,13 @@ pre{position:relative;overflow-x:auto}
     <svg viewBox="0 0 24 24" width="20" height="20"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z" fill="rgba(93,78,109,0.4)"/></svg>
   </button>
   <button class="btn-mic" id="camBtn" title="Toggle camera view" onclick="toggleCameraView()">
-    <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z" fill="rgba(93,78,109,0.4)"/><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24-5-5z" fill="rgba(93,78,109,0.4)"/></svg>
+    <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z" fill="rgba(93,78,109,0.4)"/><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z" fill="rgba(93,78,109,0.4)"/></svg>
   </button>
-  <button class="btn-mic" id="arBtn" title="Toggle AR mode" onclick="toggleARMode()">
-    <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 2L2 22h20L12 2zm0 3.5L18.5 20h-13L12 5.5zM11 10v4h2v-4h-2zm0 6v2h2v-2h-2z" fill="rgba(93,78,109,0.4)"/></svg>
+  <button class="btn-mic" id="codeBtn" title="Toggle coding mode" onclick="toggleCodingMode()">
+    <svg viewBox="0 0 24 24" width="20" height="20"><path d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z" fill="rgba(93,78,109,0.4)"/></svg>
   </button>
   <button class="btn-mic" id="hiveBtn" title="Toggle hive group chat" onclick="toggleGroupChat()">
     <svg viewBox="0 0 24 24" width="20" height="20"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z" fill="rgba(93,78,109,0.4)"/><circle cx="8" cy="10" r="1.5" fill="rgba(93,78,109,0.4)"/><circle cx="12" cy="10" r="1.5" fill="rgba(93,78,109,0.4)"/><circle cx="16" cy="10" r="1.5" fill="rgba(93,78,109,0.4)"/></svg>
-  </button>
-  <button class="btn-mic" id="thinkBtn" title="Toggle thinking indicator" onclick="toggleThinkingIndicator()">
-    <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="rgba(93,78,109,0.4)"/></svg>
   </button>
 </div>
 
@@ -14345,11 +13476,16 @@ function selectAvatar(animal, el) {
 }
 
 const CHAR_NAMES = {puppy:'Lilly',fox:'Fox',cat:'Cat',bear:'Bear',bunny:'Bunny',owl:'Owl',deer:'Deer',wolf:'Wolf',raccoon:'Raccoon'};
-const CHAR_ROLES = {puppy:'Alpha Assistant',fox:'Creative Strategist',cat:'Precision Analyst',bear:'Steadfast Guardian',bunny:'Energetic Scout',owl:'Wisdom Keeper',deer:'Gentle Healer',wolf:'Fierce Protector',raccoon:'Tech Tinkerer'};
+const CHAR_ROLES = {puppy:'Alpha Companion',fox:'Creative Strategist',cat:'Precision Analyst',bear:'Steadfast Guardian',bunny:'Energetic Scout',owl:'Wisdom Keeper',deer:'Gentle Healer',wolf:'Fierce Protector',raccoon:'Tech Tinkerer'};
 
 function selectAvatarAndAuth(animal, el) {
   pickerAvatar = animal;
   selectedAvatar = animal;
+  // Sync the vibecode agent to the newly selected avatar
+  if(vibecodeActive){
+    vcAgent = resolvePersonaKey(animal) || 'puppy';
+    selectVcAgent(vcAgent);
+  }
   localStorage.setItem('lilly_avatar', animal);
   document.querySelectorAll('.avatar-card').forEach(c => c.classList.remove('selected'));
   el.classList.add('selected');
@@ -14401,7 +13537,7 @@ function applyTheme(theme) {
 
 function showAvatarPicker() {
   // Hide background UI so it doesn't bleed through
-  ['statusBar','moodBadge'].forEach(id => {
+  ['statusBar','moodBadge','petHeartWidget'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.style.display = 'none';
   });
@@ -14420,7 +13556,7 @@ function showAvatarPicker() {
   document.querySelectorAll('.char-desc').forEach(d => d.style.display = 'none');
   const desc = document.querySelector(`.char-desc[data-animal="${savedAnimal}"]`);
   if (desc) desc.style.display = 'block';
-  document.getElementById('startSubtitle').textContent = 'choose your assistant';
+  document.getElementById('startSubtitle').textContent = 'choose your companion';
   const h1 = document.getElementById('startCharName');
   if (h1) h1.textContent = CHAR_NAMES[savedAnimal] || savedAnimal;
   document.getElementById('avatarPicker').style.display = 'flex';
@@ -14720,46 +13856,33 @@ function confirmPicker() {
 // ─── Auth0 Authentication ─────────────────────────────────────────
 let currentUser = null;
 
-// Resolve the person's real name from the logged-in account.
-// Priority: Auth0/Google profile name (first name, e.g. "Laurence Kidney" -> "Laurence"),
-// then the raw profile name if it's a single word, then a formatted email prefix.
-function personDisplayName(u) {
-  if (!u) return '';
-  const emailPrefix = (u.email || '').split('@')[0].toLowerCase();
-  let real = (u.name && u.name !== 'User') ? u.name.trim() : '';
-  // If the profile "name" is just the username/email prefix, ignore it
-  if (real && real.toLowerCase() === emailPrefix) real = '';
-  if (real) {
-    // Prefer the first name: "Laurence Kidney" -> "Laurence"
-    const first = real.split(/\s+/)[0].replace(/[._-]+/g, '').trim();
-    if (first) return first;
-  }
-  if (!emailPrefix) return '';
-  // Fallback: derive from the email prefix, capitalizing each word
-  return emailPrefix
-    .replace(/[._-]/g, ' ')
-    .split(' ')
-    .filter(Boolean)
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(' ');
-}
-
 async function checkAuth() {
   try {
     const r = await fetch('/api/auth/me', { credentials: 'include' });
     if (r.ok) {
       const data = await r.json();
       currentUser = data.user;
-      // Use the person's real name from the logged-in account
-      // (not the username, e.g. "Laurence" not "laurencekidney")
-      const personName = personDisplayName(currentUser);
-      if (personName) {
-        // Update localStorage so the UI uses the real name
-        localStorage.setItem('lilly_user_name', personName);
+      // Extract username from Google email and set it as USER_NAME
+      if (currentUser && currentUser.email) {
+        const emailUsername = currentUser.email.split('@')[0];
+        // Format: capitalize first letter of each word separated by dots/underscores
+        const formattedName = emailUsername
+          .replace(/[._-]/g, ' ')
+          .split(' ')
+          .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+          .join(' ');
+        
+        // Update localStorage and server
+        localStorage.setItem('lilly_user_name', formattedName);
+        fetch('/api/set_name', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: formattedName})
+        });
         
         // Update the name tag in UI
         const nameLabel = document.getElementById('nameLabel');
-        if (nameLabel) nameLabel.textContent = personName;
+        if (nameLabel) nameLabel.textContent = formattedName;
       }
       // Auto-skip picker after auth redirect
       hideStartScreen();
@@ -14781,7 +13904,7 @@ function hideStartScreen() {
   setTimeout(() => {
     ss.style.display = 'none';
     // Restore background UI elements
-    ['statusBar','moodBadge'].forEach(id => {
+    ['statusBar','moodBadge','petHeartWidget'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.style.display = '';
     });
@@ -14962,10 +14085,26 @@ function _showPermNudge(title, msg) {
 }
 
 /* ─── Coding Mode Chat ─── */
+let codingMode=false;
 const chatContainer=document.getElementById('chatContainer');
 const chatMessages=document.getElementById('chatMessages');
 
-// ── Show the main chat container ──
+function toggleCodingMode(){
+  codingMode=!codingMode;
+  fetch('/api/coding_mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active:codingMode})});
+  document.getElementById('startScreen').classList.toggle('coding-shrink',codingMode);
+  if(codingMode){
+    // Open VibeCode panels AND the main chat container so the coding
+    // conversation flows through the same chat the user sees.
+    if(!vibecodeActive) openVibecode();
+    showMainChat();
+    displaySpeech('VibeCode is up — let\'s build something cool.');
+  }else{
+    displaySpeech('Coding mode off — still listening!');
+  }
+}
+
+// ── Show the main chat container (used when entering coding/vibecode mode) ──
 function showMainChat(){
   if(chatContainer){
     chatContainer.classList.add('active');
@@ -14996,7 +14135,9 @@ function addChatMessage(role,content,meta){
     const avatarMeta = chatAvatarMeta(avatarKey);
     const emoji = (meta && meta.emoji) || avatarMeta.emoji;
     const name = (meta && meta.name) || avatarMeta.name;
-    html='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+'</div>'+html;
+    const isAlpha = (meta ? meta.key : avatarKey) === 'puppy';
+    html='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+
+      (isAlpha?' <span class="chat-alpha">Alpha</span>':'')+'</div>'+html;
   }
   div.innerHTML=html;
   chatMessages.appendChild(div);
@@ -15080,18 +14221,17 @@ async function downloadProject(){
 
 async function sendCodingMessage(text){
   if(!text)return;
+  // Route through unified VibeCode chat when active
+  if(vibecodeActive){
+    sendVibeCodeMessage(text);
+    return;
+  }
   addChatMessage('user',text);
   try{
     const r=await fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,avatar:localStorage.getItem('lilly_avatar')||'puppy'})});
     const d=await r.json();
     if(d.reply){
-      const meta = {};
-      if(d.delegate_to){
-        meta.key = d.delegate_to;
-        meta.emoji = d.delegate_emoji;
-        meta.name = d.delegate_name;
-      }
-      addChatMessage('assistant',d.reply, meta);
+      addChatMessage('assistant',d.reply);
       displaySpeech(d.reply);
     }
     if(d.audio_id)playAudio(d.audio_id);
@@ -15176,6 +14316,10 @@ function toggleHiveMute(){
 
 function toggleGroupChat(){
   hiveActive = !hiveActive;
+  // Close vibecode panels if we're enabling hive chat — they shouldn't overlap
+  if(hiveActive && vibecodeActive){
+    closeVibecode();
+  }
   hiveContainer.classList.toggle('active', hiveActive);
   const hiveSpheres = document.getElementById('hiveSpheres');
   if(hiveSpheres) hiveSpheres.style.display = hiveActive ? 'flex' : 'none';
@@ -15193,7 +14337,6 @@ function toggleGroupChat(){
 }
 
 let _cameraViewActive = false;
-let _arMode = false;
 let _activeFilter = 'none';
 let _pipW = parseInt(localStorage.getItem('lilly_pip_w')) || 140;
 let _pipH = parseInt(localStorage.getItem('lilly_pip_h')) || 105;
@@ -15229,8 +14372,8 @@ function _initPiPResize(){
     if(e.touches.length===2){
       e.preventDefault();
       const scale=getDist(e.touches)/startDist;
-      _pipW=Math.max(100,Math.min(800,Math.round(startW*scale)));
-      _pipH=Math.max(75,Math.min(600,Math.round(startH*scale)));
+      _pipW=Math.max(100,Math.min(400,Math.round(startW*scale)));
+      _pipH=Math.max(75,Math.min(300,Math.round(startH*scale)));
       pip.style.setProperty('--pip-w',_pipW+'px');
       pip.style.setProperty('--pip-h',_pipH+'px');
     }
@@ -15245,8 +14388,8 @@ function _initPiPResize(){
   handle.addEventListener('mousedown',(e)=>{dragging=true;mx0=e.clientX;my0=e.clientY;e.preventDefault()});
   document.addEventListener('mousemove',(e)=>{
     if(!dragging)return;
-     _pipW=Math.max(100,Math.min(800,_pipW+(e.clientX-mx0)));
-     _pipH=Math.max(75,Math.min(600,_pipH+(e.clientY-my0)));
+    _pipW=Math.max(100,Math.min(400,_pipW+(e.clientX-mx0)));
+    _pipH=Math.max(75,Math.min(300,_pipH+(e.clientY-my0)));
     mx0=e.clientX;my0=e.clientY;
     pip.style.setProperty('--pip-w',_pipW+'px');
     pip.style.setProperty('--pip-h',_pipH+'px');
@@ -15336,7 +14479,6 @@ async function toggleCameraView(){
     if(pip) pip.style.display = 'none';
     if(filterBar) filterBar.style.display = 'none';
     if(camBtnEl) camBtnEl.classList.remove('recording');
-    if(_arMode) toggleARMode();
   }
 }
 
@@ -15347,106 +14489,6 @@ async function reactToCameraView(){
     if(d.reply) displaySpeech(d.reply);
     if(d.audio_id) playAudio(d.audio_id);
   }catch(e){}
-}
-
-// ─── AR Mode ──────────────────────────────────────────────
-function toggleARMode(){
-  _arMode = !_arMode;
-  const btn = document.getElementById('arBtn');
-  if(btn) btn.classList.toggle('active', _arMode);
-  if(_arMode){
-    if(!CameraBridge.active) CameraBridge.start().catch(()=>{});
-    const pip = document.getElementById('pipContainer');
-    if(pip){
-      pip.style.setProperty('--pip-w','280px');
-      pip.style.setProperty('--pip-h','210px');
-      pip.style.display = 'block';
-      _initPiPResize();
-    }
-    const overlay = document.getElementById('arOverlay');
-    const crosshair = document.getElementById('arCrosshair');
-    const label = document.getElementById('arLabel');
-    if(overlay) overlay.style.display = 'block';
-    if(crosshair) crosshair.style.display = 'block';
-    if(label) label.style.display = 'block';
-    _arLoop();
-  }else{
-    const overlay = document.getElementById('arOverlay');
-    const crosshair = document.getElementById('arCrosshair');
-    const label = document.getElementById('arLabel');
-    if(overlay) overlay.style.display = 'none';
-    if(crosshair) crosshair.style.display = 'none';
-    if(label) label.style.display = 'none';
-    const pip = document.getElementById('pipContainer');
-    if(pip){
-      pip.style.setProperty('--pip-w',_pipW+'px');
-      pip.style.setProperty('--pip-h',_pipH+'px');
-    }
-    if(!_cameraViewActive && CameraBridge.active){
-      CameraBridge.stop();
-    }
-  }
-}
-
-async function _arLoop(){
-  if(!_arMode) return;
-  try{
-    const r = await fetch('/api/vision/browser');
-    const d = await r.json();
-    _drawARDebug(d);
-  }catch(e){}
-  if(_arMode) setTimeout(_arLoop, 500);
-}
-
-function _drawARDebug(data){
-  const canvas = document.getElementById('arCanvas');
-  const label = document.getElementById('arLabel');
-  if(!canvas) return;
-  const pip = document.getElementById('pipContainer');
-  if(!pip) return;
-  const rect = pip.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = rect.width * dpr;
-  canvas.height = rect.height * dpr;
-  canvas.style.width = rect.width + 'px';
-  canvas.style.height = rect.height + 'px';
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  const bridgeVideo = document.getElementById('cameraBridgeVideo');
-  const vw = bridgeVideo ? (bridgeVideo.videoWidth || 640) : 640;
-  const vh = bridgeVideo ? (bridgeVideo.videoHeight || 480) : 480;
-  const maxDim = 480;
-  const scale = Math.min(maxDim / vw, maxDim / vh, 1);
-  const fw = Math.round(vw * scale);
-  const fh = Math.round(vh * scale);
-
-  const dets = data && data.detections ? data.detections : [];
-  if(dets.length > 0){
-    const sx = canvas.width / fw;
-    const sy = canvas.height / fh;
-    ctx.font = (10 * dpr) + 'px sans-serif';
-    dets.forEach(det => {
-      const x = (det.x1 || 0) * sx;
-      const y = (det.y1 || 0) * sy;
-      const w = ((det.x2 || 0) - (det.x1 || 0)) * sx;
-      const h = ((det.y2 || 0) - (det.y1 || 0)) * sy;
-      ctx.strokeStyle = 'rgba(232,180,80,0.9)';
-      ctx.lineWidth = 2 * dpr;
-      ctx.strokeRect(x, y, w, h);
-      ctx.fillStyle = 'rgba(232,180,80,0.85)';
-      const text = (det.label || '?') + ' ' + Math.round((det.confidence || 0) * 100) + '%';
-      const tw = ctx.measureText(text).width;
-      const th = 14 * dpr;
-      ctx.fillRect(x, y - th, tw + 8 * dpr, th);
-      ctx.fillStyle = '#111';
-      ctx.fillText(text, x + 4 * dpr, y - 3 * dpr);
-    });
-    if(label) label.textContent = dets.length + ' object' + (dets.length !== 1 ? 's' : '') + ' detected';
-  }else{
-    if(label) label.textContent = 'Scanning...';
-  }
-}
 }
 
 // ─── Face Filter Drawing Functions ──────────────────────────
@@ -15732,7 +14774,6 @@ canvas.addEventListener('click',(e)=>{
 
 let frame=0,blinkFrame=100,isBlinking=false,pupSpeech="",speechTimer=0,pupMood='calm';
 let lastMouthVal=0,isThinking=false;
-let showThinkingIndicator=true;
 let childMode=false,noseTapCount=0,noseTapTimer=0;
 let lookAt=null,lookAtTimer=0;
 function setLookAt(target,durationMs){
@@ -15956,29 +14997,16 @@ function displaySpeech(text){
 }
 
 let heardTimer=null;
- function showHeard(text){
-   if(!text)return;
-   // Defense-in-depth: never show vulgar text on screen (STT is already
-   // filtered server-side; this catches anything that slips through).
-   text = censorText(text);
-   // Show heard text as a user message in the chat — natural, no floating bubble
-   showMainChat();
-   addChatMessage('user',text);
- }
- function censorText(t){
-   if(!t)return t;
-   var re=/f\s*[u\*\.\-_!]*\s*c\s*[u\*\.\-_!\s]*k|s\s*h\s*i\s*t\b|b\s*i\s*t\s*c\s*h\b|a\s*s\s*s\s*h\s*o\s*l\s*e\b|n\s*i\s*g\s*g\s*e\s*r\b|d\s*i\s*c\s*k\s*h\s*e\s*a\s*d\b|w\s*h\s*o\s*r\s*e\b|c\s*u\s*n\s*t\b|m\s*o\s*t\s*h\s*e\s*r\s*f\s*u\s*c\s*k\s*e\s*r\b/g;
-   return t.replace(re, function(m){
-     var out='';
-     for(var i=0;i<m.length;i++){ out += (m[i]===' '||m[i]==='-') ? m[i] : '*'; }
-     return out;
-   });
- }
+function showHeard(text){
+  if(!text)return;
+  // Show heard text as a user message in the chat — natural, no floating bubble
+  showMainChat();
+  addChatMessage('user',text);
+}
 function setMouth(val){lastMouthVal=Math.max(0,Math.min(1,val))}
 
- let lastSpoken="",lastHeard="",lastSsml="";
- let isStreaming=false;
- let _firstPoll=true;
+let lastSpoken="",lastHeard="",lastSsml="";
+let isStreaming=false;
 const inputField=document.getElementById('userInput');
 
 /* ─── Drag-and-drop file support (desktop/Windows) ─── */
@@ -16054,83 +15082,15 @@ document.getElementById('clearBtn').onclick=async()=>{
 
 /* ─── Dashboard Toggle ─── */
 /* ─── Settings Panel ─── */
- function toggleSettings(){
-   const panel=document.getElementById('settingsPanel');
-   if (!panel) return;
-   const open=panel.style.display==='block';
-   panel.style.display=open?'none':'block';
-   if (!open) loadSettings();
-   if (open) closeHamburgerMenu();
- }
+function toggleSettings(){
+  const panel=document.getElementById('settingsPanel');
+  if (!panel) return;
+  const open=panel.style.display==='block';
+  panel.style.display=open?'none':'block';
+  if (!open) loadSettings();
+}
 
- /* ─── Hamburger Dropdown Menu ─── */
- function toggleHamburgerMenu(){
-   const menu=document.getElementById('hamburgerMenu');
-   if(!menu)return;
-   const open=menu.style.display==='none'||menu.style.display==='';
-   menu.style.display=open?'block':'none';
-   if(open){
-     const settingsPanel=document.getElementById('settingsPanel');
-     if(settingsPanel) settingsPanel.style.display='none';
-   }
- }
- function closeHamburgerMenu(){
-   const menu=document.getElementById('hamburgerMenu');
-   if(menu) menu.style.display='none';
- }
- function handleHamburgerAction(action){
-   closeHamburgerMenu();
-   switch(action){
-     case 'chat': toggleChat(); break;
-     case 'mic': toggleBrowserMic(); break;
-     case 'radar': openRadarFromMenu(); break;
-     case 'map': openLocationMap(); break;
-     case 'car': startCarGameFromMenu(); break;
-     case 'fetch': startFetchGameFromMenu(); break;
-     case 'settings': toggleSettings(); break;
-     case 'close': break;
-   }
- }
- function toggleChat(){
-   const chat=document.getElementById('chatContainer');
-   if(chat) chat.classList.toggle('active');
- }
- function openRadarFromMenu(){
-   addChatMessage('system','Radar: scanning surroundings...');
- }
- function openLocationMap(){
-   try{ window.open('https://www.google.com/maps?q=My+Location','_blank'); }
-   catch(e){ addChatMessage('system','Map: unable to open maps.'); }
- }
- function startCarGameFromMenu(){
-   addChatMessage('system','Car Ride Game starting...');
- }
- function startFetchGameFromMenu(){
-   addChatMessage('system','Fetch Game starting...');
- }
- document.addEventListener('DOMContentLoaded',function(){
-   const menu=document.getElementById('hamburgerMenu');
-   if(menu){
-     menu.addEventListener('click',function(e){
-       const btn=e.target.closest('.ham-icon-btn');
-       if(!btn)return;
-       const action=btn.getAttribute('data-action');
-       if(action) handleHamburgerAction(action);
-     });
-     document.addEventListener('touchstart',function(e){
-       if(menu.style.display==='block'&&!menu.contains(e.target)&&e.target.id!=='hamburgerBtn'){
-         closeHamburgerMenu();
-       }
-     },true);
-     document.addEventListener('click',function(e){
-       if(menu.style.display==='block'&&!menu.contains(e.target)&&e.target.id!=='hamburgerBtn'){
-         closeHamburgerMenu();
-       }
-     });
-   }
- });
-
- async function loadSettings(){
+async function loadSettings(){
   try {
     const r=await fetch('/api/settings',{credentials:'include'});
     if (!r.ok) return;
@@ -16150,38 +15110,7 @@ document.getElementById('clearBtn').onclick=async()=>{
     if (cp) cp.checked=!!d.notif_paused;
     if (cc) cc.value=d.notif_daily_cap;
     loadPairKey();
-    loadApkOptions();
   } catch(e){}
-}
-
-async function loadApkOptions(){
-  const area=document.getElementById('apk-dl-area');
-  const status=document.getElementById('apk-dl-status');
-  if (!area) return;
-  try {
-    const r=await fetch('/api/apk/variants');
-    const list=await r.json();
-    if (!list || !list.length) {
-      area.innerHTML='<div style="font-size:12px;color:rgba(93,78,109,0.5)">No overlay builds found</div>';
-      return;
-    }
-    // Only show the latest overlay (light) — ignore full bundle and older entries
-    const light=list.find(v=>v.type==='light');
-    if (!light) {
-      area.innerHTML='<div style="font-size:12px;color:rgba(93,78,109,0.5)">No overlay builds found</div>';
-      return;
-    }
-    const size=(light.size/1024/1024).toFixed(1);
-    const date=new Date(light.updated*1000).toLocaleDateString();
-    const html='<a href="/api/apk/download?type=light" download style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:12px;background:rgba(74,222,128,0.12);border:1px solid rgba(74,222,128,0.25);text-decoration:none;color:#5d4e6d;transition:all 0.2s">'
-      +'<div><div style="font-size:13px;font-weight:600">Latest Overlay</div>'
-      +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">v'+light.variant+' · '+size+' MB · Updated '+date+'</div></div>'
-      +'<span style="font-size:16px">⬇️</span></a>';
-    area.innerHTML=html;
-    if (status) status.textContent='Install from unknown sources must be enabled on your phone.';
-  } catch(e){
-    if (status) status.textContent='Failed to load APK info';
-  }
 }
 
 async function saveNotifPrefs(){
@@ -16257,22 +15186,22 @@ async function clearAllData(){
 /* ─── Pair Key ─── */
 async function loadPairKey(){
   try {
-    const r = await fetch('/api/pair/code', {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const r = await fetch('/api/settings/pair', {credentials:'include'});
     if (!r.ok) return;
     const d = await r.json();
     const el = document.getElementById('setting-pair-key');
-    if (el && d.code) el.value = String(d.code).slice(0,8);
+    if (el && d.token) el.value = d.token;
   } catch(e){}
 }
 async function refreshPairKey(){
   const status = document.getElementById('pair-status');
   if (status) { status.textContent='Generating...'; status.style.color='rgba(93,78,109,0.5)'; }
   try {
-    const r = await fetch('/api/pair/code', {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const r = await fetch('/api/settings/pair', {method:'GET', credentials:'include', headers:{'Cache-Control':'no-cache'}});
     const d = await r.json();
     const el = document.getElementById('setting-pair-key');
-    if (el && d.code) el.value = String(d.code).slice(0,8);
-    if (status) { status.textContent=d.code?'New code generated':'Failed'; status.style.color=d.code?'rgba(76,175,80,0.8)':'rgba(232,90,110,0.8)'; }
+    if (el && d.token) el.value = d.token;
+    if (status) { status.textContent=d.token?'New code generated':'Failed'; status.style.color=d.token?'rgba(76,175,80,0.8)':'rgba(232,90,110,0.8)'; }
   } catch(e){ if (status) { status.textContent='Network error'; status.style.color='rgba(232,90,110,0.8)'; } }
 }
 async function copyPairKey(){
@@ -16501,8 +15430,9 @@ async function sendStreamingReply(text){
   const avatarMeta=chatAvatarMeta(selectedAvatar);
   const emoji=(avatarMeta.emoji||'🐶');
   const name=(avatarMeta.name||'Lilly');
+  const isAlpha = (selectedAvatar||'puppy') === 'puppy';
   msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+
-    '</div><div class="chat-content streaming"></div>';
+    (isAlpha?' <span class="chat-alpha">Alpha</span>':'')+'</div><div class="chat-content streaming"></div>';
   const contentEl=msgDiv.querySelector('.chat-content');
   contentEl.textContent='...';
   chatMessages.appendChild(msgDiv);
@@ -16548,22 +15478,12 @@ async function sendStreamingReply(text){
               chatMessages.scrollTop=chatMessages.scrollHeight;
               hasContent=true;
             }else if(evt.type==='done'&&hasContent){
-              // Use server-filtered reply if available, fall back to accumulated tokens
-              const finalText = (evt.reply && evt.reply.trim()) ? evt.reply : fullReply;
-              // Use delegation info if present (Lilly handed off to a teammate)
-              let senderEmoji = emoji;
-              let senderName = name;
-              if(evt.delegate_to){
-                senderEmoji = evt.delegate_emoji || senderEmoji;
-                senderName = evt.delegate_name || senderName;
-              }
               // Convert to rendered HTML (code blocks etc.) now that the reply is complete
-              msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+senderEmoji+'</span> '+escapeHtml(senderName)+
-                '</div><div class="chat-content">'+renderCodeBlocks(finalText)+'</div>';
-              displaySpeech(finalText);
-              pupSpeech=finalText;
+              msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+
+                (isAlpha?' <span class="chat-alpha">Alpha</span>':'')+'</div><div class="chat-content">'+renderCodeBlocks(fullReply)+'</div>';
+              displaySpeech(fullReply);
+              pupSpeech=fullReply;
               speechTimer=999;
-              lastSpoken=finalText;
               if(evt.look_at)setLookAt(evt.look_at,5000);
               if(evt.open_url)window.open(evt.open_url,'_blank','noopener,noreferrer');
             }else if(evt.type==='audio'){
@@ -16588,21 +15508,15 @@ async function sendStreamingReply(text){
       const d=await r2.json();
       if(d.reply){
         fullReply=d.reply;
-        // Use delegation info if present
-        let fallbackEmoji = emoji;
-        let fallbackName = name;
-        if(d.delegate_to){
-          fallbackEmoji = d.delegate_emoji || fallbackEmoji;
-          fallbackName = d.delegate_name || fallbackName;
-        }
         // Render as HTML (with code blocks) since it's a complete message
-        msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+fallbackEmoji+'</span> '+escapeHtml(fallbackName)+
-          '</div><div class="chat-content">'+renderCodeBlocks(d.reply)+'</div>';
+        msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+
+          (isAlpha?' <span class="chat-alpha">Alpha</span>':'')+'</div><div class="chat-content">'+renderCodeBlocks(d.reply)+'</div>';
         displaySpeech(d.reply);
-        lastSpoken=d.reply;
         if(d.audio_id)playAudio(d.audio_id);
         if(d.look_at)setLookAt(d.look_at,5000);
         if(d.open_url)window.open(d.open_url,'_blank','noopener,noreferrer');
+        if(d.open_vibecode)openVibecode(d.vibecode_slug);
+        if(d.close_vibecode)closeVibecode();
       }
      }catch(e2){
       contentEl.textContent='Network error. Try again.';
@@ -16666,8 +15580,9 @@ function recordMicChunk(){
           const avatarMeta=chatAvatarMeta(selectedAvatar);
           const emoji=(avatarMeta.emoji||'🐶');
           const name=(avatarMeta.name||'Lilly');
+          const isAlpha = (selectedAvatar||'puppy') === 'puppy';
           msgDiv.innerHTML='<div class="chat-sender"><span style="font-size:14px;line-height:1">'+emoji+'</span> '+escapeHtml(name)+
-            '</div><div class="chat-content">'+renderCodeBlocks(result.reply)+'</div>';
+            (isAlpha?' <span class="chat-alpha">Alpha</span>':'')+'</div><div class="chat-content">'+renderCodeBlocks(result.reply)+'</div>';
           chatMessages.appendChild(msgDiv);
           chatMessages.scrollTop=chatMessages.scrollHeight;
           displaySpeech(result.reply);
@@ -16715,7 +15630,19 @@ inputField.addEventListener('keydown',async(e)=>{
       sendHiveMessageUnified(text);
       return;
     }
+    
+    // In coding mode, send to coding chat
+    if(codingMode){
+      sendCodingMessage(text);
+      return;
+    }
 
+    // In VibeCode mode, the existing chat is the channel → talk to Alpha
+    if(vibecodeActive){
+      sendVibeCodeMessage(text);
+      return;
+    }
+    
     const lower=text.toLowerCase();
 
     const STORY_TRIGGERS=['tell me a story','make up a story','create a story','story time',
@@ -16760,16 +15687,6 @@ inputField.addEventListener('keydown',async(e)=>{
 });
 
 let conversationMode=false;
-function toggleThinkingIndicator(){
-  showThinkingIndicator=!showThinkingIndicator;
-  const btn=document.getElementById('thinkBtn');
-  if(btn) btn.classList.toggle('active',showThinkingIndicator);
-  if(!showThinkingIndicator){
-    thinkingDots.style.display='none';
-  }else if(isThinking||isStreaming){
-    thinkingDots.style.display='flex';
-  }
-}
 async function toggleConversationMode(){
   try{
     const r=await fetch('/api/conversation_mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
@@ -16796,15 +15713,25 @@ async function pollState(){
     }
     if(d.look_at)setLookAt(d.look_at,5000);
     if(d.open_url)window.open(d.open_url,'_blank','noopener,noreferrer');
+    if(d.vibecode){
+      if(d.vibecode[0]==='open')openVibecode(d.vibecode[1]);
+      else if(d.vibecode[0]==='close')closeVibecode();
+    }
     if(d.spoken&&d.spoken!==lastSpoken){
-      if(!_firstPoll){
-        lastSpoken=d.spoken;displaySpeech(d.spoken);
-        if(d.audio_id){playAudio(d.audio_id)}
-      }
+      lastSpoken=d.spoken;displaySpeech(d.spoken);
+      if(d.audio_id){playAudio(d.audio_id)}
     }
     if(typeof d.conversation_mode==='boolean'){
       conversationMode=d.conversation_mode;
       updateConvIndicator();
+    }
+    if(typeof d.coding_mode==='boolean'){
+      codingMode=d.coding_mode;
+      document.getElementById('startScreen').classList.toggle('coding-shrink',codingMode);
+    }
+    if(d.coding_files){
+      const dlBtn=document.getElementById('downloadBtn');
+      if(dlBtn)dlBtn.disabled=d.coding_files.length===0;
     }
 
     if(typeof d.mouth==='number'){setMouth(d.mouth)}
@@ -16827,11 +15754,7 @@ async function pollState(){
 
     if(typeof d.thinking==='boolean'){
       isThinking=d.thinking;
-      if(showThinkingIndicator){
-        thinkingDots.style.display=(d.thinking||isStreaming)?'flex':'none';
-      }else{
-        thinkingDots.style.display='none';
-      }
+      thinkingDots.style.display=(d.thinking||isStreaming)?'flex':'none';
     }
 
     if(d.mood&&d.mood!==moodLabel.textContent){
@@ -16848,7 +15771,6 @@ async function pollState(){
     }
     if(typeof d.child_mode==='boolean'){childMode=d.child_mode}
   }catch(e){}
-  _firstPoll=false;
   setTimeout(pollState,600);
 }
 
@@ -16856,6 +15778,252 @@ async function pollState(){
 const ACTIVITY_ICONS={walk:'🚶',run:'🏃',bike:'🚴',drive:'🚗'};
 const ACTIVITY_LABELS={walk:'Walking',run:'Running',bike:'Cycling',drive:'Driving'};
 
+/* ─── Pet Heart Feeder Animation ─── */
+(function(){
+const C=document.getElementById('petHeartCanvas'),ctx=C.getContext('2d');
+const W=114,H=114;
+C.width=W;C.height=H;
+const CX=W/2,HEART_CY=30,HEART_R_FULL=20;
+const BOWL_CX=CX,BOWL_CY=90,BOWL_W=50,BOWL_H=12;
+const RIM_Y=BOWL_CY-4;
+let falling=[],bowlPx=[];
+let bowlCount=0,heartHP=100,bobT=0,lastSteps=0;
+let lillyHappy=false,happyTimer=0;
+let overflowPx=[];
+const PINKS=['#e94560','#ff6b6b','#ff4757','#f08080','#e8838a'];
+const KIBBLE_COLORS=['#c8a870','#b89860','#d4b880','#a88850','#d8c090'];
+
+function heartPath(cx,cy,r){
+  ctx.beginPath();
+  ctx.moveTo(cx,cy+r*0.7);
+  ctx.bezierCurveTo(cx-r*1.2,cy-r*0.1,cx-r*0.6,cy-r*1.1,cx,cy-r*0.4);
+  ctx.bezierCurveTo(cx+r*0.6,cy-r*1.1,cx+r*1.2,cy-r*0.1,cx,cy+r*0.7);
+  ctx.closePath();
+}
+
+function drawHeart(){
+  const bob=Math.sin(bobT)*2;
+  const pulse=1+Math.sin(bobT*1.8)*0.03;
+  const r=HEART_R_FULL*(heartHP/100);
+  if(r<3)return;
+  ctx.save();
+  ctx.translate(CX,HEART_CY+bob);
+  ctx.scale(pulse,pulse);
+  ctx.shadowColor='rgba(233,69,96,0.2)';
+  ctx.shadowBlur=8;
+  const g=ctx.createRadialGradient(0,-4,2,0,2,r);
+  g.addColorStop(0,'#ff8a9e');
+  g.addColorStop(0.5,'#e94560');
+  g.addColorStop(1,'#c0392b');
+  ctx.fillStyle=g;
+  heartPath(0,2,r);
+  ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.fillStyle='rgba(255,255,255,0.2)';
+  heartPath(-2,-2,r*0.5);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawBowl(){
+  ctx.save();
+  ctx.shadowColor='rgba(0,0,0,0.08)';
+  ctx.shadowBlur=6;
+  ctx.shadowOffsetY=3;
+  const g=ctx.createLinearGradient(BOWL_CX-BOWL_W/2,BOWL_CY,BOWL_CX+BOWL_W/2,BOWL_CY+BOWL_H);
+  g.addColorStop(0,'#c8b898');
+  g.addColorStop(1,'#a89070');
+  ctx.fillStyle=g;
+  ctx.beginPath();
+  ctx.ellipse(BOWL_CX,BOWL_CY,BOWL_W/2,BOWL_H/2,0,0,Math.PI);
+  ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.fillStyle='#8a7a5a';
+  ctx.beginPath();
+  ctx.ellipse(BOWL_CX,BOWL_CY+1,BOWL_W/2-4,BOWL_H/2-3,0,0,Math.PI);
+  ctx.fill();
+  ctx.strokeStyle='#b8a880';
+  ctx.lineWidth=2.5;
+  ctx.beginPath();
+  ctx.ellipse(BOWL_CX,BOWL_CY,BOWL_W/2,4,0,Math.PI,Math.PI*2);
+  ctx.stroke();
+  ctx.fillStyle='rgba(120,100,70,0.5)';
+  ctx.font='bold 7px sans-serif';
+  ctx.textAlign='center';
+  ctx.fillText("Lilly's",BOWL_CX,BOWL_CY+4);
+  ctx.restore();
+}
+
+function drawBowlKibble(){
+  for(const k of bowlPx){
+    ctx.globalAlpha=k.a;
+    ctx.fillStyle=k.color;
+    ctx.beginPath();
+    ctx.arc(k.x,k.y,k.r,0,Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.2)';
+    ctx.beginPath();
+    ctx.arc(k.x-0.5,k.y-0.5,k.r*0.4,0,Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha=1;
+}
+
+function drawOverflow(){
+  for(const p of overflowPx){
+    ctx.globalAlpha=p.a;
+    ctx.fillStyle=p.color;
+    ctx.beginPath();
+    ctx.arc(p.x,p.y,2,0,Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha=1;
+}
+
+function drawFalling(){
+  for(const p of falling){
+    ctx.globalAlpha=0.9;
+    ctx.fillStyle=p.color;
+    ctx.shadowColor=p.color;
+    ctx.shadowBlur=3;
+    ctx.beginPath();
+    ctx.arc(p.x,p.y,2.2,0,Math.PI*2);
+    ctx.fill();
+    ctx.shadowBlur=0;
+  }
+  ctx.globalAlpha=1;
+}
+
+function drawHappy(){
+  if(happyTimer<=0)return;
+  const a=Math.min(1,happyTimer/30);
+  ctx.save();
+  ctx.globalAlpha=a;
+  ctx.fillStyle='rgba(233,69,96,0.7)';
+  ctx.font='bold 9px sans-serif';
+  ctx.textAlign='center';
+  const yOff=Math.sin(bobT*2)*3;
+  ctx.fillText('Yum! Thank you! ♥',CX,BOWL_CY+22+yOff);
+  ctx.restore();
+  ctx.globalAlpha=1;
+}
+
+function releasePixel(n){
+  if(heartHP<=0)return;
+  const canRelease=Math.min(n,Math.floor(heartHP/2));
+  for(let i=0;i<canRelease;i++){
+    const angle=Math.random()*Math.PI*2;
+    const dist=Math.random()*HEART_R_FULL*(heartHP/100)*0.5;
+    falling.push({
+      x:CX+Math.cos(angle)*dist,
+      y:HEART_CY+Math.sin(angle)*dist*0.7+2,
+      vx:(Math.random()-0.5)*0.6,
+      vy:-2-Math.random()*1,
+      gravity:0.1+Math.random()*0.04,
+      color:PINKS[Math.floor(Math.random()*PINKS.length)],
+      kibbleColor:KIBBLE_COLORS[Math.floor(Math.random()*KIBBLE_COLORS.length)]
+    });
+    heartHP=Math.max(0,heartHP-1.8);
+  }
+  document.getElementById('petHeartHP').textContent=Math.floor(heartHP);
+}
+
+function findKibblePos(x){
+  const rimLeft=BOWL_CX-BOWL_W/2+4;
+  const rimRight=BOWL_CX+BOWL_W/2-4;
+  x=Math.max(rimLeft,Math.min(rimRight,x));
+  const inBowl=bowlPx.filter(k=>k.y>=RIM_Y);
+  const heapCount=inBowl.length;
+  const layer=Math.floor(heapCount/6);
+  const posInLayer=heapCount%6;
+  const heapWidth=Math.min(BOWL_W-12,20+layer*4);
+  const spacing=heapWidth/Math.max(1,Math.min(6,6-layer));
+  const baseX=BOWL_CX-heapWidth/2+posInLayer*spacing;
+  const baseY=RIM_Y-2-layer*3.5;
+  return{x:baseX+(Math.random()-0.5)*2,y:baseY+(Math.random()-0.5)*1.5};
+}
+
+function update(){
+  bobT+=0.04;
+  for(let i=falling.length-1;i>=0;i--){
+    const p=falling[i];
+    p.vy+=p.gravity;
+    p.x+=p.vx;
+    p.y+=p.vy;
+    p.vx*=0.99;
+    if(p.y>=RIM_Y-2){
+      if(bowlCount>=40){
+        overflowPx.push({x:p.x,y:RIM_Y-8,color:p.kibbleColor,a:1,vy:0.3+Math.random()*0.3});
+        if(overflowPx.length>20)overflowPx.shift();
+      }else{
+        const pos=findKibblePos(p.x);
+        bowlPx.push({x:pos.x,y:pos.y,color:p.kibbleColor,r:2+Math.random()*0.5,a:0.9});
+      }
+      bowlCount++;
+      document.getElementById('petBowlCount').textContent=Math.min(bowlCount,50);
+      falling.splice(i,1);
+    }
+  }
+  for(let i=overflowPx.length-1;i>=0;i--){
+    const p=overflowPx[i];
+    p.vy+=0.08;
+    p.y+=p.vy;
+    p.a-=0.005;
+    if(p.a<=0)overflowPx.splice(i,1);
+  }
+  if(bowlCount>=40&&!lillyHappy){
+    lillyHappy=true;happyTimer=180;
+  }
+  if(happyTimer>0)happyTimer--;
+}
+
+function render(){
+  ctx.clearRect(0,0,W,H);
+  drawBowl();
+  drawBowlKibble();
+  drawOverflow();
+  drawHeart();
+  drawFalling();
+  drawHappy();
+}
+
+function loop(){update();render();requestAnimationFrame(loop);}
+loop();
+
+setInterval(()=>{
+  if(heartHP<100)heartHP=Math.min(100,heartHP+0.15);
+  document.getElementById('petHeartHP').textContent=Math.floor(heartHP);
+},2500);
+
+/* Poll activity and feed heart */
+async function pollPetActivity(){
+  try{
+    const r=await fetch('/api/activity'),d=await r.json();
+    const pts=d.track_points||d.elapsed_sec||0;
+    if(pts>lastSteps){
+      const diff=Math.min(pts-lastSteps,10);
+      if(diff>0)releasePixel(diff);
+    }
+    lastSteps=pts;
+  }catch(e){}
+  setTimeout(pollPetActivity,2000);
+}
+pollPetActivity();
+
+/* Feed on conversation interaction */
+const _origDisplaySpeech=window.displaySpeech;
+window.displaySpeech=function(text){
+  if(_origDisplaySpeech)_origDisplaySpeech.call(this,text);
+  releasePixel(1);
+};
+
+/* Feed on manual text input */
+inputField.addEventListener('keydown',function(e){
+  if(e.key==='Enter'&&inputField.value.trim()){
+    releasePixel(2);
+  }
+});
+})();
 
 // ═══════════════════════════════════════════════════════════════
 // ── SensorBridge — lets the agents feel the world through the  ──
@@ -17261,17 +16429,606 @@ window.CameraBridge = {
 })(); // end CameraBridge IIFE
 </script>
 
+<!-- ─── VibeCode Overlay Panels ─── -->
 
+<div id="vcLeft">
+  <div class="vc-head">
+    <span class="vc-title">📁 VibeCode · Projects</span>
+    <button class="vc-btn" onclick="loadVcProjects(true)" title="Refresh">⟳</button>
+    <button class="vc-x" onclick="closeVibecode()" title="Close">✕</button>
+  </div>
+  <div class="vc-body">
+    <select id="vcProjectSel" onchange="selectVcProject(this.value)"><option value="">— no project —</option></select>
+    <div id="vcFileTree"><div class="vc-empty">Pick a project to see its files.</div></div>
+  </div>
+</div>
 
+<div id="vcRight">
+  <div class="vc-head">
+    <span class="vc-title">🖥️ VibeCode · Project</span>
+    <button class="vc-btn" onclick="toggleVcPanel('left')" title="Toggle left panel">◀</button>
+    <button class="vc-btn" onclick="toggleVcPanel('right')" title="Toggle right panel">▶</button>
+  </div>
+  <div class="vc-tabs">
+    <button class="vc-tab active" id="vcTabPreview" onclick="setVcTab('preview')">Preview</button>
+    <button class="vc-tab" id="vcTabLogs" onclick="setVcTab('logs')">Logs</button>
+  </div>
+  <div class="vc-body" id="vcPreviewWrap" style="display:none">
+    <iframe id="vcFrame" title="VibeCode preview"></iframe>
+  </div>
+  <div class="vc-body" id="vcLogsWrap" style="display:none">
+    <pre id="vcLogs">(select a project)</pre>
+  </div>
+  <div id="vcStatusBar">
+    <span class="vc-dot" id="vcDot"></span>
+    <span id="vcStatusText">no project selected</span>
+    <button class="vc-btn" id="vcRunBtn" onclick="vcRunProject()" style="margin-left:auto">▶ Run</button>
+    <button class="vc-btn" id="vcStopBtn" onclick="vcStopProject()">■ Stop</button>
+  </div>
+</div>
 
+<!-- Unified VibeCode Coding Assistant (dashboard + chat merged) -->
+<div id="vcChat">
+  <div id="vcChatHead">
+    <div class="vc-orb" id="vcChatOrb">🐶</div>
+    <span id="vcChatTitle">VibeCode Coding Assistant</span>
+    <button class="vc-btn" onclick="closeVibecode()" title="Close">✕</button>
+  </div>
+  <div class="vc-dash" id="vcDash">
+    <span class="vc-dash-pill" id="vcDashProject"><span class="vc-dot-sm stopped" id="vcDashDot"></span> <span id="vcDashProjectName">no project</span></span>
+    <span class="vc-dash-pill" id="vcDashPort" style="display:none">:<span id="vcDashPortNum">—</span></span>
+    <span class="vc-dash-pill files" id="vcDashFiles" style="display:none">📄 <span id="vcDashFilesNum">0</span></span>
+  </div>
+  <div id="vcChatMsgs"></div>
+  <div class="vc-chat-input">
+    <input type="text" id="vcChatInput" placeholder="Ask about the project…" autocomplete="off">
+    <button id="vcChatSend" onclick="sendVcChatFromInput()">Send</button>
+  </div>
+</div>
 
+<!-- Alpha overlay pill + roster -->
+<div id="vcAlpha" onclick="toggleVcRoster()" title="Switch avatar">
+  <div class="vc-orb" id="vcAlphaOrb">🐶<span class="vc-dot"></span></div>
+  <div>
+    <div class="vc-a-name" id="vcAlphaName">Lilly</div>
+    <div class="vc-a-sub" id="vcAlphaSub">Alpha Companion · VibeCode</div>
+  </div>
+  <span class="vc-a-chevy">▾</span>
+</div>
+<div id="vcAlphaRoster"></div>
 
+<script>
+/* ─── VibeCode Overlay ─────────────────────────────────────────────── */
+const VC_ROSTER = [
+  {key:'puppy',name:'Lilly',emoji:'🐶',role:'Alpha Companion'},
+  {key:'fox',name:'Fox',emoji:'🦊',role:'Creative Strategist'},
+  {key:'cat',name:'Cat',emoji:'🐱',role:'Precision Analyst'},
+  {key:'bear',name:'Bear',emoji:'🐻',role:'Steadfast Guardian'},
+  {key:'bunny',name:'Bunny',emoji:'🐰',role:'Energetic Scout'},
+  {key:'owl',name:'Owl',emoji:'🦉',role:'Wisdom Keeper'},
+  {key:'deer',name:'Deer',emoji:'🦌',role:'Gentle Healer'},
+  {key:'wolf',name:'Wolf',emoji:'🐺',role:'Fierce Protector'},
+  {key:'raccoon',name:'Raccoon',emoji:'🦝',role:'Tech Tinkerer'},
+];
+let vibecodeActive = false;
+let vcAgent = 'puppy';
+let vcSlug = '';
+let vcLogTimer = null;
+let vcTab = 'preview';
 
+function $vc(id){ return document.getElementById(id); }
 
+/* ─── VibeCode Window Drag ─── */
+makeVcDraggable($vc('vcLeft'), $vc('vcLeft').querySelector('.vc-head'));
+makeVcDraggable($vc('vcRight'), $vc('vcRight').querySelector('.vc-head'));
+makeVcDraggable($vc('vcChat'), $vc('vcChatHead'));
 
+/* ─── Dashboard bar updater ─── */
+let vcDashTimer = null;
+function updateVcDash(){
+  if(!vibecodeActive) return;
+  const nameEl = $vc('vcDashProjectName');
+  const dotEl = $vc('vcDashDot');
+  const portEl = $vc('vcDashPort');
+  const portNum = $vc('vcDashPortNum');
+  const filesEl = $vc('vcDashFiles');
+  const filesNum = $vc('vcDashFilesNum');
+  if(!nameEl) return;
+  nameEl.textContent = vcSlug || 'no project';
+  // Fetch project status
+  if(vcSlug){
+    fetch('/api/vibecode/status/' + encodeURIComponent(vcSlug)).then(r=>r.json()).then(d=>{
+      const running = (d.status||'').toLowerCase().indexOf('running') >= 0;
+      dotEl.className = 'vc-dot-sm ' + (running ? 'running' : 'stopped');
+      if(d.port){ portEl.style.display='inline-flex'; portNum.textContent = d.port; }
+      else { portEl.style.display='none'; }
+    }).catch(()=>{});
+    // Fetch file count
+    fetch('/api/vibecode/files/' + encodeURIComponent(vcSlug)).then(r=>r.json()).then(d=>{
+      const count = (d.entries||[]).length;
+      filesEl.style.display = count > 0 ? 'inline-flex' : 'none';
+      filesNum.textContent = count;
+    }).catch(()=>{});
+  } else {
+    dotEl.className = 'vc-dot-sm stopped';
+    portEl.style.display = 'none';
+    filesEl.style.display = 'none';
+  }
+}
+function startVcDashPoll(){
+  stopVcDashPoll();
+  updateVcDash();
+  vcDashTimer = setInterval(updateVcDash, 15000);
+}
+function stopVcDashPoll(){ if(vcDashTimer){ clearInterval(vcDashTimer); vcDashTimer = null; } }
 
+/* ─── Chat input handler for vcChat ─── */
+function sendVcChatFromInput(){
+  const inp = $vc('vcChatInput');
+  if(!inp) return;
+  const text = inp.value.trim();
+  if(!text) return;
+  inp.value = '';
+  sendVibeCodeMessage(text);
+}
+// Allow Enter key to send
+document.addEventListener('DOMContentLoaded', ()=>{
+  const inp = $vc('vcChatInput');
+  if(inp) inp.addEventListener('keydown', e => { if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendVcChatFromInput(); } });
+});
 
+function openVibecode(slug){
+  vibecodeActive = true;
+  if(slug) vcSlug = String(slug).replace(/[^\w.-]/g,'');
+  $vc('vcLeft').classList.add('vc-show');
+  $vc('vcRight').classList.add('vc-show');
+  // Hide the separate vibecode chat panel — chat now flows through the
+  // main #chatContainer so there's only ONE chat the user sees.
+  $vc('vcChat').classList.remove('vc-show');
+  $vc('vcAlpha').classList.add('vc-show');
+  if(inputField) inputField.placeholder = 'Ask Alpha about the project…';
+  buildVcRoster();
+  loadVcProjects();
+  if(vcSlug) selectVcProject(vcSlug);
+   startVcDashPoll();
+  // Show the main chat container with Alpha label
+  showMainChat();
+  // Update the chat title to reflect coding mode
+  var titleEl = document.getElementById('chatTitle');
+  if(titleEl) titleEl.textContent = 'Coding with Alpha';
+  // Inject a compact dashboard bar into the chat header so the user can
+  // see project status / weather / activity while coding.
+  injectVcDashBar();
+  // Sync the selected avatar to the vibecode agent
+  if(typeof selectedAvatar !== 'undefined'){
+    vcAgent = resolvePersonaKey(selectedAvatar) || 'puppy';
+    selectVcAgent(vcAgent);
+  }
+  // Seed a system message in the main chat
+  addChatMessage('system', 'VibeCode is up — pick a project in the left panel. I\'m here to help.');
+  if(inputField) inputField.focus();
+}
 
+// ── Inject / remove a mini dashboard bar in the chat header ──
+function injectVcDashBar(){
+  var header = document.getElementById('chatHeader');
+  if(!header) return;
+  // Remove existing
+  var existing = document.getElementById('vcDashBar');
+  if(existing) existing.remove();
+  var bar = document.createElement('div');
+  bar.id = 'vcDashBar';
+  bar.className = 'vc-dash';
+  bar.style.marginRight = '8px';
+  bar.style.flex = '1';
+  bar.innerHTML = '<span class="vc-dash-pill" id="vcDashProject"><span class="vc-dot-sm stopped"></span> <span id="vcDashProjectName">no project</span></span>' +
+    '<span class="vc-dash-pill files" id="vcDashFiles" style="display:none">📄 <span id="vcDashFilesNum">0</span></span>';
+  header.appendChild(bar);
+  updateVcDash();
+}
+function removeVcDashBar(){
+  var bar = document.getElementById('vcDashBar');
+  if(bar) bar.remove();
+}
+
+function closeVibecode(){
+  vibecodeActive = false;
+  vcSlug = '';
+  $vc('vcLeft').classList.remove('vc-show');
+  $vc('vcRight').classList.remove('vc-show');
+  $vc('vcChat').classList.remove('vc-show');
+  $vc('vcAlpha').classList.remove('vc-show');
+  $vc('vcAlphaRoster').classList.remove('vc-show');
+   removeVcDashBar();
+   // Restore the chat title
+   var titleEl = document.getElementById('chatTitle');
+   if(titleEl) titleEl.textContent = 'Chat';
+   if(inputField) inputField.placeholder = 'Talk to me...';
+  stopVcLogs();
+  stopVcDashPoll();
+}
+
+/* ─── VibeCode Window Drag ─── */
+function makeVcDraggable(el, handle){
+  if(!el || !handle) return;
+  let dragging=false, startX=0, startY=0, origLeft=0, origTop=0;
+  function getPos(){
+    const rect = el.getBoundingClientRect();
+    return { x: rect.left, y: rect.top };
+  }
+  function ensureExplicit(){
+    if(el.style.left || el.style.top) return;
+    const pos = getPos();
+    el.style.left = pos.x + 'px';
+    el.style.top = pos.y + 'px';
+    el.style.transform = 'none';
+    el.style.right = 'auto';
+  }
+  function onStart(e){
+    const ev = e.touches ? e.touches[0] : e;
+    dragging = true;
+    startX = ev.clientX;
+    startY = ev.clientY;
+    const pos = getPos();
+    origLeft = pos.x;
+    origTop = pos.y;
+    el.classList.add('vc-dragging');
+    ensureExplicit();
+    e.preventDefault();
+  }
+  function onMove(e){
+    if(!dragging) return;
+    const ev = e.touches ? e.touches[0] : e;
+    let dx = ev.clientX - startX;
+    let dy = ev.clientY - startY;
+    let newLeft = origLeft + dx;
+    let newTop = origTop + dy;
+    const maxX = window.innerWidth - el.offsetWidth;
+    const maxY = window.innerHeight - el.offsetHeight;
+    newLeft = Math.max(0, Math.min(newLeft, maxX));
+    newTop = Math.max(0, Math.min(newTop, maxY));
+    el.style.left = newLeft + 'px';
+    el.style.top = newTop + 'px';
+    el.style.transform = 'none';
+    el.style.right = 'auto';
+  }
+  function onEnd(){
+    if(!dragging) return;
+    dragging = false;
+    el.classList.remove('vc-dragging');
+    try {
+      const key = 'vc_pos_' + el.id;
+      localStorage.setItem(key, JSON.stringify({ left: el.style.left, top: el.style.top }));
+    } catch(e){}
+  }
+  handle.addEventListener('mousedown', onStart);
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onEnd);
+  handle.addEventListener('touchstart', onStart, {passive:false});
+  document.addEventListener('touchmove', onMove, {passive:false});
+  document.addEventListener('touchend', onEnd);
+  // Restore saved position
+  try {
+    const key = 'vc_pos_' + el.id;
+    const saved = localStorage.getItem(key);
+    if(saved){
+      const pos = JSON.parse(saved);
+      if(pos.left && pos.top){
+        el.style.left = pos.left;
+        el.style.top = pos.top;
+        el.style.transform = 'none';
+        el.style.right = 'auto';
+      }
+    }
+  } catch(e){}
+}
+
+function toggleVcRoster(){
+  $vc('vcAlphaRoster').classList.toggle('vc-show');
+}
+function buildVcRoster(){
+  const box = $vc('vcAlphaRoster');
+  box.innerHTML = '';
+  VC_ROSTER.forEach(p => {
+    const s = document.createElement('div');
+    s.className = 'vc-ar' + (p.key === vcAgent ? ' sel' : '');
+    s.dataset.key = p.key;
+    s.textContent = p.emoji;
+    s.title = p.name + ' — ' + p.role;
+    s.onclick = () => { selectVcAgent(p.key); toggleVcRoster(); };
+    box.appendChild(s);
+  });
+}
+function selectVcAgent(key){
+  vcAgent = key;
+  const p = VC_ROSTER.find(x => x.key === key) || VC_ROSTER[0];
+  $vc('vcAlphaOrb').textContent = p.emoji;
+  $vc('vcAlphaName').textContent = p.name;
+  $vc('vcAlphaSub').textContent = p.role + ' · VibeCode';
+  $vc('vcChatOrb').textContent = p.emoji;
+  $vc('vcChatTitle').textContent = 'VibeCode Coding Assistant' + (vcSlug ? ' — ' + vcSlug : '');
+  document.querySelectorAll('.vc-ar').forEach(c => c.classList.toggle('sel', c.dataset.key === key));
+}
+function setVcTab(t){
+  vcTab = t;
+  $vc('vcTabPreview').classList.toggle('active', t === 'preview');
+  $vc('vcTabLogs').classList.toggle('active', t === 'logs');
+  $vc('vcPreviewWrap').classList.toggle('active', t === 'preview');
+  $vc('vcLogsWrap').classList.toggle('active', t === 'logs');
+}
+
+// Toggle one of the two side panels (used by the ◀/▶ buttons in the right
+// panel header) while leaving the overall VibeCode mode active.
+function toggleVcPanel(which){
+  const el = $vc(which === 'left' ? 'vcLeft' : 'vcRight');
+  if(el) el.classList.toggle('vc-show');
+}
+
+async function loadVcProjects(){
+  try{
+    const r = await fetch('/api/vibecode/projects');
+    const d = await r.json();
+    const sel = $vc('vcProjectSel');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">— no project —</option>';
+    (d.projects || []).forEach(p => {
+      const o = document.createElement('option');
+      o.value = p.slug;
+      o.textContent = p.slug + (p.status === 'running' ? ' ●' : '');
+      sel.appendChild(o);
+    });
+    if(prev) sel.value = prev;
+    if(vcSlug) sel.value = vcSlug;
+  }catch(e){}
+  if(!vcSlug) $vc('vcFileTree').innerHTML = '<div class="vc-empty">Pick a project to see its files.</div>';
+}
+
+function selectVcProject(slug){
+  vcSlug = slug || '';
+  $vc('vcProjectSel').value = slug || '';
+  if(!vcSlug){
+    $vc('vcFileTree').innerHTML = '<div class="vc-empty">Pick a project to see its files.</div>';
+    $vc('vcStatusText').textContent = 'no project selected';
+    $vc('vcFrame').src = 'about:blank';
+    $vc('vcLogs').textContent = '(select a project)';
+    stopVcLogs();
+    updateVcDash();
+    return;
+  }
+  loadVcFiles('', $vc('vcFileTree'));
+  vcRefreshStatus();
+  setVcTab('preview');
+  vcPollLogs();
+  if(inputField) inputField.placeholder = 'Ask Alpha about ' + vcSlug + '…';
+  selectVcAgent(vcAgent);
+  updateVcDash();
+}
+
+async function loadVcFiles(path, container){
+  container.innerHTML = '<div class="vc-empty">loading…</div>';
+  try{
+    const q = path ? '?path=' + encodeURIComponent(path) : '';
+    const r = await fetch('/api/vibecode/files/' + encodeURIComponent(vcSlug) + q);
+    if(!r.ok){ container.innerHTML = '<div class="vc-empty">error loading files</div>'; return; }
+    const d = await r.json();
+    renderVcTree(d.entries || [], container, 0);
+  }catch(e){ container.innerHTML = '<div class="vc-empty">error loading files</div>'; }
+}
+
+function renderVcTree(entries, container, depth){
+  container.innerHTML = '';
+  if(!entries.length){ container.innerHTML = '<div class="vc-empty">empty folder</div>'; return; }
+  entries.forEach(en => {
+    const row = document.createElement('div');
+    row.className = 'vc-tree-row ' + (en.type === 'dir' ? 'dir' : 'file');
+    if(en.type === 'dir'){
+      const caret = document.createElement('span');
+      caret.className = 'vc-caret'; caret.textContent = '▸';
+      row.appendChild(caret);
+      const nm = document.createElement('span'); nm.textContent = '📁 ' + en.name;
+      row.appendChild(nm);
+      let open = false, childWrap = null;
+      row.onclick = async () => {
+        open = !open; caret.textContent = open ? '▾' : '▸';
+        if(!childWrap){
+          childWrap = document.createElement('div');
+          childWrap.className = 'vc-tree-children';
+          row.after(childWrap);
+          await loadVcFiles(en.path, childWrap);
+        }
+        childWrap.style.display = open ? 'block' : 'none';
+      };
+    }else{
+      row.style.paddingLeft = (22 + depth) + 'px';
+      const nm = document.createElement('span'); nm.textContent = '📄 ' + en.name;
+      row.appendChild(nm);
+      row.title = en.name;
+    }
+    container.appendChild(row);
+  });
+}
+
+async function vcRefreshStatus(){
+  if(!vcSlug) return;
+  try{
+    const r = await fetch('/api/vibecode/status/' + encodeURIComponent(vcSlug));
+    const d = await r.json();
+    const running = (d.status || '').toLowerCase().indexOf('running') >= 0;
+    $vc('vcDot').className = 'vc-dot ' + (running ? 'running' : 'stopped');
+    $vc('vcStatusText').textContent = vcSlug + (d.port ? ' · :' + d.port : '') + (running ? ' · running' : ' · ' + (d.status || 'stopped'));
+    if(running) $vc('vcFrame').src = '/api/vibecode/preview/' + encodeURIComponent(vcSlug);
+    else $vc('vcFrame').src = 'about:blank';
+  }catch(e){}
+}
+
+function vcPollLogs(){
+  stopVcLogs();
+  if(!vibecodeActive || !vcSlug) return;
+  vcLogTimer = setInterval(async () => {
+    if(!vcSlug || !vibecodeActive){ stopVcLogs(); return; }
+    try{
+      const r = await fetch('/api/vibecode/logs/' + encodeURIComponent(vcSlug) + '?lines=60');
+      const d = await r.json();
+      $vc('vcLogs').textContent = d.log || '(no output yet)';
+      $vc('vcLogs').scrollTop = $vc('vcLogs').scrollHeight;
+    }catch(e){}
+  }, 2500);
+}
+function stopVcLogs(){ if(vcLogTimer){ clearInterval(vcLogTimer); vcLogTimer = null; } }
+
+async function vcRunProject(){
+  if(!vcSlug) return;
+  const btn = $vc('vcRunBtn'); btn.disabled = true; btn.textContent = 'Starting…';
+  try{
+    await fetch('/api/vibecode/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slug:vcSlug})});
+  }catch(e){}
+  setTimeout(() => { btn.disabled = false; btn.textContent = '▶ Run'; vcRefreshStatus(); }, 1500);
+}
+async function vcStopProject(){
+  if(!vcSlug) return;
+  const btn = $vc('vcStopBtn'); btn.disabled = true;
+  try{
+    await fetch('/api/vibecode/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({slug:vcSlug})});
+  }catch(e){}
+  setTimeout(() => { btn.disabled = false; vcRefreshStatus(); }, 800);
+}
+
+function vcEsc(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function vcRender(text){
+  let out = vcEsc(text || '');
+  out = out.replace(/```(\w+)?\n([\s\S]*?)```/g, (m, lang, code) => {
+    const ext = {python:'py',javascript:'js',js:'js',typescript:'ts',html:'html',css:'css',json:'json',bash:'sh',shell:'sh',sql:'sql',ruby:'rb',java:'java',go:'go',rust:'rs',c:'c',cpp:'cpp'}[lang] || 'txt';
+    return '<pre><div style="text-align:right;margin-bottom:4px">' +
+      '<button onclick="vcCopy(this)" class="vc-btn">Copy</button> ' +
+      '<button onclick="vcSaveCode(this)" data-code="' + encodeURIComponent(code.trim()) + '" data-fname="' + (lang || 'code') + '.' + ext + '">Save</button></div>' +
+      '<code class="lang-' + (lang || '') + '">' + vcEsc(code.trim()) + '</code></pre>';
+  });
+  out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+  out = out.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  out = out.replace(/\n/g, '<br>');
+  return out;
+}
+function vcCopy(btn){
+  const code = btn.closest('pre').querySelector('code').textContent;
+  navigator.clipboard.writeText(code);
+  btn.textContent = '✓';
+  setTimeout(() => btn.textContent = 'Copy', 1200);
+}
+async function vcSaveCode(btn){
+  if(!vcSlug) return;
+  const code = decodeURIComponent(btn.dataset.code || '');
+  const path = prompt('Save as (path within ' + vcSlug + '):', btn.dataset.fname || 'code.txt');
+  if(!path) return;
+  try{
+    const r = await fetch('/api/vibecode/file/' + encodeURIComponent(vcSlug) + '?path=' + encodeURIComponent(path),
+      {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content:code})});
+    const d = await r.json();
+    if(!r.ok) alert(d.error || 'save failed');
+    else{
+      btn.textContent = '✓ saved';
+      setTimeout(() => btn.textContent = 'Save', 1500);
+      if($vc('vcFileTree')) loadVcFiles('', $vc('vcFileTree'));
+    }
+  }catch(e){ alert('save failed: ' + e.message); }
+}
+
+function vcAppendMsg(role, html, meta){
+  const box = $vc('vcChatMsgs');
+  const div = document.createElement('div');
+  div.className = 'vcc-msg ' + (role === 'user' ? 'user' : 'alpha');
+  let head = '';
+  if(role === 'assistant' && meta){
+    const p = VC_ROSTER.find(x => x.key === (meta.key || vcAgent)) || VC_ROSTER[0];
+    const emoji = meta.emoji || p.emoji;
+    const name = meta.name || p.name;
+    const isAlpha = (meta.key || vcAgent) === 'puppy';
+    head = '<div class="vcc-sender"><span class="vcc-s-emoji">' + emoji + '</span> ' + vcEsc(name) +
+      (isAlpha ? ' <span class="vcc-alpha-badge">Alpha</span>' : '') + '</div>';
+  }
+  div.innerHTML = head + html;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+function vcAppendSys(t){
+  const box = $vc('vcChatMsgs');
+  const div = document.createElement('div');
+  div.className = 'vcc-msg sys';
+  div.textContent = t;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+// ── Thinking indicator for the main chat container (used by sendVibeCodeMessage) ──
+// This replaces the old vcAppendThinking that appended to the separate #vcChatMsgs panel.
+
+async function sendVibeCodeMessage(text){
+  if(!text) return;
+  // While the overlay is active the main input routes here, so handle
+  // open/close commands locally instead of forwarding them to the chat.
+  const t = text.toLowerCase();
+  const closeWords = ['close vibecode','close vibe code','hide vibecode','hide vibe code',
+    'exit vibecode','exit vibe code','vibecode off','vibe code off','close the vibe panels','hide the vibe panels'];
+  if(closeWords.some(w => t.indexOf(w) >= 0)){
+    closeVibecode();
+    if(typeof displaySpeech === 'function') displaySpeech('VibeCode panels closed.');
+    return;
+  }
+  // ── Route through the MAIN chat container so the coding conversation
+  //    appears alongside all other chat (not in a separate vibecode panel) ──
+  addChatMessage('user', vcRender(text), {rawHtml: true});
+  const thinkingEl = vcAppendThinking();
+  try{
+    const r = await fetch('/api/vibecode/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({slug:vcSlug || '', message:text, file:'', agent:vcAgent || (typeof selectedAvatar !== 'undefined' ? selectedAvatar : 'puppy'), session_id:'main-chat'})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error || 'unknown error');
+    thinkingEl.remove();
+    let html = vcRender(d.reply || '');
+    if(d.suggestions && d.suggestions.length){
+      html += '<div class="vcc-suggest">' + d.suggestions.map(s =>
+        '<a href="' + (s.repo_url || '#') + '" target="_blank" rel="noopener">⭐ ' +
+        vcEsc(s.repo_name || s.repo_url || 'repo') + '</a>').join('') + '</div>';
+    }
+    // Display in the MAIN chat container with the Alpha badge
+    addChatMessage('assistant', html, {key: d.agent || vcAgent, emoji: d.agent_emoji, name: d.agent_name, alpha: true, rawHtml: true});
+    if(d.alpha_mode === 'asking'){
+      addChatMessage('system', 'Alpha is asking a few clarifying questions.');
+    }
+    if(d.project_applied){
+      vcSlug = d.project_applied;
+      selectVcProject(vcSlug);
+      addChatMessage('system', 'Project ' + d.project_applied + ' is up — run it from the right panel.');
+    }
+    // The avatar speaks the reply aloud through the main speech channel
+    if(typeof displaySpeech === 'function' && d.reply) displaySpeech(d.reply);
+    if(d.audio_id && typeof playAudio === 'function') playAudio(d.audio_id);
+    // Update dashboard after reply
+    updateVcDash();
+  }catch(e){
+    thinkingEl.remove();
+    addChatMessage('system', 'Error: ' + (e.message || 'unknown'));
+  }
+  // Focus back on main chat input
+  if(inputField) inputField.focus();
+}
+
+// ── Thinking indicator that appears in the MAIN chat container ──
+function vcAppendThinking(){
+  if(!chatMessages) return null;
+  const div = document.createElement('div');
+  div.className = 'chat-msg assistant vc-thinking';
+  // Use the currently selected avatar (Alpha/puppy by default)
+  var avatarKey = (vibecodeActive && vcAgent) || (typeof selectedAvatar !== 'undefined' && selectedAvatar) || 'puppy';
+  var meta = chatAvatarMeta(avatarKey);
+  div.innerHTML = '<div class="chat-alpha"><span style="font-size:14px">' + (meta.emoji || '🐶') + '</span> ' + (meta.name || 'Alpha') + '</div>' +
+    '<div class="vcc-think"><span></span><span></span><span></span></div>';
+  chatMessages.appendChild(div);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+  return div;
+}
+
+</script>
 
 </body>
 </html>"""
@@ -17279,47 +17036,25 @@ window.CameraBridge = {
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
-    return Response(
-        content=HTML_PAGE,
-        media_type="text/html",
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
-    )
+    return HTML_PAGE
 
 
-def _serve_phone_page(name: str) -> Response:
-    """Serve a static phone page from the server directory, same origin."""
-    page_path = Path(__file__).parent / name
-    if page_path.exists():
+@app.get("/vibecode-voice.js")
+async def serve_voice_script():
+    """Serve the OpenLive voice engine script."""
+    voice_path = Path(__file__).parent / "vibecode-voice.js"
+    if voice_path.exists():
+        from fastapi.responses import Response
+
         return Response(
-            content=page_path.read_text(encoding="utf-8"),
-            media_type="text/html",
-            headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            },
+            content=voice_path.read_text(encoding="utf-8"),
+            media_type="application/javascript",
         )
     return Response(
-        content=f"<html><body><p>page {name} not found on server</p></body></html>",
+        content="// Voice script not found",
         status_code=404,
-        media_type="text/html",
+        media_type="application/javascript",
     )
-
-
-@app.get("/openlive-human.html", response_class=HTMLResponse)
-async def serve_openlive_page():
-    """Serve the OpenLive × Lilly voice conversation page (same origin)."""
-    return _serve_phone_page("openlive-human.html")
-
-
-@app.get("/openhuman.html", response_class=HTMLResponse)
-async def serve_openhuman_page():
-    """Serve the OpenHuman skill-store page (same origin)."""
-    return _serve_phone_page("openhuman.html")
 
 
 _pairing_codes: dict[str, dict] = {}
@@ -17565,89 +17300,142 @@ async def download_file(filename: str):
     return FileResponse(str(path), filename=safe_name)
 
 
-# ─── APK DOWNLOAD API ──────────────────────────────────────────
-# Serves the Android overlay / Termux-server APK builds so the phone
-# can fetch them straight from the Settings panel.
+# ─── APK DOWNLOAD PAGE ──────────────────────────────────────────
+
+APK_HTML_PAGE = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Lilly APK Download</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:#f0e6ef;color:#5d4e6d;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:20px}
+.card{background:rgba(255,255,255,0.55);backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:22px;padding:32px;max-width:520px;width:100%;text-align:center;box-shadow:0 8px 40px rgba(180,140,180,0.15);margin-bottom:20px}
+h1{font-size:24px;font-weight:600;margin-bottom:4px}
+.subtitle{font-size:14px;color:rgba(93,78,109,0.7);margin-bottom:20px;line-height:1.5}
+.features{text-align:left;margin-bottom:24px;padding:0 4px}
+.features h3{font-size:13px;font-weight:600;color:rgba(93,78,109,0.8);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px}
+.feature-item{display:flex;align-items:flex-start;gap:8px;padding:6px 0;font-size:13px;color:rgba(93,78,109,0.75);line-height:1.4}
+.feature-item .icon{font-size:16px;flex-shrink:0;margin-top:1px}
+.pairing{background:rgba(139,122,158,0.1);border-radius:14px;padding:16px;margin-bottom:20px;text-align:center}
+.pairing h3{font-size:13px;font-weight:600;color:rgba(93,78,109,0.8);margin-bottom:6px}
+.pairing p{font-size:12px;color:rgba(93,78,109,0.6);line-height:1.5;margin-bottom:8px}
+.pairing code{font-size:13px;font-weight:600;color:#5d4e6d;background:rgba(255,255,255,0.5);padding:6px 14px;border-radius:8px;display:inline-block;margin:4px 0}
+.version-list{display:flex;flex-direction:column;gap:8px;margin-bottom:20px}
+.version-item{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-radius:14px;background:rgba(255,255,255,0.4);border:1px solid rgba(184,169,201,0.2);transition:all 0.2s}
+.version-item:hover{background:rgba(255,255,255,0.6);border-color:rgba(184,169,201,0.4)}
+.version-name{font-weight:500;font-size:14px}
+.version-size{font-size:12px;color:rgba(93,78,109,0.5)}
+.dl-btn{padding:8px 20px;border-radius:12px;border:none;background:rgba(139,122,158,0.25);color:#5d4e6d;font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;transition:all 0.2s}
+.dl-btn:hover{background:rgba(139,122,158,0.4);transform:scale(1.05)}
+.dl-btn:active{transform:scale(0.95)}
+.refresh-btn{padding:8px 16px;border-radius:12px;border:1px solid rgba(184,169,201,0.3);background:transparent;color:rgba(93,78,109,0.6);font-size:12px;cursor:pointer;transition:all 0.2s}
+.refresh-btn:hover{background:rgba(184,169,201,0.15)}
+.note{font-size:11px;color:rgba(93,78,109,0.4);margin-top:12px;line-height:1.5}
+.loading{font-size:13px;color:rgba(93,78,109,0.5);padding:20px 0}
+.error{font-size:13px;color:#e85a6e;padding:12px;display:none}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Lilly Overlay</h1>
+  <div class="subtitle">A floating digital companion that lives on your screen</div>
+
+  <!-- Prerequisites -->
+  <div style="margin-bottom:20px;padding:14px;background:rgba(139,122,158,0.08);border-radius:12px;border:1px solid rgba(139,122,158,0.15);text-align:left">
+    <div style="font-weight:600;font-size:13px;margin-bottom:6px">📋 Prerequisites</div>
+    <div style="font-size:12px;line-height:1.6;opacity:0.8">
+      • <strong>Android 8.0+</strong> (API 26+) required<br>
+      • <strong>F-Droid</strong> app store for installing Termux<br>
+      • <strong>Termux</strong> from F-Droid (not Play Store version)<br>
+      • <strong>200 MB+ free storage</strong> for Termux + Python packages<br>
+      • <strong>For Termux Server:</strong> 1-2 GB extra for AI models
+    </div>
+  </div>
+
+  <div class="features">
+    <h3>What it does</h3>
+    <div class="feature-item"><span class="icon">💬</span> Speech bubble overlay — Lilly speaks directly on your screen, over any app</div>
+    <div class="feature-item"><span class="icon">🎤</span> Voice chat — tap the mic button and talk hands-free</div>
+    <div class="feature-item"><span class="icon">🐺</span> Voice-activated avatars — say "hey Wolf" and Wolf appears</div>
+    <div class="feature-item"><span class="icon">👆</span> Single-tap to chat — tap once to open chat and mic</div>
+    <div class="feature-item"><span class="icon">🔍</span> OSINT & Skills — news, anonymous messaging, fake identities</div>
+    <div class="feature-item"><span class="icon">🔔</span> Proactive notifications — Lilly taps your shoulder when something needs attention</div>
+    <div class="feature-item"><span class="icon">🌙</span> Always-on-top — appears as a system overlay, even with other apps open</div>
+  </div>
+
+  <div class="pairing">
+    <h3>Pairing</h3>
+    <p>After installing, open the overlay and go to the web UI to generate a pairing code:</p>
+    <code>Settings → Pair Device</code>
+    <p style="margin-top:8px">Enter the 8-character code in the overlay to link it to your account.</p>
+  </div>
+
+  <h3 style="font-size:13px;font-weight:600;color:rgba(93,78,109,0.8);margin-bottom:10px;text-transform:uppercase;letter-spacing:0.5px">Download</h3>
+  <div id="error" class="error"></div>
+  <div id="loading" class="loading">Loading…</div>
+  <div id="dlArea" style="display:none;text-align:center;padding:8px 0"></div>
+  <div class="note">Enable <strong>Install from unknown sources</strong> in your Android settings<br>Requires Android 8+ (API 26+)</div>
+</div>
+<script>
+async function loadVersions() {
+  const dlArea = document.getElementById('dlArea');
+  const loading = document.getElementById('loading');
+  const errEl = document.getElementById('error');
+  loading.style.display = 'block';
+  errEl.style.display = 'none';
+  dlArea.style.display = 'none';
+  try {
+    const r = await fetch('/api/apk/variants');
+    const list = await r.json();
+    loading.style.display = 'none';
+    if (!list.length) {
+      dlArea.innerHTML = '<div style="opacity:0.5;padding:12px 0;font-size:13px">No APK builds found</div>';
+      dlArea.style.display = 'block';
+      return;
+    }
+    const light = list.find(f => f.type === 'light');
+    const full = list.find(f => f.type === 'full');
+    let html = '';
+    
+    if (light) {
+      const size = (light.size / 1024 / 1024).toFixed(1);
+      html += '<div style="margin-bottom:16px;padding:16px;border-radius:14px;background:rgba(74,222,128,0.1);border:1px solid rgba(74,222,128,0.2)">';
+      html += '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#4ade80;margin-bottom:6px">Light Version</div>';
+      html += '<div style="font-size:15px;font-weight:600;margin-bottom:4px">v' + light.variant + '</div>';
+      html += '<div style="font-size:12px;color:rgba(93,78,109,0.5);margin-bottom:12px">' + size + ' MB \u00b7 Minimal overlay client</div>';
+      html += '<a class="dl-btn" href="/api/apk/download?type=light" style="padding:12px 32px;font-size:14px;border-radius:12px;background:rgba(74,222,128,0.2);color:#2d5a3e">\u2B07 Download Light</a>';
+      html += '</div>';
+    }
+    
+    if (full) {
+      const size = (full.size / 1024 / 1024).toFixed(1);
+      html += '<div style="margin-bottom:16px;padding:16px;border-radius:14px;background:rgba(139,122,158,0.1);border:1px solid rgba(139,122,158,0.2)">';
+      html += '<div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;color:#8b7a9e;margin-bottom:6px">Termux Server Version</div>';
+      html += '<div style="font-size:15px;font-weight:600;margin-bottom:4px">v' + full.variant + '</div>';
+      html += '<div style="font-size:12px;color:rgba(93,78,109,0.5);margin-bottom:12px">' + size + ' MB \u00b7 Full server with AI backend</div>';
+      html += '<a class="dl-btn" href="/api/apk/download?type=full" style="padding:12px 32px;font-size:14px;border-radius:12px;background:rgba(139,122,158,0.2)">\u2B07 Download Termux Server</a>';
+      html += '</div>';
+    }
+    
+    dlArea.innerHTML = html;
+    dlArea.style.display = 'block';
+  } catch (e) {
+    loading.style.display = 'none';
+    errEl.textContent = 'Failed to load APK info';
+    errEl.style.display = 'block';
+  }
+}
+loadVersions();
+</script>
+</body>
+</html>"""
 
 
-def _apk_variants() -> list[dict]:
-    """Discover available APK builds.
-
-    light — small overlay client (file_share/latest_apk.apk, else newest
-            lilly-overlay-v*.apk in the overlay build dir).
-    full  — large Termux-server bundle with AI backend (file_share/lilly-overlay-5*.apk).
-    """
-    variants: list[dict] = []
-    fs_dir = FILE_SHARE_DIR
-
-    def _add(kind: str, path: Path) -> None:
-        if not path or not path.is_file():
-            return
-        st = path.stat()
-        # variant label from filename (e.g. "v3.10-debug" → "3.10")
-        m = re.search(r"(\d+(?:\.\d+)+)", path.name)
-        label = m.group(1).strip(".-") if m else "latest"
-        variants.append(
-            {
-                "type": kind,
-                "name": path.name,
-                "path": str(path),
-                "size": st.st_size,
-                "variant": label,
-                "updated": int(st.st_mtime),
-            }
-        )
-
-    # Light: prefer latest_apk.apk, then newest lilly-overlay-*.apk under ~10MB
-    light_candidates = []
-    if (fs_dir / "latest_apk.apk").exists():
-        light_candidates.append(fs_dir / "latest_apk.apk")
-    light_candidates.extend(
-        sorted(
-            [
-                p
-                for p in fs_dir.glob("lilly-overlay-*.apk")
-                if p.stat().st_size < 10_000_000
-            ],
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-    )
-    if light_candidates:
-        _add("light", light_candidates[0])
-    # Full: largest lilly-overlay-*.apk (Termux-server bundle, typically >50MB)
-    if fs_dir.exists():
-        fulls = sorted(
-            fs_dir.glob("lilly-overlay-*.apk"),
-            key=lambda p: p.stat().st_size,
-            reverse=True,
-        )
-        # Pick the largest file that's clearly a full bundle (>50MB)
-        full = next((p for p in fulls if p.stat().st_size > 50_000_000), None)
-        if full:
-            _add("full", full)
-    return variants
-
-
-@app.get("/api/apk/variants")
-async def apk_variants():
-    return _apk_variants()
-
-
-@app.get("/api/apk/download")
-async def apk_download(type: str = "light"):
-    variants = _apk_variants()
-    match = next((v for v in variants if v["type"] == type), None)
-    if not match:
-        raise HTTPException(status_code=404, detail="APK variant not found")
-    path = Path(match["path"])
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="APK file missing")
-    return FileResponse(
-        str(path),
-        media_type="application/vnd.android.package-archive",
-        filename=match["name"],
-    )
+@app.get("/apk", response_class=HTMLResponse)
+async def apk_page():
+    return APK_HTML_PAGE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -17918,7 +17706,7 @@ async def get_settings_pair_token(request: Request):
 async def clear_settings(request: Request):
     user = await get_current_user(request)
     uid = user.get("id") if user else "anonymous"
-    _settings_store.pop(uid, None)  # type: ignore[arg-type]
+    _settings_store.pop(uid, None)
     return {"ok": True}
 
 
@@ -18119,12 +17907,6 @@ async def _cf_termux_fast(cmd: str, trigger: str) -> Optional[str]:
 _PRESENCE_LAST_SCAN: float = 0.0
 _PRESENCE_SCAN_TTL: float = 30.0
 
-try:
-    from bt_profiles import classify_devices, format_summary
-except Exception:
-    classify_devices = None
-    format_summary = None
-
 
 async def _presence_scan(force: bool = False) -> dict:
     """Classified scan of nearby Bluetooth devices. Cached for TTL seconds."""
@@ -18254,6 +18036,547 @@ CANNED_FUNCTIONS.append(
 )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# VIBECODE — Git Repo Drop-in, Containerised Projects, File Manager, Live IDE
+# ─────────────────────────────────────────────────────────────────────────────
+
+import asyncio
+import subprocess
+
+VIBECODE_PROJECTS_DIR = Path(__file__).parent / "projects"
+VIBECODE_DEPLOYMENTS_FILE = Path(__file__).parent / ".opencode" / "deployments.json"
+VIBECODE_PORT_BASE = 8201  # allocate from here upward (8200 is used by entity-platform)
+VIBECODE_PORT_MAX = 8299
+
+
+def _vibecode_get_base_url(request: Request | None, slug: str) -> str:
+    """Construct the public URL for a vibecode project from the incoming request."""
+    if request is not None and request.url is not None:
+        host = request.url.hostname or "localhost"
+        scheme = request.url.scheme or "http"
+        return f"{scheme}://{host}/vibecode/p/{slug}"
+    return f"/vibecode/p/{slug}"
+
+
+def _vibecode_get_slug_by_port(port: int) -> str | None:
+    """Look up project slug from port number in deployments."""
+    dep = _vibecode_load_deployments().get("projects", {})
+    for slug, info in dep.items():
+        if info.get("port") == port:
+            return slug
+    return None
+
+
+def _vibecode_port_is_available(port: int) -> bool:
+    """Check if a TCP port is actually free on the host."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("", port))
+            return True
+        except OSError:
+            return False
+
+
+def _vibecode_cleanup_stale_deployments() -> None:
+    """Remove deployment entries for projects that no longer exist on disk."""
+    if not VIBECODE_DEPLOYMENTS_FILE.exists():
+        return
+    try:
+        d = json.loads(VIBECODE_DEPLOYMENTS_FILE.read_text())
+    except Exception:
+        return
+    projects = d.get("projects", {})
+    stale = [
+        slug
+        for slug in list(projects.keys())
+        if not (VIBECODE_PROJECTS_DIR / slug).exists()
+    ]
+    for slug in stale:
+        del projects[slug]
+    if stale:
+        _vibecode_save_deployments(d)
+
+
+def _vibecode_load_deployments() -> dict:
+    if VIBECODE_DEPLOYMENTS_FILE.exists():
+        try:
+            return json.loads(VIBECODE_DEPLOYMENTS_FILE.read_text())
+        except Exception:
+            pass
+    return {"projects": {}}
+
+
+def _vibecode_save_deployments(d: dict) -> None:
+    VIBECODE_DEPLOYMENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    VIBECODE_DEPLOYMENTS_FILE.write_text(json.dumps(d, indent=2))
+
+
+def _vibecode_alloc_port(project_name: str) -> int:
+    d = _vibecode_load_deployments()
+    # Return existing port if already allocated and still available
+    existing = d.get("projects", {}).get(project_name, {}).get("port")
+    if existing and _vibecode_port_is_available(existing):
+        return int(existing)
+    # Find next free port that is actually available on the host
+    used = {v.get("port") for v in d.get("projects", {}).values() if v.get("port")}
+    for p in range(VIBECODE_PORT_BASE, VIBECODE_PORT_MAX + 1):
+        if p not in used and _vibecode_port_is_available(p):
+            d.setdefault("projects", {})[project_name] = {
+                "port": p,
+                "updated": __import__("datetime").datetime.utcnow().isoformat()[:19],
+            }
+            _vibecode_save_deployments(d)
+            return p
+    raise RuntimeError("No free ports in VibeCode range 8201-8299")
+
+
+def _vibecode_project_slug(name: str) -> str:
+    import re
+
+    return re.sub(r"[^a-z0-9-]", "-", name.lower().strip()).strip("-") or "project"
+
+
+def _vibecode_container_name(slug: str) -> str:
+    return f"vibecode-{slug}"
+
+
+# ── VibeCode skills (reusable project baselines from GitHub repos) ──────────
+# A skill is a git repo — suggested by Alpha, dropped in chat, or cloned —
+# that can be applied to start a new project from it.
+
+VIBECODE_SKILLS_FILE = WORKSPACE / "vibecode_skills.json"
+
+
+def _vibecode_skills_load() -> dict:
+    """Load the skills store: {"skills": {key: {...}}}."""
+    if VIBECODE_SKILLS_FILE.exists():
+        try:
+            return json.loads(VIBECODE_SKILLS_FILE.read_text())
+        except Exception:
+            pass
+    return {"skills": {}}
+
+
+def _vibecode_skills_save(d: dict) -> None:
+    try:
+        VIBECODE_SKILLS_FILE.write_text(json.dumps(d, indent=2))
+    except Exception:
+        pass
+
+
+def _vibecode_skills_list() -> list:
+    """All skills, newest first."""
+    d = _vibecode_skills_load()
+    skills = list(d.get("skills", {}).values())
+    return sorted(skills, key=lambda s: s.get("created_at", ""), reverse=True)
+
+
+def _vibecode_skills_upsert(
+    repo_url: str,
+    meta: Optional[dict] = None,
+    source: str = "dropped",
+) -> str:
+    """Record a git repo as a reusable VibeCode skill. Returns the skill key.
+
+    meta may carry: name, description, language, stars, tags.
+    Re-running for an existing repo just bumps the timestamp / source.
+    """
+    repo_url = (repo_url or "").strip().rstrip("/")
+    if not repo_url:
+        return ""
+    # Normalize the URL to a canonical .git-less form
+    canonical = repo_url
+    for suffix in (".git", "/"):
+        if canonical.endswith(suffix):
+            canonical = canonical[: -len(suffix)]
+    key = _vibecode_project_slug(canonical.split("/")[-1] or canonical)
+    meta = meta or {}
+    store = _vibecode_skills_load()
+    skills = store.setdefault("skills", {})
+    existing = skills.get(key, {})
+    entry = {
+        "key": key,
+        "name": meta.get("name")
+        or existing.get("name")
+        or key.replace("-", " ").title(),
+        "repo_url": canonical,
+        "description": meta.get("description") or existing.get("description", ""),
+        "language": meta.get("language") or existing.get("language", ""),
+        "stars": meta.get("stars") or existing.get("stars", 0),
+        "tags": meta.get("tags") or existing.get("tags", []),
+        "source": source or existing.get("source", "dropped"),
+        "created_at": existing.get("created_at")
+        or __import__("datetime").datetime.utcnow().isoformat()[:19],
+        "used_count": existing.get("used_count", 0),
+    }
+    skills[key] = entry
+    _vibecode_skills_save(store)
+    return key
+
+
+def _vibecode_skills_get(key: str) -> Optional[dict]:
+    key = _vibecode_project_slug(key or "")
+    return _vibecode_skills_load().get("skills", {}).get(key)
+
+
+def _vibecode_skills_bump_used(key: str) -> None:
+    """Increment used_count for a skill (called when it's applied)."""
+    key = _vibecode_project_slug(key or "")
+    store = _vibecode_skills_load()
+    skills = store.setdefault("skills", {})
+    if key in skills:
+        skills[key]["used_count"] = int(skills[key].get("used_count", 0)) + 1
+        _vibecode_skills_save(store)
+
+
+# ── List projects ───────────────────────────────────────────────────────────
+
+
+@app.get("/api/vibecode/projects")
+async def vibecode_list_projects(request: Request):
+    """Return all VibeCode projects with status."""
+    VIBECODE_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    deployments = _vibecode_load_deployments()
+    projects = []
+    for p in sorted(VIBECODE_PROJECTS_DIR.iterdir()):
+        if not p.is_dir():
+            continue
+        slug = p.name
+        dep = deployments.get("projects", {}).get(slug, {})
+        port = dep.get("port")
+        container = _vibecode_container_name(slug)
+        # Check container status
+        status = "stopped"
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", "--format", "{{.State.Status}}", container],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                status = result.stdout.strip()
+        except Exception:
+            pass
+        url = _vibecode_get_base_url(request, slug) if port else ""
+        projects.append(
+            {
+                "slug": slug,
+                "name": slug,
+                "port": port,
+                "url": url,
+                "container": container,
+                "status": status,
+                "path": str(p),
+            }
+        )
+    return {"projects": projects}
+
+
+# ── Clone a git repo as a new project ───────────────────────────────────────
+
+
+@app.post("/api/vibecode/clone")
+async def vibecode_clone_repo(data: dict, request: Request):
+    """
+    Clone a git repo into projects/<slug> and allocate a port.
+    Body: { "url": "https://github.com/...", "name": "optional-name" }
+    """
+    repo_url = (data.get("url") or "").strip()
+    if not repo_url:
+        return JSONResponse({"error": "url required"}, status_code=400)
+
+    # Derive project name from URL or user-supplied name
+    raw_name = data.get("name") or repo_url.rstrip("/").split("/")[-1].removesuffix(
+        ".git"
+    )
+    slug = _vibecode_project_slug(raw_name)
+    dest = VIBECODE_PROJECTS_DIR / slug
+
+    if dest.exists():
+        return JSONResponse(
+            {"error": f"Project '{slug}' already exists."}, status_code=409
+        )
+
+    VIBECODE_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Clone (async subprocess so we don't block the server)
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "clone",
+        "--depth",
+        "1",
+        repo_url,
+        str(dest),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+
+    if proc.returncode != 0:
+        return JSONResponse(
+            {"error": f"git clone failed: {stderr.decode(errors='replace')[:500]}"},
+            status_code=500,
+        )
+
+    port = _vibecode_alloc_port(slug)
+    url = _vibecode_get_base_url(request, slug)
+    _vibecode_bootstrap_project(slug, dest)
+    _vibecode_skills_upsert(repo_url, source="cloned")
+    return {
+        "slug": slug,
+        "port": port,
+        "url": url,
+        "path": str(dest),
+        "message": f"Cloned '{slug}' — port {port} allocated.",
+    }
+
+
+# ── Bootstrap cloned project with themed preview overlay ─────────────────────
+
+
+def _vibecode_bootstrap_project(slug: str, project_dir: Path) -> None:
+    """Add a themed preview overlay for cloned repos so they use the VibeCode frost theme."""
+    try:
+        # Find the main entry point: index.html at root, or first HTML file found
+        entry_candidates = [
+            project_dir / "index.html",
+            project_dir / "index.htm",
+        ]
+        entry = next((p for p in entry_candidates if p.exists()), None)
+        if not entry:
+            for p in sorted(project_dir.rglob("*.html")):
+                if ".git" not in str(p).lower():
+                    entry = p
+                    break
+
+        overlay_name = "_vibecode_preview.html"
+        overlay_path = project_dir / overlay_name
+
+        if entry:
+            # Read original entry
+            original = entry.read_text(encoding="utf-8", errors="replace")
+            entry_rel = entry.relative_to(project_dir)
+            entry_rel = entry.relative_to(project_dir)
+            # Create overlay that injects frost theme + drag-drop cards
+            overlay = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>DroolingWithSanity — {slug}</title>
+<style>
+:root{{
+  --frost-bg:rgba(15,15,28,0.88);
+  --frost-surface:rgba(255,255,255,0.06);
+  --frost-border:rgba(255,255,255,0.10);
+  --accent:#a78bfa;
+  --accent2:#818cf8;
+  --green:#4ade80;
+  --red:#f87171;
+  --yellow:#fbbf24;
+  --text:rgba(255,255,255,0.88);
+  --text-dim:rgba(255,255,255,0.42);
+  --radius:14px;
+}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{
+  background:#0b0b18;
+  background-image:radial-gradient(ellipse at 20% 20%,rgba(88,60,160,0.22) 0%,transparent 55%),
+                   radial-gradient(ellipse at 80% 80%,rgba(40,80,160,0.18) 0%,transparent 55%);
+  color:var(--text);
+  font-family:"Segoe UI",system-ui,-apple-system,sans-serif;
+  min-height:100vh;
+  padding:20px;
+}}
+.frost{{
+  background:var(--frost-bg);
+  backdrop-filter:blur(24px) saturate(1.4);
+  -webkit-backdrop-filter:blur(24px) saturate(1.4);
+  border:1px solid var(--frost-border);
+  border-radius:var(--radius);
+  box-shadow:0 8px 40px rgba(0,0,0,0.55),0 0 0 1px rgba(255,255,255,0.04) inset;
+}}
+.topbar{{
+  display:flex;align-items:center;gap:12px;
+  padding:12px 16px;margin-bottom:20px;
+}}
+.topbar .logo{{font-size:15px;font-weight:700;color:var(--accent);letter-spacing:.5px}}
+.topbar .logo span{{color:var(--text-dim);font-weight:400}}
+.topbar .subtitle{{font-size:12px;color:var(--text-dim)}}
+.board{{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
+  gap:16px;
+}}
+.card{{
+  padding:16px;
+  cursor:grab;
+  transition:transform .15s,box-shadow .15s;
+}}
+.card:active{{cursor:grabbing}}
+.card.drag-over{{
+  transform:scale(1.03);
+  box-shadow:0 0 0 2px var(--accent),0 12px 48px rgba(0,0,0,.6);
+}}
+.card-header{{
+  display:flex;align-items:center;gap:8px;
+  margin-bottom:10px;
+}}
+.card-dot{{
+  width:10px;height:10px;border-radius:50%;
+}}
+.card-dot.accent{{background:var(--accent);box-shadow:0 0 8px var(--accent)}}
+.card-dot.green{{background:var(--green);box-shadow:0 0 8px var(--green)}}
+.card-dot.yellow{{background:var(--yellow);box-shadow:0 0 8px var(--yellow)}}
+.card-title{{font-size:14px;font-weight:600;color:var(--text)}}
+.card-body{{font-size:13px;color:var(--text-dim);line-height:1.5;margin-bottom:12px}}
+.cta{{
+  background:rgba(167,139,250,.18);
+  border:1px solid rgba(167,139,250,.35);
+  color:var(--accent);
+  border-radius:10px;
+  padding:8px 14px;
+  font-size:13px;
+  cursor:pointer;
+}}
+.cta:hover{{background:rgba(167,139,250,.28)}}
+.preview-frame{{
+  width:100%;
+  height:calc(100vh - 160px);
+  border:1px solid var(--frost-border);
+  border-radius:var(--radius);
+  background:#000;
+}}
+</style>
+</head>
+<body>
+  <header class="topbar frost">
+    <div class="logo">Drooling<span>WithSanity</span></div>
+    <div class="subtitle">{slug}</div>
+  </header>
+
+  <main class="board">
+    <div class="card frost" draggable="true" data-color="accent">
+      <div class="card-header">
+        <span class="card-dot accent"></span>
+        <span class="card-title">Repository</span>
+      </div>
+      <p class="card-body">Cloned repo preview with VibeCode theme.</p>
+      <button class="cta" onclick="openOriginal()">Open Original</button>
+    </div>
+
+    <div class="card frost" draggable="true" data-color="green">
+      <div class="card-header">
+        <span class="card-dot green"></span>
+        <span class="card-title">Status</span>
+      </div>
+      <p class="card-body" id="vcs-status">Loading git status…</p>
+    </div>
+
+    <div class="card frost" draggable="true" data-color="yellow">
+      <div class="card-header">
+        <span class="card-dot yellow"></span>
+        <span class="card-title">Branch</span>
+      </div>
+      <p class="card-body" id="vcs-branch">Loading…</p>
+    </div>
+  </main>
+
+  <div style="margin-top:16px">
+    <iframe id="preview" class="preview-frame" src="{entry.relative_to(project_dir) if entry else ""}"></iframe>
+  </div>
+
+  <script>
+    function openOriginal() {{
+      const src = document.getElementById('preview').src;
+      if (src) window.open(src, '_blank');
+    }}
+
+    async function loadVCS() {{
+      try {{
+        const r = await fetch('/api/vibecode/git/status/{slug}');
+        const d = await r.json();
+        if (d.branch) document.getElementById('vcs-branch').textContent = d.branch;
+        if (d.status) document.getElementById('vcs-status').textContent = d.status;
+      }} catch(e) {{
+        document.getElementById('vcs-status').textContent = 'VCS unavailable';
+      }}
+    }}
+    loadVCS();
+
+    let dragged = null;
+    document.querySelectorAll('.card').forEach(card => {{
+      card.addEventListener('dragstart', e => {{
+        dragged = card;
+        e.dataTransfer.effectAllowed = 'move';
+        setTimeout(() => card.style.opacity = '0.4', 0);
+      }});
+      card.addEventListener('dragend', () => {{
+        card.style.opacity = '1';
+        dragged = null;
+        document.querySelectorAll('.card').forEach(c => c.classList.remove('drag-over'));
+      }});
+      card.addEventListener('dragover', e => {{
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        if (card !== dragged) card.classList.add('drag-over');
+      }});
+      card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+      card.addEventListener('drop', e => {{
+        e.preventDefault();
+        card.classList.remove('drag-over');
+        if (!dragged || card === dragged) return;
+        const board = document.querySelector('.board');
+        const children = Array.from(board.children);
+        const fromIdx = children.indexOf(dragged);
+        const toIdx = children.indexOf(card);
+        if (fromIdx < toIdx) board.insertBefore(dragged, card.nextSibling);
+        else board.insertBefore(dragged, card);
+      }});
+    }});
+  </script>
+</body>
+</html>"""
+            overlay_path.write_text(overlay, encoding="utf-8")
+        else:
+            # No entry point found — create a themed directory listing overlay
+            try:
+                entries = sorted(
+                    project_dir.iterdir(), key=lambda p: (p.is_file(), p.name.lower())
+                )
+                files = [p.name for p in entries if p.name != ".git"]
+                listing = "\n".join(files)
+                overlay = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>DroolingWithSanity — {slug}</title>
+<style>
+:root{{--frost-bg:rgba(15,15,28,0.88);--frost-surface:rgba(255,255,255,0.06);--frost-border:rgba(255,255,255,0.10);--accent:#a78bfa;--text:rgba(255,255,255,0.88);--text-dim:rgba(255,255,255,0.42);--radius:14px}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:#0b0b18;color:var(--text);font-family:"Segoe UI",system-ui,sans-serif;min-height:100vh;padding:20px}}
+.frost{{background:var(--frost-bg);backdrop-filter:blur(24px) saturate(1.4);border:1px solid var(--frost-border);border-radius:var(--radius);padding:16px}}
+h1{{font-size:16px;color:var(--accent);margin-bottom:12px}}
+ul{{list-style:none}}li{{padding:4px 0}}a{{color:var(--text);text-decoration:none}}a:hover{{color:var(--accent)}}
+</style></head><body><div class="frost"><h1>{slug}</h1><p style="color:var(--text-dim);margin-bottom:12px">Repository files:</p><ul>
+"""
+                for f in files:
+                    icon = "📁" if (project_dir / f).is_dir() else "📄"
+                    overlay += f'<li><a href="{f}">{icon} {f}</a></li>\n'
+                overlay += "</ul></div></body></html>"
+                overlay_path.write_text(overlay, encoding="utf-8")
+            except Exception:
+                pass
+    except Exception:
+        # Non-fatal: if bootstrap fails, project still works normally
+        pass
+
+
 # ── Create project from template ────────────────────────────────
 
 _VIBECODE_TEMPLATES = {
@@ -18353,7 +18676,7 @@ async def vibecode_templates():
 
 
 # ── CodeMode: Project Management ─────────────────────────────────────────
-# List, browse, create, delete projects. Alpha Assistant uses these to
+# List, browse, create, delete projects. Alpha Companion uses these to
 # scaffold new coding sessions, inspect existing ones, and spin up
 # disposable containers for quick experiments.
 
@@ -18440,7 +18763,7 @@ async def codemode_delete_project(slug: str):
 
 # ── GitHub Scraping for Alpha Suggestions ─────────────────────────────────
 # Scrapes the GitHub API for trending/popular repos and turns them into
-# project suggestions the Alpha Assistant can present to the user.
+# project suggestions the Alpha Companion can present to the user.
 
 
 _GITHUB_CACHE: dict = {}
@@ -18456,7 +18779,7 @@ async def github_suggestions(
 ):
     """
     Fetch GitHub repos via the public Search API and format them as
-    project suggestions for the Alpha Assistant.
+    project suggestions for the Alpha Companion.
 
     Returns trending repos filtered by language, sorted by stars/forks,
     with metadata Alpha can use to recommend a starting point.
@@ -18540,7 +18863,7 @@ def _github_to_template(language: str, topics: list) -> str:
 
 
 def _generate_alpha_blurb(item: dict, topics: list, stars: int) -> str:
-    """Generate a friendly description the Alpha Assistant can speak."""
+    """Generate a friendly description the Alpha Companion can speak."""
     name = item.get("full_name", "this project")
     desc = item.get("description") or "No description provided"
     lang = item.get("language", "Unknown")
@@ -18776,12 +19099,11 @@ async def vibecode_run(data: dict):
                 status_code=500,
             )
 
-    url = _vibecode_get_base_url(None, slug)
-
     await proactive_notify(
         f"{slug} is running at {url}",
         Archetype.EXPLORER,
     )
+    url = _vibecode_get_base_url(None, slug)
     return {"message": f"Container started on port {port}", "url": url, "port": port}
 
 
@@ -19209,7 +19531,7 @@ async def alpha_scaffold(data: dict, request: Request):
     """
     # Get user for project_id (falls back to "anon" if not authenticated)
     try:
-        user = await get_current_user(request)
+        user = auth0_auth.get_current_user(request)
         user_id = user.get("user_id", "anon") if user else "anon"
     except Exception:
         user_id = "anon"
@@ -20580,8 +20902,6 @@ async def vibecode_preview_proxy(slug: str, request: Request):
         except Exception:
             pass
 
-    from fastapi.responses import Response as _Response
-
     return _Response(
         content=resp.content,
         status_code=resp.status_code,
@@ -20653,7 +20973,7 @@ def _vibecode_git_dir(slug: str) -> Path:
     return project_dir
 
 
-async def _vibecode_git(slug: str, *args: str) -> tuple[str, str, int]:
+async def _vibecode_git(slug: str, *args: str) -> tuple[str, str]:
     """Run a git command in the project directory."""
     project_dir = _vibecode_git_dir(slug)
     proc = await asyncio.create_subprocess_exec(

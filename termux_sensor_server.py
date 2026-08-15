@@ -33,6 +33,80 @@ LATEST_LOCATION: dict = {}
 LAST_UPDATE: float = 0.0
 LIST_AVAILABLE: list[str] = []
 
+# ─── SENSOR CATEGORIES ────────────────────────────────────────────
+# Map Android sensor names to the 6 synaptic categories.
+_SENSOR_CATEGORIES = {
+    "vision": [
+        "Camera",
+        "Depth Sensor",
+        "Camera2",
+        "Laser Sensor",
+        "ToF Sensor",
+    ],
+    "orientation": [
+        "Gyroscope",
+        "Accelerometer",
+        "Linear Acceleration",
+        "Gravity",
+        "Rotation Vector",
+        "Game Rotation Vector",
+        "Step Detector",
+        "Step Counter",
+        "Significant Motion",
+    ],
+    "acoustics": [
+        "Microphone",
+        "Audio",
+        "Sound",
+        "Ultrasonic",
+    ],
+    "touch": [
+        "Fingerprint",
+        "Touchscreen",
+        "Pressure",
+        "Temperature",
+    ],
+    "proximity": [
+        "Proximity",
+        "Magnetometer",
+        "Compass",
+    ],
+    "ambient": [
+        "Light",
+        "Hall Effect",
+        "Barometer",
+        "Ambient Temperature",
+        "Relative Humidity",
+    ],
+}
+
+
+def _categorize_sensor(name: str) -> str | None:
+    """Return category key for a sensor name, or None if uncategorized."""
+    n = name.lower()
+    for category, keywords in _SENSOR_CATEGORIES.items():
+        for kw in keywords:
+            if kw.lower() in n:
+                return category
+    return None
+
+
+def get_categorized_sensors() -> dict:
+    """Group latest sensor readings into the 6 categories."""
+    result: dict = {}
+    for category in _SENSOR_CATEGORIES.keys():
+        result[category] = {}
+    uncategorized: dict = {}
+    for name, values in LATEST_SENSORS.items():
+        cat = _categorize_sensor(name)
+        if cat:
+            result[cat][name] = values
+        else:
+            uncategorized[name] = values
+    result["other"] = uncategorized
+    return result
+
+
 # ─── GAME STATE ──────────────────────────────────────────────────
 _CAR_GAME_ACTIVE = False
 _CAR_GAME_START = 0.0
@@ -266,6 +340,15 @@ async def get_sensor_live(name: str):
             status_code=404, content={"error": f"Sensor '{name}' not found"}
         )
     return {"name": name, "values": val, "timestamp": time.time()}
+
+
+@app.get("/sensors/categorized")
+async def get_sensors_categorized():
+    """Return sensors grouped into the 6 synaptic categories."""
+    return {
+        "categories": get_categorized_sensors(),
+        "timestamp": LAST_UPDATE,
+    }
 
 
 @app.get("/sensors/list")
