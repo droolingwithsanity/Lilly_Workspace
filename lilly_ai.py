@@ -8555,7 +8555,11 @@ async def handle_intent(
             else:
                 reply = "I'm looking but I don't recognize anything specific right now."
         else:
-            reply = "I can't see anything — there's no camera feed available."
+            reply = (
+                "I don't have a camera feed right now. "
+                "If you're in the web UI, tap the camera button and allow camera permission. "
+                "If you're in the Android overlay, camera vision isn't available there yet — use the web UI instead."
+            )
         await memory.add("user", cmd)
         await memory.add("assistant", reply)
         await save_memory()
@@ -15272,7 +15276,19 @@ async function toggleCameraView(){
   const filterBar = document.getElementById('filterBar');
   const camBtnEl = document.getElementById('camBtn');
   if(_cameraViewActive){
-    if(!CameraBridge.active) await CameraBridge.start();
+    try {
+      if(!CameraBridge.active) await CameraBridge.start();
+      if(!CameraBridge.active){
+        // Camera failed to start (permission denied or no camera)
+        _cameraViewActive = false;
+        displaySpeech("I can't access the camera right now. Please grant camera permission in your browser.");
+        return;
+      }
+    } catch(e) {
+      _cameraViewActive = false;
+      displaySpeech("Camera error: " + (e.message || e));
+      return;
+    }
     if(pip){
       pip.style.display = 'block';
       pip.style.setProperty('--pip-w', _pipW+'px');
@@ -17582,8 +17598,8 @@ async def download_file(filename: str):
 def _apk_variants() -> list[dict]:
     """Discover available APK builds.
 
-    light — small overlay client (file_share/latest_apk.apk, else newest
-            lilly-overlay-v*.apk in the overlay build dir).
+    light — small overlay client (file_share/latest_apk.apk, hitomi-v*.apk,
+             else newest lilly-overlay-v*.apk under ~10MB).
     full  — large Termux-server bundle with AI backend (file_share/lilly-overlay-5*.apk).
     """
     variants: list[dict] = []
@@ -17593,8 +17609,8 @@ def _apk_variants() -> list[dict]:
         if not path or not path.is_file():
             return
         st = path.stat()
-        # variant label from filename (e.g. "v3.10-debug" → "3.10")
-        m = re.search(r"(\d+(?:\.\d+)+)", path.name)
+        # variant label from filename (e.g. "hitomi-v0.1.3" → "0.1.3", "v3.10-debug" → "3.10")
+        m = re.search(r"v?(\d+(?:\.\d+)+)", path.name)
         label = m.group(1).strip(".-") if m else "latest"
         variants.append(
             {
@@ -17607,23 +17623,34 @@ def _apk_variants() -> list[dict]:
             }
         )
 
-    # Light: prefer latest_apk.apk, then newest lilly-overlay-*.apk under ~10MB
-    light_candidates = []
-    if (fs_dir / "latest_apk.apk").exists():
-        light_candidates.append(fs_dir / "latest_apk.apk")
-    light_candidates.extend(
-        sorted(
+    def _best_light() -> Path | None:
+        # 1) Prefer newest hitomi-v*.apk by version/mtime
+        hitomi = sorted(
+            [p for p in fs_dir.glob("hitomi-v*.apk") if p.is_file()],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if hitomi:
+            return hitomi[0]
+        # 2) Fallback: explicit latest_apk.apk
+        latest = fs_dir / "latest_apk.apk"
+        if latest.exists():
+            return latest
+        # 3) Fallback: newest lilly-overlay-*.apk under ~10MB
+        overlay = sorted(
             [
                 p
                 for p in fs_dir.glob("lilly-overlay-*.apk")
-                if p.stat().st_size < 10_000_000
+                if p.is_file() and p.stat().st_size < 10_000_000
             ],
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
-    )
-    if light_candidates:
-        _add("light", light_candidates[0])
+        return overlay[0] if overlay else None
+
+    light = _best_light()
+    if light:
+        _add("light", light)
     # Full: largest lilly-overlay-*.apk (Termux-server bundle, typically >50MB)
     if fs_dir.exists():
         fulls = sorted(
