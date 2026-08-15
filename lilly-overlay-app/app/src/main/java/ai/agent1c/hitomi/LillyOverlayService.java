@@ -135,14 +135,22 @@ public class LillyOverlayService extends Service {
     private Intent speechIntent;
     private boolean sttListening = false;
     private MediaPlayer ttsPlayer;
-
     private final Handler longPressHandler = new Handler(Looper.getMainLooper());
     private boolean longPressTriggered = false;
+
     private float touchDownX, touchDownY;
     private static final int LONG_PRESS_THRESHOLD_MS = 400;
     // Small dead-zone so the overlay tracks the finger almost immediately
     // (4dp ≈ 1.3mm) while still distinguishing taps from drags.
     private static final int LONG_PRESS_MOVE_THRESHOLD_DP = 4;
+
+    // Double-tap to open radial menu
+    private static final int DOUBLE_TAP_TIMEOUT_MS = 300;
+    private static final int DOUBLE_TAP_MAX_DISTANCE_DP = 50;
+    private long lastTapTime = 0;
+    private float lastTapX = 0, lastTapY = 0;
+    private final Handler singleTapHandler = new Handler(Looper.getMainLooper());
+    private Runnable pendingToggle;
 
     private static volatile boolean overlayRunning = false;
 

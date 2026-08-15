@@ -16367,23 +16367,19 @@ async function loadApkOptions(){
   const status=document.getElementById('apk-dl-status');
   if (!area) return;
   try {
-    const r=await fetch('/api/apk/variants');
-    const list=await r.json();
-    if (!list || !list.length) {
+    const r=await fetch('/api/apk/latest');
+    if (!r.ok) {
       area.innerHTML='<div style="font-size:12px;color:rgba(93,78,109,0.5)">No overlay builds found</div>';
       return;
     }
-    // Only show the latest overlay (light) — ignore full bundle and older entries
-    const light=list.find(v=>v.type==='light');
-    if (!light) {
-      area.innerHTML='<div style="font-size:12px;color:rgba(93,78,109,0.5)">No overlay builds found</div>';
-      return;
-    }
+    const light=await r.json();
     const size=(light.size/1024/1024).toFixed(1);
     const date=new Date(light.updated*1000).toLocaleDateString();
+    const version = light.variant && light.variant !== 'latest' ? 'v' + light.variant : '';
+    const title = version ? 'Latest Overlay ' + version : 'Latest Overlay';
     const html='<a href="/api/apk/download?type=light" download style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:12px;background:rgba(74,222,128,0.12);border:1px solid rgba(74,222,128,0.25);text-decoration:none;color:#5d4e6d;transition:all 0.2s">'
-      +'<div><div style="font-size:13px;font-weight:600">Latest Overlay</div>'
-      +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">v'+light.variant+' · '+size+' MB · Updated '+date+'</div></div>'
+      +'<div><div style="font-size:13px;font-weight:600">'+title+'</div>'
+      +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+light.name+' · '+size+' MB · Updated '+date+'</div></div>'
       +'<span style="font-size:16px">⬇️</span></a>';
     area.innerHTML=html;
     if (status) status.textContent='Install from unknown sources must be enabled on your phone.';
@@ -17790,7 +17786,7 @@ def _apk_variants() -> list[dict]:
         if not path or not path.is_file():
             return
         st = path.stat()
-        # variant label from filename (e.g. "hitomi-v0.1.3" → "0.1.3", "v3.10-debug" → "3.10")
+        # variant label from filename (e.g. "hitomi-v0.1.3" → "0.1.3", "v3.10-debug" → "3.10", "lilly-overlay-4.0-debug" → "4.0")
         m = re.search(r"v?(\d+(?:\.\d+)+)", path.name)
         label = m.group(1).strip(".-") if m else "latest"
         variants.append(
@@ -17849,6 +17845,16 @@ def _apk_variants() -> list[dict]:
 @app.get("/api/apk/variants")
 async def apk_variants():
     return _apk_variants()
+
+
+@app.get("/api/apk/latest")
+async def apk_latest():
+    """Return the latest light overlay APK info."""
+    variants = _apk_variants()
+    light = next((v for v in variants if v["type"] == "light"), None)
+    if not light:
+        raise HTTPException(status_code=404, detail="No overlay build found")
+    return light
 
 
 @app.get("/api/apk/download")
