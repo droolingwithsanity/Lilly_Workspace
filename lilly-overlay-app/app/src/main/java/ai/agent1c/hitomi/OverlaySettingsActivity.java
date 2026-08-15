@@ -61,7 +61,9 @@ public class OverlaySettingsActivity extends AppCompatActivity {
             setupPhoneAssistantPreferences();
             setupOsintPreferences();
             setupServerPreferences();
+            setupPairingPreferences();
             refreshTermuxStatus();
+            refreshPairingCode();
         }
 
         @Override
@@ -447,7 +449,63 @@ public class OverlaySettingsActivity extends AppCompatActivity {
             }
         }
 
-        // ─── Helpers ────────────────────────────────────────────────
+    // ─── Pairing ────────────────────────────────────────────────
+
+    private void setupPairingPreferences() {
+        Preference refresh = findPreference("refresh_pairing");
+        if (refresh != null) {
+            refresh.setOnPreferenceClickListener(p -> {
+                refreshPairingCode();
+                return true;
+            });
+        }
+
+        EditTextPreference pairingCode = findPreference("pairing_code");
+        if (pairingCode != null) {
+            pairingCode.setOnPreferenceClickListener(p -> {
+                // Copy to clipboard when tapped
+                String code = pairingCode.getText();
+                if (code != null && !code.isEmpty()) {
+                    android.content.ClipboardManager cm =
+                        (android.content.ClipboardManager) requireContext().getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+                    if (cm != null) {
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("Lilly Pair", code));
+                        Toast.makeText(requireContext(), "Copied to clipboard", Toast.LENGTH_SHORT).show();
+                    }
+                }
+                return true;
+            });
+        }
+    }
+
+    private void refreshPairingCode() {
+        updateSummary("pairing_code", "Loading...");
+        executor.execute(() -> {
+            try {
+                LocalPhoneClient client = new LocalPhoneClient();
+                String response = client.get("/api/pair_token");
+                org.json.JSONObject obj = new org.json.JSONObject(response);
+                String token = obj.optString("token", "");
+                mainHandler.post(() -> {
+                    if (token.isEmpty()) {
+                        updateSummary("pairing_code", "Phone server not running");
+                    } else {
+                        EditTextPreference pairingCode = findPreference("pairing_code");
+                        if (pairingCode != null) {
+                            pairingCode.setText(token);
+                            pairingCode.setSummary("Tap to copy");
+                        }
+                    }
+                });
+            } catch (Exception e) {
+                mainHandler.post(() -> {
+                    updateSummary("pairing_code", "Error: " + e.getMessage());
+                });
+            }
+        });
+    }
+
+    // ─── Helpers ────────────────────────────────────────────────
 
         private SharedPreferences getPrefs() {
             return PreferenceManager.getDefaultSharedPreferences(requireContext());

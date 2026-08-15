@@ -165,4 +165,23 @@
 
     </PreferenceCategory>
 
+    <!-- Pairing -->
+    <PreferenceCategory app:title="Pairing">
+
+        <EditTextPreference
+            app:key="pairing_code"
+            app:title="Pairing Code"
+            app:summary="Tap to view/copy the current pairing code"
+            app:defaultValue=""
+            app:enabled="false"
+            app:dialogTitle="Pairing Code" />
+
+        <Preference
+            app:key="refresh_pairing"
+            app:title="Refresh Pairing Code"
+            app:summary="Generate a new pairing code"
+            app:icon="@android:drawable/ic_menu_upload" />
+
+    </PreferenceCategory>
+
 </PreferenceScreen>
