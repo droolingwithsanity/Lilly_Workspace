@@ -37,6 +37,17 @@ public class MainActivity extends AppCompatActivity {
         stopBtn = findViewById(R.id.stopOverlay);
         settingsBtn = findViewById(R.id.openSettings);
 
+        // Set version dynamically from package info
+        try {
+            String version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            TextView versionView = findViewById(R.id.appVersionText);
+            if (versionView != null) {
+                versionView.setText("v" + version);
+            }
+        } catch (Exception e) {
+            // Fallback: use string resource
+        }
+
         startBtn.setOnClickListener(v -> checkPermissionsAndStart());
         stopBtn.setOnClickListener(v -> {
             Intent intent = new Intent(this, LillyOverlayService.class);

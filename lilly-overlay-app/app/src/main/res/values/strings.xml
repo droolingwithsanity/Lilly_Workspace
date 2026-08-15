@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Lilly</string>
-    <string name="app_version">v3.11-debug</string>
+    <string name="app_version">v4.0</string>
     <string name="app_subtitle">AI Companion</string>
 
     <!-- ─── Quick Actions Menu ─── -->
@@ -50,4 +50,14 @@
     <string name="status_offline">Offline</string>
     <string name="status_scanning">Scanning...</string>
     <string name="status_trip_complete">Trip complete! Drove %1$.1f km.</string>
+
+    <!-- ─── Recent Changes ─── -->
+    <string name="recent_changes_title">Recent Changes</string>
+    <string name="recent_changes_1">• Removed Alpha badge and emojis from chat</string>
+    <string name="recent_changes_2">• Added self-echo suppression to avoid hearing itself</string>
+    <string name="recent_changes_3">• Overlay v4.0 with watch-face UI and radial menu</string>
+    <string name="recent_changes_4">• Real AR camera + YOLO object detection</string>
+    <string name="recent_changes_5">• Real microphone stream with frequency visualization</string>
+    <string name="recent_changes_6">• Fixed Termux bridge: auto-launch if not running</string>
+    <string name="recent_changes_7">• Transparent backgrounds, no more cut-off artifacts</string>
 </resources>

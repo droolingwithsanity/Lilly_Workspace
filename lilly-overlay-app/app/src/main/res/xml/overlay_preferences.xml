@@ -148,4 +148,21 @@
 
     </PreferenceCategory>
 
+    <!-- About -->
+    <PreferenceCategory app:title="About">
+
+        <Preference
+            app:key="app_version"
+            app:title="Version"
+            app:summary="4.0"
+            app:icon="@android:drawable/ic_dialog_info" />
+
+        <Preference
+            app:key="recent_changes"
+            app:title="Recent Changes"
+            app:summary="Removed Alpha badge/emojis, added self-echo suppression, watch-face UI, AR camera, YOLO detection, real mic stream, Termux bridge auto-launch"
+            app:icon="@android:drawable/ic_menu_upload" />
+
+    </PreferenceCategory>
+
 </PreferenceScreen>

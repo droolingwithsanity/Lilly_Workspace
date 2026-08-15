@@ -23,6 +23,7 @@
             android:layout_marginBottom="4dp" />
 
         <TextView
+            android:id="@+id/appVersionText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/app_version"
@@ -94,6 +95,79 @@
             android:textSize="11sp"
             android:textColor="#5D4E6D80"
             android:layout_marginBottom="12dp" />
+
+        <!-- Recent Changes -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#5D4E6D33"
+            android:layout_marginTop="20dp"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/recent_changes_title"
+            android:textSize="14sp"
+            android:textColor="#5D4E6D"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/recent_changes_1"
+            android:textSize="11sp"
+            android:textColor="#5D4E6D80"
+            android:layout_marginBottom="2dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/recent_changes_2"
+            android:textSize="11sp"
+            android:textColor="#5D4E6D80"
+            android:layout_marginBottom="2dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/recent_changes_3"
+            android:textSize="11sp"
+            android:textColor="#5D4E6D80"
+            android:layout_marginBottom="2dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/recent_changes_4"
+            android:textSize="11sp"
+            android:textColor="#5D4E6D80"
+            android:layout_marginBottom="2dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/recent_changes_5"
+            android:textSize="11sp"
+            android:textColor="#5D4E6D80"
+            android:layout_marginBottom="2dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/recent_changes_6"
+            android:textSize="11sp"
+            android:textColor="#5D4E6D80"
+            android:layout_marginBottom="2dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/recent_changes_7"
+            android:textSize="11sp"
+            android:textColor="#5D4E6D80"
+            android:layout_marginBottom="2dp" />
 
     </LinearLayout>
 </ScrollView>
