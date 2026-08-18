@@ -1320,6 +1320,14 @@ def _clean_transcription_fillers(text: str) -> str:
     return result
 
 
+# ─── LLM RESPONSE CACHE (buffer middle man) ──────────────────────
+# In-memory cache for repeated LLM prompts. Reduces latency for
+# common questions by returning cached responses instantly.
+_LLM_RESPONSE_CACHE: dict[str, dict] = {}
+_LLM_CACHE_TTL: float = 300.0  # 5 minutes
+_LLM_CACHE_MAX: int = 200  # max entries before pruning
+
+
 class LlamaBackend:
     """Manages Ollama inference requests (unified backend)."""
 
@@ -1335,6 +1343,34 @@ class LlamaBackend:
         model: str = "",
     ) -> str:
         use_model = model or OLLAMA_MODEL
+
+        # ── Response cache (buffer middle man) ────────────────────────
+        # Cache key = hash of messages + temperature + model + max_tokens
+        # Repeated prompts return instantly from cache.
+        try:
+            import hashlib, json as _json
+
+            cache_key_data = _json.dumps(
+                {
+                    "messages": messages,
+                    "temperature": temperature,
+                    "model": use_model,
+                    "max_tokens": max_tokens,
+                },
+                sort_keys=True,
+            )
+            cache_key = hashlib.sha256(cache_key_data.encode()).hexdigest()[:32]
+            cached = _LLM_RESPONSE_CACHE.get(cache_key)
+            if cached is not None:
+                age = time.time() - cached["ts"]
+                if age < _LLM_CACHE_TTL:
+                    logger.debug(f"LLM cache HIT ({age:.1f}s old)")
+                    return cached["text"]
+                else:
+                    _LLM_RESPONSE_CACHE.pop(cache_key, None)
+        except Exception:
+            pass  # Cache failures are non-fatal
+
         payload = {
             "model": use_model,
             "messages": messages,
@@ -1353,10 +1389,40 @@ class LlamaBackend:
                 if r.status_code == 200:
                     data = r.json()
                     msg = data.get("message", {})
-                    text = (msg.get("content") or msg.get("thinking") or "").strip()
-                    if not text and msg.get("thinking"):
-                        text = msg["thinking"].strip()
-                    return strip_think_tags(text) if text else ""
+                    # Only use the final content — ignore internal reasoning/thinking
+                    text = (msg.get("content") or "").strip()
+                    result = strip_think_tags(text) if text else ""
+                    # Store in cache
+                    try:
+                        import hashlib, json as _json
+
+                        cache_key_data = _json.dumps(
+                            {
+                                "messages": messages,
+                                "temperature": temperature,
+                                "model": use_model,
+                                "max_tokens": max_tokens,
+                            },
+                            sort_keys=True,
+                        )
+                        cache_key = hashlib.sha256(cache_key_data.encode()).hexdigest()[
+                            :32
+                        ]
+                        _LLM_RESPONSE_CACHE[cache_key] = {
+                            "text": result,
+                            "ts": time.time(),
+                        }
+                        # Prune stale entries if cache is getting large
+                        if len(_LLM_RESPONSE_CACHE) > _LLM_CACHE_MAX:
+                            now = time.time()
+                            _LLM_RESPONSE_CACHE = {
+                                k: v
+                                for k, v in _LLM_RESPONSE_CACHE.items()
+                                if now - v["ts"] < _LLM_CACHE_TTL
+                            }
+                    except Exception:
+                        pass  # Cache storage failures are non-fatal
+                    return result
             except Exception as e:
                 logger.debug(f"Ollama attempt {attempt} failed: {e}")
                 if attempt == 0:
@@ -1381,6 +1447,8 @@ class LlamaBackend:
             "options": {
                 "temperature": temperature,
                 "num_predict": max_tokens,
+                # Qwen3 reasoning models: disable thinking output for normal chat.
+                "think": False,
             },
         }
         try:
@@ -1395,8 +1463,7 @@ class LlamaBackend:
                         chunk = json.loads(line)
                         if chunk.get("done"):
                             break
-                        msg = chunk.get("message", {})
-                        token = msg.get("content", "") or msg.get("thinking", "") or ""
+                        token = chunk.get("message", {}).get("content", "")
                         if token:
                             cleaned = re.sub(
                                 r"<think>.*?</think>", "", token, flags=re.DOTALL
