@@ -134,7 +134,7 @@ except ImportError:
 # ─── CONFIGURATION ───────────────────────────────────────────────
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://100.73.249.14:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.8-27b-q4")
-FAST_MODEL = os.environ.get("FAST_MODEL", "qwen3.8-27b-q4")
+FAST_MODEL = os.environ.get("FAST_MODEL", "qwen2.5:3b")
 PIPER_BIN = shutil.which("piper") or os.environ.get(
     "PIPER_BIN", "/usr/local/piper/piper"
 )
@@ -1323,7 +1323,6 @@ def _clean_transcription_fillers(text: str) -> str:
 # ─── LLM RESPONSE CACHE (buffer middle man) ──────────────────────
 # In-memory cache for repeated LLM prompts. Reduces latency for
 # common questions by returning cached responses instantly.
-_LLM_RESPONSE_CACHE: dict[str, dict] = {}
 _LLM_CACHE_TTL: float = 300.0  # 5 minutes
 _LLM_CACHE_MAX: int = 200  # max entries before pruning
 
@@ -1333,6 +1332,8 @@ class LlamaBackend:
 
     def __init__(self):
         self.model_name = ""
+        # Per-instance response cache (avoid global state confusion)
+        self._response_cache: dict[str, dict] = {}
 
     async def chat(
         self,
@@ -1360,14 +1361,14 @@ class LlamaBackend:
                 sort_keys=True,
             )
             cache_key = hashlib.sha256(cache_key_data.encode()).hexdigest()[:32]
-            cached = _LLM_RESPONSE_CACHE.get(cache_key)
+            cached = self._response_cache.get(cache_key)
             if cached is not None:
                 age = time.time() - cached["ts"]
                 if age < _LLM_CACHE_TTL:
                     logger.debug(f"LLM cache HIT ({age:.1f}s old)")
                     return cached["text"]
                 else:
-                    _LLM_RESPONSE_CACHE.pop(cache_key, None)
+                    self._response_cache.pop(cache_key, None)
         except Exception:
             pass  # Cache failures are non-fatal
 
@@ -1408,16 +1409,16 @@ class LlamaBackend:
                         cache_key = hashlib.sha256(cache_key_data.encode()).hexdigest()[
                             :32
                         ]
-                        _LLM_RESPONSE_CACHE[cache_key] = {
+                        self._response_cache[cache_key] = {
                             "text": result,
                             "ts": time.time(),
                         }
                         # Prune stale entries if cache is getting large
-                        if len(_LLM_RESPONSE_CACHE) > _LLM_CACHE_MAX:
+                        if len(self._response_cache) > _LLM_CACHE_MAX:
                             now = time.time()
-                            _LLM_RESPONSE_CACHE = {
+                            self._response_cache = {
                                 k: v
-                                for k, v in _LLM_RESPONSE_CACHE.items()
+                                for k, v in self._response_cache.items()
                                 if now - v["ts"] < _LLM_CACHE_TTL
                             }
                     except Exception:
@@ -1478,6 +1479,145 @@ class LlamaBackend:
             return
 
 
+# ─── TWO-TIER LLM (baton race) ───────────────────────────────────
+# Fast model answers first; quality model warms up in the background.
+# Responses from the quality model are cached for repeat queries.
+class TwoTierLLM:
+    """Baton-race LLM: fast model answers immediately, quality model caches in background."""
+
+    def __init__(self, fast_model: str, quality_model: str):
+        self.fast_model = fast_model
+        self.quality_model = quality_model
+
+    async def chat(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 80,
+        timeout: int = 120,
+        model: str = "",
+    ) -> str:
+        # Determine which model to use for this request
+        use_fast = not model or model == OLLAMA_MODEL
+        fast_model = self.fast_model
+        quality_model = model or self.quality_model
+
+        # Fast path: get quick response from small model
+        fast_reply = ""
+        try:
+            fast_reply = await llama_backend.chat(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=min(timeout, 60),
+                model=fast_model,
+            )
+        except Exception as e:
+            logger.debug(f"TwoTier fast model failed: {e}")
+
+        # Background: warm up quality model and cache result
+        if fast_reply:
+            asyncio.create_task(
+                self._warm_quality_model(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=timeout,
+                    model=quality_model,
+                )
+            )
+            return fast_reply
+
+        # Fallback: if fast model failed, try quality model synchronously
+        try:
+            return await llama_backend.chat(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                model=quality_model,
+            )
+        except Exception as e:
+            logger.debug(f"TwoTier quality fallback failed: {e}")
+            return ""
+
+    async def _warm_quality_model(
+        self,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+        timeout: int,
+        model: str,
+    ) -> None:
+        """Background task: call quality model and cache the result."""
+        try:
+            quality_reply = await llama_backend.chat(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                model=model,
+            )
+            if quality_reply:
+                # Cache the quality response
+                import hashlib, json as _json
+
+                cache_key_data = _json.dumps(
+                    {
+                        "messages": messages,
+                        "temperature": temperature,
+                        "model": model,
+                        "max_tokens": max_tokens,
+                    },
+                    sort_keys=True,
+                )
+                cache_key = hashlib.sha256(cache_key_data.encode()).hexdigest()[:32]
+                llama_backend._response_cache[cache_key] = {
+                    "text": quality_reply,
+                    "ts": time.time(),
+                    "quality": True,
+                }
+                logger.debug(
+                    f"TwoTier: cached quality response ({len(quality_reply)} chars)"
+                )
+        except Exception as e:
+            logger.debug(f"TwoTier background warmup failed: {e}")
+
+    async def chat_stream(
+        self,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 80,
+        model: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
+        """Stream from fast model; background caches quality model."""
+        use_model = model or self.quality_model
+        fast_model = self.fast_model
+
+        # Stream from fast model immediately
+        try:
+            async for token in llama_backend.chat_stream(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                model=fast_model,
+            ):
+                yield token
+        except Exception as e:
+            logger.debug(f"TwoTier stream fast model failed: {e}")
+
+        # Background: cache quality model response
+        asyncio.create_task(
+            self._warm_quality_model(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=120,
+                model=use_model,
+            )
+        )
+
+
 # Persistent clients — reused across requests to avoid TCP reconnect overhead
 _ollama_client: Optional[httpx.AsyncClient] = None
 _whisper_client: Optional[httpx.AsyncClient] = None
@@ -1532,6 +1672,7 @@ async def _get_mc_client() -> httpx.AsyncClient:
 
 
 llama_backend = LlamaBackend()
+two_tier_backend = TwoTierLLM(fast_model=FAST_MODEL, quality_model=OLLAMA_MODEL)
 
 
 # ─── UTILITY FUNCTIONS ──────────────────────────────────────────
@@ -8961,7 +9102,7 @@ async def handle_intent(
     # lets Lilly be chatty and friend-like.
     temp = 0.7
     reply = strip_json_wrapper(
-        await llama_backend.chat(messages, temperature=temp, max_tokens=120)
+        await two_tier_backend.chat(messages, temperature=temp, max_tokens=120)
     )
 
     # ── Grounding guard #3: post-filter — strip known hallucination patterns
@@ -19002,11 +19143,11 @@ async def save_pushbullet_setting(request: Request):
 
 
 @app.post("/api/settings/sensor")
-async def save_sensor_setting(request: Request):  # type: ignore[valid-type]
-    user = await get_current_user(request)
+async def save_sensor_setting(req):
+    user = await get_current_user(req)
     uid = user.get("id") if user else "anonymous"
     try:
-        body = await request.json()
+        body = await req.json()
         url = (body.get("url") or "").strip()
     except Exception:
         url = ""
@@ -19017,11 +19158,11 @@ async def save_sensor_setting(request: Request):  # type: ignore[valid-type]
 
 
 @app.post("/api/settings/pair-token")
-async def save_pair_token_setting(request: Request):  # type: ignore[valid-type]
-    user = await get_current_user(request)
+async def save_pair_token_setting(req):
+    user = await get_current_user(req)
     uid = user.get("id") if user else "anonymous"
     try:
-        body = await request.json()
+        body = await req.json()
         token = (body.get("token") or "").strip()
     except Exception:
         token = ""
@@ -19037,11 +19178,11 @@ async def save_pair_token_setting(request: Request):  # type: ignore[valid-type]
 
 
 @app.get("/api/settings/pair")
-async def get_settings_pair_token(request: Request):  # type: ignore[valid-type]
+async def get_settings_pair_token(req):
     """Return a device pair token for the current authenticated user.
     If the user has no token yet, create one and store it in _device_tokens.
     """
-    user = await get_current_user(request) if AUTH_AVAILABLE else None
+    user = await get_current_user(req) if AUTH_AVAILABLE else None
     if not user or not user.get("id"):
         raise HTTPException(status_code=401, detail="Not authenticated")
     uid = user["id"]
