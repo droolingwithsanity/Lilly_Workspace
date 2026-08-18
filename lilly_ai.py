@@ -1330,8 +1330,8 @@ class LlamaBackend:
         self,
         messages: list[dict],
         temperature: float = 0.7,
-        max_tokens: int = 256,
-        timeout: int = 25,
+        max_tokens: int = 80,
+        timeout: int = 120,
         model: str = "",
     ) -> str:
         use_model = model or OLLAMA_MODEL
@@ -1351,7 +1351,11 @@ class LlamaBackend:
                     f"{OLLAMA_URL}/api/chat", json=payload, timeout=timeout
                 )
                 if r.status_code == 200:
-                    text = r.json()["message"]["content"].strip()
+                    data = r.json()
+                    msg = data.get("message", {})
+                    text = (msg.get("content") or msg.get("thinking") or "").strip()
+                    if not text and msg.get("thinking"):
+                        text = msg["thinking"].strip()
                     return strip_think_tags(text) if text else ""
             except Exception as e:
                 logger.debug(f"Ollama attempt {attempt} failed: {e}")
@@ -1365,7 +1369,7 @@ class LlamaBackend:
         self,
         messages: list[dict],
         temperature: float = 0.7,
-        max_tokens: int = 256,
+        max_tokens: int = 80,
         model: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """Stream chat response token by token. Yields text chunks as they arrive."""
@@ -1382,7 +1386,7 @@ class LlamaBackend:
         try:
             c = await _get_ollama_client()
             async with c.stream(
-                "POST", f"{OLLAMA_URL}/api/chat", json=payload, timeout=60.0
+                "POST", f"{OLLAMA_URL}/api/chat", json=payload, timeout=120.0
             ) as r:
                 async for line in r.aiter_lines():
                     if not line:
@@ -1391,7 +1395,8 @@ class LlamaBackend:
                         chunk = json.loads(line)
                         if chunk.get("done"):
                             break
-                        token = chunk.get("message", {}).get("content", "")
+                        msg = chunk.get("message", {})
+                        token = msg.get("content", "") or msg.get("thinking", "") or ""
                         if token:
                             cleaned = re.sub(
                                 r"<think>.*?</think>", "", token, flags=re.DOTALL
