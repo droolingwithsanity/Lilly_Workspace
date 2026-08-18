@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lilly AI v2 — Digital assistant for Android + web.
+Lilly AI v6.0 — Digital assistant for Android + web.
 Architecture:
   FastAPI server (port 8098)
   ├── llama.cpp / Ollama backend
@@ -32,6 +32,9 @@ Key endpoints:
   /api/google/gmail  GET   Gmail inbox (with OAuth)
   /api/google/calendar GET Calendar events (with OAuth)
   /api/openhuman/*   GET/POST OpenHuman catalog/skills/refresh/avatars
+  /api/pair/initiate POST  Generate 6-digit pairing code (v6.0)
+  /api/pair/confirm  POST  Exchange code for device token (v6.0)
+  /api/pair/status   GET   Check pairing code validity (v6.0)
 
 Environment:
   SENSOR_SERVER_URL  Android APK webserver (default: http://100.115.234.87:8099)
@@ -130,8 +133,8 @@ except ImportError:
 
 # ─── CONFIGURATION ───────────────────────────────────────────────
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://100.93.131.114:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
-FAST_MODEL = os.environ.get("FAST_MODEL", "qwen2.5:7b")  # for creative/story tasks
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
+FAST_MODEL = os.environ.get("FAST_MODEL", "qwen3:8b")  # for creative/story tasks
 PIPER_BIN = shutil.which("piper") or os.environ.get(
     "PIPER_BIN", "/usr/local/piper/piper"
 )
@@ -405,15 +408,11 @@ AVATAR_SKILL_TAGS = {
     "raccoon": ["coding", "hacking", "gadgets", "tools", "cli"],
 }
 
-# ── TencentDB Agent Memory (4-layer memory pyramid) ─────────────────────
-# Maps Lilly's 7 senses to the/tencentDB memory layers:
-#   Eyes 👁️ → L2 Scenario / L1 Atom (light, vision)
-#   Ears 👂 → L0 Conversation / L1 Atom (speech, audio)
-#   Nose 👃 → L2 Scenario / L1 Atom (temperature, pressure)
-#   Tongue 👅 → L2 Scenario / L1 Atom (proximity, ambient light)
-#   Skin ✋ → L2 Scenario / L1 Atom (motion, touch)
-#   Heart ❤️ → L1 Atom / L3 Core (battery, power)
-#   Brain 🧠 → L3 Core / L1 Atom (preferences, facts, cross-avatar awareness)
+# ── Local Memory (free, built-in) ──────────────────────────────────────────
+# Lilly AI includes a local memory server that provides the same 4-layer
+# memory pyramid as TencentDB but uses local JSON files instead of cloud.
+# This is the default and requires no external service.
+# Set TENCENTDB_GATEWAY_URL to use the external TencentDB service instead.
 TENCENTDB_GATEWAY_URL = os.environ.get("TENCENTDB_GATEWAY_URL", "http://localhost:8420")
 TENCENTDB_API_KEY = os.environ.get("TENCENTDB_API_KEY", "tdai-memory-key")
 
@@ -430,6 +429,10 @@ except ImportError:
 
 
 SENSOR_SERVER_URL = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8099")
+# Derive phone server URL from sensor server URL (overlay APK :8099 → phone server :8097)
+_PHONE_SERVER_FROM_SENSOR = SENSOR_SERVER_URL.replace(":8099", ":8097")
+PHONE_SERVER_URL = os.environ.get("PHONE_SERVER_URL", _PHONE_SERVER_FROM_SENSOR)
+LILLY_PAIR_TOKEN = os.environ.get("LILLY_PAIR_TOKEN", "")
 VISION_SERVER_URL = os.environ.get("VISION_SERVER_URL", "")
 WHISPER_SERVER_URL = os.environ.get("WHISPER_SERVER_URL", "http://localhost:8001")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "Systran/faster-whisper-large-v3")
@@ -1423,9 +1426,13 @@ async def _get_ollama_client() -> httpx.AsyncClient:
 async def _get_sensor_client() -> httpx.AsyncClient:
     global _sensor_client
     if _sensor_client is None or _sensor_client.is_closed:
+        headers = {"Accept": "application/json"}
+        if LILLY_PAIR_TOKEN:
+            headers["X-Pair-Token"] = LILLY_PAIR_TOKEN
         _sensor_client = httpx.AsyncClient(
             timeout=10.0,
             limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
+            headers=headers,
         )
     return _sensor_client
 
@@ -2038,6 +2045,55 @@ _openhuman_catalog_ttl: float = 300.0  # 5 minutes
 _openhuman_avatar_skills: dict[str, dict] = {}
 
 
+def _is_iphone_ios_skill(entry: dict) -> bool:
+    """Return True if a catalog entry is exclusively an iPhone/iOS app skill.
+
+    Filters out skills whose only target platforms are iOS-family, or whose
+    name/tags/description explicitly identify them as iPhone/iOS-only when no
+    cross-platform markers are present.
+    """
+    platforms = [str(p).lower() for p in (entry.get("platforms") or [])]
+    cross_platform_markers = {
+        "linux",
+        "windows",
+        "macos",
+        "android",
+        "web",
+        "cross-platform",
+        "desktop",
+    }
+    ios_only_platforms = {"ios", "iphone", "ipados", "watchos", "tvos"}
+
+    # If platforms includes any cross-platform or macOS/Android/Linux/Windows marker, keep it
+    if any(p in cross_platform_markers for p in platforms):
+        return False
+
+    # If platforms is exclusively iOS-family, drop it
+    if platforms and all(p in ios_only_platforms for p in platforms):
+        return True
+
+    # For entries with no/missing platforms, check name/tags/description for explicit iPhone/iOS app markers
+    text_blob = " ".join(
+        [
+            str(entry.get("name", "")),
+            str(entry.get("description", "")),
+            " ".join(str(t) for t in entry.get("tags", [])),
+        ]
+    ).lower()
+
+    # Look for standalone "iphone" or "ios" words (not substrings like "iosif" or "iphonecase")
+    has_iphone = bool(re.search(r"\biphone\b", text_blob))
+    has_ios = bool(re.search(r"\bios\b", text_blob))
+
+    if has_iphone or has_ios:
+        # Keep if it also has cross-platform indicators
+        if any(marker in text_blob for marker in cross_platform_markers):
+            return False
+        return True
+
+    return False
+
+
 async def _fetch_openhuman_catalog(force_refresh: bool = False) -> list[dict]:
     """Fetch the OpenHuman skill catalog from the bridge service.
 
@@ -2060,6 +2116,8 @@ async def _fetch_openhuman_catalog(force_refresh: bool = False) -> list[dict]:
             if resp.status_code == 200:
                 data = resp.json()
                 entries = data.get("entries", [])
+                # Filter out iPhone/iOS-only app skills — Lilly runs on Android
+                entries = [e for e in entries if not _is_iphone_ios_skill(e)]
                 _openhuman_catalog_cache = entries
                 _openhuman_catalog_loaded = now
                 logger.info(
@@ -3135,6 +3193,14 @@ async def termux_sensor_read(sensor_name: str, timeout: float = 15.0) -> Optiona
             SENSOR_SERVER_OK = False
         logger.debug(f"Sensor server read failed ({sensor_name}): {e}")
         return None
+
+
+def _sensor_headers() -> dict:
+    """Build headers for sensor server requests, including pair token if set."""
+    headers = {"Accept": "application/json"}
+    if LILLY_PAIR_TOKEN:
+        headers["X-Pair-Token"] = LILLY_PAIR_TOKEN
+    return headers
 
 
 async def termux_sensor_read_all(timeout: float = 20.0) -> dict:
@@ -8130,6 +8196,27 @@ async def handle_intent(
             gated = await _gate_phone_action(skill, skill_arg)
             if gated:
                 return {"action": "handled", "text": gated}
+            # YouTube: if not paired, open in web PiP instead of phone
+            if pkg in (
+                "com.google.android.youtube",
+                "com.google.android.apps.youtube.music",
+            ):
+                url = uri_template or "https://www.youtube.com"
+                if skill_arg and "{}" in url:
+                    url = url.replace("{}", urllib.parse.quote(skill_arg))
+                elif skill_arg:
+                    url = (
+                        "https://www.youtube.com/results?search_query="
+                        + urllib.parse.quote(skill_arg)
+                    )
+                reply = f"Opening {skill.get('label', 'YouTube')}!"
+                await speak(reply)
+                return {
+                    "action": "handled",
+                    "text": reply,
+                    "open_url": url,
+                    "web_pip": True,
+                }
             await app_process_monkey_intent(pkg, intent_action, uri_template, skill_arg)
             reply = f"Launching {skill.get('label', 'app')}!"
         elif action == "shell_command":
@@ -9855,17 +9942,6 @@ async def proactive_suggestion_loop():
         # Build a contextual proactive message
         messages_options = []
 
-        if recent:
-            # Something they were recently into
-            r_topic = random.choice(recent)
-            messages_options.extend(
-                [
-                    f"Hey, we were talking about {r_topic} earlier — want to pick that up?",
-                    f"I was thinking about our {r_topic} conversation. Want to know something cool about it?",
-                    f"Remember when we talked about {r_topic}? I found it interesting.",
-                ]
-            )
-
         if topic and topic not in (recent or []):
             messages_options.extend(
                 [
@@ -9962,7 +10038,8 @@ async def _ensure_sensor_server():
     await asyncio.sleep(1.0)
 
     # Start the sensor server in background on the phone
-    cmd = f"nohup python3 ~/termux_sensor_server.py --port 8099 > ~/sensor_server.log 2>&1 &"
+    pair_env = f"LILLY_PAIR_TOKEN={LILLY_PAIR_TOKEN} " if LILLY_PAIR_TOKEN else ""
+    cmd = f"nohup {pair_env}python3 ~/termux_sensor_server.py --port 8099 > ~/sensor_server.log 2>&1 &"
     await termux_run(["sh", "-c", cmd], timeout=5.0)
 
     # Wait for it to come up (retry up to 8 seconds)
@@ -12081,6 +12158,7 @@ async def browser_mic_upload(request: Request):
         return {"status": "noise"}
 
     # Resolve the signed-in user so memory is isolated per Google account
+    _user_name = ""
     if AUTH_AVAILABLE:
         user_info = await get_current_user(request)
         if user_info:
@@ -12848,6 +12926,38 @@ async def status():
 # skills without needing the Rust core running.
 
 
+@app.get("/api/lilly_skills")
+async def lilly_skills_api(limit: int = Query(100, description="Max skills to return")):
+    """Return loaded skills from lilly_skills.json."""
+    seen = set()
+    skills = []
+    for key, skill in SKILLS.items():
+        # Deduplicate by normalized label/package to avoid alias duplicates
+        label = normalize_text(skill.get("label", ""))
+        pkg = skill.get("package", "")
+        dedup_key = (label, pkg)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        skills.append(
+            {
+                "id": key,
+                "name": skill.get("label", key),
+                "description": skill.get("canned_reply", skill.get("description", "")),
+                "source": "builtin",
+                "category": skill.get("category", ""),
+                "tags": skill.get("tags", []),
+                "aliases": skill.get("aliases", []),
+                "commands": skill.get("commands", {}),
+                "package": skill.get("package", ""),
+                "uri_template": skill.get("uri_template", ""),
+            }
+        )
+        if len(skills) >= limit:
+            break
+    return {"skills": skills, "count": len(skills)}
+
+
 @app.get("/api/openhuman/catalog")
 async def openhuman_browse_catalog(
     force_refresh: bool = Query(
@@ -12856,6 +12966,7 @@ async def openhuman_browse_catalog(
     avatar: str | None = Query(
         None, description="Filter to skills available for this avatar"
     ),
+    limit: int = Query(200, description="Max catalog entries to return"),
 ):
     """Browse the OpenHuman community skill catalog.
 
@@ -12877,7 +12988,7 @@ async def openhuman_browse_catalog(
             ):
                 filtered.append(e)
         entries = filtered
-    return {"entries": entries, "count": len(entries)}
+    return {"entries": entries[:limit], "count": min(len(entries), limit)}
 
 
 @app.get("/api/openhuman/skills")
@@ -13277,8 +13388,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
 <title>DroolingWithSanity — Lilly</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <!-- Auth0 handles login via HTTP redirect (/api/auth0/login) -->
 <style>
+
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body,html{width:100%;height:100%;overflow:hidden;font-family:-apple-system,'Segoe UI',system-ui,sans-serif;color:#5d4e6d;background:#f0e6ef}
 body.drag-over{outline:3px dashed rgba(139,122,158,0.6);outline-offset:-6px;background:rgba(240,230,239,0.15)}
@@ -13327,9 +13440,9 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 .stream-indicator{position:absolute;bottom:8px;right:12px;font-size:10px;color:rgba(93,78,109,0.6);animation:pulse 1.5s infinite}
 
 @keyframes pulse{0%{opacity:1}50%{opacity:0.5}100%{opacity:1}}
+  /* ─── Input Panel ─── */
 
-/* ─── Input Panel ─── */
-.input-panel{position:absolute;bottom:28px;left:50%;transform:translateX(-50%);width:92%;max-width:620px;z-index:10;background:rgba(255,255,255,0.45);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:28px;padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;box-shadow:0 4px 30px rgba(180,140,180,0.12)}
+  .input-panel{position:absolute;bottom:28px;left:50%;transform:translateX(-50%);width:92%;max-width:620px;z-index:25;background:rgba(255,255,255,0.45);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:28px;padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;box-shadow:0 4px 30px rgba(180,140,180,0.12);pointer-events:auto}
 .input-panel input{flex:1;background:rgba(255,255,255,0.4);border:none;outline:none;border-radius:16px;font-size:15px;padding:12px 16px;color:#5d4e6d;font-weight:400}
 .input-panel input::placeholder{color:rgba(93,78,109,0.3)}
 .btn-mic{background:rgba(255,255,255,0.4);border:none;border-radius:50%;width:44px;height:44px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.25s}
@@ -13345,6 +13458,11 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 #chatContainer{position:absolute;bottom:80px;left:50%;transform:translateX(-50%);width:92%;max-width:620px;max-height:30vh;z-index:15;background:rgba(255,255,255,0.35);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.5);border-radius:16px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(180,140,180,0.12)}
 #chatContainer.active{display:flex}
 #chatMessages{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:8px;scroll-behavior:smooth}
+@media (max-width:640px){
+  #chatContainer{max-height:40vh;width:min(96vw,520px)}
+  .input-panel{width:96%;bottom:16px;padding:8px}
+  .input-panel input{font-size:14px;padding:10px 12px}
+}
 #chatMessages::-webkit-scrollbar{width:4px}
 #chatMessages::-webkit-scrollbar-track{background:transparent;border-radius:2px}
 #chatMessages::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.2);border-radius:2px}
@@ -13539,11 +13657,14 @@ pre{position:relative;overflow-x:auto}
 /* ─── Hamburger Dropdown Menu ─── */
 #hamburgerMenu{animation:hamIn 0.15s ease-out}
 @keyframes hamIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
-.ham-icon-btn{width:44px;height:44px;border:none;border-radius:12px;background:rgba(255,255,255,0.4);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s;padding:0;flex-direction:column;gap:2px}
+.ham-icon-btn{width:44px;height:44px;border:none;border-radius:12px;background:rgba(255,255,255,0.4);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s;padding:0;flex-direction:column;gap:2px;outline:none;-webkit-tap-highlight-color:transparent}
 .ham-icon-btn:hover{background:rgba(255,255,255,0.6);transform:scale(1.08)}
 .ham-icon-btn:active{transform:scale(0.92)}
-.ham-icon{font-size:18px;line-height:1}
-.ham-label{font-size:9px;color:rgba(93,78,109,0.5);text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ham-icon-btn:focus-visible{box-shadow:0 0 0 2px rgba(93,78,109,0.4)}
+.ham-icon{width:18px;height:18px;display:block;color:rgba(93,78,109,0.5);transition:color 0.2s}
+.ham-icon-btn:hover .ham-icon{color:rgba(93,78,109,0.85)}
+.ham-label{font-size:9px;color:rgba(93,78,109,0.5);text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color 0.2s}
+.ham-icon-btn:hover .ham-label{color:rgba(93,78,109,0.85)}
 
 
 
@@ -13552,6 +13673,173 @@ pre{position:relative;overflow-x:auto}
 
 
 
+
+#thinkingDots{position:absolute;top:38%;left:50%;transform:translateX(-50%);z-index:20;display:none;gap:8px;align-items:center;justify-content:center}
+#thinkingDots span{width:8px;height:8px;border-radius:50%;background:rgba(139,122,158,0.5);animation:thinkBounce 1.2s ease-in-out infinite}
+@keyframes thinkBounce{0%,60%,100%{transform:translateY(0);opacity:0.3}30%{transform:translateY(-14px);opacity:1}}
+.chat-msg .chat-alpha{font-size:8px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#fff;
+  background:linear-gradient(135deg,#a78bfa,#8b7a9e);border-radius:6px;padding:1px 5px}
+.hive-alpha-badge{display:inline-block;font-size:8px;font-weight:700;color:rgba(139,122,158,0.7);background:rgba(184,169,201,0.2);border:1px solid rgba(184,169,201,0.3);border-radius:6px;padding:1px 6px;margin-left:6px;vertical-align:middle;letter-spacing:0.5px}
+/* ─── Pet Heart Feeder ─── */
+#petHeartWidget{position:fixed;bottom:100px;left:14px;z-index:25;width:130px;background:rgba(255,255,255,0.45);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,0.5);border-radius:20px;padding:8px;display:flex;flex-direction:column;align-items:center;cursor:pointer;transition:all 0.3s;box-shadow:0 4px 24px rgba(180,140,180,0.15)}
+#petHeartWidget:hover{background:rgba(255,255,255,0.6);transform:scale(1.04)}
+#petHeartWidget canvas{display:block;width:114px;height:114px;border-radius:12px}
+#petHeartLabel{font-size:9px;color:rgba(93,78,109,0.5);margin-top:3px;text-align:center;line-height:1.2;letter-spacing:0.3px}
+#petHeartLabel span{color:rgba(139,122,158,0.8);font-weight:600}
+/* ─── VibeCode Overlay Panels ────────────────────────────────────────── */
+#vcLeft,#vcRight{
+  position:fixed;top:110px;z-index:6;
+  background:rgba(240,230,239,0.86);
+  backdrop-filter:blur(22px) saturate(1.15);
+  -webkit-backdrop-filter:blur(22px) saturate(1.15);
+  border:1.5px solid rgba(93,78,109,0.18);
+  box-shadow:0 8px 40px rgba(93,78,109,0.18),0 0 0 1px rgba(255,255,255,0.35) inset;
+  display:flex;flex-direction:column;overflow:hidden;
+  transition:transform .32s ease,opacity .32s ease, left .32s ease, top .32s ease;
+  opacity:0;pointer-events:none;
+  max-height:60vh;
+}
+#vcLeft{left:12px;width:260px;transform:translateX(calc(-100% - 28px))}
+#vcRight{right:12px;width:300px;transform:translateX(calc(100% + 28px))}
+#vcLeft.vc-show,#vcRight.vc-show{opacity:1;pointer-events:auto;transform:translateX(0)}
+.vc-head{display:flex;align-items:center;gap:8px;padding:12px 14px;
+  border-bottom:1.5px solid rgba(93,78,109,0.16);background:rgba(255,255,255,0.45);flex-shrink:0;cursor:move;user-select:none;-webkit-user-select:none;touch-action:none}
+.vc-head .vc-title{font-weight:700;font-size:13px;color:#5d4e6d;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vc-head button{background:rgba(93,78,109,0.08);border:1px solid rgba(93,78,109,0.15);border-radius:8px;color:#8b7a9e;cursor:pointer;font-size:11px;padding:4px 8px;transition:.15s}
+.vc-head button:hover{background:rgba(139,122,158,0.22);color:#5d4e6d}
+.vc-head button.vc-x{width:26px;height:26px;padding:0;border-radius:8px;font-size:13px}
+.vc-head button.vc-x:hover{background:rgba(192,85,85,0.14);color:#c05555}
+.vc-body{flex:1;overflow-y:auto;padding:10px;scrollbar-width:thin}
+.vc-body::-webkit-scrollbar{width:5px}
+.vc-body::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.2);border-radius:3px}
+#vcProjectSel{width:100%;font:inherit;font-size:12px;color:#5d4e6d;padding:7px 9px;border-radius:10px;
+  border:1.5px solid rgba(93,78,109,0.18);background:rgba(255,255,255,0.55);outline:none;margin-bottom:8px}
+#vcProjectSel:focus{border-color:#8b7a9e;box-shadow:0 0 0 3px rgba(139,122,158,0.15)}
+.vc-tree-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:8px;cursor:pointer;font-size:12px;color:#5d4e6d;transition:.12s}
+.vc-tree-row:hover{background:rgba(139,122,158,0.14)}
+.vc-tree-row.dir{font-weight:600}
+.vc-tree-row.file{padding-left:22px;font-weight:400}
+.vc-tree-row .vc-caret{width:14px;color:rgba(93,78,109,0.5);font-size:10px;flex-shrink:0}
+.vc-tree-children{margin-left:14px;border-left:1px dashed rgba(93,78,109,0.2);padding-left:6px}
+.vc-empty{font-size:12px;color:rgba(93,78,109,0.5);padding:12px;text-align:center}
+#vcRight .vc-tabs{display:flex;gap:4px;padding:8px 10px 0;background:rgba(255,255,255,0.3);border-bottom:1.5px solid rgba(93,78,109,0.14);flex-shrink:0}
+.vc-tab{background:transparent;border:1px solid transparent;border-bottom:none;border-radius:9px 9px 0 0;color:rgba(93,78,109,0.6);
+  font-size:12px;padding:7px 12px;cursor:pointer;transition:.15s}
+.vc-tab.active{background:rgba(255,255,255,0.6);color:#5d4e6d;font-weight:600;border-color:rgba(93,78,109,0.14)}
+.vc-tab:hover{color:#5d4e6d}
+#vcPreviewWrap,#vcLogsWrap{flex:1;min-height:0;display:none;flex-direction:column}
+#vcPreviewWrap.active,#vcLogsWrap.active{display:flex}
+#vcFrame{flex:1;width:100%;border:none;background:#fff}
+#vcLogs{flex:1;margin:0;padding:10px;font:11px/1.55 ui-monospace,Consolas,monospace;color:#c8d3d8;
+  background:rgba(30,26,42,0.92);border-radius:0 0 16px 16px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+#vcStatusBar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1.5px solid rgba(93,78,109,0.14);
+  background:rgba(255,255,255,0.35);font-size:11px;color:rgba(93,78,109,0.7);flex-shrink:0}
+#vcStatusBar .vc-dot{width:8px;height:8px;border-radius:50%;background:rgba(93,78,109,0.25);flex-shrink:0}
+#vcStatusBar .vc-dot.running{background:#3a8a6a;box-shadow:0 0 8px rgba(58,138,106,0.6)}
+#vcStatusBar .vc-dot.stopped{background:rgba(93,78,109,0.3)}
+.vc-btn{background:rgba(93,78,109,0.08);border:1px solid rgba(93,78,109,0.15);border-radius:8px;color:#8b7a9e;
+  font-size:11px;padding:5px 10px;cursor:pointer;transition:.15s}
+.vc-btn:hover{background:rgba(139,122,158,0.22);color:#5d4e6d}
+.vc-btn.primary{background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;border:none;box-shadow:0 3px 12px rgba(139,122,158,0.3)}
+.vc-btn.primary:hover{filter:brightness(1.08)}
+.vc-btn:disabled{opacity:.5;cursor:default}
+/* Middle VibeCode chat panel — unified VibeCode Coding Assistant with dashboard */
+#vcChat{position:absolute;bottom:96px;left:50%;transform:translateX(-50%);width:min(520px,88vw);max-height:48vh;
+   z-index:15;background:rgba(255,255,255,0.42);backdrop-filter:blur(22px) saturate(1.15);
+   -webkit-backdrop-filter:blur(22px) saturate(1.15);border:1.5px solid rgba(93,78,109,0.18);
+   border-radius:18px;display:none;flex-direction:column;overflow:hidden;
+   box-shadow:0 6px 30px rgba(93,78,109,0.18)}
+#vcChat.vc-show{display:flex}
+/* Compact dashboard bar inside vcChat */
+.vc-dash{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1.5px solid rgba(93,78,109,0.12);
+  background:rgba(255,255,255,0.35);flex-shrink:0;flex-wrap:wrap}
+.vc-dash-pill{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:8px;font-size:10px;
+  font-weight:600;color:#5d4e6d;background:rgba(139,122,158,0.1);border:1px solid rgba(139,122,158,0.18);white-space:nowrap}
+.vc-dash-pill .vc-dot-sm{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.vc-dash-pill .vc-dot-sm.running{background:#3a8a6a;box-shadow:0 0 6px rgba(58,138,106,0.5)}
+.vc-dash-pill .vc-dot-sm.stopped{background:rgba(93,78,109,0.3)}
+.vc-dash-pill.weather{color:#4a80a0;background:rgba(74,128,160,0.1);border-color:rgba(74,128,160,0.2)}
+.vc-dash-pill.activity{color:#3a8a6a;background:rgba(58,138,106,0.1);border-color:rgba(58,138,106,0.2)}
+.vc-dash-pill.files{color:#a0607a;background:rgba(160,96,122,0.1);border-color:rgba(160,96,122,0.2)}
+/* Chat input bar inside vcChat */
+.vc-chat-input{display:flex;align-items:center;gap:6px;padding:8px 12px;border-top:1.5px solid rgba(93,78,109,0.12);
+  background:rgba(255,255,255,0.35);flex-shrink:0}
+.vc-chat-input input{flex:1;padding:8px 12px;border-radius:12px;border:1.5px solid rgba(93,78,109,0.18);
+  background:rgba(255,255,255,0.55);font:inherit;font-size:13px;color:#5d4e6d;outline:none}
+.vc-chat-input input:focus{border-color:#8b7a9e;box-shadow:0 0 0 3px rgba(139,122,158,0.12)}
+.vc-chat-input input::placeholder{color:rgba(93,78,109,0.4)}
+.vc-chat-input button{padding:8px 14px;border-radius:12px;border:none;background:linear-gradient(140deg,#8b7a9e,#a892b8);
+  color:#fff;font-size:12px;font-weight:600;cursor:pointer;transition:.15s;white-space:nowrap}
+.vc-chat-input button:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.vc-chat-input button:disabled{opacity:.5;cursor:default;transform:none}
+#vcChatHead{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1.5px solid rgba(93,78,109,0.14);
+  background:rgba(255,255,255,0.45);flex-shrink:0}
+#vcChatHead .vc-orb{width:28px;height:28px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  font-size:15px;background:linear-gradient(140deg,rgba(167,139,250,.4),rgba(240,198,224,.45));
+  border:1.5px solid rgba(167,139,250,.5)}
+#vcChatTitle{font-weight:700;font-size:13px;color:#5d4e6d;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#vcChatMsgs{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:8px;scroll-behavior:smooth}
+#vcChatMsgs::-webkit-scrollbar{width:5px}
+#vcChatMsgs::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.2);border-radius:3px}
+.vcc-msg{max-width:90%;padding:8px 12px;border-radius:14px;font-size:13px;line-height:1.5;color:#5d4e6d;word-wrap:break-word;animation:msgIn .2s ease-out}
+.vcc-msg.user{align-self:flex-end;background:rgba(167,139,250,.18);border:1px solid rgba(167,139,250,.3);border-bottom-right-radius:4px}
+.vcc-msg.alpha{align-self:flex-start;background:rgba(255,255,255,.62);border:1px solid rgba(93,78,109,.14);border-bottom-left-radius:4px}
+.vcc-msg.sys{align-self:center;font-size:11px;color:rgba(93,78,109,.55);background:rgba(93,78,109,.08);border-radius:10px;padding:5px 10px}
+.vcc-msg pre{background:rgba(93,78,109,.08);border:1px solid rgba(93,78,109,.14);border-radius:10px;padding:10px 12px;margin:6px 0 0;
+  overflow-x:auto;font:12px/1.5 ui-monospace,Consolas,monospace;color:#4a3a5c}
+.vcc-msg code{background:rgba(93,78,109,.1);padding:1px 5px;border-radius:6px;font:12px ui-monospace,Consolas,monospace}
+.vcc-msg pre code{background:none;padding:0}
+.vcc-msg .vcc-suggest{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.vcc-suggest a{font-size:12px;color:#8b7a9e;text-decoration:none;background:rgba(139,122,158,.1);border:1px solid rgba(139,122,158,.25);
+  border-radius:10px;padding:7px 10px;transition:.15s}
+.vcc-suggest a:hover{background:rgba(139,122,158,.2)}
+.vcc-msg .vcc-code{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.vcc-code button{background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;border:none;border-radius:10px;font-size:11px;padding:6px 12px;cursor:pointer}
+.vcc-msg .vcc-actions{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.vcc-msg .vcc-sender{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:700;color:#8b7a9e;margin-bottom:4px}
+.vcc-msg .vcc-s-emoji{font-size:14px;line-height:1}
+.vcc-msg .vcc-alpha-badge{font-size:8px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:#fff;
+  background:linear-gradient(135deg,#a78bfa,#8b7a9e);border-radius:6px;padding:1px 5px}
+.vcc-actions button{background:rgba(93,78,109,.08);border:1px solid rgba(93,78,109,.15);border-radius:10px;color:#8b7a9e;font-size:11px;padding:6px 12px;cursor:pointer;transition:.15s}
+.vcc-actions button:hover{background:rgba(139,122,158,.2);color:#5d4e6d}
+.vcc-think{display:flex;gap:4px;align-items:center;padding:6px 2px}
+.vcc-think span{width:6px;height:6px;border-radius:50%;background:#8b7a9e;animation:thinkBounce 1.2s infinite}
+.vcc-think span:nth-child(2){animation-delay:.2s}
+.vcc-think span:nth-child(3){animation-delay:.4s}
+/* Alpha overlay — floats on top of the middle chat */
+#vcAlpha{position:fixed;top:14px;left:50%;transform:translateX(-50%) translateY(-6px);z-index:25;
+  display:flex;align-items:center;gap:8px;padding:6px 12px 6px 7px;border-radius:999px;
+  background:rgba(255,255,255,.55);backdrop-filter:blur(20px) saturate(1.15);
+  -webkit-backdrop-filter:blur(20px) saturate(1.15);border:1.5px solid rgba(93,78,109,.18);
+  box-shadow:0 6px 24px rgba(93,78,109,.2),0 0 0 1px rgba(255,255,255,.4) inset;
+  opacity:0;pointer-events:none;transition:.3s ease;cursor:pointer}
+#vcAlpha.vc-show{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+#vcAlpha .vc-orb{width:30px;height:30px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  font-size:16px;background:linear-gradient(140deg,rgba(167,139,250,.4),rgba(240,198,224,.45));
+  border:1.5px solid rgba(167,139,250,.5);position:relative}
+#vcAlpha .vc-orb .vc-dot{position:absolute;right:-1px;bottom:-1px;width:9px;height:9px;border-radius:50%;
+  background:#3a8a6a;border:2px solid #fff}
+#vcAlpha .vc-a-name{font-weight:700;font-size:12px;color:#5d4e6d;line-height:1.1}
+#vcAlpha .vc-a-sub{font-size:10px;color:rgba(93,78,109,.55);line-height:1.1;max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#vcAlpha .vc-a-chevy{font-size:10px;color:rgba(93,78,109,.5)}
+#vcAlphaRoster{position:fixed;top:70px;left:50%;transform:translateX(-50%) translateY(-6px);z-index:26;
+  display:none;gap:5px;padding:9px;border-radius:16px;background:rgba(255,255,255,.7);
+  backdrop-filter:blur(20px);border:1.5px solid rgba(93,78,109,.18);box-shadow:0 10px 34px rgba(93,78,109,.22);
+  transition:.25s ease}
+#vcAlphaRoster.vc-show{display:flex;transform:translateX(-50%) translateY(0)}
+.vc-ar{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;
+  cursor:pointer;background:rgba(255,255,255,.6);border:1.5px solid rgba(93,78,109,.18);transition:.15s}
+.vc-ar:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(139,122,158,.3)}
+.vc-ar.sel{border-color:#8b7a9e;box-shadow:0 0 0 3px rgba(139,122,158,.2)}
+@media (max-width:900px){
+  #vcLeft{width:200px}
+  #vcRight{width:240px}
+@media (max-width:640px){
+  #vcLeft{width:min(200px,70vw)}
+  #vcRight{width:min(260px,80vw)}
+   #vcChat{max-height:40vh;width:min(96vw,520px)}
+  .vc-dash{padding:6px 10px}
+  .vc-dash-pill{font-size:9px;padding:2px 6px}
 </style>
 </head>
 <body>
@@ -13699,58 +13987,115 @@ pre{position:relative;overflow-x:auto}
   <button id="hamburgerBtn" onclick="toggleHamburgerMenu()" style="background:none;border:none;cursor:pointer;padding:4px 8px;margin-left:8px;font-size:18px;color:rgba(93,78,109,0.5);transition:color 0.2s;display:flex;align-items:center;justify-content:center" title="Menu">
     <svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z" fill="currentColor"/></svg>
   </button>
-  <button id="settingsBtn" onclick="toggleSettings()" style="background:none;border:none;cursor:pointer;padding:4px 8px;margin-left:4px;font-size:16px;color:rgba(93,78,109,0.5);transition:color 0.2s" title="Settings">⚙️</button>
 </div>
 
 <!-- Hamburger Dropdown Menu -->
-<div id="hamburgerMenu" style="display:none;position:fixed;top:60px;right:16px;width:220px;max-width:calc(100vw - 32px);z-index:210;background:rgba(255,255,255,0.9);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:8px;box-shadow:0 8px 40px rgba(180,140,180,0.15)">
+<div id="hamburgerMenu" style="display:none;position:fixed;top:60px;left:16px;width:220px;max-width:calc(100vw - 32px);z-index:210;background:rgba(255,255,255,0.9);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:8px;box-shadow:0 8px 40px rgba(180,140,180,0.15)">
   <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;margin-bottom:4px">
     <div style="font-size:12px;font-weight:600;color:#5d4e6d;text-transform:uppercase;letter-spacing:0.5px">Menu</div>
-    <button onclick="toggleHamburgerMenu()" style="background:none;border:none;cursor:pointer;font-size:14px;color:rgba(93,78,109,0.5);padding:2px 6px">✕</button>
-  </div>
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:4px">
-    <button class="ham-icon-btn" data-action="chat" title="Chat">
-      <span class="ham-icon">💬</span>
-    </button>
-    <button class="ham-icon-btn" data-action="mic" title="Mic">
-      <span class="ham-icon">🎤</span>
-    </button>
-    <button class="ham-icon-btn" data-action="radar" title="Radar">
-      <span class="ham-icon">📡</span>
-    </button>
-    <button class="ham-icon-btn" data-action="map" title="Map">
-      <span class="ham-icon">📍</span>
-    </button>
-    <button class="ham-icon-btn" data-action="car" title="Car Game">
-      <span class="ham-icon">🎮</span>
-    </button>
-    <button class="ham-icon-btn" data-action="fetch" title="Fetch Game">
-      <span class="ham-icon">🐕</span>
-    </button>
-    <button class="ham-icon-btn" data-action="settings" title="Settings">
-      <span class="ham-icon">⚙️</span>
-    </button>
-    <button class="ham-icon-btn" data-action="close" title="Close">
-      <span class="ham-icon">✕</span>
+    <button onclick="toggleHamburgerMenu()" style="background:none;border:none;cursor:pointer;padding:2px 6px;color:rgba(93,78,109,0.5);transition:color 0.2s" title="Close">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
     </button>
   </div>
-  <div id="hamMenuLabels" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:0 4px 4px">
-    <span class="ham-label">Chat</span>
-    <span class="ham-label">Mic</span>
-    <span class="ham-label">Radar</span>
-    <span class="ham-label">Map</span>
-    <span class="ham-label">Car</span>
-    <span class="ham-label">Fetch</span>
-    <span class="ham-label">Settings</span>
-    <span class="ham-label">Close</span>
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:4px">
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="chat" title="Chat">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      </button>
+      <span class="ham-label">Chat</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="mic" title="Mic">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+      </button>
+      <span class="ham-label">Mic</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="radar" title="Radar">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg>
+      </button>
+      <span class="ham-label">Radar</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="map" title="Map">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 21 18 21 2 16 6 8 2 1 6"/><line x1="16" y1="6" x2="16" y2="22"/><line x1="8" y1="2" x2="8" y2="18"/></svg>
+      </button>
+      <span class="ham-label">Map</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="car" title="Car Game">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 16H9m10 0h3v-3.15a1 1 0 0 0-.84-.99L16 11l-2.7-3.6a1 1 0 0 0-.8-.4H5.24a2 2 0 0 0-1.8 1.1l-.8 1.63A6 6 0 0 0 2 12.42V16h2"/><circle cx="6.5" cy="16.5" r="2.5"/><circle cx="16.5" cy="16.5" r="2.5"/></svg>
+      </button>
+      <span class="ham-label">Car</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="fetch" title="Fetch Game">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="4" r="2"/><circle cx="18" cy="8" r="2"/><circle cx="20" cy="16" r="2"/><path d="M9 10a5 5 0 0 1 5 5v3.5a3.5 3.5 0 0 1-6.84 1.045Q6.52 17.48 4.46 16.84A3.5 3.5 0 0 1 5.5 10H9z"/><path d="M10.64 17.64A3.5 3.5 0 0 1 9 10H5.5a3.5 3.5 0 0 1 .46 6.54A5 5 0 0 1 9 17.5"/></svg>
+      </button>
+      <span class="ham-label">Fetch</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="settings" title="Settings">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0-2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+      <span class="ham-label">Settings</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="pair" title="Pair Device">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </button>
+      <span class="ham-label">Pair</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="download" title="Download App">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      </button>
+      <span class="ham-label">Download</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="skills" title="Skills Market">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+      </button>
+      <span class="ham-label">Skills</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="close" title="Close">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+      <span class="ham-label">Close</span>
+    </div>
   </div>
+</div>
+
+<!-- Pair Device Panel -->
+<div id="pairPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:250;width:min(360px,88vw);background:rgba(255,255,255,0.92);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:2px solid rgba(139,122,158,0.3);border-radius:24px;padding:24px;box-shadow:0 12px 48px rgba(93,78,109,0.25);text-align:center">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <div style="font-size:14px;font-weight:700;color:#5d4e6d">Pair Device</div>
+    <button onclick="closePairPanel()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);font-size:18px;padding:2px 6px">✕</button>
+  </div>
+  <div style="margin-bottom:6px;font-size:12px;color:rgba(93,78,109,0.6)">Enter your device's 8-character token:</div>
+  <input type="text" id="pairInput" maxlength="8" placeholder="XXXXXXXX" style="width:100%;padding:10px;font-size:14px;border:1px solid rgba(93,78,109,0.2);border-radius:10px;margin-bottom:10px;text-align:center;letter-spacing:2px;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace">
+  <button onclick="verifyPairCode()" style="width:100%;padding:10px;border:none;border-radius:12px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:13px;font-weight:600;cursor:pointer">Pair Device</button>
+  <div id="pairStatus" style="font-size:11px;color:rgba(93,78,109,0.5);margin-top:6px"></div>
+</div>
+
+<!-- Movement Break Game Area -->
+<div id="moveGameArea" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:250;width:min(360px,88vw);background:rgba(255,255,255,0.92);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:2px solid rgba(139,122,158,0.3);border-radius:24px;padding:24px;box-shadow:0 12px 48px rgba(93,78,109,0.25);text-align:center">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <div style="font-size:14px;font-weight:700;color:#5d4e6d">Movement Break</div>
+    <button onclick="stopMoveBreak()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);font-size:18px;padding:2px 6px">✕</button>
+  </div>
+  <div id="moveCountdown" style="font-size:12px;color:rgba(93,78,109,0.5);margin-bottom:8px">Starting...</div>
+  <div id="movePrompt" style="font-size:13px;color:#5d4e6d"></div>
 </div>
 
 <!-- ── Settings Panel ── -->
 <div id="settingsPanel" style="display:none;position:fixed;top:60px;right:16px;width:320px;max-width:calc(100vw - 32px);max-height:calc(100vh - 80px);overflow-y:auto;z-index:200;background:rgba(255,255,255,0.85);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:16px;box-shadow:0 8px 40px rgba(180,140,180,0.15)">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
     <div style="font-size:14px;font-weight:600;color:#5d4e6d">Settings</div>
-    <button onclick="toggleSettings()" style="background:none;border:none;cursor:pointer;font-size:16px;color:rgba(93,78,109,0.5)">✕</button>
+     <button onclick="toggleSettings()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);padding:2px 6px">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
   </div>
 
   <!-- Pushbullet -->
@@ -13790,48 +14135,30 @@ pre{position:relative;overflow-x:auto}
 
   <!-- Sensor Server -->
   <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Phone (Sensor Server)</div>
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Sensor Server (Optional)</div>
     <input id="setting-sensor-url" type="text" placeholder="http://<phone-ip>:8099" style="width:100%;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box">
     <button onclick="saveSensorUrl()" style="width:100%;margin-top:8px;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Save Sensor URL</button>
   </div>
 
-  <!-- App Download (APK) -->
+  <!-- Pair Token (light bridge auth) -->
   <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Lilly App (Android)</div>
-    <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Download the overlay APK to your phone, then install it (allow unknown sources).</div>
-    <div id="apk-dl-area" style="display:flex;flex-direction:column;gap:8px">
-      <div style="font-size:12px;color:rgba(93,78,109,0.5)">Loading builds…</div>
-    </div>
-    <div id="apk-dl-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
-  </div>
-
-  <!-- Skills List -->
-  <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Skills Reference</div>
-    <a href="/api/files/SKILLS.txt" target="_blank" rel="noopener" style="font-size:12px;color:#5d4e6d;text-decoration:none;display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:10px;background:rgba(139,122,158,0.12);border:1px solid rgba(139,122,158,0.25);transition:all 0.2s">
-      <span style="font-size:14px">📄</span>
-      <span>View all skills (SKILLS.txt)</span>
-    </a>
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Pair Token</div>
+    <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Shared secret for device pairing and server access.</div>
+    <input id="setting-pair-token" type="text" placeholder="Empty = no auth (open)" style="width:100%;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace">
+    <button onclick="savePairToken()" style="width:100%;margin-top:8px;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Save Pair Token</button>
+    <div id="pair-token-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
   </div>
 
   <!-- Pairing -->
   <div style="margin-bottom:16px">
     <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Pairing</div>
-    <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Share this 8-character code with your phone to pair:</div>
+    <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Enter your device's 8-character token:</div>
     <div style="display:flex;gap:8px;align-items:center">
-      <input id="setting-pair-key" type="text" readonly style="flex:1;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace">
-      <button onclick="refreshPairKey()" style="padding:8px 12px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">New</button>
-      <button onclick="copyPairKey()" style="padding:8px 12px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Copy</button>
+      <input id="setting-pair-token" type="text" maxlength="8" placeholder="XXXXXXXX"
+        style="flex:1;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace;text-transform:uppercase">
+      <button onclick="submitPairToken()" style="padding:8px 12px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Pair</button>
     </div>
     <div id="pair-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
-  </div>
-
-  <!-- Voice Recognition -->
-  <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Voice Recognition</div>
-    <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Enroll your voice for wake-word and speaker ID:</div>
-    <button id="voice-enroll-btn" onclick="enrollVoice()" style="width:100%;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Enroll Voice (5s)</button>
-    <div id="voice-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
   </div>
 
   <!-- About / Docs -->
@@ -13839,7 +14166,7 @@ pre{position:relative;overflow-x:auto}
     <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">About</div>
     <a href="https://github.com/labhrasd/Lilly_Workspace" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8b7a9e;text-decoration:none;padding:6px 0;border-bottom:1px solid rgba(184,169,201,0.15)">📖 Setup Guide (README)</a>
     <a href="https://droolingwithsanity.ca" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8b7a9e;text-decoration:none;padding:6px 0">🌐 droolingwithsanity.ca</a>
-    <div style="font-size:10px;color:rgba(93,78,109,0.4);margin-top:6px">Lilly AI · 9 Avatars · Termux + Docker</div>
+    <div id="aboutVersion" style="font-size:10px;color:rgba(93,78,109,0.4);margin-top:6px">Lilly AI · 9 Avatars · Termux + Docker</div>
   </div>
 
   <!-- Danger zone -->
@@ -13862,32 +14189,6 @@ pre{position:relative;overflow-x:auto}
 <div id="speechBubble"></div>
 <canvas id="pupCanvas"></canvas>
 
-<!-- Filter Bar (above PiP) -->
-<div id="filterBar">
-  <span class="filter-label">Filter</span>
-  <button class="filter-btn active" data-filter="none" onclick="setFilter('none')" title="No filter">✕</button>
-  <button class="filter-btn" data-filter="puppy_ears" onclick="setFilter('puppy_ears')" title="Puppy ears">🐶</button>
-  <button class="filter-btn" data-filter="top_hat" onclick="setFilter('top_hat')" title="Top hat">🎩</button>
-  <button class="filter-btn" data-filter="mustache" onclick="setFilter('mustache')" title="Mustache">🥸</button>
-  <button class="filter-btn" data-filter="crown" onclick="setFilter('crown')" title="Crown">👑</button>
-  <button class="filter-btn" data-filter="sunglasses" onclick="setFilter('sunglasses')" title="Sunglasses">🕶️</button>
-  <button class="filter-btn" data-filter="rainbow" onclick="setFilter('rainbow')" title="Rainbow">🌈</button>
-  <button class="filter-btn" data-filter="sepia" onclick="setFilter('sepia')" title="Vintage">📷</button>
-</div>
-
-<!-- Vision PiP -->
-<div id="pipContainer" onclick="reactToCameraView()">
-  <img id="pipFeed" alt="Lilly's view">
-  <div id="arOverlay">
-    <canvas id="arCanvas"></canvas>
-    <div id="arCrosshair"></div>
-    <div id="arLabel"></div>
-  </div>
-  <span class="dot"></span>
-  <span id="pipLabel">Lilly's view</span>
-  <div class="pip-resize" id="pipResize"></div>
-</div>
-
 <div id="chatContainer">
   <div id="chatHeader">
     <span id="chatTitle">Chat</span>
@@ -13909,6 +14210,19 @@ pre{position:relative;overflow-x:auto}
     <div id="hiveCharRow"></div>
   </div>
   <div id="hiveMessages"></div>
+</div>
+
+<!-- YouTube PiP Container -->
+<div id="youtubePiP" style="display:none;position:fixed;top:20px;right:20px;width:320px;height:240px;z-index:300;background:#000;border-radius:16px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.3);border:2px solid rgba(139,122,158,0.3)">
+  <div style="position:absolute;top:0;left:0;right:0;height:32px;background:linear-gradient(135deg,#8b7a9e,#a892b8);display:flex;align-items:center;justify-content:space-between;padding:0 10px;z-index:10">
+    <span style="color:#fff;font-size:11px;font-weight:600">YouTube</span>
+    <div style="display:flex;gap:6px">
+      <button onclick="youtubePiPControl('search')" style="background:none;border:none;color:#fff;font-size:14px;cursor:pointer;padding:2px" title="Search">🔍</button>
+      <button onclick="youtubePiPControl('play')" style="background:none;border:none;color:#fff;font-size:14px;cursor:pointer;padding:2px" title="Play/Pause">▶️</button>
+      <button onclick="closeYouTubePiP()" style="background:none;border:none;color:#fff;font-size:14px;cursor:pointer;padding:2px" title="Close">✕</button>
+    </div>
+  </div>
+  <iframe id="youtubePiPFrame" style="width:100%;height:100%;border:none;margin-top:32px" src="" allow="autoplay; encrypted-media" allowfullscreen></iframe>
 </div>
 
 <div class="input-panel">
@@ -13951,6 +14265,9 @@ let pickerAvatar = localStorage.getItem('lilly_avatar') || 'puppy';
 let pickerTheme  = localStorage.getItem('lilly_theme')  || 'lilac';
 let selectedAvatar = localStorage.getItem('lilly_avatar') || 'puppy';
 let previewFrame = 0, previewRaf = null;
+
+// Phone server URL for pairing (Termux bridge on :8097)
+    const PHONE_SERVER_URL = 'http://localhost:8097';
 
 // Avatar emoji/name by key — same roster as VibeCode, shown across the UI
 const CHAT_AVATARS = {
@@ -15003,13 +15320,24 @@ async function submitOCUnlock() {
 }
 
 // On load: check if already authenticated, then show picker
-document.getElementById('ocGate').style.display = 'none';
-(async function() {
-  const alreadyAuthed = await checkAuth();
-  if (!alreadyAuthed) {
-    showAvatarPicker();
+try { document.getElementById('ocGate').style.display = 'none'; } catch(e) { console.error('ocGate:', e); }
+(function initLilly() {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => bootLilly());
+  } else {
+    bootLilly();
   }
 })();
+async function bootLilly() {
+  try {
+    const alreadyAuthed = await checkAuth();
+    if (!alreadyAuthed) {
+      showAvatarPicker();
+    }
+  } catch (e) {
+    console.error('bootLilly:', e);
+  }
+}
 
 
 
@@ -15558,6 +15886,81 @@ async function reactToCameraView(){
 }
 
 // ─── AR Mode ──────────────────────────────────────────────
+// ─── YouTube PiP ─────────────────────────────────────────────
+let youtubePiPActive = false;
+let youtubePiPVideoId = '';
+
+function openYouTubePiP(videoId){
+  const pip = document.getElementById('youtubePiP');
+  const frame = document.getElementById('youtubePiPFrame');
+  if(!pip || !frame) return;
+  youtubePiPVideoId = videoId || '';
+  const src = videoId
+    ? 'https://www.youtube.com/embed/' + videoId + '?autoplay=1&controls=1&rel=0&modestbranding=1'
+    : 'https://www.youtube.com/embed?autoplay=1&controls=1&rel=0&modestbranding=1';
+  frame.src = src;
+  pip.style.display = 'block';
+  youtubePiPActive = true;
+  addChatMessage('system','YouTube: opened in PiP mode');
+}
+
+function closeYouTubePiP(){
+  const pip = document.getElementById('youtubePiP');
+  const frame = document.getElementById('youtubePiPFrame');
+  if(pip) pip.style.display = 'none';
+  if(frame) frame.src = '';
+  youtubePiPActive = false;
+  youtubePiPVideoId = '';
+}
+
+function extractYouTubeVideoId(url){
+  const patterns = [
+    /[?&]v=([^&]+)/,
+    /youtube\.com\/embed\/([^?]+)/,
+    /youtu\.be\/([^?]+)/,
+  ];
+  for(const p of patterns){
+    const m = url.match(p);
+    if(m) return m[1];
+  }
+  return null;
+}
+
+function openYouTubePiPFromUrl(url){
+  const pip = document.getElementById('youtubePiP');
+  const frame = document.getElementById('youtubePiPFrame');
+  if(!pip || !frame) return;
+  const videoId = extractYouTubeVideoId(url);
+  const src = videoId
+    ? 'https://www.youtube.com/embed/' + videoId + '?autoplay=1&controls=1&rel=0&modestbranding=1'
+    : url;
+  frame.src = src;
+  pip.style.display = 'block';
+  youtubePiPActive = true;
+  if(videoId) youtubePiPVideoId = videoId;
+  addChatMessage('system','YouTube: opened in PiP mode');
+}
+
+function youtubePiPControl(action){
+  const frame = document.getElementById('youtubePiPFrame');
+  if(!frame || !frame.src) return;
+  if(action === 'close'){
+    closeYouTubePiP();
+    return;
+  }
+  if(action === 'play' && frame.contentWindow){
+    frame.contentWindow.postMessage('{"event":"command","func":"playVideo"}', '*');
+  }
+  if(action === 'search'){
+    const query = prompt('Search YouTube:');
+    if(query){
+      const url = 'https://www.youtube.com/embed?autoplay=1&controls=1&rel=0&modestbranding=1&q=' + encodeURIComponent(query);
+      frame.src = url;
+      addChatMessage('system','YouTube: searching for ' + query);
+    }
+  }
+}
+
 function toggleARMode(){
   _arMode = !_arMode;
   const btn = document.getElementById('arBtn');
@@ -15654,7 +16057,6 @@ function _drawARDebug(data){
   }else{
     if(label) label.textContent = 'Scanning...';
   }
-}
 }
 
 // ─── Face Filter Drawing Functions ──────────────────────────
@@ -16286,37 +16688,144 @@ document.getElementById('clearBtn').onclick=async()=>{
    const menu=document.getElementById('hamburgerMenu');
    if(menu) menu.style.display='none';
  }
- function handleHamburgerAction(action){
-   closeHamburgerMenu();
-   switch(action){
-     case 'chat': toggleChat(); break;
-     case 'mic': toggleBrowserMic(); break;
-     case 'radar': openRadarFromMenu(); break;
-     case 'map': openLocationMap(); break;
-     case 'car': startCarGameFromMenu(); break;
-     case 'fetch': startFetchGameFromMenu(); break;
-     case 'settings': toggleSettings(); break;
-     case 'close': break;
-   }
- }
+  async function isPaired(){
+    try{
+      const r=await fetch('/api/pair/status',{credentials:'include'});
+      return r.ok;
+    }catch(e){return false;}
+  }
+  async function sendPhoneCommand(type, payload={}){
+    const token = localStorage.getItem('lilly_device_token')||'';
+    const body = {type, token, ...payload};
+    try{
+      const r=await fetch('/api/phone_cmd',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),credentials:'include'});
+      return await r.json();
+    }catch(e){return {ok:false,error:String(e)};}
+  }
+  function handleHamburgerAction(action){
+    closeHamburgerMenu();
+    const paired = localStorage.getItem('lilly_device_token');
+    switch(action){
+      case 'chat': toggleChat(); break;
+      case 'mic': toggleBrowserMic(); break;
+      case 'radar': openRadarFromMenu(!!paired); break;
+      case 'map': openLocationMap(!!paired); break;
+      case 'car': startCarGameFromMenu(!!paired); break;
+      case 'fetch': startFetchGameFromMenu(!!paired); break;
+      case 'settings': toggleSettings(); break;
+      case 'pair': openPairPanel(); break;
+      case 'download': downloadApk(); break;
+      case 'skills': openSkillsMarket(); break;
+      case 'close': break;
+    }
+  }
  function toggleChat(){
    const chat=document.getElementById('chatContainer');
    if(chat) chat.classList.toggle('active');
  }
- function openRadarFromMenu(){
-   addChatMessage('system','Radar: scanning surroundings...');
- }
- function openLocationMap(){
-   try{ window.open('https://www.google.com/maps?q=My+Location','_blank'); }
-   catch(e){ addChatMessage('system','Map: unable to open maps.'); }
- }
- function startCarGameFromMenu(){
-   addChatMessage('system','Car Ride Game starting...');
- }
- function startFetchGameFromMenu(){
-   addChatMessage('system','Fetch Game starting...');
- }
- document.addEventListener('DOMContentLoaded',function(){
+  async function openRadarFromMenu(paired){
+    addChatMessage('system','Radar: scanning surroundings...');
+    if(paired){
+      const bt = await sendPhoneCommand('termux', {command:'termux-bluetooth-scan'});
+      const wifi = await sendPhoneCommand('termux', {command:'termux-wifi-scaninfo'});
+      const parts = [];
+      if(bt && bt.ok && bt.stdout){ parts.push('Bluetooth: ' + bt.stdout.split('\n').length + ' lines'); }
+      if(wifi && wifi.ok && wifi.stdout){ parts.push('WiFi: ' + wifi.stdout.split('\n').length + ' lines'); }
+      addChatMessage('system','Radar (phone): ' + (parts.length ? parts.join(', ') : 'scan sent'));
+    } else if(window.LillyOverlay && typeof LillyOverlay.openRadar === 'function'){
+      try{ LillyOverlay.openRadar(); }catch(e){}
+    } else {
+      fetch('/api/sensors').then(r=>r.ok?r.json():Promise.reject()).then(data=>{
+        const sensors = Array.isArray(data) ? data : [];
+        const nearby = sensors.filter(s => /bluetooth|wifi|proximity|step/i.test((s.name||'')+(s.sensor||'')));
+        const count = nearby.length || sensors.length;
+        addChatMessage('system','Radar: ' + count + ' sensor(s) detected nearby');
+      }).catch(()=>{
+        addChatMessage('system','Radar: sensor scan unavailable from web UI');
+      });
+    }
+  }
+  function openLocationMap(paired){
+    if(paired){
+      sendPhoneCommand('open_url', {url:'https://www.google.com/maps?q=My+Location'});
+      addChatMessage('system','Map: opening Google Maps on phone...');
+    } else {
+      try{ window.open('https://www.google.com/maps?q=My+Location','_blank'); }
+      catch(e){ addChatMessage('system','Map: unable to open maps.'); }
+    }
+  }
+  function startCarGameFromMenu(paired){
+    addChatMessage('system','Car mode: starting drive tracking...');
+    if(paired){
+      sendPhoneCommand('open_app', {package:'com.google.android.apps.maps'});
+      addChatMessage('system','Car: opening Maps on phone');
+    } else {
+      try{ window.open('https://www.google.com/maps?q=My+Location','_blank'); }
+      catch(e){ addChatMessage('system','Map: unable to open maps.'); }
+    }
+  }
+  async function startFetchGameFromMenu(paired){
+    addChatMessage('system','Fetch: checking phone data...');
+    if(paired){
+      const notif = await sendPhoneCommand('termux', {command:'termux-notification-list'});
+      const battery = await sendPhoneCommand('termux', {command:'termux-battery-status'});
+      const n = notif && notif.stdout ? notif.stdout.split('\n').filter(l=>l.trim()).length : 0;
+      const b = battery && battery.stdout ? battery.stdout.split('\n')[0] : 'unknown';
+      addChatMessage('system','Fetch: ' + n + ' notification(s), battery=' + b);
+    } else {
+      Promise.all([
+        fetch('/api/notifications').then(r=>r.ok?r.json():Promise.reject()).catch(()=>({notifications:[]})),
+        fetch('/api/sensors').then(r=>r.ok?r.json():Promise.reject()).catch(()=>([]))
+      ]).then(([notif, sensors])=>{
+        const n = Array.isArray(notif.notifications) ? notif.notifications.length : 0;
+        const s = Array.isArray(sensors) ? sensors.length : 0;
+        addChatMessage('system','Fetch: ' + n + ' notification(s), ' + s + ' sensor reading(s)');
+      }).catch(()=>{
+        addChatMessage('system','Fetch: unable to load phone data');
+      });
+    }
+  }
+  function downloadApk(){
+    try{ window.open('/api/apk/download','_blank'); }
+    catch(e){ addChatMessage('system','Download: unable to start download.'); }
+  }
+  function openSkillsMarket(){
+    window.open('/skills-market.html','_blank');
+  }
+  function openPairPanel(){
+    const panel=document.getElementById('pairPanel');
+    if(panel) panel.style.display='block';
+  }
+  function closePairPanel(){
+    const panel=document.getElementById('pairPanel');
+    if(panel) panel.style.display='none';
+  }
+  async function verifyPairCode(){
+    const input=document.getElementById('pairInput');
+    const status=document.getElementById('pairStatus');
+    if(!input) return;
+    const code=input.value.trim().replace(/\s/g,'').toUpperCase();
+    if(code.length!==8){
+      if(status) status.textContent='Enter the 8-character code from your phone';
+      return;
+    }
+    if(status) status.textContent='Pairing...';
+    try{
+      // Phone tokens are native identifiers, not ephemeral codes.
+      // Use /api/phone_pair so the phone's own ~/.lilly_pair_token is accepted directly.
+      const r=await fetch('/api/phone_pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:code})});
+      const data=await r.json();
+      if(data.ok){
+        if(status) status.textContent='Paired successfully! Device registered.';
+        if(input) input.value='';
+      }else{
+        if(status) status.textContent='Pairing failed: '+((data.detail)||'invalid token');
+      }
+    }catch(e){
+      if(status) status.textContent='Error verifying code';
+    }
+  }
+  document.addEventListener('DOMContentLoaded',function(){
    const menu=document.getElementById('hamburgerMenu');
    if(menu){
      menu.addEventListener('click',function(e){
@@ -16345,8 +16854,10 @@ document.getElementById('clearBtn').onclick=async()=>{
     const d=await r.json();
     const pbKey=document.getElementById('setting-pushbullet-key');
     const sensorUrl=document.getElementById('setting-sensor-url');
+    const pairToken=document.getElementById('setting-pair-token');
     if (pbKey && d.pushbullet_api_key) pbKey.value=d.pushbullet_api_key;
     if (sensorUrl && d.sensor_server_url) sensorUrl.value=d.sensor_server_url;
+    if (pairToken && d.lilly_pair_token) pairToken.value=d.lilly_pair_token;
     const c1=document.getElementById('setting-notif-proactive');
     const c2=document.getElementById('setting-notif-sound');
     const c3=document.getElementById('setting-notif-pushbullet');
@@ -16357,8 +16868,6 @@ document.getElementById('clearBtn').onclick=async()=>{
     if (c3) c3.checked=d.pushbullet_fallback===true;
     if (cp) cp.checked=!!d.notif_paused;
     if (cc) cc.value=d.notif_daily_cap;
-    loadPairKey();
-    loadApkOptions();
   } catch(e){}
 }
 
@@ -16383,6 +16892,10 @@ async function loadApkOptions(){
       +'<span style="font-size:16px">⬇️</span></a>';
     area.innerHTML=html;
     if (status) status.textContent='Install from unknown sources must be enabled on your phone.';
+    const aboutVer = document.getElementById('aboutVersion');
+    if (aboutVer && version) {
+      aboutVer.textContent = 'Lilly AI · 9 Avatars · Termux + Docker · Overlay ' + version;
+    }
   } catch(e){
     if (status) status.textContent='Failed to load APK info';
   }
@@ -16434,7 +16947,7 @@ async function testPushbullet(){
   } catch(e){ status.textContent='Network error'; status.style.color='rgba(232,90,110,0.8)'; }
 }
 
-async function saveSensorUrl(){
+ async function saveSensorUrl(){
   const url=document.getElementById('setting-sensor-url').value.trim();
   if (!url) return;
   try {
@@ -16447,7 +16960,25 @@ async function saveSensorUrl(){
     status.style.borderColor=d.ok?'rgba(76,175,80,0.5)':'rgba(232,90,110,0.5)';
     setTimeout(()=>{ status.style.borderColor='rgba(184,169,201,0.3)'; },1500);
   } catch(e){}
-}
+ }
+
+ async function savePairToken(){
+  const el=document.getElementById('setting-pair-token');
+  const status=document.getElementById('pair-token-status');
+  const token=(el ? el.value : '').trim();
+  try {
+    const r=await fetch('/api/settings/pair-token',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token})
+    });
+    const d=await r.json();
+    if (status) {
+      status.textContent=d.ok?'Saved — restart sensor server with LILLY_PAIR_TOKEN='+token:'Failed';
+      status.style.color=d.ok?'rgba(76,175,80,0.8)':'rgba(232,90,110,0.8)';
+    }
+    if (el) el.style.borderColor=d.ok?'rgba(76,175,80,0.5)':'rgba(232,90,110,0.5)';
+  } catch(e){ if (status) { status.textContent='Network error'; status.style.color='rgba(232,90,110,0.8)'; } }
+ }
 
 async function clearAllData(){
   if (!confirm('Clear all local data? This cannot be undone.')) return;
@@ -16458,38 +16989,30 @@ async function clearAllData(){
   } catch(e){ alert('Failed to clear data'); }
 }
 
-/* ─── Pair Key ─── */
-async function loadPairKey(){
-  try {
-    const r = await fetch('/api/pair/code', {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:'{}'});
-    if (!r.ok) return;
-    const d = await r.json();
-    const el = document.getElementById('setting-pair-key');
-    if (el && d.code) el.value = String(d.code).slice(0,8);
-  } catch(e){}
-}
-async function refreshPairKey(){
+async function submitPairToken(){
+  const el = document.getElementById('setting-pair-token');
   const status = document.getElementById('pair-status');
-  if (status) { status.textContent='Generating...'; status.style.color='rgba(93,78,109,0.5)'; }
+  const code = (el ? el.value : '').trim().toUpperCase();
+  if (code.length !== 8){
+    if (status) { status.textContent='Code must be 8 characters'; status.style.color='rgba(232,90,110,0.8)'; }
+    return;
+  }
+  if (status) { status.textContent='Pairing...'; status.style.color='rgba(93,78,109,0.5)'; }
   try {
-    const r = await fetch('/api/pair/code', {method:'POST', credentials:'include', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const r = await fetch('/api/phone_pair', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token: code})
+    });
     const d = await r.json();
-    const el = document.getElementById('setting-pair-key');
-    if (el && d.code) el.value = String(d.code).slice(0,8);
-    if (status) { status.textContent=d.code?'New code generated':'Failed'; status.style.color=d.code?'rgba(76,175,80,0.8)':'rgba(232,90,110,0.8)'; }
-  } catch(e){ if (status) { status.textContent='Network error'; status.style.color='rgba(232,90,110,0.8)'; } }
-}
-async function copyPairKey(){
-  const el = document.getElementById('setting-pair-key');
-  const status = document.getElementById('pair-status');
-  if (!el || !el.value) return;
-  try {
-    await navigator.clipboard.writeText(el.value);
-    if (status) { status.textContent='Copied ✓'; status.style.color='rgba(76,175,80,0.8)'; }
+    if (r.ok && d.ok){
+      if (status) { status.textContent='Paired: ' + d.user_name; status.style.color='rgba(76,175,80,0.8)'; }
+      if (el) { el.value = ''; }
+    } else {
+      if (status) { status.textContent = (d.detail || 'Pairing failed'); status.style.color='rgba(232,90,110,0.8)'; }
+    }
   } catch(e){
-    el.select && el.select();
-    document.execCommand && document.execCommand('copy');
-    if (status) { status.textContent='Copied (fallback)'; status.style.color='rgba(76,175,80,0.8)'; }
+    if (status) { status.textContent='Network error'; status.style.color='rgba(232,90,110,0.8)'; }
   }
 }
 
@@ -16548,9 +17071,8 @@ async function enrollVoice(){
 // Close settings on outside click
 document.addEventListener('click',function(e){
   const panel=document.getElementById('settingsPanel');
-  const btn=document.getElementById('settingsBtn');
-  if (!panel||!btn) return;
-  if (panel.style.display==='block' && !panel.contains(e.target) && e.target!==btn && !btn.contains(e.target)){
+  if (!panel) return;
+  if (panel.style.display==='block' && !panel.contains(e.target)){
     panel.style.display='none';
   }
 });
@@ -16766,7 +17288,13 @@ async function sendStreamingReply(text){
               speechTimer=999;
               lastSpoken=finalText;
               if(evt.look_at)setLookAt(evt.look_at,5000);
-              if(evt.open_url)window.open(evt.open_url,'_blank','noopener,noreferrer');
+              if(evt.open_url){
+                if(evt.web_pip && typeof openYouTubePiP === 'function'){
+                  openYouTubePiPFromUrl(evt.open_url);
+                }else{
+                  window.open(evt.open_url,'_blank','noopener,noreferrer');
+                }
+              }
             }else if(evt.type==='audio'){
               playAudio(evt.audio_id);
               _lastPollAudioId = evt.audio_id;
@@ -16802,7 +17330,13 @@ async function sendStreamingReply(text){
         lastSpoken=d.reply;
         if(d.audio_id){playAudio(d.audio_id); _lastPollAudioId = d.audio_id;}
         if(d.look_at)setLookAt(d.look_at,5000);
-        if(d.open_url)window.open(d.open_url,'_blank','noopener,noreferrer');
+        if(d.open_url){
+          if(d.web_pip && typeof openYouTubePiP === 'function'){
+            openYouTubePiPFromUrl(d.open_url);
+          }else{
+            window.open(d.open_url,'_blank','noopener,noreferrer');
+          }
+        }
       }
      }catch(e2){
       contentEl.textContent='Network error. Try again.';
@@ -16877,7 +17411,7 @@ function recordMicChunk(){
         const sb=document.getElementById('speechBubble');
         if(sb.style.display!=='block')displaySpeech('...');
       }
-    }catch(e){}
+    }catch(e){console.error('browser_mic error:',e);}
     audioCtx.close();
     // Don't reschedule here — the next chunk was already scheduled above (pipelining)
   };
@@ -16916,6 +17450,64 @@ inputField.addEventListener('keydown',async(e)=>{
     }
 
     const lower=text.toLowerCase();
+
+    // ─── Natural language phone intents (paired only) ───
+    const MAP_TRIGGERS=['where am i','open maps','navigate to','show map','my location','directions to','map','locate me'];
+    const RADAR_TRIGGERS=["what's around me",'radar','scan surroundings','nearby devices',"what's near me",'bluetooth scan','wifi scan',"who's near me",'devices nearby'];
+    const isMap = MAP_TRIGGERS.some(t=>lower.includes(t));
+    const isRadar = RADAR_TRIGGERS.some(t=>lower.includes(t));
+    if(isMap || isRadar){
+      try{
+        showMainChat();
+        addChatMessage('user',text);
+        const token = localStorage.getItem('lilly_device_token');
+        if(token){
+          if(isMap){
+            await sendPhoneCommand("open_url", {url:"https://www.google.com/maps?q=My+Location"});
+            addChatMessage("assistant","Opening Google Maps on your phone...");
+          }else{
+            const bt = await sendPhoneCommand("termux", {command:"termux-bluetooth-scan"});
+            const wifi = await sendPhoneCommand("termux", {command:"termux-wifi-scaninfo"});
+            const parts = [];
+            if(bt && bt.ok && bt.stdout){ parts.push("Bluetooth: " + bt.stdout.split("\n").length + " lines"); }
+            if(wifi && wifi.ok && wifi.stdout){ parts.push("WiFi: " + wifi.stdout.split("\n").length + " lines"); }
+            addChatMessage("assistant","Radar scan sent to phone. " + (parts.length ? parts.join(", ") : "Check your phone for results."));
+          }
+        }else{
+          addChatMessage("assistant","Pair your phone first to use " + (isMap ? "maps" : "radar") + ". Open Settings → Pair to connect.");
+        }
+        statusLabel.textContent='idle';
+      }catch(e){ statusLabel.textContent='error'; }
+      return;
+    }
+
+    // ─── YouTube PiP voice commands ───
+    const YOUTUBE_TRIGGERS=['youtube','open youtube','play youtube','youtube search','search youtube','pause youtube','close youtube','stop youtube'];
+    const isYouTube = YOUTUBE_TRIGGERS.some(t=>lower.includes(t));
+    if(isYouTube){
+      try{
+        showMainChat();
+        addChatMessage('user',text);
+        if(lower.includes('search') || lower.includes('find')){
+          const query = text.replace(/youtube|search|for|find|on/gi,'').trim();
+          if(query){
+            openYouTubePiPFromUrl('https://www.youtube.com/results?search_query=' + encodeURIComponent(query));
+            addChatMessage('assistant','Searching YouTube for ' + query);
+          }else{
+            openYouTubePiP();
+            addChatMessage('assistant','What would you like to search for on YouTube?');
+          }
+        }else if(lower.includes('pause') || lower.includes('stop') || lower.includes('close')){
+          closeYouTubePiP();
+          addChatMessage('assistant','YouTube closed');
+        }else{
+          openYouTubePiP();
+          addChatMessage('assistant','Opening YouTube!');
+        }
+        statusLabel.textContent='idle';
+      }catch(e){ statusLabel.textContent='error'; }
+      return;
+    }
 
     const STORY_TRIGGERS=['tell me a story','make up a story','create a story','story time',
       'what do your sensors feel','what do you sense','describe your world',
@@ -17524,69 +18116,91 @@ async def serve_openhuman_page():
     return _serve_phone_page("openhuman.html")
 
 
-_pairing_codes: dict[str, dict] = {}
+@app.get("/favicon.svg")
+async def serve_favicon():
+    """Serve the Lilly favicon."""
+    favicon_path = WORKSPACE / "favicon.svg"
+    if not favicon_path.exists():
+        return Response("", media_type="image/svg+xml")
+    content = favicon_path.read_text(encoding="utf-8")
+    return Response(
+        content=content,
+        media_type="image/svg+xml",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@app.get("/skills-market.html")
+async def serve_skills_market():
+    """Serve the Lilly Skills Market page."""
+    page_path = WORKSPACE / "skills-market.html"
+    if not page_path.exists():
+        return Response(
+            "Skills Market page not found", status_code=404, media_type="text/html"
+        )
+    content = page_path.read_text(encoding="utf-8")
+    return Response(
+        content=content,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@app.get("/Readme.md")
+async def serve_readme():
+    """Serve the UI/app Readme.md for droolingwithsanity.ca/Readme.md."""
+    readme_path = WORKSPACE / "Readme.md"
+    if not readme_path.exists():
+        return Response("Readme.md not found", status_code=404, media_type="text/plain")
+    content = readme_path.read_text(encoding="utf-8")
+    return Response(
+        content=content,
+        media_type="text/markdown",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 # Maps device_token → {"user_id": str, "user_name": str, "created": float}
 _device_tokens: dict[str, dict] = {}
+
+# v6.0 Unified Pairing Protocol
 _PAIRING_CODE_TTL = 300  # 5 minutes
+_pairing_codes: dict[str, dict] = {}
+
+
+def _cleanup_expired_pairing_codes():
+    """Remove expired pairing codes to prevent memory leak."""
+    now = time.time()
+    expired = [code for code, entry in _pairing_codes.items() if now > entry["expires"]]
+    for code in expired:
+        del _pairing_codes[code]
+    if expired:
+        logger.debug(f"Cleaned up {len(expired)} expired pairing codes")
 
 
 def _generate_pairing_code() -> str:
-    import secrets, string
-
-    chars = string.ascii_uppercase + string.digits
-    return "".join(secrets.choice(chars) for _ in range(8))
+    """Generate a 6-digit numeric pairing code."""
+    # Clean up expired codes before generating new one
+    _cleanup_expired_pairing_codes()
+    return f"{random.randint(0, 999999):06d}"
 
 
 def _generate_device_token() -> str:
     import secrets
 
     return secrets.token_hex(32)
-
-
-@app.post("/api/pair/input")
-async def input_pairing_code(request: Request):
-    """Input a pairing code directly for logged-in users."""
-    user = _resolve_user(request)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not paired")
-    body = await request.json()
-    code = (body.get("code") or "").strip().upper()
-    if not code:
-        raise HTTPException(status_code=400, detail="No pairing code provided")
-    entry = _pairing_codes.get(code)
-    if not entry:
-        raise HTTPException(status_code=400, detail="Invalid or expired pairing code")
-    if entry["user_id"] != user.get("id"):
-        raise HTTPException(
-            status_code=403, detail="Pairing code is for a different user"
-        )
-    # Generate device token for the logged-in user
-    token = _generate_device_token()
-    _device_tokens[token] = {
-        "user_id": entry["user_id"],
-        "user_name": entry["user_name"],
-        "created": time.time(),
-    }
-    # Remove the used pairing code
-    _pairing_codes.pop(code, None)
-    return {
-        "token": token,
-        "user_name": entry["user_name"],
-        "server_url": f"https://droolingwithsanity.ca",
-        "message": "Successfully paired with your account!",
-    }
-
-
-@app.get("/api/pair/status")
-async def pairing_status(request: Request):
-    """Check if the current request is authenticated (Auth0 or device token)."""
-    user = _resolve_user(request)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not paired")
-    return {
-        "paired": True,
-        "user_name": user.get("name", user.get("user_name", "User")),
-    }
 
 
 def _resolve_user(request: Request) -> dict | None:
@@ -17604,26 +18218,32 @@ def _resolve_user(request: Request) -> dict | None:
     return None
 
 
-@app.post("/api/pair/code")
-async def generate_pairing_code(request: Request):
-    """Generate a pairing code for the authenticated web user."""
-    user = await get_current_user(request) if AUTH_AVAILABLE else None
-    if not user or not user.get("id"):
-        raise HTTPException(status_code=401, detail="Not authenticated")
+# ─── v6.0 UNIFIED PAIRING ──────────────────────────────────────────────
+@app.post("/api/pair/initiate")
+async def pair_initiate(request: Request):
+    """Generate a 6-digit pairing code for web UI → overlay pairing."""
     code = _generate_pairing_code()
     _pairing_codes[code] = {
-        "user_id": user["id"],
-        "user_name": user.get("name", user.get("email", "User")),
+        "created": time.time(),
         "expires": time.time() + _PAIRING_CODE_TTL,
     }
-    return {"code": code, "expires_in": _PAIRING_CODE_TTL}
+    return {
+        "ok": True,
+        "code": code,
+        "expires_in": _PAIRING_CODE_TTL,
+        "version": "6.0",
+    }
 
 
-@app.post("/api/pair/verify")
-async def verify_pairing_code(request: Request):
-    """Exchange a pairing code for a device token."""
+@app.post("/api/pair/confirm")
+async def pair_confirm(request: Request):
+    """Exchange a 6-digit pairing code for a persistent device token."""
     body = await request.json()
-    code = (body.get("code") or "").strip().upper()
+    code = (body.get("code") or "").strip()
+    if not code or len(code) != 6 or not code.isdigit():
+        raise HTTPException(
+            status_code=400, detail="Invalid pairing code (must be 6 digits)"
+        )
     entry = _pairing_codes.pop(code, None)
     if not entry:
         raise HTTPException(status_code=400, detail="Invalid or expired pairing code")
@@ -17631,54 +18251,98 @@ async def verify_pairing_code(request: Request):
         raise HTTPException(status_code=400, detail="Pairing code expired")
     token = _generate_device_token()
     _device_tokens[token] = {
-        "user_id": entry["user_id"],
-        "user_name": entry["user_name"],
+        "user_id": "overlay_device",
+        "user_name": "Lilly Overlay v6",
         "created": time.time(),
+        "version": "6.0",
     }
     return {
+        "ok": True,
         "token": token,
-        "user_name": entry["user_name"],
+        "user_name": "Lilly Overlay v6",
         "server_url": f"https://droolingwithsanity.ca",
-    }
-
-
-@app.post("/api/pair/input")
-async def input_pairing_code(request: Request):
-    """Input a pairing code directly for logged-in users."""
-    user = _resolve_user(request)
-    if not user:
-        raise HTTPException(status_code=401, detail="Not paired")
-    body = await request.json()
-    code = (body.get("code") or "").strip().upper()
-    if not code:
-        raise HTTPException(status_code=400, detail="No pairing code provided")
-    entry = _pairing_codes.get(code)
-    if not entry:
-        raise HTTPException(status_code=400, detail="Invalid or expired pairing code")
-    if entry["user_id"] != user.get("id"):
-        raise HTTPException(
-            status_code=403, detail="Pairing code is for a different user"
-        )
-    # Generate device token for the logged-in user
-    token = _generate_device_token()
-    _device_tokens[token] = {
-        "user_id": entry["user_id"],
-        "user_name": entry["user_name"],
-        "created": time.time(),
-    }
-    # Remove the used pairing code
-    _pairing_codes.pop(code, None)
-    return {
-        "token": token,
-        "user_name": entry["user_name"],
-        "server_url": f"https://droolingwithsanity.ca",
-        "message": "Successfully paired with your account!",
+        "version": "6.0",
     }
 
 
 @app.get("/api/pair/status")
-async def pair_status():
-    return {"paired": len(_device_tokens) > 0, "devices": len(_device_tokens)}
+async def pair_status(request: Request):
+    """Check if a pairing code is valid and not expired."""
+    code = request.query_params.get("code", "").strip()
+    if not code or len(code) != 6:
+        return {"ok": False, "valid": False, "reason": "missing_code"}
+    entry = _pairing_codes.get(code)
+    if not entry:
+        return {"ok": False, "valid": False, "reason": "not_found"}
+    if time.time() > entry["expires"]:
+        _pairing_codes.pop(code, None)
+        return {"ok": False, "valid": False, "reason": "expired"}
+    return {
+        "ok": True,
+        "valid": True,
+        "expires_in": int(entry["expires"] - time.time()),
+    }
+
+
+@app.post("/api/phone_pair")
+async def phone_pair(request: Request):
+    """Legacy pairing endpoint (v4.x compat). Now delegates to v6.0 flow."""
+    body = await request.json()
+    token = (body.get("token") or "").strip().upper()
+    if not token or len(token) != 8:
+        raise HTTPException(
+            status_code=400, detail="Invalid pairing token (must be 8 characters)"
+        )
+    # v6.0: auto-generate a 6-digit code for this legacy token
+    code = _generate_pairing_code()
+    _pairing_codes[code] = {
+        "created": time.time(),
+        "expires": time.time() + _PAIRING_CODE_TTL,
+        "legacy_token": token,
+    }
+    _device_tokens[token] = {
+        "user_id": "overlay_device",
+        "user_name": "Lilly Overlay v6",
+        "created": time.time(),
+        "version": "6.0",
+    }
+    return {
+        "ok": True,
+        "token": token,
+        "user_name": "Lilly Overlay v6",
+        "server_url": f"https://droolingwithsanity.ca",
+        "message": "Overlay paired successfully (v6.0 compat)",
+        "version": "6.0",
+    }
+
+
+@app.post("/api/phone_cmd")
+async def phone_cmd(request: Request):
+    """Proxy phone commands to the Termux phone server."""
+    body = await request.json()
+    cmd_type = body.get("type", "")
+    token = body.get("token", "")
+    # Verify pairing token if provided
+    if token and token not in _device_tokens:
+        # Also accept overlay 8-char tokens
+        if len(token) == 8 and token in _device_tokens:
+            pass
+        else:
+            raise HTTPException(status_code=401, detail="Invalid device token")
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                f"{PHONE_SERVER_URL}/api/phone_cmd",
+                json=body,
+                headers={"Content-Type": "application/json"},
+            )
+            return Response(
+                content=r.content,
+                status_code=r.status_code,
+                media_type=r.headers.get("content-type", "application/json"),
+            )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # ─── FILE SHARE ──────────────────────────────────────────────────
@@ -17800,30 +18464,39 @@ def _apk_variants() -> list[dict]:
             }
         )
 
+    def _version_tuple(path: Path) -> tuple:
+        """Extract a sortable version tuple from an APK filename."""
+        m = re.search(r"v?(\d+(?:\.\d+)+)", path.name)
+        if not m:
+            return (0,)
+        return tuple(int(x) for x in m.group(1).split("."))
+
     def _best_light() -> Path | None:
-        # 1) Prefer newest hitomi-v*.apk by version/mtime
-        hitomi = sorted(
-            [p for p in fs_dir.glob("hitomi-v*.apk") if p.is_file()],
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        if hitomi:
-            return hitomi[0]
-        # 2) Fallback: explicit latest_apk.apk
-        latest = fs_dir / "latest_apk.apk"
-        if latest.exists():
-            return latest
-        # 3) Fallback: newest lilly-overlay-*.apk under ~10MB
+        # 1) Prefer lilly-overlay-*.apk under ~10MB, sorted by version desc then mtime desc
         overlay = sorted(
             [
                 p
                 for p in fs_dir.glob("lilly-overlay-*.apk")
                 if p.is_file() and p.stat().st_size < 10_000_000
             ],
-            key=lambda p: p.stat().st_mtime,
+            key=lambda p: (_version_tuple(p), p.stat().st_mtime),
             reverse=True,
         )
-        return overlay[0] if overlay else None
+        if overlay:
+            return overlay[0]
+        # 2) Fallback: newest hitomi-v*.apk by version/mtime
+        hitomi = sorted(
+            [p for p in fs_dir.glob("hitomi-v*.apk") if p.is_file()],
+            key=lambda p: (_version_tuple(p), p.stat().st_mtime),
+            reverse=True,
+        )
+        if hitomi:
+            return hitomi[0]
+        # 3) Fallback: explicit latest_apk.apk
+        latest = fs_dir / "latest_apk.apk"
+        if latest.exists():
+            return latest
+        return None
 
     light = _best_light()
     if light:
@@ -18064,6 +18737,7 @@ async def get_settings(request: Request):
         "sensor_server_url": s.get(
             "sensor_server_url", os.environ.get("SENSOR_SERVER_URL", "")
         ),
+        "lilly_pair_token": s.get("lilly_pair_token", ""),
         "proactive_notifications": s.get("proactive_notifications", True),
         "notification_sound": s.get("notification_sound", True),
         "pushbullet_fallback": s.get("pushbullet_fallback", False),
@@ -18102,6 +18776,26 @@ async def save_sensor_setting(request: Request):
     _set_user_settings(uid, {"sensor_server_url": url})
     global SENSOR_SERVER_URL
     SENSOR_SERVER_URL = url
+    return {"ok": True}
+
+
+@app.post("/api/settings/pair-token")
+async def save_pair_token_setting(request: Request):
+    user = await get_current_user(request)
+    uid = user.get("id") if user else "anonymous"
+    try:
+        body = await request.json()
+        token = (body.get("token") or "").strip()
+    except Exception:
+        token = ""
+    _set_user_settings(uid, {"lilly_pair_token": token})
+    global LILLY_PAIR_TOKEN
+    LILLY_PAIR_TOKEN = token
+    # Reset sensor client so it picks up the new token
+    global _sensor_client
+    if _sensor_client and not _sensor_client.is_closed:
+        _sensor_client.close()
+        _sensor_client = None
     return {"ok": True}
 
 

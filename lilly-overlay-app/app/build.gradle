@@ -12,8 +12,8 @@ android {
         applicationId 'ai.agent1c.hitomi'
         minSdk 21
         targetSdk 34
-        versionCode 40
-        versionName "4.0"
+        versionCode 60
+        versionName "6.0"
     }
 
     buildTypes {

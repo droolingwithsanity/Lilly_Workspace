@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Simplified main activity — overlay relay only, no Auth0 / local AI -->
+<!-- v3.8-simple — guided setup, minimal options, frosty glass aesthetic -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -10,164 +10,391 @@
         android:layout_height="wrap_content"
         android:gravity="center_horizontal"
         android:orientation="vertical"
-        android:padding="24dp">
+        android:padding="20dp">
 
         <!-- Header -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Lilly AI Companion"
-            android:textSize="28sp"
-            android:textColor="#5D4E6D"
+            android:text="Lilly AI v6.0"
+            android:textSize="26sp"
+            android:textColor="#4A5568"
             android:textStyle="bold"
-            android:layout_marginBottom="4dp" />
+            android:layout_marginBottom="2dp" />
 
         <TextView
             android:id="@+id/appVersionText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/app_version"
-            android:textSize="16sp"
+            android:textSize="14sp"
             android:textColor="#4ADE80"
-            android:layout_marginBottom="8dp" />
+            android:layout_marginBottom="16dp" />
 
-        <!-- Overlay Controls -->
-        <Button
-            android:id="@+id/startOverlay"
+        <!-- ─── Quick Setup ─── -->
+        <TextView
             android:layout_width="match_parent"
-            android:layout_height="52dp"
-            android:text="@string/app_name"
-            android:textSize="16sp"
-            android:backgroundTint="#4ADE80"
-            android:textColor="#000000"
+            android:layout_height="wrap_content"
+            android:text="SETUP"
+            android:textSize="11sp"
+            android:textColor="#4ADE80"
+            android:textStyle="bold"
+            android:letterSpacing="0.15"
             android:layout_marginBottom="12dp" />
 
-        <Button
-            android:id="@+id/stopOverlay"
+        <!-- Microphone -->
+        <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="52dp"
-            android:text="Stop Lilly Overlay"
-            android:textSize="16sp"
-            android:backgroundTint="#F472B6"
-            android:textColor="#000000"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Microphone"
+                android:textSize="13sp"
+                android:textColor="#4A5568" />
+
+            <Button
+                android:id="@+id/btnRequestMic"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="Enable"
+                android:textSize="11sp"
+                android:backgroundTint="#4ADE80"
+                android:textColor="#000000" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/micStatusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Mic: not enabled"
+            android:textSize="12sp"
+            android:textColor="#4A5568"
             android:layout_marginBottom="12dp" />
+
+        <!-- Overlay -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Overlay"
+                android:textSize="13sp"
+                android:textColor="#4A5568" />
+
+            <Button
+                android:id="@+id/startOverlay"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="Start"
+                android:textSize="11sp"
+                android:backgroundTint="#4ADE80"
+                android:textColor="#000000"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/stopOverlay"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="Stop"
+                android:textSize="11sp"
+                android:backgroundTint="#F472B6"
+                android:textColor="#000000" />
+        </LinearLayout>
 
         <Button
             android:id="@+id/openSettings"
             android:layout_width="match_parent"
-            android:layout_height="52dp"
+            android:layout_height="40dp"
             android:text="App Permissions"
-            android:textSize="16sp"
+            android:textSize="12sp"
             android:backgroundTint="#7DD3FC"
             android:textColor="#FFFFFF"
-            android:layout_marginBottom="4dp" />
+            android:layout_marginBottom="16dp" />
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Requires: Overlay, Microphone, Notifications"
-            android:textSize="11sp"
-            android:textColor="#7D4E6D"
-            android:gravity="center"
-            android:layout_marginBottom="24dp" />
-
-        <!-- Get Phone App (APK Download) -->
+        <!-- ─── Camera ─── -->
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
-            android:background="#5D4E6D33"
-            android:layout_marginTop="20dp"
-            android:layout_marginBottom="16dp" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Lilly Phone App"
-            android:textSize="14sp"
-            android:textColor="#5D4E6D"
-            android:textStyle="bold"
-            android:layout_marginBottom="4dp" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Share this APK with another phone or re-install the latest build."
-            android:textSize="11sp"
-            android:textColor="#5D4E6D80"
+            android:background="#4A556833"
             android:layout_marginBottom="12dp" />
 
-        <!-- Recent Changes -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="VISION"
+            android:textSize="11sp"
+            android:textColor="#4ADE80"
+            android:textStyle="bold"
+            android:letterSpacing="0.15"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
+
+            <Button
+                android:id="@+id/btnRequestCamera"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:text="Enable Camera"
+                android:textSize="11sp"
+                android:backgroundTint="#4ADE80"
+                android:textColor="#000000"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/btnTestCamera"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:text="Test Camera"
+                android:textSize="11sp"
+                android:backgroundTint="#F472B6"
+                android:textColor="#000000"
+                android:layout_marginStart="4dp"
+                android:enabled="false" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/cameraStatusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Camera: not enabled"
+            android:textSize="12sp"
+            android:textColor="#4A5568"
+            android:gravity="center"
+            android:layout_marginBottom="12dp" />
+
+        <!-- ─── Bridge ─── -->
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
-            android:background="#5D4E6D33"
-            android:layout_marginTop="20dp"
-            android:layout_marginBottom="16dp" />
+            android:background="#4A556833"
+            android:layout_marginBottom="12dp" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/recent_changes_title"
-            android:textSize="14sp"
-            android:textColor="#5D4E6D"
+            android:text="BRIDGE"
+            android:textSize="11sp"
+            android:textColor="#4ADE80"
             android:textStyle="bold"
+            android:letterSpacing="0.15"
             android:layout_marginBottom="8dp" />
 
         <TextView
+            android:id="@+id/termuxStatusText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/recent_changes_1"
-            android:textSize="11sp"
-            android:textColor="#5D4E6D80"
-            android:layout_marginBottom="2dp" />
+            android:background="#FFFFFF33"
+            android:padding="8dp"
+            android:text="Bridge: checking..."
+            android:textSize="12sp"
+            android:textColor="#4A5568"
+            android:layout_marginBottom="8dp" />
 
-        <TextView
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/recent_changes_2"
-            android:textSize="11sp"
-            android:textColor="#5D4E6D80"
-            android:layout_marginBottom="2dp" />
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/recent_changes_3"
-            android:textSize="11sp"
-            android:textColor="#5D4E6D80"
-            android:layout_marginBottom="2dp" />
+            <Button
+                android:id="@+id/termuxPermissionButton"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:text="Grant Permission"
+                android:textSize="11sp"
+                android:backgroundTint="#7DD3FC"
+                android:textColor="#FFFFFF"
+                android:layout_marginEnd="4dp" />
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/recent_changes_4"
-            android:textSize="11sp"
-            android:textColor="#5D4E6D80"
-            android:layout_marginBottom="2dp" />
+            <Button
+                android:id="@+id/termuxTestBtn"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:text="Test"
+                android:textSize="11sp"
+                android:backgroundTint="#F472B6"
+                android:textColor="#000000"
+                android:layout_marginStart="4dp"
+                android:enabled="false" />
+        </LinearLayout>
 
-        <TextView
+        <!-- ─── Advanced (collapsed by default) ─── -->
+        <LinearLayout
+            android:id="@+id/advancedSection"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/recent_changes_5"
-            android:textSize="11sp"
-            android:textColor="#5D4E6D80"
-            android:layout_marginBottom="2dp" />
+            android:orientation="vertical"
+            android:layout_marginBottom="16dp">
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/recent_changes_6"
-            android:textSize="11sp"
-            android:textColor="#5D4E6D80"
-            android:layout_marginBottom="2dp" />
+            <Button
+                android:id="@+id/btnToggleAdvanced"
+                android:layout_width="match_parent"
+                android:layout_height="40dp"
+                android:text="Advanced ▼"
+                android:textSize="12sp"
+                android:backgroundTint="#334155"
+                android:textColor="#FFFFFF" />
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/recent_changes_7"
-            android:textSize="11sp"
-            android:textColor="#5D4E6D80"
-            android:layout_marginBottom="2dp" />
+            <LinearLayout
+                android:id="@+id/advancedContent"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone"
+                android:paddingTop="8dp">
+
+                <!-- Skills -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="SKILLS"
+                    android:textSize="11sp"
+                    android:textColor="#4ADE80"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.15"
+                    android:layout_marginBottom="8dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginBottom="8dp">
+
+                    <Button
+                        android:id="@+id/btnListSkills"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_weight="1"
+                        android:text="List Skills"
+                        android:textSize="11sp"
+                        android:backgroundTint="#7DD3FC"
+                        android:textColor="#FFFFFF"
+                        android:layout_marginEnd="4dp" />
+
+                    <Button
+                        android:id="@+id/btnListPackages"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_weight="1"
+                        android:text="Packages"
+                        android:textSize="11sp"
+                        android:backgroundTint="#7DD3FC"
+                        android:textColor="#FFFFFF"
+                        android:layout_marginStart="4dp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginBottom="8dp">
+
+                    <Button
+                        android:id="@+id/btnInstallPackage"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_weight="1"
+                        android:text="Install"
+                        android:textSize="11sp"
+                        android:backgroundTint="#4ADE80"
+                        android:textColor="#000000"
+                        android:layout_marginEnd="4dp" />
+
+                    <Button
+                        android:id="@+id/btnUpdateAll"
+                        android:layout_width="0dp"
+                        android:layout_height="40dp"
+                        android:layout_weight="1"
+                        android:text="Update All"
+                        android:textSize="11sp"
+                        android:backgroundTint="#4ADE80"
+                        android:textColor="#000000"
+                        android:layout_marginStart="4dp" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnSyncOpenHuman"
+                    android:layout_width="match_parent"
+                    android:layout_height="40dp"
+                    android:text="Sync OpenHuman"
+                    android:textSize="11sp"
+                    android:backgroundTint="#8B5CF6"
+                    android:textColor="#FFFFFF"
+                    android:layout_marginBottom="8dp" />
+
+                <!-- Server -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="SERVER"
+                    android:textSize="11sp"
+                    android:textColor="#4ADE80"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.15"
+                    android:layout_marginBottom="8dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginBottom="8dp">
+
+                    <EditText
+                        android:id="@+id/serverUrlInput"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:hint="https://droolingwithsanity.ca"
+                        android:text="https://droolingwithsanity.ca"
+                        android:textSize="12sp"
+                        android:textColor="#3D2E52"
+                        android:backgroundTint="#7DD3FC"
+                        android:padding="8dp"
+                        android:importantForAutofill="no" />
+
+                    <Button
+                        android:id="@+id/saveServerBtn"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Save"
+                        android:textSize="11sp"
+                        android:backgroundTint="#7DD3FC"
+                        android:textColor="#FFFFFF"
+                        android:layout_marginStart="4dp" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/skillsStatusText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Bridge ready"
+                    android:textSize="12sp"
+                    android:textColor="#4A5568"
+                    android:gravity="center"
+                    android:layout_marginBottom="4dp" />
+
+            </LinearLayout>
+        </LinearLayout>
 
     </LinearLayout>
 </ScrollView>

@@ -10,7 +10,7 @@ body{
   background:transparent;
   overflow:visible;
   font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
-  width:96px;height:96px;
+  width:80px;height:80px;
   user-select:none;-webkit-user-select:none;
   touch-action:manipulation;
 }
@@ -19,25 +19,25 @@ body{
   --glass-bg:rgba(255,255,255,0.55);
   --glass-border:rgba(255,255,255,0.6);
   --glass-blur:blur(24px);
-  --text-primary:rgba(93,78,109,0.85);
-  --text-secondary:rgba(93,78,109,0.5);
-  --text-tertiary:rgba(93,78,109,0.35);
-  --accent-pink:rgba(245,213,224,0.55);
+  --text-primary:rgba(74,85,104,0.9);
+  --text-secondary:rgba(74,85,104,0.6);
+  --text-tertiary:rgba(74,85,104,0.4);
+  --accent-pink:rgba(226,232,240,0.55);
   --accent-blue:rgba(212,232,245,0.55);
   --accent-mint:rgba(213,240,230,0.55);
-  --accent-cream:rgba(245,230,212,0.55);
-  --bubble-shadow:rgba(180,140,180,0.15);
+  --accent-cream:rgba(241,245,249,0.55);
+  --bubble-shadow:rgba(100,116,139,0.12);
 }
 #container{
-  width:96px;height:96px;
+  width:80px;height:80px;
   position:relative;
   /* Collapsed: smart watch face — subtle frosted glass orb */
-  background:radial-gradient(circle at 35% 30%,rgba(255,255,255,0.35),rgba(255,255,255,0.08) 70%,rgba(255,255,255,0.02));
+  background:radial-gradient(circle at 35% 30%,rgba(255,255,255,0.22),rgba(255,255,255,0.05) 70%,rgba(255,255,255,0.01));
   backdrop-filter:blur(12px);
   -webkit-backdrop-filter:blur(12px);
   border-radius:50%;
-  border:2px solid rgba(255,255,255,0.45);
-  box-shadow:0 4px 20px rgba(180,140,180,0.18), inset 0 1px 2px rgba(255,255,255,0.4);
+  border:2px solid rgba(255,255,255,0.35);
+  box-shadow:0 4px 20px rgba(180,140,180,0.12), inset 0 1px 2px rgba(255,255,255,0.3);
   transition:all 0.3s;
   overflow:hidden;
 }
@@ -66,19 +66,19 @@ body.expanded #aurora{opacity:1}
   border-radius:50%;filter:blur(80px);opacity:0.55;
   animation:auroraDrift 12s ease-in-out infinite alternate;
 }
-#aurora .l1{background:radial-gradient(ellipse at 30% 40%,var(--accent-pink),transparent 70%);animation-delay:0s}
+#aurora .l1{background:radial-gradient(ellipse at 30% 40%,var(--accent-blue),transparent 70%);animation-delay:0s}
 #aurora .l2{background:radial-gradient(ellipse at 70% 60%,var(--accent-blue),transparent 70%);animation-delay:-4s}
 #aurora .l3{background:radial-gradient(ellipse at 50% 30%,var(--accent-mint),transparent 70%);animation-delay:-8s}
 #aurora .l4{background:radial-gradient(ellipse at 20% 70%,var(--accent-cream),transparent 70%);animation-delay:-2s;opacity:0.3}
 @keyframes auroraDrift{0%{transform:translate(0,0) scale(1)}100%{transform:translate(4%,3%) scale(1.12)}}
 #aurora::after{
   content:'';position:absolute;top:0;left:0;width:100%;height:100%;
-  background:linear-gradient(180deg,rgba(240,230,239,0.3) 0%,transparent 40%,transparent 70%,rgba(240,230,239,0.4) 100%);
+  background:linear-gradient(180deg,rgba(226,232,240,0.25) 0%,transparent 40%,transparent 70%,rgba(226,232,240,0.3) 100%);
 }
 #pupCanvas{
   position:absolute;
-  top:-16px;left:-16px;
-  width:128px;height:128px;
+  top:-40px;left:-40px;
+  width:160px;height:160px;
   image-rendering:auto;
   touch-action:none;
   z-index:2;
@@ -86,8 +86,8 @@ body.expanded #aurora{opacity:1}
 }
 #dragHandle{
   position:absolute;
-  top:-16px;left:-16px;
-  width:128px;height:128px;
+  top:-40px;left:-40px;
+  width:160px;height:160px;
   z-index:5;
   touch-action:none;
 }
@@ -118,8 +118,8 @@ body.expanded #aurora{opacity:1}
   border:1px solid var(--glass-border);
   transition:all 0.5s;
 }
-#moodDot{width:6px;height:6px;border-radius:50%;background:#c0b0d0;transition:background 0.6s}
-#moodDot.active{background:#b8a9c9;box-shadow:0 0 10px rgba(184,169,201,0.5);animation:pulse 2s infinite}
+#moodDot{width:6px;height:6px;border-radius:50%;background:#94a3b8;transition:background 0.6s}
+#moodDot.active{background:#64748b;box-shadow:0 0 10px rgba(100,116,139,0.4);animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
 
 /* ─── Thinking Indicator ─── */
@@ -127,7 +127,7 @@ body.expanded #aurora{opacity:1}
   position:absolute;top:38%;left:50%;transform:translateX(-50%);
   z-index:20;display:none;gap:8px;align-items:center;justify-content:center
 }
-#thinkingDots span{width:8px;height:8px;border-radius:50%;background:rgba(139,122,158,0.5);animation:thinkBounce 1.2s ease-in-out infinite}
+#thinkingDots span{width:8px;height:8px;border-radius:50%;background:rgba(100,116,139,0.5);animation:thinkBounce 1.2s ease-in-out infinite}
 #thinkingDots span:nth-child(2){animation-delay:0.2s}
 #thinkingDots span:nth-child(3){animation-delay:0.4s}
 @keyframes thinkBounce{0%,60%,100%{transform:translateY(0);opacity:0.3}30%{transform:translateY(-14px);opacity:1}}
@@ -144,7 +144,7 @@ body.expanded #aurora{opacity:1}
 #chatBubble{
   position:absolute;
   top:120px;left:50%;transform:translateX(-50%);
-  width:92%;max-width:280px;
+  width:92%;max-width:300px;
   background:var(--glass-bg);
   backdrop-filter:var(--glass-blur);
   -webkit-backdrop-filter:var(--glass-blur);
@@ -217,7 +217,7 @@ body.expanded #aurora{opacity:1}
 #statusDot.listening{background:#4ade80;box-shadow:0 0 4px #4ade80}
 #statusDot.thinking{background:#fbbf24;box-shadow:0 0 4px #fbbf24;animation:pulse 0.8s infinite}
 #statusDot.speaking{background:#f472b6;box-shadow:0 0 4px #f472b6;animation:pulse 0.5s infinite}
-#bubbleInput{display:flex;gap:3px;align-items:center;pointer-events:auto}
+#bubbleInput{display:flex;gap:3px;align-items:center;pointer-events:auto;position:relative;z-index:5}
 #chatInput{
   flex:1;
   background:rgba(255,255,255,0.4);
@@ -227,6 +227,7 @@ body.expanded #aurora{opacity:1}
   font-size:12px;
   color:var(--text-primary);
   outline:none;min-width:0;width:140px;
+  pointer-events:auto;
 }
 #chatInput::placeholder{color:var(--text-tertiary)}
 #chatInput:focus{border-color:rgba(93,78,109,0.2)}
@@ -238,7 +239,7 @@ body.expanded #aurora{opacity:1}
 #micBtn{background:rgba(74,222,128,0.2);color:#4ade80}
 #micBtn.active{background:rgba(74,222,128,0.35);box-shadow:0 0 6px rgba(74,222,128,0.25)}
 #micBtn.muted{background:rgba(239,68,68,0.2);color:#ef4444}
-#sendBtn{background:rgba(168,85,247,0.2);color:#c084fc}
+#sendBtn{background:rgba(59,130,246,0.15);color:#60a5fa}
 .iconBtn:active{transform:scale(0.85)}
 
 /* ─── Radar popout (who's around) ─── */
@@ -370,7 +371,7 @@ body.expanded #aurora{opacity:1}
 /* ─── Car Ride Game Panel (kid mode) ─── */
 #carGamePanel{
   position:absolute;bottom:100px;left:50%;transform:translateX(-50%);
-  width:92%;max-width:280px;
+  width:92%;max-width:300px;
   background:var(--glass-bg);
   backdrop-filter:var(--glass-blur);
   -webkit-backdrop-filter:var(--glass-blur);
@@ -461,7 +462,7 @@ body.expanded #aurora{opacity:1}
 /* ─── Fetch Game Panel (mirrors car game glass style) ─── */
 #fetchGamePanel{
   position:absolute;bottom:100px;left:50%;transform:translateX(-50%);
-  width:92%;max-width:280px;
+  width:92%;max-width:300px;
   background:var(--glass-bg);
   backdrop-filter:var(--glass-blur);
   -webkit-backdrop-filter:var(--glass-blur);
@@ -504,11 +505,14 @@ body.expanded #aurora{opacity:1}
   transform:rotate(var(--angle)) translate(72px) rotate(calc(-1 * var(--angle))) scale(1);
 }
 #radialMenu.open .radial-arm:nth-child(1) .radial-item{transition-delay:0.00s}
-#radialMenu.open .radial-arm:nth-child(2) .radial-item{transition-delay:0.04s}
-#radialMenu.open .radial-arm:nth-child(3) .radial-item{transition-delay:0.08s}
-#radialMenu.open .radial-arm:nth-child(4) .radial-item{transition-delay:0.12s}
-#radialMenu.open .radial-arm:nth-child(5) .radial-item{transition-delay:0.16s}
-#radialMenu.open .radial-arm:nth-child(6) .radial-item{transition-delay:0.20s}
+#radialMenu.open .radial-arm:nth-child(2) .radial-item{transition-delay:0.03s}
+#radialMenu.open .radial-arm:nth-child(3) .radial-item{transition-delay:0.06s}
+#radialMenu.open .radial-arm:nth-child(4) .radial-item{transition-delay:0.09s}
+#radialMenu.open .radial-arm:nth-child(5) .radial-item{transition-delay:0.12s}
+#radialMenu.open .radial-arm:nth-child(6) .radial-item{transition-delay:0.15s}
+#radialMenu.open .radial-arm:nth-child(7) .radial-item{transition-delay:0.18s}
+#radialMenu.open .radial-arm:nth-child(8) .radial-item{transition-delay:0.21s}
+#radialMenu.open .radial-arm:nth-child(9) .radial-item{transition-delay:0.24s}
 .radial-item .ri-icon{font-size:18px;line-height:1}
 .radial-item .ri-label{font-size:8px;letter-spacing:0.3px;text-transform:uppercase}
 .radial-item:active{filter:brightness(1.1);background:rgba(255,255,255,0.7)}
@@ -516,11 +520,11 @@ body.expanded #aurora{opacity:1}
 /* ─── Feature Cards (slide-up panels) ─── */
 #featurePanel{
   position:absolute;bottom:0;left:0;width:100%;height:100%;
-  background:var(--glass-bg);
-  backdrop-filter:var(--glass-blur);
-  -webkit-backdrop-filter:var(--glass-blur);
-  border:1px solid var(--glass-border);
-  border-radius:22px;padding:12px;
+  background:rgba(30,41,59,0.85);
+  backdrop-filter:blur(20px);
+  -webkit-backdrop-filter:blur(20px);
+  border:1px solid rgba(148,163,184,0.2);
+  border-radius:16px;padding:12px;
   display:none;flex-direction:column;gap:10px;z-index:25;
   box-shadow:0 8px 40px var(--bubble-shadow);
   overflow-y:auto;
@@ -575,6 +579,7 @@ body.expanded #aurora{opacity:1}
   <div id="chatBubble">
     <div id="chatHeader">
       <span id="chatTitle">Chat</span>
+      <a id="versionBadge" href="#" title="Download Lilly app update" style="display:none; margin-left:auto; font-size:11px; color:#4ADE80; text-decoration:none;">v…</a>
       <button id="closeChatBtn" onclick="closeChat()">✕</button>
     </div>
     <div id="bubbleTail"></div>
@@ -725,13 +730,14 @@ body.expanded #aurora{opacity:1}
   <!-- ─── Radial Menu (long-press to open, auto-dismiss on select) ─── -->
   <div id="radialMenu">
     <div class="radial-arm" style="--angle:0deg"><button class="radial-item" onclick="openFeature('vision')"><span class="ri-icon">👁️</span><span class="ri-label">Vision</span></button></div>
-    <div class="radial-arm" style="--angle:45deg"><button class="radial-item" onclick="openFeature('orientation')"><span class="ri-icon">🧭</span><span class="ri-label">Motion</span></button></div>
-    <div class="radial-arm" style="--angle:90deg"><button class="radial-item" onclick="openFeature('acoustics')"><span class="ri-icon">🎤</span><span class="ri-label">Sound</span></button></div>
-    <div class="radial-arm" style="--angle:135deg"><button class="radial-item" onclick="openFeature('touch')"><span class="ri-icon">👆</span><span class="ri-label">Touch</span></button></div>
-    <div class="radial-arm" style="--angle:180deg"><button class="radial-item" onclick="openFeature('proximity')"><span class="ri-icon">📡</span><span class="ri-label">Proximity</span></button></div>
-    <div class="radial-arm" style="--angle:225deg"><button class="radial-item" onclick="openFeature('ambient')"><span class="ri-icon">💡</span><span class="ri-label">Ambient</span></button></div>
-    <div class="radial-arm" style="--angle:270deg"><button class="radial-item" onclick="openFeature('chat')"><span class="ri-icon">💬</span><span class="ri-label">Chat</span></button></div>
-    <div class="radial-arm" style="--angle:315deg"><button class="radial-item" onclick="openFeature('games')"><span class="ri-icon">🎮</span><span class="ri-label">Games</span></button></div>
+    <div class="radial-arm" style="--angle:40deg"><button class="radial-item" onclick="openFeature('orientation')"><span class="ri-icon">🧭</span><span class="ri-label">Motion</span></button></div>
+    <div class="radial-arm" style="--angle:80deg"><button class="radial-item" onclick="openFeature('acoustics')"><span class="ri-icon">🎤</span><span class="ri-label">Sound</span></button></div>
+    <div class="radial-arm" style="--angle:120deg"><button class="radial-item" onclick="openFeature('touch')"><span class="ri-icon">👆</span><span class="ri-label">Touch</span></button></div>
+    <div class="radial-arm" style="--angle:160deg"><button class="radial-item" onclick="openFeature('proximity')"><span class="ri-icon">📡</span><span class="ri-label">Proximity</span></button></div>
+    <div class="radial-arm" style="--angle:200deg"><button class="radial-item" onclick="openFeature('ambient')"><span class="ri-icon">💡</span><span class="ri-label">Ambient</span></button></div>
+    <div class="radial-arm" style="--angle:240deg"><button class="radial-item" onclick="openFeature('chat')"><span class="ri-icon">💬</span><span class="ri-label">Chat</span></button></div>
+    <div class="radial-arm" style="--angle:280deg"><button class="radial-item" onclick="openFeature('games')"><span class="ri-icon">🎮</span><span class="ri-label">Games</span></button></div>
+    <div class="radial-arm" style="--angle:320deg"><button class="radial-item" onclick="openPairing()"><span class="ri-icon">🔗</span><span class="ri-label">Pair</span></button></div>
   </div>
 
   <!-- ─── Feature Detail Panel ─── -->
@@ -1184,7 +1190,7 @@ function drawPup(){
   ctx.restore();
   // ── UNIFIED CLAY FACE — every avatar (incl. 🐶 Lilly) renders with the
   // ── same drawAnimalFace style, matching the avatar picker + main UI.
-  drawAnimalFace(ctx, avatar, W/2, H/2, Math.min(W,H)*0.48, frame, true);
+  drawAnimalFace(ctx, avatar, W/2, H/2, Math.min(W,H)*0.36, frame, true);
   if(thinking){
     ctx.save();
     const g=0.06+Math.sin(frame*0.06)*0.03;
@@ -1801,6 +1807,23 @@ authFetch('/api/ui_state').then(r=>r.json()).then(s=>{
   // avatar detection from server
 }).catch(()=>{});
 
+// Show the installed app version in the header and link it to the APK download
+(function(){
+  var badge = document.getElementById('versionBadge');
+  if (!badge) return;
+  function show(v){ badge.textContent = 'v' + (v || '?'); badge.style.display = ''; }
+  fetch('/api/app_version')
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      show(d && d.version);
+      if (d && d.download_url) {
+        badge.href = d.download_url;
+        badge.title = 'Download Lilly app v' + (d.version || '');
+      }
+    })
+    .catch(function(){ show(null); });
+})();
+
 // Drag handle - native onTouchListener handles the window movement.
 // JS only needs to detect taps for expand/collapse.
 // In Android mode, drag is handled by the touch handlers above (LillyBridge.onDrag).
@@ -1933,7 +1956,7 @@ function drawRadar(t){
   c.fillStyle='#7dd3fc';
   c.beginPath();c.arc(cx,cy,3.5,0,Math.PI*2);c.fill();
   // Pins
-  const COLORS={ios:'#60a5fa',android:'#4ade80',apple:'#c084fc',computer:'#fb923c',audio:'#f472b6',iot:'#fbbf24',other:'#94a3b8',unknown:'#e2e8f0'};
+  const COLORS={ios:'#60a5fa',android:'#4ade80',apple:'#60a5fa',computer:'#fb923c',audio:'#f472b6',iot:'#fbbf24',other:'#94a3b8',unknown:'#e2e8f0'};
   const devs=_radarDevices||[];
   for(let i=0;i<devs.length;i++){
     const d=devs[i];
@@ -2792,6 +2815,90 @@ function closeFeature(){
   featurePanel.classList.remove('show');
   if(featureHideTimer)clearTimeout(featureHideTimer);
 }
+
+function openPairing(){
+  if(featureHideTimer)clearTimeout(featureHideTimer);
+  const panel = document.getElementById('featurePanel');
+  const title = document.getElementById('featTitle');
+  const content = document.getElementById('featContent');
+  title.textContent = 'Pair with Web UI';
+  content.innerHTML = `
+    <div style="padding:16px;text-align:center">
+      <div style="font-size:13px;color:var(--text-primary);margin-bottom:16px;line-height:1.5">
+        Open your web dashboard and enter the 6-digit code shown there.
+      </div>
+      <input id="pairCodeInput" type="text" inputmode="numeric" maxlength="6" placeholder="000000"
+        style="width:100%;padding:16px;border-radius:16px;border:2px solid var(--glass-border);
+        background:var(--glass-bg);color:var(--text-primary);font-size:28px;text-align:center;
+        letter-spacing:8px;font-family:ui-monospace,Consolas,monospace;box-sizing:border-box;
+        outline:none;transition:border-color 0.2s">
+      <button onclick="submitPairCode()" style="width:100%;margin-top:16px;padding:14px;border:none;
+        border-radius:14px;background:var(--accent-mint);color:#fff;font-size:15px;font-weight:600;cursor:pointer;
+        letter-spacing:0.5px">
+        Pair Now
+      </button>
+      <div id="pairStatus" style="margin-top:12px;font-size:12px;color:var(--text-secondary)"></div>
+      <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--glass-border)">
+        <div style="font-size:11px;color:var(--text-tertiary);line-height:1.5">
+          v6.0 unified pairing<br>
+          Code expires in 5 minutes
+        </div>
+      </div>
+    </div>
+  `;
+  panel.classList.add('show');
+  // Auto-focus the input
+  const input = document.getElementById('pairCodeInput');
+  if (input) input.focus();
+  // Auto-submit when 6 digits entered
+  if (input) {
+    input.addEventListener('input', (e) => {
+      if (e.target.value.length === 6) {
+        submitPairCode();
+      }
+    });
+  }
+}
+
+async function submitPairCode(){
+  const input = document.getElementById('pairCodeInput');
+  const status = document.getElementById('pairStatus');
+  if (!input) return;
+  const code = (input.value || '').trim();
+  if (code.length !== 6 || !/^\d{6}$/.test(code)){
+    status.textContent = 'Enter the exact 6-digit code';
+    status.style.color = '#f87171';
+    return;
+  }
+  status.textContent = 'Pairing...';
+  status.style.color = 'var(--text-secondary)';
+  input.disabled = true;
+  try {
+    const server = await _getServer();
+    const resp = await fetch(server + '/api/pair/confirm', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({code: code})
+    });
+    const data = await resp.json();
+    if (resp.ok){
+      localStorage.setItem('lilly_device_token', data.token);
+      localStorage.setItem('lilly_pair_version', data.version || '6.0');
+      status.textContent = 'Paired! Welcome, ' + (data.user_name || 'User');
+      status.style.color = '#4ade80';
+      setTimeout(closeFeature, 1500);
+    } else {
+      status.textContent = data.detail || 'Pairing failed';
+      status.style.color = '#f87171';
+      input.disabled = false;
+    }
+  } catch (e) {
+    status.textContent = 'Network error — try again';
+    status.style.color = '#f87171';
+    input.disabled = false;
+  }
+}
+
 function autoHideFeature(delay){
   if(featureHideTimer)clearTimeout(featureHideTimer);
   featureHideTimer=setTimeout(closeFeature,delay||8000);
@@ -2907,14 +3014,17 @@ function renderFeatureCard(name,data){
     html=`<div class="feat-card wide" style="padding:0;overflow:hidden">
       <div style="position:relative;width:100%;aspect-ratio:4/3;background:#000;border-radius:12px;overflow:hidden">
         <video id="visionCamera" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:block"></video>
+        <video id="nativeCamera" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:none"></video>
         <canvas id="visionAR" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none"></canvas>
         <div id="visionDepth" style="position:absolute;bottom:6px;left:6px;font-size:9px;color:#fff;background:rgba(0,0,0,0.55);padding:3px 8px;border-radius:999px;backdrop-filter:blur(6px)">Depth: --</div>
+        <div id="visionSourceLabel" style="position:absolute;top:6px;right:6px;font-size:9px;color:#fff;background:rgba(0,0,0,0.55);padding:3px 8px;border-radius:999px;backdrop-filter:blur(6px)">Browser</div>
       </div>
       <div style="padding:8px 6px 0">
         <div style="font-size:9px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:0.4px;margin-bottom:4px">Live Camera</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <button class="iconBtn" id="visionSnapBtn" style="background:rgba(74,222,128,0.2);color:#4ade80;width:auto;height:auto;padding:6px 10px;border-radius:10px;font-size:10px">📸 Snap</button>
           <button class="iconBtn" id="visionARModeBtn" style="background:rgba(56,189,248,0.2);color:#7dd3fc;width:auto;height:auto;padding:6px 10px;border-radius:10px;font-size:10px">🧭 AR</button>
+          <button class="iconBtn" id="visionSwitchBtn" style="background:rgba(139,92,246,0.2);color:#a78bfa;width:auto;height:auto;padding:6px 10px;border-radius:10px;font-size:10px">📱 Native</button>
         </div>
       </div>
     </div>`;
@@ -3002,6 +3112,30 @@ async function initVisionPanel(){
     };
   }
 
+  const switchBtn = document.getElementById('visionSwitchBtn');
+  const nativeVideo = document.getElementById('nativeCamera');
+  const sourceLabel = document.getElementById('visionSourceLabel');
+  if(switchBtn && nativeVideo){
+    switchBtn.onclick = function(){
+      if(LillyBridge && typeof LillyBridge.startCameraStream === 'function'){
+        if(nativeVideo.style.display === 'none' || nativeVideo.style.display === ''){
+          nativeVideo.src = 'http://localhost:8095/stream';
+          nativeVideo.style.display = 'block';
+          if(sourceLabel) sourceLabel.textContent = 'Native';
+          switchBtn.style.background = 'rgba(139,92,246,0.45)';
+          LillyBridge.startCameraStream();
+        } else {
+          nativeVideo.style.display = 'none';
+          if(sourceLabel) sourceLabel.textContent = 'Browser';
+          switchBtn.style.background = 'rgba(139,92,246,0.2)';
+          if(LillyBridge.stopCameraStream) LillyBridge.stopCameraStream();
+        }
+      } else {
+        alert('Native camera bridge not available');
+      }
+    };
+  }
+
   // Start detection loop: send frames to server YOLO every 500ms
   startVisionDetectionLoop();
 
@@ -3067,12 +3201,14 @@ async function initVisionPanel(){
 }
 
 async function startVisionDetectionLoop(){
-  const video = document.getElementById('visionCamera');
-  if(!video || !visionStream) return;
+  const browserVideo = document.getElementById('visionCamera');
+  const nativeVideo = document.getElementById('nativeCamera');
+  if(!browserVideo && !nativeVideo) return;
 
   let lastSent = 0;
   async function tick(){
-    if(!visionStream || !video || video.readyState < 2){
+    const activeVideo = (nativeVideo && nativeVideo.style.display === 'block') ? nativeVideo : browserVideo;
+    if(!activeVideo || activeVideo.readyState < 2){
       setTimeout(tick, 500);
       return;
     }
@@ -3087,15 +3223,17 @@ async function startVisionDetectionLoop(){
       const c = document.createElement('canvas');
       c.width = 320; c.height = 240;
       const ctx = c.getContext('2d');
-      ctx.drawImage(video, 0, 0, 320, 240);
+      ctx.drawImage(activeVideo, 0, 0, 320, 240);
       const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.7));
       if(!blob) { setTimeout(tick, 500); return; }
 
       const srv = await _getServer();
       const form = new FormData();
       form.append('file', blob, 'frame.jpg');
+      const source = (activeVideo === nativeVideo) ? 'native' : 'browser';
+      form.append('source', source);
 
-      const r = await fetch(srv + '/api/vision/browser', {
+      const r = await fetch(srv + '/api/vision/' + source, {
         method: 'POST',
         body: form
       });

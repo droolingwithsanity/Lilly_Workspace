@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Lilly Sensor Server — runs on Termux, broadcasts all sensor data via HTTP.
+Lilly Sensor Server v6.0 — runs on Termux, broadcasts all sensor data via HTTP.
 
 Install on Termux:
   pip install fastapi uvicorn
@@ -15,7 +15,7 @@ import os, sys, json, re, time, asyncio, logging
 from typing import Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 
@@ -26,6 +26,7 @@ logger = logging.getLogger("SensorServer")
 
 PORT = int(os.environ.get("SENSOR_PORT", "8099"))
 BATCH_INTERVAL = float(os.environ.get("SENSOR_BATCH_INTERVAL", "2.0"))
+PAIR_TOKEN = os.environ.get("LILLY_PAIR_TOKEN", "").strip()
 
 LATEST_SENSORS: dict = {}
 LATEST_BATTERY: dict = {}
@@ -299,6 +300,73 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+# ─── PAIR TOKEN AUTH ──────────────────────────────────────────────
+# If LILLY_PAIR_TOKEN is set, require X-Pair-Token header on all requests
+# except /health and /pair/public-key. This lets the web UI authenticate
+# without needing the overlay APK.
+
+_PUBLIC_PATHS = {"/health", "/pair/public-key", "/docs", "/openapi.json"}
+
+
+async def _check_pair_token(request: Request):
+    if not PAIR_TOKEN:
+        return
+    path = request.url.path
+    for public in _PUBLIC_PATHS:
+        if path == public or path.startswith(public + "/"):
+            return
+    token = request.headers.get("X-Pair-Token", "")
+    if token != PAIR_TOKEN:
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error": "unauthorized",
+                "detail": "Invalid or missing X-Pair-Token",
+            },
+        )
+
+
+@app.middleware("http")
+async def pair_token_middleware(request: Request, call_next):
+    response = await _check_pair_token(request)
+    if response is not None:
+        return response
+    return await call_next(request)
+
+
+@app.get("/pair/public-key")
+async def pair_public_key():
+    """Return the expected token name so the web UI knows what to send."""
+    return {
+        "token_name": "X-Pair-Token",
+        "has_token": bool(PAIR_TOKEN),
+        "hint": "Set LILLY_PAIR_TOKEN in Termux and in web UI settings",
+        "version": "6.0",
+    }
+
+
+@app.get("/api/version")
+async def sensor_server_version():
+    return {
+        "service": "lilly-sensor-server",
+        "version": "6.0",
+        "port": PORT,
+        "pair_token_required": bool(PAIR_TOKEN),
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "version": "6.0",
+        "port": PORT,
+        "sensors_cached": len(LATEST_SENSORS),
+        "last_update": LAST_UPDATE,
+        "pair_token_required": bool(PAIR_TOKEN),
+    }
+
+
 @app.get("/sensors/all")
 async def get_all_sensors():
     return {
@@ -376,17 +444,6 @@ async def get_location():
 async def get_location_live():
     data = await read_location()
     return {"location": data, "timestamp": time.time()}
-
-
-@app.get("/health")
-async def health():
-    return {
-        "status": "ok",
-        "sensor_count": len(LATEST_SENSORS),
-        "last_update": LAST_UPDATE,
-        "age_sec": round(time.time() - LAST_UPDATE, 1) if LAST_UPDATE else None,
-        "battery": LATEST_BATTERY.get("percentage", None),
-    }
 
 
 @app.post("/shell")
