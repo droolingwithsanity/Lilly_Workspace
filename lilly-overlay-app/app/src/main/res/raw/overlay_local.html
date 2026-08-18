@@ -208,6 +208,11 @@ body.expanded #aurora{opacity:1}
 }
 #bubbleText::-webkit-scrollbar{width:2px}
 #bubbleText::-webkit-scrollbar-thumb{background:rgba(93,78,109,0.12);border-radius:2px}
+
+/* ── Swipe-to-dismiss bubbles ── */
+.msg{position:relative;transition:transform .2s ease, opacity .2s ease}
+.msg.swiping{transition:none}
+.msg.swipe-out{transform:translateX(120%);opacity:0;pointer-events:none;max-height:0 !important;padding:0 !important;margin:0 !important;overflow:hidden}
 #bubbleStatus{
   display:flex;align-items:center;gap:3px;
   font-size:8px;color:var(--text-tertiary);
@@ -1413,6 +1418,7 @@ function appendMsg(who,text){
   bubbleText.appendChild(d);
   bubbleText.scrollTop=bubbleText.scrollHeight;
   _lastActivity=Date.now();
+  attachSwipeToMsg(d);
   return d;
 }
 function showThinking(){
@@ -1421,6 +1427,7 @@ function showThinking(){
     _thinkingEl.className='msg lilly';
     _thinkingEl.innerHTML='<span class="who">'+overlayCharName()+'</span><i>thinking...</i>';
     bubbleText.appendChild(_thinkingEl);
+    attachSwipeToMsg(_thinkingEl);
   }
   bubbleText.scrollTop=bubbleText.scrollHeight;
   _lastActivity=Date.now();

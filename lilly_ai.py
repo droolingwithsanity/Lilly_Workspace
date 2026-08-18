@@ -132,9 +132,9 @@ except ImportError:
     logging.warning("persona_optimizer not found — persona self-optimization disabled")
 
 # ─── CONFIGURATION ───────────────────────────────────────────────
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://100.93.131.114:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
-FAST_MODEL = os.environ.get("FAST_MODEL", "qwen3:8b")  # for creative/story tasks
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://100.73.249.14:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.8-27b-q4")
+FAST_MODEL = os.environ.get("FAST_MODEL", "qwen3.8-27b-q4")
 PIPER_BIN = shutil.which("piper") or os.environ.get(
     "PIPER_BIN", "/usr/local/piper/piper"
 )
@@ -2910,7 +2910,8 @@ async def speak(text: str, use_toast: bool = True, char_key: Optional[str] = Non
         LILLY_MOOD, \
         LAST_SPOKEN, \
         PHONEME_QUEUE, \
-        MOUTH_OPEN
+        MOUTH_OPEN, \
+        SPEAKING_SESSION_ID
     global AUDIO_CACHE, AUDIO_CACHE_ID, _RECENT_SPEECH
     raw_text = text.replace("\n", " ").strip()
     if not raw_text:
@@ -8669,11 +8670,17 @@ async def handle_intent(
         "use your eyes",
     ]
     if any(p in cmd for p in vision_phrases):
-        # Prefer fresh browser camera detections; fall back to server webcam.
+        # Prefer fresh camera detections: native > browser > server webcam.
         detections = []
-        browser_age = time.time() - _browser_vision_ts if _browser_vision_ts else 999
-        if _browser_vision_detections and browser_age < _BROWSER_VISION_TTL:
-            detections = _browser_vision_detections
+        native_age = time.time() - _native_vision_ts if _native_vision_ts else 999
+        if _native_vision_detections and native_age < _NATIVE_VISION_TTL:
+            detections = _native_vision_detections
+        if not detections:
+            browser_age = (
+                time.time() - _browser_vision_ts if _browser_vision_ts else 999
+            )
+            if _browser_vision_detections and browser_age < _BROWSER_VISION_TTL:
+                detections = _browser_vision_detections
         if not detections:
             labeled, detections = await grab_and_label_frame()
         if detections:
@@ -8701,7 +8708,7 @@ async def handle_intent(
             reply = (
                 "I don't have a camera feed right now. "
                 "If you're in the web UI, tap the camera button and allow camera permission. "
-                "If you're in the Android overlay, camera vision isn't available there yet — use the web UI instead."
+                "If you're in the Android overlay, open the Vision panel and switch to Native camera."
             )
         await memory.add("user", cmd)
         await memory.add("assistant", reply)
@@ -12469,6 +12476,164 @@ async def get_browser_vision():
         "age_seconds": round(age, 2) if age is not None else None,
         "stale": age is None or age > _BROWSER_VISION_TTL,
     }
+
+
+# ─── NATIVE CAMERA (Android overlay → MJPEG) ───────────────────────
+# Stores the most recent detection result from the native Android camera
+# forwarded through the overlay's MJPEG server (port 8095).
+_native_vision_detections: list = []
+_native_vision_description: str = ""
+_native_vision_ts: float = 0.0
+_NATIVE_VISION_TTL: float = 8.0  # seconds
+
+
+@app.post("/api/vision/native")
+async def ingest_native_frame(file: UploadFile = File(...)):
+    """
+    Receive a JPEG frame from the Android native camera (forwarded by overlay
+    or captured from the MJPEG stream). Runs the same YOLO detection
+    pipeline as the browser camera path.
+    """
+    global _native_vision_detections, _native_vision_description, _native_vision_ts
+    data = await file.read()
+    if not data or len(data) < 500:
+        return JSONResponse({"ok": False, "error": "frame too small"})
+
+    _avatar = current_avatar or "puppy"
+
+    if VISION_SERVER_URL:
+        proxy_resp = await _proxy_vision_frame(data, avatar=_avatar)
+        if proxy_resp and proxy_resp.get("detections"):
+            _native_vision_detections = [
+                {
+                    "label": d.get("label", "object"),
+                    "confidence": float(d.get("conf", d.get("confidence", 0))),
+                    "x1": float(d.get("x", 0)),
+                    "y1": float(d.get("y", 0)),
+                    "x2": (float(d.get("x", 0)) + float(d.get("w", 0))),
+                    "y2": (float(d.get("y", 0)) + float(d.get("h", 0))),
+                }
+                for d in proxy_resp["detections"]
+            ]
+            _native_vision_ts = time.time()
+            reply_text = proxy_resp.get("reply", "")
+            if not reply_text and _native_vision_detections:
+                labels = sorted(set(d["label"] for d in _native_vision_detections))
+                reply_text = "Camera sees: " + ", ".join(labels)
+            _native_vision_description = reply_text
+            return {
+                "ok": True,
+                "detections": [
+                    {
+                        "label": d["label"],
+                        "confidence": round(d.get("confidence", 0), 2),
+                    }
+                    for d in _native_vision_detections
+                ],
+                "description": _native_vision_description,
+            }
+
+    _, detections = await detect_objects(data)
+    _native_vision_detections = detections
+    _native_vision_ts = time.time()
+    if detections:
+        labels = sorted(set(d["label"] for d in detections))
+        _native_vision_description = "Camera sees: " + ", ".join(labels)
+    else:
+        _native_vision_description = ""
+    return {
+        "ok": True,
+        "detections": [
+            {"label": d["label"], "confidence": round(d.get("confidence", 0), 2)}
+            for d in detections
+        ],
+        "description": _native_vision_description,
+    }
+
+
+@app.get("/api/vision/native")
+async def get_native_vision():
+    """Return the latest native-camera detection result."""
+    age = time.time() - _native_vision_ts if _native_vision_ts else None
+    return {
+        "detections": _native_vision_detections,
+        "description": _native_vision_description,
+        "age_seconds": round(age, 2) if age is not None else None,
+        "stale": age is None or age > _NATIVE_VISION_TTL,
+    }
+
+
+@app.get("/api/vision/stream")
+async def vision_stream_proxy():
+    """
+    Proxy the Android native camera MJPEG stream (port 8095) so the web UI
+    can view it without CORS issues.
+    """
+    # Derive the native camera stream URL from SENSOR_SERVER_URL
+    # Sensor server is on :8099, native camera MJPEG is on :8095
+    sensor_url = SENSOR_SERVER_URL
+    stream_url = sensor_url.replace(":8099", ":8095").replace(":8098", ":8095")
+    if stream_url == sensor_url:
+        # Fallback: if no port replacement happened, assume same host
+        from urllib.parse import urlparse
+
+        parsed = urlparse(sensor_url)
+        stream_url = f"{parsed.scheme}://{parsed.hostname}:8095/stream"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(stream_url, follow_redirects=True)
+            if resp.status_code == 200:
+                return Response(
+                    content=resp.content,
+                    media_type="multipart/x-mixed-replace; boundary=frame_boundary",
+                    headers={
+                        "Cache-Control": "no-store, no-cache, must-revalidate",
+                        "Pragma": "no-cache",
+                    },
+                )
+    except Exception as e:
+        logger.debug(f"Vision stream proxy error: {e}")
+
+    return JSONResponse(
+        status_code=503,
+        content={"error": "native camera stream unavailable", "url": stream_url},
+    )
+
+
+# ─── OBJECT KNOWLEDGE ──────────────────────────────────────────────
+# Let the web UI query and teach Lilly about detected objects.
+
+
+@app.get("/api/object_knowledge/objects")
+async def list_known_objects():
+    """Return all objects Lilly has learned names for."""
+    from object_knowledge import get_known_objects
+
+    return {"objects": get_known_objects()}
+
+
+@app.get("/api/object_knowledge/detections")
+async def list_recent_detections(limit: int = 20):
+    """Return recent detection log entries."""
+    from object_knowledge import get_recent_detections
+
+    return {"detections": get_recent_detections(limit)}
+
+
+@app.post("/api/object_knowledge/learn")
+async def learn_object_name(data: dict):
+    """Teach Lilly a name for a detected object."""
+    from object_knowledge import learn_object
+
+    object_id = data.get("object_id", "").strip()
+    name = data.get("name", "").strip()
+    if not object_id or not name:
+        raise HTTPException(status_code=400, detail="object_id and name required")
+    result = learn_object(object_id, name, data.get("attributes"))
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("error"))
+    return result
 
 
 @app.get("/api/vision/react")
@@ -18765,7 +18930,7 @@ async def save_pushbullet_setting(request: Request):
 
 
 @app.post("/api/settings/sensor")
-async def save_sensor_setting(request: Request):
+async def save_sensor_setting(request: Request):  # type: ignore[valid-type]
     user = await get_current_user(request)
     uid = user.get("id") if user else "anonymous"
     try:
@@ -18780,7 +18945,7 @@ async def save_sensor_setting(request: Request):
 
 
 @app.post("/api/settings/pair-token")
-async def save_pair_token_setting(request: Request):
+async def save_pair_token_setting(request: Request):  # type: ignore[valid-type]
     user = await get_current_user(request)
     uid = user.get("id") if user else "anonymous"
     try:
@@ -18800,7 +18965,7 @@ async def save_pair_token_setting(request: Request):
 
 
 @app.get("/api/settings/pair")
-async def get_settings_pair_token(request: Request):
+async def get_settings_pair_token(request: Request):  # type: ignore[valid-type]
     """Return a device pair token for the current authenticated user.
     If the user has no token yet, create one and store it in _device_tokens.
     """
