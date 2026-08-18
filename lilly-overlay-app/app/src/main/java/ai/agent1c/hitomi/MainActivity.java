@@ -427,7 +427,7 @@ public class MainActivity extends AppCompatActivity {
             null,
             result -> mainHandler.post(() -> {
                 String out = result != null && result.stdout != null ? result.stdout.trim() : "";
-                skillsStatusText.setText(out.isEmpty() ? "No skills found" : out.replace('\n', ' | '));
+                skillsStatusText.setText(out.isEmpty() ? "No skills found" : out.replace("\n", " | "));
             })
         );
     }
@@ -444,7 +444,7 @@ public class MainActivity extends AppCompatActivity {
             null,
             result -> mainHandler.post(() -> {
                 String out = result != null && result.stdout != null ? result.stdout.trim() : "";
-                skillsStatusText.setText(out.isEmpty() ? "No packages listed" : out.replace('\n', ' | '));
+                skillsStatusText.setText(out.isEmpty() ? "No packages listed" : out.replace("\n", " | "));
             })
         );
     }
@@ -454,11 +454,26 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this, "Set up bridge first", Toast.LENGTH_SHORT).show();
             return;
         }
-        String pkg = serverUrlInput != null ? serverUrlInput.getText().toString().trim() : "";
-        if (pkg.isEmpty()) {
-            Toast.makeText(this, "Enter package name in the Server field and tap Install", Toast.LENGTH_LONG).show();
-            return;
-        }
+        // Prompt for package name via dialog since serverUrlInput was removed in v6.0
+        android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(this);
+        builder.setTitle("Install Package");
+        final android.widget.EditText input = new android.widget.EditText(this);
+        input.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        input.setHint("e.g. termux-api");
+        builder.setView(input);
+        builder.setPositiveButton("Install", (dialog, which) -> {
+            String pkg = input.getText().toString().trim();
+            if (pkg.isEmpty()) {
+                Toast.makeText(this, "Enter a package name", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            doInstallPackage(pkg);
+        });
+        builder.setNegativeButton("Cancel", null);
+        builder.show();
+    }
+
+    private void doInstallPackage(String pkg) {
         skillsStatusText.setText("Installing " + pkg + "...");
         termuxBridge.runCommand(
             "/data/data/com.termux/files/usr/bin/sh",
@@ -468,7 +483,7 @@ public class MainActivity extends AppCompatActivity {
                 String out = result != null && result.stdout != null ? result.stdout.trim() : "";
                 String err = result != null && result.stderr != null ? result.stderr.trim() : "";
                 String msg = out.isEmpty() ? err : out;
-                skillsStatusText.setText(msg.isEmpty() ? "Install finished" : msg.replace('\n', ' | '));
+                skillsStatusText.setText(msg.isEmpty() ? "Install finished" : msg.replace("\n", " | "));
             })
         );
     }
@@ -485,7 +500,7 @@ public class MainActivity extends AppCompatActivity {
             null,
             result -> mainHandler.post(() -> {
                 String out = result != null && result.stdout != null ? result.stdout.trim() : "";
-                skillsStatusText.setText(out.isEmpty() ? "Update finished" : out.replace('\n', ' | '));
+                skillsStatusText.setText(out.isEmpty() ? "Update finished" : out.replace('\n', " | "));
             })
         );
     }

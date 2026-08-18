@@ -235,7 +235,7 @@ public class WebViewActivity extends AppCompatActivity {
                 ttsPlayer.release();
             }
             ttsPlayer = new MediaPlayer();
-            ttsPlayer.setAudioStreamType(AudioManager.STREAM_VOICE_CALL);
+            ttsPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
             ttsPlayer.setDataSource(url);
             ttsPlayer.setOnPreparedListener(mp -> mp.start());
             ttsPlayer.setOnErrorListener((mp, what, extra) -> {

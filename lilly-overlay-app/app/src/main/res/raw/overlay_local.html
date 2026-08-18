@@ -1378,12 +1378,13 @@ function executePendingCmd(cmd){
 
 async function playAudio(audioId){
   if(!audioId)return;
-  const url='/api/tts?id='+audioId+'&t='+Date.now();
-  if(window.LillyBridge&&window.LillyBridge.playTTS){
-    window.LillyBridge.playTTS(window.location.origin+url);
-  }else{
-    const audio=new Audio(url);
-    try{await audio.play()}catch(e){}
+  const srv = await _getServer();
+  const url = srv + '/api/tts?id=' + audioId + '&t=' + Date.now();
+  if(window.LillyBridge && window.LillyBridge.playTTS){
+    window.LillyBridge.playTTS(url);
+  } else {
+    const audio = new Audio(url);
+    try { await audio.play(); } catch(e) {}
   }
 }
 

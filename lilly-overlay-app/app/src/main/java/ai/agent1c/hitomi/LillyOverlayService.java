@@ -59,7 +59,7 @@ public class LillyOverlayService extends Service {
     public static final String ACTION_STOP = "ai.agent1c.hitomi.STOP_LILLY_OVERLAY";
     private static final String CHANNEL_ID = "lilly_overlay_channel";
     private static final int NOTIF_ID = 1018;
-    private static final int COLLAPSED_SIZE_DP = 80;  // head size (dp) — larger default for visibility; override via lilly_head_size pref
+    private static final int COLLAPSED_SIZE_DP = 80;  // head size (dp) — larger icon for visibility; override via lilly_head_size pref
     private static final int EXPANDED_WIDTH_DP = 300;   // width for expanded overlay (frosty glass)
     private static final int EXPANDED_HEIGHT_DP = 420;  // height for expanded overlay — increased so chat isn't hidden by IME/apps
 
@@ -125,6 +125,10 @@ public class LillyOverlayService extends Service {
     private TermuxCommandBridge termuxBridge;
     private LocalPhoneClient phoneClient;
     private static LillyHttpServer lillyHttpServer;
+    private CameraStreamBridge cameraStreamBridge;
+    private CameraMjpegServer cameraMjpegServer;
+    private final ExecutorService cameraExecutor = Executors.newSingleThreadExecutor();
+    private boolean cameraStreaming = false;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable statePoller = this::pollLillyState;
@@ -140,6 +144,7 @@ public class LillyOverlayService extends Service {
 
     private float touchDownX, touchDownY;
     private static final int LONG_PRESS_THRESHOLD_MS = 400;
+
     // Small dead-zone so the overlay tracks the finger almost immediately
     // (4dp ≈ 1.3mm) while still distinguishing taps from drags.
     private static final int LONG_PRESS_MOVE_THRESHOLD_DP = 4;
@@ -229,14 +234,16 @@ public class LillyOverlayService extends Service {
     }
 
     @Override
-    public void onDestroy() {
-        super.onDestroy();
-        overlayRunning = false;
-        mainHandler.removeCallbacks(statePoller);
-        stopSpeech();
-        if (termuxBridge != null) termuxBridge.shutdown();
-        if (phoneClient != null) phoneClient.shutdown();
-        executor.shutdownNow();
+     public void onDestroy() {
+         super.onDestroy();
+         overlayRunning = false;
+         mainHandler.removeCallbacks(statePoller);
+         stopSpeech();
+         stopCameraStream();
+         if (termuxBridge != null) termuxBridge.shutdown();
+         if (phoneClient != null) phoneClient.shutdown();
+         executor.shutdownNow();
+         cameraExecutor.shutdownNow();
         if (ttsPlayer != null) {
             ttsPlayer.release();
             ttsPlayer = null;
@@ -525,7 +532,7 @@ public class LillyOverlayService extends Service {
                         ttsPlayer.release();
                     }
                     ttsPlayer = new MediaPlayer();
-                    ttsPlayer.setAudioStreamType(AudioManager.STREAM_VOICE_CALL);
+                    ttsPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
                     ttsPlayer.setDataSource(url);
                     ttsPlayer.setOnPreparedListener(mp -> mp.start());
                     ttsPlayer.setOnErrorListener((mp, what, extra) -> {
@@ -554,9 +561,19 @@ public class LillyOverlayService extends Service {
                     "if(typeof setAvatar==='function')setAvatar('" + escaped + "');", null);
             });
         }
+
+        @JavascriptInterface
+        public void startCameraStream() {
+            mainHandler.post(() -> startCameraStream());
+        }
+
+        @JavascriptInterface
+        public void stopCameraStream() {
+            mainHandler.post(() -> stopCameraStream());
+        }
     }
 
-    // ─── Local Termux commands (Android intents, NO sshd required) ───
+    // ─── Phone commands (Android intents, NO sshd required) ───
     // These fire directly via com.termux.RUN_COMMAND on the local device.
     // No SSH daemon, no remote shell — purely local.
     private final Object termuxThrottleLock = new Object();
@@ -703,7 +720,7 @@ public class LillyOverlayService extends Service {
             return;
         }
         if (!termuxBridge.isTermuxRunning()) {
-            Log.w(TAG, "Termux not running — launching it first");
+            Log.w(TAG, "Termux bridge unavailable — using web server");
             termuxBridge.ensureTermuxRunning(new TermuxCommandBridge.Callback() {
                 @Override
                 public void onResult(TermuxCommandBridge.Result result) {
@@ -815,7 +832,6 @@ public class LillyOverlayService extends Service {
         View avatarBtn     = quickActionsView.findViewById(R.id.lillyQuickAvatar);
         View pairingBtn    = quickActionsView.findViewById(R.id.lillyQuickPairing);
         View settingsBtn   = quickActionsView.findViewById(R.id.lillyQuickSettings);
-        View modeBtn       = quickActionsView.findViewById(R.id.lillyQuickMode);
         View minimizeBtn   = quickActionsView.findViewById(R.id.lillyQuickMinimize);
         View closeBtn      = quickActionsView.findViewById(R.id.lillyQuickClose);
         // ── New gaming/sensor/termux/download buttons ──
@@ -890,14 +906,6 @@ public class LillyOverlayService extends Service {
                 Intent intent = new Intent(this, MainActivity.class);
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 startActivity(intent);
-            });
-        }
-
-        // ── Mode: toggle between local (8099) and remote server ──
-        if (modeBtn != null) {
-            modeBtn.setOnClickListener(v -> {
-                hideQuickActions();
-                toggleServerMode();
             });
         }
 
@@ -1036,7 +1044,7 @@ public class LillyOverlayService extends Service {
             final String finalCode = code;
             mainHandler.post(() -> {
                 if (finalCode.isEmpty()) {
-                    Toast.makeText(this, "Phone server not running. Deploy AI to Termux first.",
+                    Toast.makeText(this, "Server not reachable. Ensure droolingwithsanity.ca is accessible.",
                         Toast.LENGTH_LONG).show();
                 } else {
                     android.content.ClipboardManager cm =
@@ -1058,30 +1066,7 @@ public class LillyOverlayService extends Service {
         if (icon  != null) icon.setText(alwaysListeningEnabled  ? "🔇"   : "🎤");
     }
 
-    private boolean usingLocalServer = false;
 
-    private void toggleServerMode() {
-        usingLocalServer = !usingLocalServer;
-        String newUrl = usingLocalServer
-            ? "http://127.0.0.1:8099"
-            : getSharedPreferences("lilly_prefs", android.content.Context.MODE_PRIVATE)
-                .getString("lilly_server_url_remote", "https://droolingwithsanity.ca");
-        chatClient.setServerUrl(newUrl);
-        // Also push to the WebView
-        if (lillyWebView != null) {
-            String escaped = escapeJs(newUrl);
-            lillyWebView.evaluateJavascript(
-                "(function(){" +
-                "if(typeof setServerUrl==='function'){setServerUrl(" + escaped + ");}" +
-                "if(typeof _resolveServer==='function'){_srvUrl=null;_resolveServer();}" +
-                "})()", null);
-        }
-        String label = usingLocalServer ? "Local" : "Online";
-        if (modeLabelView != null) modeLabelView.setText(label);
-        Toast.makeText(this,
-            usingLocalServer ? "Switched to local AI (phone)" : "Switched to online server",
-            Toast.LENGTH_SHORT).show();
-    }
 
     private void updateMicButtonAppearance() {
         updateMicIndicator();
@@ -1194,7 +1179,7 @@ public class LillyOverlayService extends Service {
         }
     }
 
-    // ── Drag: direct layout updates (no frame deferral) for snappy 1:1 tracking ──
+    // ── Drag: instant response, no long-press delay ──
     private void setupDrag() {
         overlayView.setOnTouchListener((v, event) -> {
             int viewW = overlayExpanded ? dp(EXPANDED_WIDTH_DP) : dp(getCollapsedSizeDp());
@@ -1215,46 +1200,42 @@ public class LillyOverlayService extends Service {
                     dragMode = false;
                     overlayClosing = false;
                     longPressHandler.removeCallbacksAndMessages(null);
-                    longPressHandler.postDelayed(() -> {
-                        longPressTriggered = true;
-                        showQuickActions();
-                    }, LONG_PRESS_THRESHOLD_MS);
                     return true;
                 case MotionEvent.ACTION_MOVE:
-                    longPressHandler.removeCallbacksAndMessages(null);
-                    if (longPressTriggered) return true;
-                    if (!dragMode && !overlayDragging) {
-                        float moveDx = event.getRawX() - touchDownX;
-                        float moveDy = event.getRawY() - touchDownY;
-                        if (Math.hypot(moveDx, moveDy) > dp(LONG_PRESS_MOVE_THRESHOLD_DP)) {
-                            longPressTriggered = false;
-                            if (overlayExpanded) { overlayDragging = true; fadeCloseTarget(1f); }
-                            else                 { enterDragMode(); }
+                    float moveDx = event.getRawX() - touchDownX;
+                    float moveDy = event.getRawY() - touchDownY;
+                    float moveDist = (float) Math.hypot(moveDx, moveDy);
+                    if (!overlayDragging && !dragMode && moveDist > dp(LONG_PRESS_MOVE_THRESHOLD_DP)) {
+                        longPressTriggered = false;
+                        longPressHandler.removeCallbacksAndMessages(null);
+                        if (overlayExpanded) {
+                            overlayDragging = true;
+                            fadeCloseTarget(1f);
                         } else {
-                            return true;
+                            enterDragMode();
                         }
                     }
-                    int newX = clamp(dragStartX + (int)(event.getRawX() - dragStartRawX), 0, getScreenWidth() - viewW);
-                    int newY = clamp(dragStartY + (int)(event.getRawY() - dragStartRawY), 0, getScreenHeight() - viewH);
-                    if (newX != draggedLastX || newY != draggedLastY) {
-                        draggedLastX = newX;
-                        draggedLastY = newY;
-                        // Direct layout update — no frame deferral, tracks the finger 1:1.
-                        overlayParams.x = newX;
-                        overlayParams.y = newY;
-                        windowManager.updateViewLayout(overlayView, overlayParams);
-                    }
-                    boolean nowClosing = (event.getRawY() > getScreenHeight() - dp(120));
-                    if (nowClosing != overlayClosing) {
-                        overlayClosing = nowClosing;
-                        closeTargetView.setScaleX(nowClosing ? 1.2f : 0.5f);
-                        closeTargetView.setScaleY(nowClosing ? 1.2f : 0.5f);
+                    if (overlayDragging || dragMode) {
+                        int newX = clamp(dragStartX + (int)(event.getRawX() - dragStartRawX), 0, getScreenWidth() - viewW);
+                        int newY = clamp(dragStartY + (int)(event.getRawY() - dragStartRawY), 0, getScreenHeight() - viewH);
+                        if (newX != draggedLastX || newY != draggedLastY) {
+                            draggedLastX = newX;
+                            draggedLastY = newY;
+                            overlayParams.x = newX;
+                            overlayParams.y = newY;
+                            windowManager.updateViewLayout(overlayView, overlayParams);
+                        }
+                        boolean nowClosing = (event.getRawY() > getScreenHeight() - dp(120));
+                        if (nowClosing != overlayClosing) {
+                            overlayClosing = nowClosing;
+                            closeTargetView.setScaleX(nowClosing ? 1.2f : 0.5f);
+                            closeTargetView.setScaleY(nowClosing ? 1.2f : 0.5f);
+                        }
                     }
                     return true;
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL:
                     longPressHandler.removeCallbacksAndMessages(null);
-                    if (longPressTriggered) return true;
                     repositionQuickActions();
                     if (overlayClosing) {
                         exitDragMode();
@@ -1557,44 +1538,7 @@ public class LillyOverlayService extends Service {
         });
     }
 
-    private long lastPairTime = 0;
-    private void autoPairWithRemote() {
-        // Only pair once every 5 minutes
-        long now = System.currentTimeMillis();
-        if (now - lastPairTime < 5 * 60 * 1000) return;
-        lastPairTime = now;
-
-        if (phoneClient == null) phoneClient = new LocalPhoneClient();
-        executor.execute(() -> {
-            try {
-                // Get pair token from local phone server via LocalPhoneClient
-                String tokenJson = phoneClient.get("/api/pair_token");
-                org.json.JSONObject tokenData = new org.json.JSONObject(tokenJson);
-                String token = tokenData.optString("token", "");
-                if (token.isEmpty()) return;
-
-                // Register with remote server
-                String remoteUrl = getSharedPreferences("lilly_prefs", android.content.Context.MODE_PRIVATE)
-                    .getString("lilly_server_url", "https://droolingwithsanity.ca");
-                java.net.URL pairUrl = new java.net.URL(remoteUrl + "/api/phone_pair");
-                java.net.HttpURLConnection pc = (java.net.HttpURLConnection) pairUrl.openConnection();
-                pc.setRequestMethod("POST");
-                pc.setConnectTimeout(5000);
-                pc.setReadTimeout(5000);
-                pc.setRequestProperty("Content-Type", "application/json");
-                pc.setDoOutput(true);
-                org.json.JSONObject body = new org.json.JSONObject();
-                body.put("token", token);
-                body.put("cmd_url", "http://127.0.0.1:8099/api/phone_cmd");
-                pc.getOutputStream().write(body.toString().getBytes("UTF-8"));
-                int code = pc.getResponseCode();
-                pc.disconnect();
-                Log.d(TAG, "Auto-pair with remote: HTTP " + code);
-             } catch (Exception e) {
-                 Log.d(TAG, "Auto-pair skipped: " + e.getMessage());
-             }
-         });
-     }
+    // Pairing is now handled manually via the radial menu or settings
 
     private static boolean _killSwitchActive = false;
 
@@ -1904,6 +1848,63 @@ public class LillyOverlayService extends Service {
             try { speechRecognizer.stopListening(); } catch (Exception ignored) {}
             try { speechRecognizer.destroy(); } catch (Exception ignored) {}
         }
+    }
+
+    // ─── Camera / Vision Streaming ─────────────────────────────────────────
+
+    private void startCameraStream() {
+        if (cameraStreaming) return;
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Grant camera permission first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        cameraStreaming = true;
+        cameraMjpegServer = new CameraMjpegServer();
+        cameraMjpegServer.startServer();
+
+        cameraStreamBridge = new CameraStreamBridge(this);
+        cameraStreamBridge.setFrameCallback((jpeg, width, height) -> {
+            if (cameraMjpegServer != null && cameraStreaming) {
+                cameraMjpegServer.pushFrame(jpeg);
+            }
+        });
+
+        cameraExecutor.execute(() -> {
+            boolean started = cameraStreamBridge.startStreaming();
+            mainHandler.post(() -> {
+                if (!started) {
+                    Toast.makeText(this, "Camera failed to start", Toast.LENGTH_SHORT).show();
+                    stopCameraStream();
+                } else {
+                    Toast.makeText(this, "Camera streaming started", Toast.LENGTH_SHORT).show();
+                    updateNativeCameraUI(true);
+                }
+            });
+        });
+    }
+
+    private void stopCameraStream() {
+        cameraStreaming = false;
+        if (cameraStreamBridge != null) {
+            cameraStreamBridge.stopStreaming();
+            cameraStreamBridge = null;
+        }
+        if (cameraMjpegServer != null) {
+            cameraMjpegServer.stopServer();
+            cameraMjpegServer = null;
+        }
+        updateNativeCameraUI(false);
+    }
+
+    private void updateNativeCameraUI(boolean streaming) {
+        if (lillyWebView == null) return;
+        String js = "(function(){var n=document.getElementById('nativeCamera'),l=document.getElementById('visionSourceLabel');" +
+            "if(n){n.style.display='" + (streaming ? "block" : "none") + "';}" +
+            "if(l){l.textContent='" + (streaming ? "Native" : "Browser") + "';}" +
+            "})()";
+        lillyWebView.evaluateJavascript(js, null);
     }
 
     private String escapeJs(String s) {
