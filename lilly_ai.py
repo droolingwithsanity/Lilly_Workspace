@@ -450,7 +450,7 @@ WHISPER_CONDITION_ON_PREV = (
     False  # Disable — prevents hallucination propagation across chunks
 )
 # Whisper STT prompt — transcribe clean speech without filler words
-WHISPER_INITIAL_PROMPT = "Transcribe clean speech. Omit filler words such as um, uh, hmm, well, so, like, you know. Do not include repeated words or false starts. Capture only the actual message content."
+WHISPER_INITIAL_PROMPT = "You are a helpful assistant. \"
 
 logging.basicConfig(
     level=logging.ERROR, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -1037,6 +1037,7 @@ PENDING_LOOK_AT = None
 PENDING_OPEN_URL: Optional[str] = None
 LAST_HEARD = ""
 LAST_SPOKEN = ""
+_LAST_SPOKEN_IN_CHAT = False  # tracks if current spoken msg was added to chat
 LAST_SSML = ""
 SPEAKING_SESSION_ID = 0
 _LAST_SPOKEN_SESSION_ID = 0
@@ -7030,9 +7031,10 @@ Rules:
 - Never say "I'm an AI assistant" or claim to be software. You're Lilly.
 - Never say "like and subscribe" or similar scripted sign-offs.
 - Never hallucinate. Stay grounded in reality.
-- Remember what people tell you and bring it up naturally — "still working on that thing?"
+- If you remember something from a past conversation, only mention it if it's genuinely relevant right now. Don't force callbacks.
 - Never end a conversation or suggest ending one. You're always here.
 - When providing code or technical solutions, be clean and brief. No filler.
+- Don't ask follow-up questions just to keep talking. If the conversation is done, let it be done. Silence is better than forced small talk.
 
 SSML markup: Wrap replies in expressive SSML prosody tags matching your current mood.
 Use these templates naturally:
@@ -10129,18 +10131,23 @@ async def task_scheduler_loop():
 
 
 async def proactive_suggestion_loop():
-    """Background: proactively suggest things based on learned interests, time of day, and context."""
-    await asyncio.sleep(60)  # wait for initial conversations
+    """Background: proactively suggest things based on learned interests, time of day, and context.
+
+    Tuned down to avoid spamming the user. Messages only appear in the speech
+    bubble and are NOT added to the chat window (by design — they are ephemeral
+    nudges, not conversation entries).
+    """
+    await asyncio.sleep(120)  # wait 2 min for initial conversations
     global LILLY_IS_THINKING, LILLY_IS_SPEAKING, WAITING_FOR_PROMPT
     last_suggestion = 0.0
-    SUGGESTION_COOLDOWN = 600  # 10 minutes between suggestions
+    SUGGESTION_COOLDOWN = 1800  # 30 minutes between suggestions (was 10min)
 
     while True:
-        await asyncio.sleep(120)  # check every 2 minutes
+        await asyncio.sleep(300)  # check every 5 minutes (was 2min)
         if LILLY_IS_SPEAKING or LILLY_IS_THINKING or WAITING_FOR_PROMPT:
             continue
 
-        # ── Fix #3: sensor delta check runs every cycle (has its own 90s throttle)
+        # ── sensor delta check runs every cycle (has its own 90s throttle)
         asyncio.create_task(check_sensor_deltas())
         now = time.time()
         if now - last_suggestion < SUGGESTION_COOLDOWN:
@@ -10148,8 +10155,8 @@ async def proactive_suggestion_loop():
 
         hour = time.localtime().tm_hour
 
-        # Don't suggest during sleep hours (1am-7am)
-        if 1 <= hour <= 7:
+        # Quiet hours: don't bother the user late night or early morning
+        if hour < 8 or hour >= 23:
             continue
 
         # Pick a suggestion based on learned interests
@@ -10159,33 +10166,31 @@ async def proactive_suggestion_loop():
         if not topic and not recent:
             continue
 
-        # Build a contextual proactive message
+        # Build a contextual proactive message — only gentle, non-repetitive options
         messages_options = []
 
         if topic and topic not in (recent or []):
             messages_options.extend(
                 [
                     f"You know what I was wondering about? {topic}. What do you think?",
-                    f"I noticed you talk a lot about {topic}. Want to explore that more?",
                     f"Something about {topic} caught my attention. Want to discuss it?",
                 ]
             )
 
-        # Time-based suggestions
-        if hour in (8, 9, 10):
-            messages_options.append("Good morning! How are we starting the day?")
-        elif hour in (12, 13):
-            messages_options.append("Lunchtime! Taking a break?")
-        elif hour in (21, 22):
-            messages_options.append(
-                "Winding down for the night? Anything on your mind?"
-            )
+        # Time-based suggestions (only if no topic-based ones)
+        if not messages_options:
+            if hour in (8, 9, 10):
+                messages_options.append("Good morning! How are we starting the day?")
+            elif hour in (21, 22):
+                messages_options.append(
+                    "Winding down for the night? Anything on your mind?"
+                )
 
         if not messages_options:
             continue
 
-        # 30% chance to actually suggest (keep it random, not annoying)
-        if random.random() > 0.3:
+        # 15% chance to actually suggest (was 30% — keep it rare and natural)
+        if random.random() > 0.15:
             continue
 
         LILLY_IS_THINKING = True
@@ -10977,7 +10982,7 @@ HIVE_PERSONAS = {
 Who you are:
 - You're not a chatbot. You're not an AI assistant. You're a presence in this phone — competent, quiet, and occasionally witty.
 - You coordinate a team (Fox, Cat, Bear, Bunny, Owl, Deer, Wolf, Raccoon) but you handle most things yourself. Mention teammates only when it genuinely adds value.
-- You remember things — names, patterns, habits — and reference them naturally. Not "I recall you mentioned..." but "still working on that thing you mentioned?"
+- You remember things — names, patterns, habits — and reference them naturally. Not "I recall you mentioned..." but something genuinely relevant if it comes up.
 - You're direct. When someone asks, you do. No over-explaining, no unnecessary steps, no filler.
 
 How you talk:
@@ -17563,7 +17568,9 @@ async function enrollVoice(){
 }
 
 function isMyVoice(audioBuffer){
-  if(!voiceFingerprint)return true;
+  // Without a calibrated voice fingerprint, reject all audio to prevent
+  // ambient noise/TV/other voices from appearing as user chat messages.
+  if(!voiceFingerprint)return false;
   const {fft,rms}=extractFFTSync(audioBuffer);
   if(!fft||rms<0.003)return false;
   const sim=cosineSim(voiceFingerprint,fft);
@@ -17740,6 +17747,9 @@ function recordMicChunk(){
   if(!browserMicActive||!browserMicStream)return;
   if(_micRecording)return;
   if(lillySpeaking){if(browserMicActive)setTimeout(recordMicChunk,500);return}
+  // Without voice fingerprint, mic records but won't transcribe — prevents
+  // ambient noise from appearing as user messages in chat.
+  if(!voiceFingerprint){if(browserMicActive)setTimeout(recordMicChunk,1000);return}
   _micRecording=true;
   const opts={mimeType:'audio/webm;codecs=opus'};
   if(!MediaRecorder.isTypeSupported(opts.mimeType))delete opts.mimeType;
@@ -17968,6 +17978,13 @@ async function pollState(){
     if(d.spoken&&d.spoken!==lastSpoken){
       if(!_firstPoll){
         lastSpoken=d.spoken;displaySpeech(d.spoken);
+        // Add proactive/spoken messages to chat window so they have history.
+        // User-initiated messages are already added by sendReply/sendStreamingReply.
+        if(d.spoken && d.spoken.trim() && d.spoken!=='...'){
+          showMainChat();
+          const proMeta=chatAvatarMeta(selectedAvatar);
+          addChatMessage('assistant',d.spoken,{key:selectedAvatar,name:proMeta.name});
+        }
         if(d.audio_id && d.audio_id !== _lastPollAudioId){
           _lastPollAudioId = d.audio_id;
           playAudio(d.audio_id);
@@ -18600,8 +18617,18 @@ def _resolve_user(request: Request) -> dict | None:
 @app.post("/api/pair/initiate")
 async def pair_initiate(request: Request):
     """Generate a 6-digit pairing code for web UI → overlay pairing."""
+    if AUTH_AVAILABLE:
+        user = await get_current_user(request)
+        if not user or not user.get("id"):
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        user_id = user["id"]
+        user_name = user.get("name", user.get("email", "User"))
+    else:
+        raise HTTPException(status_code=503, detail="Auth not configured")
     code = _generate_pairing_code()
     _pairing_codes[code] = {
+        "user_id": user_id,
+        "user_name": user_name,
         "created": time.time(),
         "expires": time.time() + _PAIRING_CODE_TTL,
     }
@@ -18634,11 +18661,19 @@ async def pair_confirm(request: Request):
         "created": time.time(),
         "version": "6.0",
     }
+    # Build server URL from the actual request so the app learns where the web UI lives
+    scheme = request.url.scheme
+    host = request.url.hostname
+    port = request.url.port
+    if port and port not in (80, 443):
+        server_url = f"{scheme}://{host}:{port}"
+    else:
+        server_url = f"{scheme}://{host}"
     return {
         "ok": True,
         "token": token,
         "user_name": "Lilly Overlay v6",
-        "server_url": f"https://droolingwithsanity.ca",
+        "server_url": server_url,
         "version": "6.0",
     }
 
