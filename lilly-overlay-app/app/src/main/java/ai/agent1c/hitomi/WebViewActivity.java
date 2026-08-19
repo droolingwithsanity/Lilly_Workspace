@@ -67,7 +67,7 @@ public class WebViewActivity extends AppCompatActivity {
 
     private String getServerUrl() {
         return getSharedPreferences("lilly_prefs", Context.MODE_PRIVATE)
-            .getString("lilly_server_url", "https://droolingwithsanity.ca");
+            .getString("lilly_server_url", "http://100.93.131.114:8098");
     }
 
     private void setupWebView() {

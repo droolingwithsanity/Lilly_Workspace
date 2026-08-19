@@ -17,9 +17,9 @@ import java.nio.charset.StandardCharsets;
 public class LillyAIChatClient {
     private static final String TAG = "LillyChatClient";
 
-    // Local Termux servers — try these first before hitting the remote
-    private static final String LOCAL_PHONE_SERVER = "http://127.0.0.1:8099"; // lilly_phone_server.py
-    private static final String LOCAL_LLAMA_SERVER  = "http://127.0.0.1:8080"; // llama.cpp ai-server
+    // Web server — primary backend at droolingwithsanity.ca
+    private static final String LOCAL_AI_SERVER    = "http://127.0.0.1:8098"; // local lilly_ai.py (same-device)
+    private static final String LOCAL_PHONE_SERVER = "http://127.0.0.1:8099"; // local phone server (optional)
 
     // Hardcoded persona — locked, not user-configurable
     public static final String LOCKED_PERSONA_PROMPT =
@@ -63,27 +63,79 @@ public class LillyAIChatClient {
     }
 
     // ─── Server Resolution ──────────────────────────────────────────────
-    // Order: 127.0.0.1:8099 → 127.0.0.1:8080 → saved remote preference
+    // Order: saved remote preference → local AI (8098) → local phone (8099) → remote fallback
     private String resolveServerUrl() {
         if (cachedServerUrl != null) return cachedServerUrl;
 
-        // 1. Try lilly_phone_server on :8099
+        String remote = getSavedRemoteUrl();
+
+        // 1. Try user-saved remote URL first (the AI server)
+        if (isReachable(remote)) {
+            cachedServerUrl = remote;
+            Log.i(TAG, "Using remote server: " + cachedServerUrl);
+            return cachedServerUrl;
+        }
+
+        // 2. Try local AI server (lilly_ai.py on same device)
+        if (isReachable(LOCAL_AI_SERVER)) {
+            cachedServerUrl = LOCAL_AI_SERVER;
+            Log.i(TAG, "Using local AI server: " + cachedServerUrl);
+            return cachedServerUrl;
+        }
+
+        // 3. Try device IP on AI port (same device, 127.0.0.1 may be blocked)
+        String deviceIp = getDeviceIpAddress();
+        if (deviceIp != null) {
+            String deviceAiUrl = "http://" + deviceIp + ":8098";
+            if (isReachable(deviceAiUrl)) {
+                cachedServerUrl = deviceAiUrl;
+                Log.i(TAG, "Using device IP AI server: " + cachedServerUrl);
+                return cachedServerUrl;
+            }
+            String devicePhoneUrl = "http://" + deviceIp + ":8099";
+            if (isReachable(devicePhoneUrl)) {
+                cachedServerUrl = devicePhoneUrl;
+                Log.i(TAG, "Using device IP phone server: " + cachedServerUrl);
+                return cachedServerUrl;
+            }
+        }
+
+        // 4. Fall back to local phone server only if AI unreachable
         if (isReachable(LOCAL_PHONE_SERVER)) {
             cachedServerUrl = LOCAL_PHONE_SERVER;
             Log.i(TAG, "Using local phone server: " + cachedServerUrl);
             return cachedServerUrl;
         }
-        // 2. Try llama.cpp on :8080
-        if (isReachable(LOCAL_LLAMA_SERVER)) {
-            cachedServerUrl = LOCAL_LLAMA_SERVER;
-            Log.i(TAG, "Using local llama.cpp server: " + cachedServerUrl);
-            return cachedServerUrl;
-        }
-        // 3. Fall back to user-saved remote URL
-        String remote = getSavedRemoteUrl();
+
+        // 5. Last resort: return remote even if unreachable (let requests fail naturally)
         cachedServerUrl = remote;
-        Log.i(TAG, "Using remote server: " + cachedServerUrl);
+        Log.i(TAG, "Using remote server (unreachable): " + cachedServerUrl);
         return cachedServerUrl;
+    }
+
+    /** Try to get the device's local WiFi IP address for same-device server access. */
+    private String getDeviceIpAddress() {
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> interfaces =
+                java.net.NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                java.net.NetworkInterface iface = interfaces.nextElement();
+                if (iface.isLoopback() || iface.isVirtual() || !iface.isUp()) continue;
+                java.util.Enumeration<java.net.InetAddress> addresses = iface.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    java.net.InetAddress addr = addresses.nextElement();
+                    if (addr instanceof java.net.Inet4Address) {
+                        String ip = addr.getHostAddress();
+                        if (ip != null && !ip.startsWith("127.")) {
+                            return ip;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.d(TAG, "Could not get device IP: " + e.getMessage());
+        }
+        return null;
     }
 
     /** Invalidate cached server so next request re-probes. */
@@ -101,7 +153,7 @@ public class LillyAIChatClient {
             conn.setReadTimeout(2000);
             int code = conn.getResponseCode();
             conn.disconnect();
-            return code >= 200 && code < 500; // 4xx still means the server is up
+            return code == 200;
         } catch (Exception e) {
             return false;
         }
@@ -110,8 +162,8 @@ public class LillyAIChatClient {
     private String getSavedRemoteUrl() {
         String url = appContext
             .getSharedPreferences("lilly_prefs", Context.MODE_PRIVATE)
-            .getString("lilly_server_url", "https://droolingwithsanity.ca");
-        if (url == null || url.trim().isEmpty()) url = "https://droolingwithsanity.ca";
+            .getString("lilly_server_url", "http://100.93.131.114:8098");
+        if (url == null || url.trim().isEmpty()) url = "http://100.93.131.114:8098";
         if (url.endsWith("/")) url = url.substring(0, url.length() - 1);
         return url;
     }
@@ -155,7 +207,7 @@ public class LillyAIChatClient {
         HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
         conn.setRequestMethod("POST");
         conn.setConnectTimeout(10000);
-        conn.setReadTimeout(90000); // llama.cpp can be slow
+        conn.setReadTimeout(90000);
         conn.setRequestProperty("Content-Type", "application/json");
         conn.setDoOutput(true);
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);

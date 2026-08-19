@@ -82,6 +82,8 @@ LLAMA_URL = os.environ.get(
     "LLAMA_CHAT_URL", "http://127.0.0.1:8080/v1/chat/completions"
 )
 LLAMA_HEALTH = "http://127.0.0.1:8080/health"
+REMOTE_SERVER_URL = os.environ.get("LILLY_REMOTE_URL", "https://droolingwithsanity.ca")
+LOCAL_AI_URL = "http://127.0.0.1:8098"
 PAIR_TOKEN_FILE = Path.home() / ".lilly_pair_token"
 
 # ── State (in-memory, resets on restart) ─────────────────────────────────────
@@ -135,6 +137,21 @@ def _run_async(coro):
             return loop.run_until_complete(coro)
     except Exception:
         return asyncio.run(coro)
+
+
+def _is_url_reachable(url, timeout=2):
+    """Check if a URL is reachable."""
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return True
+    except Exception:
+        return False
+
+
+def _llama_available():
+    """Check if local llama.cpp server is reachable."""
+    return _is_url_reachable(LLAMA_HEALTH, timeout=2)
 
 
 def get_mic_data():
@@ -348,7 +365,6 @@ SYSTEM_PROMPT = (
     "- MIC LOOP GUARD: very short or repeated input → return empty string, say nothing."
 )
 
-ACTION_PATTERN = re.compile(r"<LILLY_ACTION>(.*?)</LILLY_ACTION>", re.DOTALL)
 ALLOWED_ACTIONS = {
     "open_app": {
         "chrome",
@@ -367,7 +383,7 @@ ALLOWED_ACTIONS = {
 def _extract_safe_actions(reply: str):
     """Extract <LILLY_ACTION> JSON blocks from reply text, validate them."""
     actions = []
-    for raw in ACTION_PATTERN.findall(reply):
+    for raw in re.findall(r"<LILLY_ACTION>(.*?)</LILLY_ACTION>", reply, re.DOTALL):
         try:
             action = json.loads(raw)
             atype = action.get("type", "")
@@ -381,22 +397,14 @@ def _extract_safe_actions(reply: str):
                 actions.append(action)
         except Exception:
             pass
-    return ACTION_PATTERN.sub("", reply).strip(), actions
-
-
-def _llama_available() -> bool:
-    """Check if local llama.cpp server is running."""
-    try:
-        req = urllib.request.Request(LLAMA_HEALTH, method="GET")
-        with urllib.request.urlopen(req, timeout=2) as r:
-            return r.status == 200
-    except Exception:
-        return False
+    return re.sub(
+        r"<LILLY_ACTION>.*?</LILLY_ACTION>", "", reply, flags=re.DOTALL
+    ).strip(), actions
 
 
 @app.route("/api/cmd", methods=["POST", "OPTIONS"])
 def chat_endpoint():
-    """Main chat — routes to llama.cpp if available, returns structured reply + actions."""
+    """Main chat — routes to local lilly_ai.py if available, otherwise remote web UI."""
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json(silent=True) or {}
@@ -408,45 +416,46 @@ def chat_endpoint():
     _state["thinking"] = True
     record_transcript(True, text)
 
-    payload = json.dumps(
-        {
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
-            "temperature": 0.5,
-            "max_tokens": 256,
-        }
-    ).encode()
+    payload = json.dumps({"text": text}).encode()
+    headers = {"Content-Type": "application/json"}
 
-    try:
-        req = urllib.request.Request(
-            LLAMA_URL,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            result = json.loads(resp.read().decode())
-        choices = result.get("choices", [])
-        raw = choices[0].get("message", {}).get("content", "") if choices else ""
-        reply, actions = _extract_safe_actions(raw)
-        _state["spoken"] = reply
-        _state["thinking"] = False
-        record_transcript(False, reply)
-        return jsonify({"reply": reply or "...", "actions": actions})
-    except Exception as exc:
-        _state["thinking"] = False
-        logger.warning(f"Local model not ready: {exc}")
-        # Fallback: simple echo with persona
-        _state["spoken"] = "I'm not connected to my brain right now, but I'm here."
-        return jsonify(
-            {
-                "reply": _state["spoken"],
-                "actions": [],
-                "detail": f"Local model not ready: {exc}",
-            }
-        ), 503
+    # Try local AI server first (same device), then remote
+    servers_to_try = []
+    if _is_url_reachable(LOCAL_AI_URL + "/health", timeout=2):
+        servers_to_try.append(LOCAL_AI_URL.rstrip("/") + "/api/cmd")
+    servers_to_try.append(REMOTE_SERVER_URL.rstrip("/") + "/api/cmd")
+
+    last_error = None
+    for remote_url in servers_to_try:
+        try:
+            req = urllib.request.Request(
+                remote_url,
+                data=payload,
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                result = json.loads(resp.read().decode())
+            reply = result.get("reply", "")
+            actions = result.get("actions", [])
+            _state["spoken"] = reply
+            _state["thinking"] = False
+            record_transcript(False, reply)
+            return jsonify({"reply": reply or "...", "actions": actions})
+        except Exception as exc:
+            last_error = exc
+            logger.warning(f"Server not reachable at {remote_url}: {exc}")
+
+    _state["thinking"] = False
+    error_msg = "I can't reach my brain right now. Check your connection."
+    _state["spoken"] = error_msg
+    return jsonify(
+        {
+            "reply": error_msg,
+            "actions": [],
+            "detail": f"No server reachable. Last error: {last_error}",
+        }
+    ), 503
 
 
 @app.route("/api/pair_token", methods=["GET"])

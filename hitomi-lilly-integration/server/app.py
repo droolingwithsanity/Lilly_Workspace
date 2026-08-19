@@ -3,16 +3,26 @@ import os, sys, json, re, asyncio, subprocess, logging, unicodedata, time, rando
 from pathlib import Path
 from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse, RedirectResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    Response,
+    FileResponse,
+    RedirectResponse,
+)
 import uvicorn
 import httpx
 
 REMOTE = os.environ.get("REMOTE_AI_URL", "")
 PORT = int(os.environ.get("LILLY_PORT", "8098"))
-APK_VERSION = os.environ.get("APK_VERSION", "3.2")
+APK_VERSION = os.environ.get("APK_VERSION", "4.4-debug")
 APK_FILENAME = f"lilly-overlay-v{APK_VERSION}.apk"
 _SCRIPT_DIR = Path(__file__).parent.resolve()
-APK_DIR = _SCRIPT_DIR if (_SCRIPT_DIR / APK_FILENAME).parent == _SCRIPT_DIR else Path("/app/apk")
+APK_DIR = (
+    _SCRIPT_DIR
+    if (_SCRIPT_DIR / APK_FILENAME).parent == _SCRIPT_DIR
+    else Path("/app/apk")
+)
 APK_DIR.mkdir(exist_ok=True)
 OFFLINE_MODE = not REMOTE
 
@@ -23,27 +33,72 @@ REMINDERS_FILE = WORKSPACE / "reminders.json"
 WHISPER_CLI = os.path.expanduser("~/whisper.cpp/build/bin/whisper-cli")
 WHISPER_MODEL = os.path.expanduser("~/whisper.cpp/models/ggml-tiny.en.bin")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger("LillyLocal")
 
 client = httpx.AsyncClient(timeout=30.0) if REMOTE else None
 
 chat_history = []
 SKILLS = {}
-PET_STATE = {"happiness": 50, "energy": 50, "hunger": 50, "level": 1, "xp": 0, "total_steps": 0}
+PET_STATE = {
+    "happiness": 50,
+    "energy": 50,
+    "hunger": 50,
+    "level": 1,
+    "xp": 0,
+    "total_steps": 0,
+}
 REMINDERS = []
-PHANTOMS = {"you", "thats a ghost", "thank you for watching", "thank you",
-            "subtitles by", "subtitles by amara org", "bye", "go", "ok", "okay"}
+PHANTOMS = {
+    "you",
+    "thats a ghost",
+    "thank you for watching",
+    "thank you",
+    "subtitles by",
+    "subtitles by amara org",
+    "bye",
+    "go",
+    "ok",
+    "okay",
+}
 
 ui_state = {
-    "heard": "", "spoken": "", "mood": "calm", "mic_active": False,
-    "listening": False, "thinking": False, "speaking": False,
-    "audio_id": 0, "user_name": "", "mouth": 0.0,
-    "open_url": "", "look_at": "user", "avatar": "puppy",
+    "heard": "",
+    "spoken": "",
+    "mood": "calm",
+    "mic_active": False,
+    "listening": False,
+    "thinking": False,
+    "speaking": False,
+    "audio_id": 0,
+    "user_name": "",
+    "mouth": 0.0,
+    "open_url": "",
+    "look_at": "user",
+    "avatar": "puppy",
 }
 
 STATE_FILE = WORKSPACE / "lilly_state.json"
 REMOTE_REACHABLE = False
+
+PAIRING_CODES = {}
+DEVICE_TOKENS = {}
+PAIRING_CODE_TTL = 300
+
+
+def _generate_pairing_code() -> str:
+    import secrets
+
+    return secrets.token_hex(4).upper()
+
+
+def _generate_device_token() -> str:
+    import secrets
+
+    return secrets.token_hex(32)
+
 
 JOKES = [
     "why did the scarecrow win an award? because he was outstanding in his field",
@@ -102,12 +157,15 @@ UNKNOWN_RESPONSES = [
 
 USER_NAME = ""
 
+
 def normalize_text(text: str) -> str:
-    if not text: return ""
+    if not text:
+        return ""
     text = unicodedata.normalize("NFKC", text).lower()
-    text = re.sub(r'\[.*?\]|\(.*?\)', '', text)
-    text = re.sub(r'[.,\/#!$%\^&\*;:{}=\-_`~()?\']', ' ', text)
-    return re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r"\[.*?\]|\(.*?\)", "", text)
+    text = re.sub(r"[.,\/#!$%\^&\*;:{}=\-_`~()?\']", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
 
 def load_skills():
     global SKILLS
@@ -119,6 +177,7 @@ def load_skills():
         except Exception as e:
             logger.error(f"Skills load: {e}")
 
+
 def load_pet_state():
     global PET_STATE
     if STATE_FILE.exists():
@@ -127,11 +186,13 @@ def load_pet_state():
         except Exception as e:
             logger.error(f"Pet state load: {e}")
 
+
 def save_pet_state():
     try:
         STATE_FILE.write_text(json.dumps(PET_STATE, indent=2))
     except Exception as e:
         logger.warning(f"Pet state save: {e}")
+
 
 def load_reminders():
     global REMINDERS
@@ -141,71 +202,109 @@ def load_reminders():
         except Exception:
             REMINDERS = []
 
+
 def save_reminders():
     try:
         REMINDERS_FILE.write_text(json.dumps(REMINDERS, indent=2))
     except Exception as e:
         logger.warning(f"Reminders save: {e}")
 
+
 load_skills()
 load_pet_state()
 load_reminders()
+
 
 async def whisper_stt(audio_bytes: bytes) -> str:
     if not os.path.exists(WHISPER_CLI):
         return ""
     temp = WORKSPACE / "input.wav"
     temp.write_bytes(audio_bytes)
-    r = await asyncio.to_thread(subprocess.run,
+    r = await asyncio.to_thread(
+        subprocess.run,
         [WHISPER_CLI, "-m", WHISPER_MODEL, "-f", str(temp), "-nt"],
-        capture_output=True, text=True, timeout=5)
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
     return normalize_text(r.stdout)
+
 
 async def local_tts(text: str):
     try:
-        await asyncio.to_thread(subprocess.run,
-            ["termux-tts-speak", text],
-            capture_output=True, timeout=10)
+        await asyncio.to_thread(
+            subprocess.run, ["termux-tts-speak", text], capture_output=True, timeout=10
+        )
         ui_state["spoken"] = text
         ui_state["speaking"] = True
         asyncio.create_task(_finish_speaking())
     except Exception as e:
         logger.warning(f"TTS error: {e}")
 
+
 async def _finish_speaking():
     await asyncio.sleep(len(ui_state["spoken"]) / 12)
     ui_state["speaking"] = False
 
+
 async def am_launch(pkg: str):
     if "/" in pkg:
-        await asyncio.to_thread(subprocess.run,
+        await asyncio.to_thread(
+            subprocess.run,
             ["am", "start", "-n", pkg],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     else:
-        await asyncio.to_thread(subprocess.run,
+        await asyncio.to_thread(
+            subprocess.run,
             ["am", "start", "-p", pkg],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
 
 async def am_force_stop(pkg: str):
-    await asyncio.to_thread(subprocess.run,
+    await asyncio.to_thread(
+        subprocess.run,
         ["am", "force-stop", pkg],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
 
 async def input_tap(x: int, y: int):
-    await asyncio.to_thread(subprocess.run,
+    await asyncio.to_thread(
+        subprocess.run,
         ["input", "tap", str(x), str(y)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
 
 async def set_alarm(hour: int, minute: int, label: str = ""):
-    intent = ["am", "start", "-a", "android.intent.action.INSERT",
-              "-t", "vnd.android.cursor.item/event",
-              "-d", "content://com.android.deskclock/alarms",
-              "--ei", "android.intent.extra.HOUR", str(hour),
-              "--ei", "android.intent.extra.MINUTES", str(minute)]
+    intent = [
+        "am",
+        "start",
+        "-a",
+        "android.intent.action.INSERT",
+        "-t",
+        "vnd.android.cursor.item/event",
+        "-d",
+        "content://com.android.deskclock/alarms",
+        "--ei",
+        "android.intent.extra.HOUR",
+        str(hour),
+        "--ei",
+        "android.intent.extra.MINUTES",
+        str(minute),
+    ]
     if label:
         intent.extend(["--es", "android.intent.extra.TITLE", label])
-    await asyncio.to_thread(subprocess.run, intent,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    await asyncio.to_thread(
+        subprocess.run, intent, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+
 
 async def check_reminders():
     now = time.time()
@@ -217,11 +316,13 @@ async def check_reminders():
         ui_state["open_url"] = ""
     save_reminders()
 
+
 async def say(reply: str, action: str = "reply"):
     if reply:
         await local_tts(reply)
         chat_history.append({"role": "lilly", "text": reply})
     return {"reply": reply, "action": action}
+
 
 def add_xp(amount: int):
     PET_STATE["xp"] = PET_STATE.get("xp", 0) + amount
@@ -230,6 +331,7 @@ def add_xp(amount: int):
         PET_STATE["level"] = PET_STATE.get("level", 1) + 1
         PET_STATE["xp"] = 0
     save_pet_state()
+
 
 async def handle_intent(text: str) -> dict:
     global chat_history, PET_STATE, USER_NAME, REMOTE_REACHABLE
@@ -241,92 +343,119 @@ async def handle_intent(text: str) -> dict:
     ui_state["heard"] = phrase
     ui_state["thinking"] = True
 
-    cmd = re.sub(r'\b(hey lilly|lilly|hey lilly)\b', '', phrase).strip()
-    stripped = re.sub(r'^(run|use|click|tap|open|launch|close)\s+', '', cmd).strip()
+    cmd = re.sub(r"\b(hey lilly|lilly|hey lilly)\b", "", phrase).strip()
+    stripped = re.sub(r"^(run|use|click|tap|open|launch|close)\s+", "", cmd).strip()
 
     user = USER_NAME or "you"
 
     # ── Name ──
-    m = re.match(r'(?:my name is|im |i am |call me |you can call me )(.+)', cmd)
+    m = re.match(r"(?:my name is|im |i am |call me |you can call me )(.+)", cmd)
     if m:
         USER_NAME = m.group(1).strip().title()
         add_xp(2)
         return await say(f"nice to meet you {USER_NAME}")
 
-    m = re.match(r'(?:whats my name|who am i|do you know my name)', cmd)
+    m = re.match(r"(?:whats my name|who am i|do you know my name)", cmd)
     if m:
-        return await say(f"you are {user} silly" if USER_NAME else "hmm i dont know your name yet what is it")
+        return await say(
+            f"you are {user} silly"
+            if USER_NAME
+            else "hmm i dont know your name yet what is it"
+        )
 
     # ── Greetings ──
-    if re.search(r'\b(hello|hi|hey|howdy|sup|yo|good morning|good evening|good afternoon)\b', cmd):
+    if re.search(
+        r"\b(hello|hi|hey|howdy|sup|yo|good morning|good evening|good afternoon)\b", cmd
+    ):
         add_xp(1)
         return await say(random.choice(GREETING_RESPONSES))
 
     # ── Farewell ──
-    if re.search(r'\b(bye|goodbye|see you|later|gotta go|talk later)\b', cmd):
+    if re.search(r"\b(bye|goodbye|see you|later|gotta go|talk later)\b", cmd):
         return await say(random.choice(FAREWELL_RESPONSES))
 
     # ── How are you ──
-    if re.search(r'\b(how are you|how do you feel|are you ok|how is lilly)\b', cmd):
+    if re.search(r"\b(how are you|how do you feel|are you ok|how is lilly)\b", cmd):
         h = PET_STATE.get("happiness", 50)
-        mood = "im great wag wag" if h > 70 else "im doing pretty good" if h > 40 else "im a little bored play with me"
+        mood = (
+            "im great wag wag"
+            if h > 70
+            else "im doing pretty good"
+            if h > 40
+            else "im a little bored play with me"
+        )
         return await say(mood)
 
     # ── Time & Date ──
-    if re.search(r'\b(time|what time|clock)\b', cmd) and re.search(r'\b(what|tell|current)\b', cmd):
+    if re.search(r"\b(time|what time|clock)\b", cmd) and re.search(
+        r"\b(what|tell|current)\b", cmd
+    ):
         now = datetime.now()
         return await say(f"its {now.strftime('%I:%M %p')}")
 
-    if re.search(r'\b(date|day|whats the date|today)\b', cmd) and re.search(r'\b(what|tell|current)\b', cmd):
+    if re.search(r"\b(date|day|whats the date|today)\b", cmd) and re.search(
+        r"\b(what|tell|current)\b", cmd
+    ):
         now = datetime.now()
         return await say(f"today is {now.strftime('%A %B %d %Y')}")
 
     # ── Thanks ──
-    if re.search(r'\b(thanks|thank you|appreciate it|good job)\b', cmd):
+    if re.search(r"\b(thanks|thank you|appreciate it|good job)\b", cmd):
         add_xp(2)
         return await say("youre welcome happy to help")
 
     # ── Compliments ──
-    if re.search(r'\b(youre (cute|smart|funny|amazing|awesome|the best)|i love lilly|good (girl|boy|pup))\b', cmd):
+    if re.search(
+        r"\b(youre (cute|smart|funny|amazing|awesome|the best)|i love lilly|good (girl|boy|pup))\b",
+        cmd,
+    ):
         PET_STATE["happiness"] = min(100, PET_STATE.get("happiness", 50) + 10)
         add_xp(3)
         save_pet_state()
         return await say(random.choice(COMPLIMENT_RESPONSES))
 
     # ── Sorry ──
-    if re.search(r'\b(sorry|my bad|apologize|i apologize)\b', cmd):
+    if re.search(r"\b(sorry|my bad|apologize|i apologize)\b", cmd):
         PET_STATE["happiness"] = min(100, PET_STATE.get("happiness", 50) + 5)
         add_xp(1)
         save_pet_state()
         return await say("its ok i forgive you")
 
     # ── Jokes ──
-    if re.search(r'\b(joke|funny|make me laugh|tell me a joke)\b', cmd):
+    if re.search(r"\b(joke|funny|make me laugh|tell me a joke)\b", cmd):
         add_xp(2)
         return await say(random.choice(JOKES))
 
     # ── Fact ──
-    if re.search(r'\b(fact|tell me something|did you know|interesting)\b', cmd):
+    if re.search(r"\b(fact|tell me something|did you know|interesting)\b", cmd):
         add_xp(2)
         return await say(f"did you know {random.choice(FACTS)}")
 
     # ── Help ──
-    if re.search(r'\b(help|what can you do|commands|capabilities|what do you do)\b', cmd):
+    if re.search(
+        r"\b(help|what can you do|commands|capabilities|what do you do)\b", cmd
+    ):
         return await say(
             f"i can tell you the time and date tell jokes share fun facts set alarms and reminders "
             f"open apps control your pet puppy lilly and chat with you. "
             f"just ask me anything",
-            "help")
+            "help",
+        )
 
     # ── Reminders ──
-    m = re.match(r'(?:remind|reminder|set reminder|remember)\s+(?:me\s+)?(?:to\s+)?(?:(?:in\s+)?(\d+)\s*(min|minutes|hour|hours|sec|seconds)\s+)?(.+)', cmd)
+    m = re.match(
+        r"(?:remind|reminder|set reminder|remember)\s+(?:me\s+)?(?:to\s+)?(?:(?:in\s+)?(\d+)\s*(min|minutes|hour|hours|sec|seconds)\s+)?(.+)",
+        cmd,
+    )
     if m:
         delta = m.group(1)
         unit = m.group(2)
         reminder_text = m.group(3)
         when = time.time()
         if delta and unit:
-            seconds = int(delta) * (60 if unit.startswith("min") else 3600 if unit.startswith("hour") else 1)
+            seconds = int(delta) * (
+                60 if unit.startswith("min") else 3600 if unit.startswith("hour") else 1
+            )
             when += seconds
         REMINDERS.append({"text": reminder_text, "time": when, "done": False})
         save_reminders()
@@ -335,7 +464,7 @@ async def handle_intent(text: str) -> dict:
             reply += f" in {delta} {unit}"
         return await say(reply, "reminder")
 
-    m = re.search(r'\b(show|list|what|my)\s+reminders\b', cmd)
+    m = re.search(r"\b(show|list|what|my)\s+reminders\b", cmd)
     if m:
         active = [r for r in REMINDERS if not r.get("done")]
         if not active:
@@ -344,7 +473,10 @@ async def handle_intent(text: str) -> dict:
         return await say(reply, "reminder")
 
     # ── Mood ──
-    m = re.search(r'\b(i am|im |i feel|feeling)\s+(happy|sad|angry|tired|bored|lonely|great|good|bad|stressed|anxious)\b', cmd)
+    m = re.search(
+        r"\b(i am|im |i feel|feeling)\s+(happy|sad|angry|tired|bored|lonely|great|good|bad|stressed|anxious)\b",
+        cmd,
+    )
     if m:
         mood = m.group(2)
         replies = {
@@ -364,41 +496,45 @@ async def handle_intent(text: str) -> dict:
         return await say(replies.get(mood, f"thanks for telling me how you feel"))
 
     # ── Pet interactions ──
-    if re.search(r'\b(good (girl|boy|pup|doggy)|love you|best girl|i love lilly)\b', cmd):
+    if re.search(
+        r"\b(good (girl|boy|pup|doggy)|love you|best girl|i love lilly)\b", cmd
+    ):
         PET_STATE["happiness"] = min(100, PET_STATE.get("happiness", 50) + 15)
         add_xp(5)
         save_pet_state()
         return await say("wag wag i love you too")
-    if re.search(r'\b(feed|lunch|dinner|breakfast|treat|snack|bone|food|hungry)\b', cmd):
+    if re.search(
+        r"\b(feed|lunch|dinner|breakfast|treat|snack|bone|food|hungry)\b", cmd
+    ):
         PET_STATE["hunger"] = max(0, PET_STATE.get("hunger", 50) - 20)
         PET_STATE["energy"] = min(100, PET_STATE.get("energy", 50) + 10)
         add_xp(3)
         save_pet_state()
         return await say("yummy thank you")
-    if re.search(r'\b(pet|rub|scratch|belly|tummy|headpat|pats|head pat)\b', cmd):
+    if re.search(r"\b(pet|rub|scratch|belly|tummy|headpat|pats|head pat)\b", cmd):
         PET_STATE["happiness"] = min(100, PET_STATE.get("happiness", 50) + 10)
         add_xp(2)
         save_pet_state()
         return await say("purrrr that feels nice")
-    if re.search(r'\b(play|fetch|ball|toy|chase|wiggle|zoomies)\b', cmd):
+    if re.search(r"\b(play|fetch|ball|toy|chase|wiggle|zoomies)\b", cmd):
         PET_STATE["happiness"] = min(100, PET_STATE.get("happiness", 50) + 12)
         PET_STATE["energy"] = max(0, PET_STATE.get("energy", 50) - 15)
         add_xp(4)
         save_pet_state()
         return await say("zoom zoom got the ball")
-    if re.search(r'\b(sleep|nap|tired|rest|bed|sleepy)\b', cmd):
+    if re.search(r"\b(sleep|nap|tired|rest|bed|sleepy)\b", cmd):
         PET_STATE["energy"] = min(100, PET_STATE.get("energy", 50) + 30)
         add_xp(1)
         save_pet_state()
         return await say("yawn good night zzz")
-    if re.search(r'\b(walk|stroll|outside|park|steps|run)\b', cmd):
+    if re.search(r"\b(walk|stroll|outside|park|steps|run)\b", cmd):
         PET_STATE["energy"] = max(0, PET_STATE.get("energy", 50) - 20)
         PET_STATE["happiness"] = min(100, PET_STATE.get("happiness", 50) + 8)
         PET_STATE["total_steps"] = PET_STATE.get("total_steps", 0) + 500
         add_xp(3)
         save_pet_state()
         return await say("sniff sniff outside smells so good")
-    if re.search(r'\b(how.*(feel|happy|doing|are you)|status|stats)\b', cmd):
+    if re.search(r"\b(how.*(feel|happy|doing|are you)|status|stats)\b", cmd):
         h = PET_STATE.get("happiness", 50)
         e = PET_STATE.get("energy", 50)
         hu = PET_STATE.get("hunger", 50)
@@ -406,26 +542,45 @@ async def handle_intent(text: str) -> dict:
         xp = PET_STATE.get("xp", 0)
         mood_desc = "so happy" if h > 70 else "pretty good" if h > 40 else "a bit down"
         next_lv = lv * 100
-        return await say(f"im {mood_desc} energy {e} percent hunger {hu} percent level {lv} with {xp} out of {next_lv} xp for next level")
+        return await say(
+            f"im {mood_desc} energy {e} percent hunger {hu} percent level {lv} with {xp} out of {next_lv} xp for next level"
+        )
 
     # ── Alarm ──
-    alarm_match = re.match(r'set\s+(an?\s+)?alarm\s+(?:for\s+)?(\d{1,2}):(\d{2})\s*(am|pm)?\s*(.*)', cmd)
+    alarm_match = re.match(
+        r"set\s+(an?\s+)?alarm\s+(?:for\s+)?(\d{1,2}):(\d{2})\s*(am|pm)?\s*(.*)", cmd
+    )
     if alarm_match:
         hour = int(alarm_match.group(2))
         minute = int(alarm_match.group(3))
         ampm = alarm_match.group(4)
         label = alarm_match.group(5).strip()
         if ampm and hour <= 12:
-            if ampm == "pm" and hour < 12: hour += 12
-            if ampm == "am" and hour == 12: hour = 0
+            if ampm == "pm" and hour < 12:
+                hour += 12
+            if ampm == "am" and hour == 12:
+                hour = 0
         await set_alarm(hour, minute, label)
         return await say(f"alarm set for {hour:02d}:{minute:02d}")
 
     # ── Avatar change ──
-    avatar_match = re.match(r'(?:change|switch|become|set avatar)\s+(?:to\s+)?(\w+)', cmd)
+    avatar_match = re.match(
+        r"(?:change|switch|become|set avatar)\s+(?:to\s+)?(\w+)", cmd
+    )
     if avatar_match:
         avatar_name = avatar_match.group(1).lower()
-        VALID_AVATARS = {"puppy", "cat", "bunny", "dragon", "owl", "penguin", "robot", "fox", "bear", "koala"}
+        VALID_AVATARS = {
+            "puppy",
+            "cat",
+            "bunny",
+            "dragon",
+            "owl",
+            "penguin",
+            "robot",
+            "fox",
+            "bear",
+            "koala",
+        }
         if avatar_name in VALID_AVATARS:
             ui_state["avatar"] = avatar_name
             add_xp(2)
@@ -455,8 +610,11 @@ async def handle_intent(text: str) -> dict:
     # ── Try remote AI if available ──
     if REMOTE and client:
         try:
-            r = await client.post(f"{REMOTE}/api/cmd",
-                json={"text": cmd, "avatar": ui_state.get("avatar", "puppy")}, timeout=15.0)
+            r = await client.post(
+                f"{REMOTE}/api/cmd",
+                json={"text": cmd, "avatar": ui_state.get("avatar", "puppy")},
+                timeout=15.0,
+            )
             if r.status_code == 200:
                 data = r.json()
                 reply = data.get("reply", "")
@@ -473,7 +631,9 @@ async def handle_intent(text: str) -> dict:
     ui_state["thinking"] = False
     return await say(random.choice(UNKNOWN_RESPONSES), "offline")
 
+
 app = FastAPI()
+
 
 @app.post("/api/stream_audio")
 async def stream_audio(request: Request):
@@ -484,11 +644,13 @@ async def stream_audio(request: Request):
         return {"transcription": text, **result}
     return {"transcription": text or "", "reply": "", "action": "ignored"}
 
+
 @app.post("/api/transcribe")
 async def api_transcribe(request: Request):
     audio = await request.body()
     text = await whisper_stt(audio)
     return {"text": text or ""}
+
 
 @app.post("/api/cmd")
 async def api_cmd(request: Request):
@@ -497,19 +659,23 @@ async def api_cmd(request: Request):
     result = await handle_intent(text)
     return {"reply": result.get("reply", ""), "action": result.get("action", "")}
 
+
 @app.post("/api/toggle_mic")
 async def api_toggle_mic():
     ui_state["mic_active"] = not ui_state["mic_active"]
     return {"active": ui_state["mic_active"]}
+
 
 @app.get("/api/ui_state")
 async def api_ui_state():
     await check_reminders()
     return ui_state
 
+
 @app.get("/api/chat")
 def get_chat():
     return {"chat": chat_history}
+
 
 @app.get("/api/tts")
 async def api_tts(text: str = ""):
@@ -517,14 +683,17 @@ async def api_tts(text: str = ""):
         await local_tts(text)
     return {"spoken": text}
 
+
 @app.get("/api/alarm")
 async def api_alarm(hour: int, minute: int, label: str = ""):
     await set_alarm(hour, minute, label)
     return {"set": f"{hour:02d}:{minute:02d} {label}"}
 
+
 @app.get("/api/pet/state")
 async def api_pet_state():
     return PET_STATE
+
 
 @app.post("/api/pet/state")
 async def api_pet_state_update(data: dict):
@@ -534,25 +703,35 @@ async def api_pet_state_update(data: dict):
     save_pet_state()
     return PET_STATE
 
+
 @app.get("/apk/{apk_name}")
 async def serve_apk(apk_name: str):
     apk_path = APK_DIR / apk_name
     if apk_path.exists():
-        return FileResponse(str(apk_path), media_type="application/vnd.android.package-archive",
-            filename=apk_name)
+        return FileResponse(
+            str(apk_path),
+            media_type="application/vnd.android.package-archive",
+            filename=apk_name,
+        )
     raise HTTPException(404)
+
 
 @app.get("/download")
 async def download_redirect():
     return RedirectResponse(url=f"/api/apk/download")
 
+
 @app.get("/api/apk/download")
 async def api_apk_download():
     apk_path = APK_DIR / APK_FILENAME
     if apk_path.exists():
-        return FileResponse(str(apk_path), media_type="application/vnd.android.package-archive",
-            filename=APK_FILENAME)
+        return FileResponse(
+            str(apk_path),
+            media_type="application/vnd.android.package-archive",
+            filename=APK_FILENAME,
+        )
     raise HTTPException(404, f"APK v{APK_VERSION} not found")
+
 
 @app.get("/lilly_ai.py")
 async def serve_lilly_ai_py():
@@ -562,25 +741,34 @@ async def serve_lilly_ai_py():
     if not lilly_ai_path.exists():
         lilly_ai_path = Path("/app/lilly_ai.py")
     if lilly_ai_path.exists():
-        return FileResponse(str(lilly_ai_path), media_type="text/x-python",
-            filename="lilly_ai.py")
+        return FileResponse(
+            str(lilly_ai_path), media_type="text/x-python", filename="lilly_ai.py"
+        )
     raise HTTPException(404, "lilly_ai.py not found")
+
 
 @app.get("/api/status")
 async def api_status():
     return {
-        "skills": len(SKILLS), "whisper": os.path.exists(WHISPER_CLI),
-        "remote": REMOTE or "none", "chat_len": len(chat_history),
+        "skills": len(SKILLS),
+        "whisper": os.path.exists(WHISPER_CLI),
+        "remote": REMOTE or "none",
+        "chat_len": len(chat_history),
         "mode": "offline" if OFFLINE_MODE or not REMOTE_REACHABLE else "online",
     }
 
+
 OVERLAY_HTML_PATH = _SCRIPT_DIR / "overlay.html"
+
 
 @app.get("/overlay")
 async def serve_overlay():
     if OVERLAY_HTML_PATH.exists():
         return HTMLResponse(content=OVERLAY_HTML_PATH.read_text(encoding="utf-8"))
-    return HTMLResponse(content="<html><body><h1>Overlay page not found</h1></body></html>")
+    return HTMLResponse(
+        content="<html><body><h1>Overlay page not found</h1></body></html>"
+    )
+
 
 @app.post("/api/browser_mic")
 async def api_browser_mic(request: Request):
@@ -591,6 +779,7 @@ async def api_browser_mic(request: Request):
         return {"heard": text, **result}
     return {"heard": text or "", "reply": "", "action": "ignored"}
 
+
 @app.get("/")
 async def proxy_root():
     if REMOTE and client:
@@ -600,6 +789,7 @@ async def proxy_root():
         except Exception:
             pass
     return HTMLResponse(content=render_fallback_page())
+
 
 def render_fallback_page():
     apk_path = APK_DIR / APK_FILENAME
@@ -622,7 +812,7 @@ h1{{font-size:28px;color:#6b9ce3}}
 <div class="card">
   <h1>Lilly Local</h1>
   <div class="tag">offline assistant with voice control</div>
-  <div class="version">v{APK_VERSION}{f' ({size_mb:.1f} MB)' if size_mb else ''}</div>
+  <div class="version">v{APK_VERSION}{f" ({size_mb:.1f} MB)" if size_mb else ""}</div>
   <a class="btn-dl" href="/api/apk/download">⬇ Download APK v{APK_VERSION}</a>
   <div class="info">
     <strong>Try saying:</strong><br>
@@ -634,36 +824,60 @@ h1{{font-size:28px;color:#6b9ce3}}
 </div>
 </body></html>"""
 
+
 async def proxy_to_remote(path: str, request: Request):
     if not REMOTE or not client:
         if path == "/api/state":
-            return JSONResponse(content={
-                "thought": "local mode", "emotion": "calm", "mode": "idle", "goals": [],
-                "status": PET_STATE,
-            })
+            return JSONResponse(
+                content={
+                    "thought": "local mode",
+                    "emotion": "calm",
+                    "mode": "idle",
+                    "goals": [],
+                    "status": PET_STATE,
+                }
+            )
         raise HTTPException(502, "Remote not configured")
     try:
         method = request.method
-        headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "content-length")}
+        headers = {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() not in ("host", "content-length")
+        }
         body = await request.body() if method in ("POST", "PUT", "PATCH") else None
         url = f"{REMOTE}{path}"
         qs = request.url.query
         if qs:
             url += f"?{qs}"
-        r = await client.request(method, url, headers=headers, content=body, timeout=30.0)
-        return Response(content=r.content, status_code=r.status_code,
-            headers={k: v for k, v in r.headers.items() if k.lower() not in ("transfer-encoding",)})
+        r = await client.request(
+            method, url, headers=headers, content=body, timeout=30.0
+        )
+        return Response(
+            content=r.content,
+            status_code=r.status_code,
+            headers={
+                k: v
+                for k, v in r.headers.items()
+                if k.lower() not in ("transfer-encoding",)
+            },
+        )
     except Exception:
         raise HTTPException(502, "Remote unavailable")
+
 
 @app.get("/api/state")
 async def proxy_api_state():
     if not REMOTE or not client:
-        return JSONResponse(content={
-            "thought": "local mode offline",
-            "emotion": "calm", "mode": "idle", "goals": [],
-            "status": PET_STATE,
-        })
+        return JSONResponse(
+            content={
+                "thought": "local mode offline",
+                "emotion": "calm",
+                "mode": "idle",
+                "goals": [],
+                "status": PET_STATE,
+            }
+        )
     try:
         r = await client.get(f"{REMOTE}/api/state", timeout=10.0)
         data = r.json()
@@ -672,17 +886,64 @@ async def proxy_api_state():
             save_pet_state()
         return JSONResponse(content=data)
     except Exception:
-        return JSONResponse(content={
-            "thought": "local mode", "emotion": "calm", "mode": "idle", "goals": [],
-            "status": PET_STATE,
-        })
+        return JSONResponse(
+            content={
+                "thought": "local mode",
+                "emotion": "calm",
+                "mode": "idle",
+                "goals": [],
+                "status": PET_STATE,
+            }
+        )
+
 
 @app.get("/api/lipsync")
 async def proxy_lipsync():
     if not REMOTE or not client:
         return JSONResponse({"visemes": []})
-    return await proxy_to_remote("/api/lipsync",
-        Request(scope={"type": "http", "method": "GET", "headers": [], "query_string": b""}))
+    return await proxy_to_remote(
+        "/api/lipsync",
+        Request(
+            scope={"type": "http", "method": "GET", "headers": [], "query_string": b""}
+        ),
+    )
+
+
+@app.post("/api/pair/code")
+async def generate_pairing_code():
+    code = _generate_pairing_code()
+    PAIRING_CODES[code] = {
+        "expires": time.time() + PAIRING_CODE_TTL,
+    }
+    return {"code": code, "expires_in": PAIRING_CODE_TTL}
+
+
+@app.post("/api/pair/verify")
+async def verify_pairing_code(request: Request):
+    body = await request.json()
+    code = (body.get("code") or "").strip().upper()
+    entry = PAIRING_CODES.pop(code, None)
+    if not entry:
+        raise HTTPException(status_code=400, detail="Invalid or expired pairing code")
+    if time.time() > entry["expires"]:
+        raise HTTPException(status_code=400, detail="Pairing code expired")
+    token = _generate_device_token()
+    DEVICE_TOKENS[token] = {
+        "created": time.time(),
+    }
+    return {
+        "token": token,
+        "server_url": str(request.base_url).rstrip("/"),
+    }
+
+
+@app.get("/api/pair/status")
+async def pairing_status(request: Request):
+    token = request.headers.get("X-Device-Token", "")
+    if token and token in DEVICE_TOKENS:
+        return {"paired": True}
+    return JSONResponse({"paired": False, "detail": "Not paired"}, status_code=401)
+
 
 @app.get("/static/{path:path}")
 async def proxy_static(path: str):
@@ -690,9 +951,13 @@ async def proxy_static(path: str):
         raise HTTPException(404)
     try:
         r = await client.get(f"{REMOTE}/static/{path}", timeout=10.0)
-        return Response(content=r.content, media_type=r.headers.get("content-type", "application/octet-stream"))
+        return Response(
+            content=r.content,
+            media_type=r.headers.get("content-type", "application/octet-stream"),
+        )
     except Exception:
         raise HTTPException(404)
+
 
 if __name__ == "__main__":
     mode = "OFFLINE" if OFFLINE_MODE else f"proxy → {REMOTE}"

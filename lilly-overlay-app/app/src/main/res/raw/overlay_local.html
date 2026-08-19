@@ -594,13 +594,11 @@ body.expanded #aurora{opacity:1}
       <span id="statusLabel">idle</span>
     </div>
      <div id="bubbleInput">
-       <button class="iconBtn" id="micBtn">🎤</button>
-       <input id="chatInput" type="text" placeholder="Message..." autocomplete="off">
-       <button class="iconBtn" id="carGameBtn" title="Car Ride Game" onclick="startCarGame()" style="display:none">🎮</button>
-       <button class="iconBtn" id="fetchGameBtn" title="Fetch Game" onclick="startFetchGame()" style="display:none">🐕</button>
-       <button class="iconBtn" id="mapBtn" title="Where are we?" onclick="showLocationMap()">📍</button>
-       <button class="iconBtn" id="radarBtn" title="Who's around">📡</button>
-       <button class="iconBtn" id="sendBtn">➤</button>
+        <button class="iconBtn" id="micBtn">🎤</button>
+        <input id="chatInput" type="text" placeholder="Message..." autocomplete="off">
+        <button class="iconBtn" id="mapBtn" title="Where are we?" onclick="showLocationMap()">📍</button>
+        <button class="iconBtn" id="radarBtn" title="Who's around">📡</button>
+        <button class="iconBtn" id="sendBtn">➤</button>
      </div>
 
     <div id="radarPanel">
@@ -734,15 +732,12 @@ body.expanded #aurora{opacity:1}
 
   <!-- ─── Radial Menu (long-press to open, auto-dismiss on select) ─── -->
   <div id="radialMenu">
-    <div class="radial-arm" style="--angle:0deg"><button class="radial-item" onclick="openFeature('vision')"><span class="ri-icon">👁️</span><span class="ri-label">Vision</span></button></div>
-    <div class="radial-arm" style="--angle:40deg"><button class="radial-item" onclick="openFeature('orientation')"><span class="ri-icon">🧭</span><span class="ri-label">Motion</span></button></div>
-    <div class="radial-arm" style="--angle:80deg"><button class="radial-item" onclick="openFeature('acoustics')"><span class="ri-icon">🎤</span><span class="ri-label">Sound</span></button></div>
-    <div class="radial-arm" style="--angle:120deg"><button class="radial-item" onclick="openFeature('touch')"><span class="ri-icon">👆</span><span class="ri-label">Touch</span></button></div>
-    <div class="radial-arm" style="--angle:160deg"><button class="radial-item" onclick="openFeature('proximity')"><span class="ri-icon">📡</span><span class="ri-label">Proximity</span></button></div>
-    <div class="radial-arm" style="--angle:200deg"><button class="radial-item" onclick="openFeature('ambient')"><span class="ri-icon">💡</span><span class="ri-label">Ambient</span></button></div>
-    <div class="radial-arm" style="--angle:240deg"><button class="radial-item" onclick="openFeature('chat')"><span class="ri-icon">💬</span><span class="ri-label">Chat</span></button></div>
-    <div class="radial-arm" style="--angle:280deg"><button class="radial-item" onclick="openFeature('games')"><span class="ri-icon">🎮</span><span class="ri-label">Games</span></button></div>
-    <div class="radial-arm" style="--angle:320deg"><button class="radial-item" onclick="openPairing()"><span class="ri-icon">🔗</span><span class="ri-label">Pair</span></button></div>
+    <div class="radial-arm" style="--angle:0deg"><button class="radial-item" onclick="openFeature('chat')"><span class="ri-icon">💬</span><span class="ri-label">Chat</span></button></div>
+    <div class="radial-arm" style="--angle:60deg"><button class="radial-item" onclick="toggleOverlayMic()"><span class="ri-icon">🎤</span><span class="ri-label">Mic</span></button></div>
+    <div class="radial-arm" style="--angle:120deg"><button class="radial-item" onclick="cycleAvatar()"><span class="ri-icon">🐶</span><span class="ri-label">Avatar</span></button></div>
+    <div class="radial-arm" style="--angle:180deg"><button class="radial-item" onclick="openPairing()"><span class="ri-icon">🔗</span><span class="ri-label">Pair</span></button></div>
+    <div class="radial-arm" style="--angle:240deg"><button class="radial-item" onclick="openSettings()"><span class="ri-icon">⚙️</span><span class="ri-label">Settings</span></button></div>
+    <div class="radial-arm" style="--angle:300deg"><button class="radial-item" onclick="hideRadial()"><span class="ri-icon">✕</span><span class="ri-label">Close</span></button></div>
   </div>
 
   <!-- ─── Feature Detail Panel ─── -->
@@ -764,19 +759,40 @@ if(!ctx){document.body.innerHTML='<div style="padding:20px;color:#fff">Canvas un
 
 // Auth: session cookie (auto-sent) + optional device token fallback
 const DEVICE_TOKEN=localStorage.getItem('lilly_device_token')||'';
-// Resolve server URL — try the page origin first, then local Termux servers, then remote
+// Injected server URL from native Android bridge (set by LillyOverlayService)
+var _injectedServerUrl=null;
+function setServerUrl(url){
+  if(url&&typeof url==='string'){
+    _injectedServerUrl=url.replace(/\/$/,'');
+    _srvUrl=null; // force re-resolve
+    _resolveServer();
+  }
+}
+// Resolve server URL — prefer bridged URL, then page origin, then remote fallback
 var _srvUrl=null;
-var _LOCAL_SERVERS=['http://127.0.0.1:8099','http://127.0.0.1:8080','http://127.0.0.1:8098'];
 async function _probeUrl(base){try{var c=new AbortController();var t=setTimeout(function(){c.abort();},1500);var r=await fetch(base+'/api/ui_state',{signal:c.signal});clearTimeout(t);return r.ok;}catch(e){return false;}}
 async function _resolveServer(){
+  // 1. Use injected URL if available (native bridge set it)
+  if(_injectedServerUrl){
+    _srvUrl=_injectedServerUrl;
+    updateStatusDot('local');
+    return _srvUrl;
+  }
+  // 2. Try page origin (works when served from lilly_ai.py or phone server)
   var here='';
   try{here=window.location.origin;}catch(e){}
   if(here&&(await _probeUrl(here))){_srvUrl=here;updateStatusDot('local');return _srvUrl;}
-  for(var i=0;i<_LOCAL_SERVERS.length;i++){if(await _probeUrl(_LOCAL_SERVERS[i])){_srvUrl=_LOCAL_SERVERS[i];updateStatusDot('local');return _srvUrl;}}
+  // 3. Try bridged URL from native Android
   var remote='';
   if(typeof LillyBridge!=='undefined'&&LillyBridge.getServerUrl)remote=LillyBridge.getServerUrl();
-  if(!remote)remote='https://droolingwithsanity.ca';
+  if(remote){
+    remote=remote.replace(/\/$/,'');
+    if(await _probeUrl(remote)){_srvUrl=remote;updateStatusDot('local');return _srvUrl;}
+  }
+  // 4. Last resort: hardcoded remote fallback
+  remote='https://droolingwithsanity.ca';
   _srvUrl=remote.replace(/\/$/,'');
+  updateStatusDot('offline');
   return _srvUrl;
 }
 async function _getServer(){if(_srvUrl!==null)return _srvUrl;return await _resolveServer();}
@@ -1803,6 +1819,20 @@ function setAvatar(newAvatar){
   }
 }
 
+function cycleAvatar(){
+  const keys = Object.keys(OVERLAY_CHAR_NAMES);
+  const idx = keys.indexOf(avatar);
+  const next = keys[(idx + 1) % keys.length];
+  setAvatarWithRevert(next);
+}
+
+function openSettings(){
+  if(window.LillyBridge && LillyBridge.launchApp){
+    LillyBridge.launchApp('/api/settings');
+  } else {
+    window.open('/api/settings','_blank');
+  }
+}
 
 // Init
 drawFrame();

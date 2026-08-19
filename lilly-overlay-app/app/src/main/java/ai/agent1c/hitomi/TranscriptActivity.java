@@ -1,5 +1,7 @@
 package ai.agent1c.hitomi;
 
+import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.os.Bundle;
@@ -24,9 +26,12 @@ import java.util.Locale;
  * TranscriptActivity — shows the full conversation history from the Lilly overlay.
  *
  * It reads the static transcript buffer in {@link LillyOverlayService} directly (same process),
- * or falls back to fetching /api/transcript from the local phone server on 127.0.0.1:8099.
+ * or falls back to fetching /api/transcript from the paired server.
  */
 public class TranscriptActivity extends AppCompatActivity {
+
+    private static final String PREFS_NAME = "lilly_prefs";
+    private static final String KEY_SERVER_URL = "lilly_server_url";
 
     private TextView transcriptText;
     private ScrollView scrollView;
@@ -61,6 +66,30 @@ public class TranscriptActivity extends AppCompatActivity {
         loadTranscript();
     }
 
+    private String getDeviceIpAddress() {
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> interfaces =
+                java.net.NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                java.net.NetworkInterface iface = interfaces.nextElement();
+                if (iface.isLoopback() || iface.isVirtual() || !iface.isUp()) continue;
+                java.util.Enumeration<java.net.InetAddress> addresses = iface.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    java.net.InetAddress addr = addresses.nextElement();
+                    if (addr instanceof java.net.Inet4Address) {
+                        String ip = addr.getHostAddress();
+                        if (ip != null && !ip.startsWith("127.")) {
+                            return ip;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w("TranscriptActivity", "Could not get device IP: " + e.getMessage());
+        }
+        return null;
+    }
+
     private void loadTranscript() {
         // First try the in-process static buffer
         java.util.List<LillyOverlayService.TranscriptEntry> entries =
@@ -73,49 +102,86 @@ public class TranscriptActivity extends AppCompatActivity {
 
         // Fall back to the local phone server
         new Thread(() -> {
-            try {
-                URL url = new URL("http://127.0.0.1:8099/api/transcript");
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setConnectTimeout(3000);
-                conn.setReadTimeout(5000);
-                conn.setRequestMethod("GET");
+            String[] urlsToTry = {
+                "http://127.0.0.1:8099",
+                "http://localhost:8099",
+                "http://127.0.0.1:8098",
+                "http://localhost:8098"
+            };
 
-                if (conn.getResponseCode() == 200) {
-                    BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(conn.getInputStream()));
-                    StringBuilder sb = new StringBuilder();
-                    String line;
-                    while ((line = reader.readLine()) != null) sb.append(line);
-                    reader.close();
-                    conn.disconnect();
+            // Add device IPs
+            String deviceIp = getDeviceIpAddress();
+            if (deviceIp != null) {
+                String[] deviceUrls = {
+                    "http://" + deviceIp + ":8099",
+                    "http://" + deviceIp + ":8098"
+                };
+                String[] combined = new String[urlsToTry.length + deviceUrls.length];
+                System.arraycopy(urlsToTry, 0, combined, 0, urlsToTry.length);
+                System.arraycopy(deviceUrls, 0, combined, urlsToTry.length, deviceUrls.length);
+                urlsToTry = combined;
+            }
 
-                    // Parse JSON array [{role,text,time}, ...]
-                    org.json.JSONObject root = new org.json.JSONObject(sb.toString());
-                    org.json.JSONArray arr = root.optJSONArray("transcript");
-                    if (arr != null && arr.length() > 0) {
-                        StringBuilder display = new StringBuilder();
-                        for (int i = 0; i < arr.length(); i++) {
-                            org.json.JSONObject item = arr.getJSONObject(i);
-                            String role   = item.optString("role", "?");
-                            String text   = item.optString("text", "");
-                            String timeStr = item.optString("time", "");
-                            display.append("[").append(timeStr.isEmpty() ? "?" : timeStr).append("] ");
-                            display.append(role.equals("user") ? "You" : "Lilly");
-                            display.append(": ").append(text).append("\n\n");
-                        }
-                        final String result = display.toString();
-                        mainHandler.post(() -> {
-                            if (transcriptText != null) {
-                                transcriptText.setText(result);
-                                if (scrollView != null)
-                                    scrollView.post(() -> scrollView.fullScroll(ScrollView.FOCUS_DOWN));
+            // Also try saved server URL
+            String savedUrl = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .getString(KEY_SERVER_URL, null);
+            if (savedUrl != null && !savedUrl.trim().isEmpty()) {
+                String[] withSaved = new String[urlsToTry.length + 1];
+                withSaved[0] = savedUrl.trim();
+                System.arraycopy(urlsToTry, 0, withSaved, 1, urlsToTry.length);
+                urlsToTry = withSaved;
+            }
+
+            Exception lastError = null;
+            for (String baseUrl : urlsToTry) {
+                try {
+                    String urlStr = baseUrl + "/api/transcript";
+                    URL url = new URL(urlStr);
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setConnectTimeout(3000);
+                    conn.setReadTimeout(5000);
+                    conn.setRequestMethod("GET");
+
+                    if (conn.getResponseCode() == 200) {
+                        BufferedReader reader = new BufferedReader(
+                                new InputStreamReader(conn.getInputStream()));
+                        StringBuilder sb = new StringBuilder();
+                        String line;
+                        while ((line = reader.readLine()) != null) sb.append(line);
+                        reader.close();
+                        conn.disconnect();
+
+                        // Parse JSON array [{role,text,time}, ...]
+                        org.json.JSONObject root = new org.json.JSONObject(sb.toString());
+                        org.json.JSONArray arr = root.optJSONArray("transcript");
+                        if (arr != null && arr.length() > 0) {
+                            StringBuilder display = new StringBuilder();
+                            for (int i = 0; i < arr.length(); i++) {
+                                org.json.JSONObject item = arr.getJSONObject(i);
+                                String role   = item.optString("role", "?");
+                                String text   = item.optString("text", "");
+                                String timeStr = item.optString("time", "");
+                                display.append("[").append(timeStr.isEmpty() ? "?" : timeStr).append("] ");
+                                display.append(role.equals("user") ? "You" : "Lilly");
+                                display.append(": ").append(text).append("\n\n");
                             }
-                        });
-                        return;
+                            final String result = display.toString();
+                            mainHandler.post(() -> {
+                                if (transcriptText != null) {
+                                    transcriptText.setText(result);
+                                    if (scrollView != null)
+                                        scrollView.post(() -> scrollView.fullScroll(ScrollView.FOCUS_DOWN));
+                                }
+                            });
+                            return;
+                        }
                     }
+                    conn.disconnect();
+                } catch (Exception e) {
+                    lastError = e;
                 }
-                conn.disconnect();
-            } catch (Exception ignored) {}
+            }
+
             mainHandler.post(() -> {
                 if (transcriptText != null)
                     transcriptText.setText("No conversation history yet.\nStart talking to Lilly!");

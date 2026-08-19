@@ -25,11 +25,11 @@ body{
   overflow:visible;
 }
 #container.expanded{
-  width:96px;height:320px;
+  width:min(300px,calc(100vw - 20px));height:320px;
   border-radius:24px;
 }
 body.expanded{
-  width:96px;height:320px;
+  width:min(300px,calc(100vw - 20px));height:320px;
 }
 #pupCanvas{
   position:absolute;
@@ -89,9 +89,15 @@ body.expanded{
   padding:6px 8px 8px;
   display:none;
   z-index:10;
-  transition:opacity 0.25s, top 0.3s ease, max-height 0.3s ease;
-  max-height:260px;
+  transition:opacity 0.25s, top 0.3s ease, max-height 0.3s ease, width 0.3s ease;
+  max-height:200px;
   overflow:hidden;
+  flex-direction:column;
+}
+#chatBubble.show{
+  display:block;
+  opacity:1;
+  width:min(300px,calc(100vw - 20px));
 }
 /* ─── Typing: chat rises up + grows so the log is readable while typing ─── */
 #chatBubble.typing{
@@ -101,6 +107,8 @@ body.expanded{
   border-top:1px solid rgba(255,255,255,0.08);
 }
 #chatBubble.typing #bubbleText{
+  flex:1 1 auto;
+  min-height:30px;
   max-height:calc(100vh - 200px);
 }
 /* ─── Scrollable message log ─── */
@@ -166,11 +174,9 @@ body.expanded{
 }
 #closeChatBtn:hover{background:rgba(239,68,68,0.5)}
 #bubbleText{
-  font-size:11px;
-  line-height:1.4;
-  color:rgba(255,255,255,0.85);
-  max-height:120px;
+  flex:1 1 auto;
   min-height:30px;
+  max-height:120px;
   overflow-y:auto;
   scrollbar-width:thin;
   word-wrap:break-word;
@@ -180,6 +186,9 @@ body.expanded{
   user-select:text;
   -webkit-user-select:text;
   padding:4px;
+  font-size:11px;
+  line-height:1.4;
+  color:rgba(255,255,255,0.85);
   background:rgba(255,255,255,0.04);
   border-radius:8px;
   transition:max-height 0.3s ease;
@@ -208,7 +217,7 @@ body.expanded{
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
 #bubbleInput{
   display:flex;
-  gap:3px;
+  gap:2px;
   align-items:center;
   pointer-events:auto;
 }
@@ -216,18 +225,19 @@ body.expanded{
   flex:1;
   background:rgba(255,255,255,0.08);
   border:1px solid rgba(255,255,255,0.12);
-  border-radius:10px;
-  padding:6px 10px;
-  font-size:12px;
+  border-radius:8px;
+  padding:2px 4px;
+  font-size:10px;
   color:rgba(255,255,255,0.85);
   outline:none;
   min-width:0;
-  width:140px;
+  user-select:text;
+  -webkit-user-select:text;
 }
 #chatInput::placeholder{color:rgba(255,255,255,0.25)}
 #chatInput:focus{border-color:rgba(255,255,255,0.2)}
 .iconBtn{
-  width:26px;height:26px;
+  width:14px;height:14px;
   border-radius:50%;
   border:none;
   display:flex;
@@ -235,8 +245,8 @@ body.expanded{
   justify-content:center;
   cursor:pointer;
   transition:all 0.2s;
-  font-size:12px;
-  flex-shrink:0;
+  font-size:9px;
+  flex-shrink:1;
 }
 #micBtn{
   background:rgba(74,222,128,0.2);
@@ -247,6 +257,20 @@ body.expanded{
 #sendBtn{
   background:rgba(168,85,247,0.2);
   color:#c084fc;
+}
+#headerDownloadBtn{
+  background:rgba(96,165,250,0.2);
+  color:#60a5fa;
+  width:18px;height:18px;
+  border-radius:50%;
+  border:none;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+  transition:all 0.2s;
+  font-size:10px;
+  flex-shrink:1;
 }
 .iconBtn:active{transform:scale(0.85)}
 
@@ -360,6 +384,7 @@ body.expanded{
   <div id="chatBubble">
     <div id="chatHeader">
       <span id="chatTitle">Chat</span>
+      <button class="iconBtn" id="headerDownloadBtn" title="Download APK" style="font-size:10px;">⬇️</button>
       <button id="closeChatBtn" onclick="closeChat()">✕</button>
     </div>
     <div id="bubbleTail"></div>
@@ -371,7 +396,9 @@ body.expanded{
     <div id="bubbleInput">
       <button class="iconBtn" id="micBtn">🎤</button>
       <input id="chatInput" type="text" placeholder="Message..." autocomplete="off">
-      <button class="iconBtn" id="radarBtn" title="Who's around">📡</button>
+      <button class="iconBtn" id="radarBtn" title="Who's around">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg>
+      </button>
       <button class="iconBtn" id="sendBtn">➤</button>
     </div>
 
@@ -902,7 +929,6 @@ async function pollState(){
         appendMsg('lilly',spoken);
       }
       chatBubble.classList.add('show');
-      setTimeout(function(){if(!overlayExpanded)chatBubble.classList.remove('show')},6000);
     }
 
     // ── Incremental chat array updates (new messages since last poll) ──
@@ -995,7 +1021,10 @@ setInterval(function(){
 },2000);
 chatInput.addEventListener('focus',function(){
   _lastActivity=Date.now();
-  if(Date.now()>_typingSuppress)setTyping(true);
+  setTyping(true);
+  if(window.LillyBridge && LillyBridge.showKeyboard){
+    try{ LillyBridge.showKeyboard(); }catch(e){}
+  }
 });
 chatInput.addEventListener('input',function(){_lastActivity=Date.now();setTyping(true);});
 chatInput.addEventListener('blur',function(){setTimeout(function(){setTyping(false);},250);});
@@ -1063,12 +1092,19 @@ async function toggleOverlayMic(){
 
 // ─── Overlay expansion / input ───
 let overlayExpanded=false;
+let pollInterval=null;
+let _pollPaused=false;
+function _setPolling(ms){
+  if(pollInterval){clearInterval(pollInterval);pollInterval=null;}
+  if(ms>0) pollInterval=setInterval(pollState,ms);
+}
 function expandOverlay(){
   overlayExpanded=true;
   document.body.classList.add('expanded');
   document.getElementById('container').classList.add('expanded');
   chatBubble.classList.add('show');
   setTimeout(function(){chatInput.focus()},300);
+  if(_pollPaused){_pollPaused=false;_setPolling(300);}
 }
 function collapseOverlay(){
   overlayExpanded=false;
@@ -1077,6 +1113,7 @@ function collapseOverlay(){
   chatBubble.classList.remove('show');
   chatInput.blur();
   if(typeof stopOverlayMic==='function'&&window.overlayMicActive)stopOverlayMic();
+  if(!document.hidden) _setPolling(2000);
 }
 // Close the chat from the header ✕ button (bridge-aware like the Android version)
 function closeChat(){
@@ -1207,8 +1244,19 @@ function flashAvatarName(name,emoji){
 
 // Init
 drawFrame();
-pollInterval=setInterval(pollState,300);
+_setPolling(300);
 pollState();
+
+// Pause polling when app is backgrounded
+document.addEventListener('visibilitychange',function(){
+  if(document.hidden){
+    _pollPaused=true;
+    _setPolling(0);
+  }else{
+    _pollPaused=false;
+    _setPolling(overlayExpanded?300:2000);
+  }
+});
 
 // Also show avatar name on init if not puppy
 if(avatar!=='puppy'&&avatarName){
@@ -1721,6 +1769,7 @@ async function openRadar(){
 function closeRadar(){
   const panel=document.getElementById('radarPanel');
   if(panel)panel.classList.remove('show');
+  if(_radarAnim){clearInterval(_radarAnim);_radarAnim=null;}
 }
 
 // ─── New-user help: ? badges next to UI objects ─────────────────
@@ -1728,6 +1777,7 @@ const HELP_DEFS={
   micBtn:{title:'🎤 Voice Input',body:'Tap to talk to Lilly hands-free. Voice replies play here too.'},
   radarBtn:{title:'📡 Who\'s Around',body:'Scans nearby Bluetooth and opens the radar. Pin points show devices with brand/name and distance — iPhones vs Android by MAC vendor.'},
   sendBtn:{title:'➤ Send',body:'Sends your message to Lilly. Replies appear as scrollable text, with images when Lilly generates them.'},
+  headerDownloadBtn:{title:'⬇️ Download APK',body:'Get the latest Lilly overlay build for Android.'},
   chatInput:{title:'✏️ Chat',body:'Type here and press Enter. The panel expands while typing so you can read history, then drops back down 10s after you stop.'},
   dragHandle:{title:'🐶 Lilly',body:'This is Lilly. Drag to move her around the screen, tap to open chat, long-press for quick actions.'},
 };
@@ -1763,7 +1813,7 @@ function showHelp(id,anchor,def){
   _helpTimer=setTimeout(hideHelp,8000);
 }
 function placeHelpBadges(){
-  const order=['dragHandle','micBtn','chatInput','sendBtn','radarBtn'];
+  const order=['dragHandle','micBtn','chatInput','sendBtn','radarBtn','headerDownloadBtn'];
   for(const id of order){
     const el=document.getElementById(id);
     if(!el||el.getAttribute('data-help-done'))continue;
@@ -1792,7 +1842,7 @@ function firstRunTour(){
   try{
     if(localStorage.getItem(KEY))return;
   }catch(e){}
-  const steps=['dragHandle','micBtn','radarBtn','sendBtn'];
+  const steps=['dragHandle','micBtn','radarBtn','sendBtn','headerDownloadBtn'];
   let i=0;
   const tour=function(){
     if(i>=steps.length){
@@ -1872,6 +1922,8 @@ if (!isAndroidBridge) {
   micBtn.addEventListener('click',toggleOverlayMic);
 }
 sendBtn.addEventListener('click',sendMessage);
+const hdlBtn=document.getElementById('headerDownloadBtn');
+if(hdlBtn) hdlBtn.addEventListener('click',function(){ window.open('/api/apk/download','_blank'); });
 chatInput.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();sendMessage();}});
 (function(){
   const rb=document.getElementById('radarBtn');

@@ -113,6 +113,7 @@ public class LillyOverlayService extends Service {
     private String lastAvatar = "";
     private boolean serverConnected = false;
     private long lastServerResponse = 0;
+    private String cachedLocalServerUrl = null;
     private float dragStartRawX, dragStartRawY;
     private int dragStartX, dragStartY;
     private int draggedLastX, draggedLastY;
@@ -216,7 +217,7 @@ public class LillyOverlayService extends Service {
         try {
             createNotificationChannel();
             startForeground(NOTIF_ID, buildNotification());
-            phoneClient = new LocalPhoneClient();
+            phoneClient = new LocalPhoneClient(this);
             ensureOverlay();
             overlayRunning = true;
             // Auto-prompt critical permissions on first start
@@ -330,7 +331,7 @@ public class LillyOverlayService extends Service {
 
         chatClient = new LillyAIChatClient(this);
         termuxBridge = new TermuxCommandBridge(this);
-        phoneClient = new LocalPhoneClient();
+        phoneClient = new LocalPhoneClient(this);
         loadSkills();
         initSpeechRecognizer();
         startStatePolling();
@@ -431,12 +432,113 @@ public class LillyOverlayService extends Service {
 
     private String getServerUrl() {
         return getSharedPreferences("lilly_prefs", Context.MODE_PRIVATE)
-            .getString("lilly_server_url", "https://droolingwithsanity.ca");
+            .getString("lilly_server_url", "http://100.93.131.114:8098");
+    }
+
+    private String getLocalServerUrl() {
+        // 1. Check if user explicitly saved a URL
+        String saved = getServerUrl();
+        if (saved != null && !saved.isEmpty() && !saved.equals("http://100.93.131.114:8098")) {
+            return saved;
+        }
+
+        // 2. Try local AI server first (same device)
+        String[] localUrls = {
+            "http://127.0.0.1:8098",
+            "http://127.0.0.1:8099",
+            "http://localhost:8098",
+            "http://localhost:8099"
+        };
+
+        // Add device IPs
+        String deviceIp = getDeviceIpAddress();
+        if (deviceIp != null) {
+            String[] deviceUrls = {
+                "http://" + deviceIp + ":8098",
+                "http://" + deviceIp + ":8099"
+            };
+            String[] combined = new String[localUrls.length + deviceUrls.length];
+            System.arraycopy(localUrls, 0, combined, 0, localUrls.length);
+            System.arraycopy(deviceUrls, 0, combined, localUrls.length, deviceUrls.length);
+            localUrls = combined;
+        }
+
+        for (String url : localUrls) {
+            if (isUrlReachable(url)) {
+                Log.i(TAG, "Found local server: " + url);
+                return url;
+            }
+        }
+
+        // 3. Fall back to remote default
+        return "http://100.93.131.114:8098";
+    }
+
+    private boolean isUrlReachable(String urlString) {
+        try {
+            java.net.URL url = new java.net.URL(urlString + "/api/ui_state");
+            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(2000);
+            conn.setReadTimeout(2000);
+            int code = conn.getResponseCode();
+            conn.disconnect();
+            return code == 200;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private String getDeviceIpAddress() {
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> interfaces =
+                java.net.NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                java.net.NetworkInterface iface = interfaces.nextElement();
+                if (iface.isLoopback() || iface.isVirtual() || !iface.isUp()) continue;
+                java.util.Enumeration<java.net.InetAddress> addresses = iface.getInetAddresses();
+                while (addresses.hasMoreElements()) {
+                    java.net.InetAddress addr = addresses.nextElement();
+                    if (addr instanceof java.net.Inet4Address) {
+                        String ip = addr.getHostAddress();
+                        if (ip != null && !ip.startsWith("127.")) {
+                            return ip;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Could not get device IP: " + e.getMessage());
+        }
+        return null;
     }
 
     private void injectAndroidBridge() {
         if (lillyWebView == null) return;
         String serverUrl = getServerUrl();
+        
+        // If user explicitly saved a URL, use it directly
+        if (serverUrl != null && !serverUrl.isEmpty() && !serverUrl.equals("http://100.93.131.114:8098")) {
+            injectServerUrl(serverUrl);
+            return;
+        }
+        
+        // Otherwise, use cached local server URL or detect in background
+        if (cachedLocalServerUrl != null) {
+            injectServerUrl(cachedLocalServerUrl);
+            return;
+        }
+        
+        // Detect local server in background
+        executor.execute(() -> {
+            String localUrl = getLocalServerUrl();
+            cachedLocalServerUrl = localUrl;
+            mainHandler.post(() -> injectServerUrl(localUrl));
+        });
+    }
+    
+    private void injectServerUrl(String serverUrl) {
+        if (lillyWebView == null) return;
         String escaped = escapeJs(serverUrl);
         lillyWebView.evaluateJavascript(
             "(function(){" +
@@ -819,30 +921,15 @@ public class LillyOverlayService extends Service {
         });
     }
 
-    private View quickChatBtn, quickModeBtn;
-    private android.widget.TextView modeLabelView;
-
     private void setupQuickActions() {
-        quickMicBtn      = null;
-        quickCloseBtn    = null;
+        View chatBtn     = quickActionsView.findViewById(R.id.lillyQuickChat);
+        View micBtn      = quickActionsView.findViewById(R.id.lillyQuickMic);
+        View avatarBtn   = quickActionsView.findViewById(R.id.lillyQuickAvatar);
+        View pairingBtn  = quickActionsView.findViewById(R.id.lillyQuickPairing);
+        View settingsBtn = quickActionsView.findViewById(R.id.lillyQuickSettings);
+        View closeBtn    = quickActionsView.findViewById(R.id.lillyQuickClose);
 
-        View chatBtn       = quickActionsView.findViewById(R.id.lillyQuickChat);
-        View micBtn        = quickActionsView.findViewById(R.id.lillyQuickMic);
-        View transcriptBtn = quickActionsView.findViewById(R.id.lillyQuickTranscript);
-        View avatarBtn     = quickActionsView.findViewById(R.id.lillyQuickAvatar);
-        View pairingBtn    = quickActionsView.findViewById(R.id.lillyQuickPairing);
-        View settingsBtn   = quickActionsView.findViewById(R.id.lillyQuickSettings);
-        View minimizeBtn   = quickActionsView.findViewById(R.id.lillyQuickMinimize);
-        View closeBtn      = quickActionsView.findViewById(R.id.lillyQuickClose);
-        // ── New gaming/sensor/termux/download buttons ──
-        View gameBtn       = quickActionsView.findViewById(R.id.lillyQuickGame);
-        View fetchBtn      = quickActionsView.findViewById(R.id.lillyQuickFetch);
-         View sensorsBtn    = quickActionsView.findViewById(R.id.lillyQuickSensors);
-         View mapBtn        = quickActionsView.findViewById(R.id.lillyQuickMap);
-          View termuxBtn     = quickActionsView.findViewById(R.id.lillyQuickTermux);
-        modeLabelView      = quickActionsView.findViewById(R.id.lillyModeLabel);
-
-        // ── Chat: expand overlay and focus input ──
+        // Chat: expand overlay and focus input
         if (chatBtn != null) {
             chatBtn.setOnClickListener(v -> {
                 hideQuickActions();
@@ -856,7 +943,7 @@ public class LillyOverlayService extends Service {
             });
         }
 
-        // ── Mic: toggle always-listening via native Android STT ──
+        // Mic: toggle always-listening via native Android STT
         if (micBtn != null) {
             micBtn.setOnClickListener(v -> {
                 hideQuickActions();
@@ -881,17 +968,15 @@ public class LillyOverlayService extends Service {
             });
         }
 
-        // ── Transcript: launch TranscriptActivity ──
-        if (transcriptBtn != null) {
-            transcriptBtn.setOnClickListener(v -> {
+        // Avatar: cycle through avatars
+        if (avatarBtn != null) {
+            avatarBtn.setOnClickListener(v -> {
                 hideQuickActions();
-                Intent intent = new Intent(this, TranscriptActivity.class);
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(intent);
+                cycleOverlayAvatar();
             });
         }
 
-        // ── Pairing: show pairing code as a toast and copy to clipboard ──
+        // Pairing: show pairing code as a toast and copy to clipboard
         if (pairingBtn != null) {
             pairingBtn.setOnClickListener(v -> {
                 hideQuickActions();
@@ -899,7 +984,7 @@ public class LillyOverlayService extends Service {
             });
         }
 
-        // ── Settings: open MainActivity ──
+        // Settings: open MainActivity
         if (settingsBtn != null) {
             settingsBtn.setOnClickListener(v -> {
                 hideQuickActions();
@@ -909,101 +994,14 @@ public class LillyOverlayService extends Service {
             });
         }
 
-        // ── Minimize: collapse if expanded, keep running ──
-        if (minimizeBtn != null) {
-            minimizeBtn.setOnClickListener(v -> {
-                hideQuickActions();
-                if (overlayExpanded) collapseOverlay();
-                Toast.makeText(this, "Lilly minimized", Toast.LENGTH_SHORT).show();
-            });
-        }
-
-        // ── Close: stop overlay service ──
+        // Close: stop overlay service
         if (closeBtn != null) {
             closeBtn.setOnClickListener(v -> {
                 hideQuickActions();
                 stopSelf();
             });
         }
-
-        // ── Game: launch car ride game in overlay WebView ──
-        if (gameBtn != null) {
-            gameBtn.setOnClickListener(v -> {
-                hideQuickActions();
-                expandOverlay();
-                if (lillyWebView != null) {
-                    mainHandler.postDelayed(() ->
-                        lillyWebView.evaluateJavascript(
-                            "if(typeof showCarGame==='function')showCarGame();", null), 200);
-                }
-                Toast.makeText(this, "Car Ride Game — Game On!", Toast.LENGTH_SHORT).show();
-            });
-        }
-
-        // ── Fetch: launch fetch mini-game in overlay WebView ──
-        if (fetchBtn != null) {
-            fetchBtn.setOnClickListener(v -> {
-                hideQuickActions();
-                expandOverlay();
-                if (lillyWebView != null) {
-                    mainHandler.postDelayed(() ->
-                        lillyWebView.evaluateJavascript(
-                            "if(typeof showFetchGame==='function')showFetchGame();", null), 200);
-                }
-                Toast.makeText(this, "Fetch Game — throw the phone!", Toast.LENGTH_SHORT).show();
-            });
-        }
-
-         // ── Sensors: open sensor data panel ──
-         if (sensorsBtn != null) {
-             sensorsBtn.setOnClickListener(v -> {
-                 hideQuickActions();
-                 expandOverlay();
-                 if (lillyWebView != null) {
-                     mainHandler.postDelayed(() ->
-                         lillyWebView.evaluateJavascript(
-                             "if(typeof showSensorPanel==='function')showSensorPanel();", null), 200);
-                 }
-                 Toast.makeText(this, "Sensor Data", Toast.LENGTH_SHORT).show();
-             });
-         }
-
-         // ── Map: pin current location on Google Maps ──
-         if (mapBtn != null) {
-             mapBtn.setOnClickListener(v -> {
-                 hideQuickActions();
-                 expandOverlay();
-                 if (lillyWebView != null) {
-                     mainHandler.postDelayed(() ->
-                         lillyWebView.evaluateJavascript(
-                             "if(typeof showLocationMap==='function')showLocationMap();", null), 200);
-                 }
-                 Toast.makeText(this, "📍 Where are we?", Toast.LENGTH_SHORT).show();
-             });
-         }
-
-         // ── Termux Bridge: run a quick command ──
-        if (termuxBtn != null) {
-            termuxBtn.setOnClickListener(v -> {
-                hideQuickActions();
-                if (termuxBridge == null) termuxBridge = new TermuxCommandBridge(this);
-                termuxBridge.runCommand(
-                    "/data/data/com.termux/files/usr/bin/termux-battery",
-                    new String[]{},
-                    null,
-                    new TermuxCommandBridge.Callback() {
-                        @Override
-                        public void onResult(TermuxCommandBridge.Result result) {
-                            String out = result.stdout != null ? result.stdout.trim() : "";
-                            mainHandler.post(() ->
-                                Toast.makeText(LillyOverlayService.this,
-                                    "📱 " + out.replace("\n", " "), Toast.LENGTH_LONG).show());
-                        }
-                    });
-            });
-        }
     }
-
     private void autoPromptCriticalPermissions() {
         if (termuxBridge == null || !termuxBridge.isTermuxInstalled()) return;
         String[] perms = {
@@ -1030,8 +1028,25 @@ public class LillyOverlayService extends Service {
 
     private String currentAvatar = "puppy";
 
+    private void cycleOverlayAvatar() {
+        String[] avatars = {"puppy", "fox", "cat", "bear", "bunny", "owl", "deer", "wolf", "raccoon"};
+        int idx = 0;
+        for (int i = 0; i < avatars.length; i++) {
+            if (avatars[i].equals(currentAvatar)) {
+                idx = (i + 1) % avatars.length;
+                break;
+            }
+        }
+        currentAvatar = avatars[idx];
+        String escaped = currentAvatar.replace("'", "\\'");
+        if (lillyWebView != null) {
+            lillyWebView.evaluateJavascript(
+                "if(typeof setAvatar==='function'){setAvatar('" + escaped + "')}", null);
+        }
+    }
+
     private void showPairingCode() {
-        if (phoneClient == null) phoneClient = new LocalPhoneClient();
+        if (phoneClient == null) phoneClient = new LocalPhoneClient(this);
         executor.execute(() -> {
             String code = "";
             try {

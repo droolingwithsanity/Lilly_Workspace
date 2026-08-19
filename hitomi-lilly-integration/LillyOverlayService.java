@@ -58,8 +58,10 @@ public class LillyOverlayService extends Service {
     private static final String CHANNEL_ID = "lilly_overlay_channel";
     private static final int NOTIF_ID = 1018;
     private static final int COLLAPSED_SIZE_DP = 96;
-    private static final int EXPANDED_WIDTH_DP = COLLAPSED_SIZE_DP;
-    private static final int EXPANDED_HEIGHT_DP = 300;
+    private static final int EXPANDED_WIDTH_DP = 300;
+    private static final int EXPANDED_HEIGHT_DP = 320;
+    private static final long POLL_INTERVAL_COLLAPSED_MS = 5000;
+    private static final long POLL_INTERVAL_EXPANDED_MS = 2000;
 
     static {
         Thread.setDefaultUncaughtExceptionHandler((thread, ex) -> {
@@ -284,6 +286,9 @@ public class LillyOverlayService extends Service {
 
         lillyWebView.setBackgroundColor(Color.TRANSPARENT);
 
+        lillyWebView.setFocusable(true);
+        lillyWebView.setFocusableInTouchMode(true);
+
         lillyWebView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
@@ -352,6 +357,14 @@ public class LillyOverlayService extends Service {
         @JavascriptInterface
         public void runTermux(String commandJson) {
             mainHandler.post(() -> executeTermuxCommand(commandJson));
+        }
+
+        @JavascriptInterface
+        public void showKeyboard() {
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null && lillyWebView != null) {
+                imm.showSoftInput(lillyWebView, InputMethodManager.SHOW_IMPLICIT);
+            }
         }
 
         @JavascriptInterface
@@ -668,6 +681,9 @@ public class LillyOverlayService extends Service {
             int action = event.getActionMasked();
             switch (action) {
                 case MotionEvent.ACTION_DOWN:
+                    if (overlayExpanded) {
+                        return false;
+                    }
                     dragStartRawX = event.getRawX();
                     dragStartRawY = event.getRawY();
                     dragStartX = overlayParams.x;
@@ -906,7 +922,8 @@ public class LillyOverlayService extends Service {
                     }
                 });
             }
-            mainHandler.postDelayed(statePoller, 2000);
+            long nextDelay = overlayExpanded ? POLL_INTERVAL_EXPANDED_MS : POLL_INTERVAL_COLLAPSED_MS;
+            mainHandler.postDelayed(statePoller, nextDelay);
         });
     }
 
