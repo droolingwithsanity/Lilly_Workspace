@@ -450,7 +450,7 @@ WHISPER_CONDITION_ON_PREV = (
     False  # Disable — prevents hallucination propagation across chunks
 )
 # Whisper STT prompt — transcribe clean speech without filler words
-WHISPER_INITIAL_PROMPT = "You are a helpful assistant. \"
+WHISPER_INITIAL_PROMPT = "You are a helpful assistant."
 
 logging.basicConfig(
     level=logging.ERROR, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -9301,19 +9301,33 @@ def init_vision():
     YOLO = _try_import_ultralytics()
     if YOLO:
         try:
-            model_path = Path.home() / ".lilly" / "yolov8n.onnx"
-            if not model_path.exists():
+            # Search for model in multiple locations
+            search_paths = [
+                WORKSPACE / "yolov8n.pt",  # /app/yolov8n.pt (workspace)
+                Path.home() / ".lilly" / "yolov8n.pt",  # ~/.lilly/yolov8n.pt
+                WORKSPACE / "yolov8n.onnx",  # /app/yolov8n.onnx (workspace)
+                Path.home() / ".lilly" / "yolov8n.onnx",  # ~/.lilly/yolov8n.onnx
+            ]
+            model_path = None
+            for p in search_paths:
+                if p.exists():
+                    model_path = p
+                    break
+
+            if model_path is None:
+                # Download to ~/.lilly/
+                model_path = Path.home() / ".lilly" / "yolov8n.pt"
                 model_path.parent.mkdir(parents=True, exist_ok=True)
                 logger.info("Vision: Downloading YOLOv8n model (first run)...")
                 import urllib.request
 
                 urllib.request.urlretrieve(
                     "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt",
-                    str(model_path).replace(".onnx", ".pt"),
+                    str(model_path),
                 )
-                model_path = Path(str(model_path).replace(".onnx", ".pt"))
+
             _vision_enabled = True
-            logger.info("Vision: YOLO model loaded")
+            logger.info(f"Vision: YOLO model loaded from {model_path}")
             return
         except Exception as e:
             logger.warning(f"Vision: YOLO load failed ({e}), falling back")
@@ -9534,9 +9548,16 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
     if YOLO and _vision_enabled:
         try:
             if _YOLO_MODEL is None:
-                model_path = str(Path.home() / ".lilly" / "yolov8n.pt")
-                if Path(model_path).exists():
-                    _YOLO_MODEL = YOLO(model_path)
+                search_paths = [
+                    WORKSPACE / "yolov8n.pt",
+                    Path.home() / ".lilly" / "yolov8n.pt",
+                    WORKSPACE / "yolov8n.onnx",
+                    Path.home() / ".lilly" / "yolov8n.onnx",
+                ]
+                for p in search_paths:
+                    if p.exists():
+                        _YOLO_MODEL = YOLO(str(p))
+                        break
             if _YOLO_MODEL:
                 results = _YOLO_MODEL(frame, verbose=False)
                 for r in results:
@@ -9561,6 +9582,38 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
                         )
         except Exception as e:
             logger.debug(f"Vision detect error: {e}")
+
+    # ── Face recognition: rename "person" → "John" etc. ──────────
+    if _vision_enabled and any(d.get("label") == "person" for d in detections):
+        try:
+            from face_recognition_engine import get_face_engine
+
+            face_eng = get_face_engine()
+            # Convert detections to normalized format for face engine
+            h, w = frame.shape[:2]
+            norm_dets = []
+            for d in detections:
+                norm_dets.append(
+                    {
+                        "label": d["label"],
+                        "x": d["x1"] / w,
+                        "y": d["y1"] / h,
+                        "w": (d["x2"] - d["x1"]) / w,
+                        "h": (d["y2"] - d["y1"]) / h,
+                        "x1": d["x1"] / w,
+                        "y1": d["y1"] / h,
+                        "x2": d["x2"] / w,
+                        "y2": d["y2"] / h,
+                    }
+                )
+            enriched = face_eng.enrich_person_detections(frame, norm_dets)
+            # Merge back — replace label if face engine renamed it
+            for i, ed in enumerate(enriched):
+                if ed.get("original_label") == "person" and ed["label"] != "person":
+                    detections[i]["label"] = ed["label"]
+                    detections[i]["face_confidence"] = ed.get("face_confidence")
+        except Exception as e:
+            logger.debug(f"Face recognition error (non-fatal): {e}")
 
     frame = _draw_detections(frame, detections)
     ret2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -10404,8 +10457,29 @@ async def lifespan(app: FastAPI):
     # Ensure sensor server is running before anything else
     await _ensure_sensor_server()
 
+    # Initialize YOLO vision system
+    try:
+        init_vision()
+    except Exception as e:
+        logger.warning(f"Vision init failed (non-fatal): {e}")
+
     # Start local Whisper STT server (in-container, no cross-container DNS needed)
     _start_whisper_server()
+
+    # ── Phone Broker: WebSocket relay for paired devices ──
+    global phone_broker, PHONE_BROKER_AVAILABLE
+    try:
+        from phone_broker import PhoneBroker
+
+        phone_broker = PhoneBroker(app, valid_tokens=_device_tokens)
+        PHONE_BROKER_AVAILABLE = True
+        logger.info(
+            "Phone Broker initialized — WS routes mounted at /ws/phone, /ws/webui"
+        )
+    except Exception as _broker_err:
+        PHONE_BROKER_AVAILABLE = False
+        phone_broker = None
+        logger.warning(f"Phone Broker not loaded: {_broker_err}")
 
     asyncio.create_task(background_mic_loop())
     # Sensor conversation engine removed — no unsolicited sensor commentary
@@ -10434,6 +10508,193 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ─── PHONE BROKER (WebSocket relay for paired devices) ────────────
+# Deferred to startup (in lifespan) — _device_tokens is defined later in the module.
+phone_broker = None
+PHONE_BROKER_AVAILABLE = False
+
+
+@app.get("/api/broker/status")
+async def broker_status_endpoint():
+    """Check if the phone broker is running and how many devices are connected."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    return {
+        "available": True,
+        "phones": phone_broker.get_phone_ids(),
+        "phone_count": len(phone_broker.phones),
+        "webui_count": len(phone_broker.webuis),
+        "any_connected": phone_broker.is_phone_connected(),
+    }
+
+
+@app.post("/api/broker/push")
+async def broker_push(request: Request):
+    """Push data from the server to paired phones/web UIs via the broker."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    body = await request.json()
+    topic = body.get("topic", "chat")
+    data = body.get("data", {})
+    device_id = body.get("device_id", "")
+
+    if topic == "notification":
+        await phone_broker.push_notification(device_id or "server", data)
+    elif topic == "battery":
+        await phone_broker.push_battery(device_id or "server", data)
+    elif topic == "chat":
+        await phone_broker.push_chat(device_id or "server", data)
+    else:
+        await phone_broker.push_sensor(device_id or "server", data)
+    return {"pushed": True, "topic": topic}
+
+
+@app.get("/api/broker/automations")
+async def broker_automations_list():
+    """List all automation rules."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    return {"rules": phone_broker.automation.get_rules()}
+
+
+@app.post("/api/broker/automations")
+async def broker_automations_create(request: Request):
+    """Create or update an automation rule."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    from phone_broker import AutomationRule
+
+    body = await request.json()
+    rule = AutomationRule(
+        id=body.get("id", str(uuid.uuid4())[:8]),
+        name=body.get("name", "Unnamed rule"),
+        enabled=body.get("enabled", True),
+        topic=body.get("topic", ""),
+        condition=body.get("condition", {}),
+        action_type=body.get("action_type", ""),
+        action_payload=body.get("action_payload", {}),
+        cooldown_seconds=body.get("cooldown_seconds", 60.0),
+    )
+    phone_broker.automation.add_rule(rule)
+    return {"created": True, "rule": rule.to_dict()}
+
+
+@app.delete("/api/broker/automations/{rule_id}")
+async def broker_automations_delete(rule_id: str):
+    """Delete an automation rule."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    removed = phone_broker.automation.remove_rule(rule_id)
+    return {"removed": removed}
+
+
+# ─── NODE REGISTRY (multi-phone sensor network) ─────────────────────────
+
+
+@app.get("/api/nodes")
+async def nodes_list():
+    """List all registered phone nodes and their status."""
+    try:
+        from node_registry import get_node_registry
+
+        registry = get_node_registry()
+        return registry.to_dict()
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/nodes/register")
+async def nodes_register(request: Request):
+    """Register or update a phone node."""
+    body = await request.json()
+    node_id = body.get("node_id", "")
+    name = body.get("name", "")
+    sensor_url = body.get("sensor_url", "")
+    if not node_id or not sensor_url:
+        raise HTTPException(status_code=400, detail="node_id and sensor_url required")
+    try:
+        from node_registry import get_node_registry
+
+        registry = get_node_registry()
+        node = registry.register(
+            node_id=node_id,
+            name=name,
+            sensor_url=sensor_url,
+            model=body.get("model", ""),
+            role=body.get("role", "node"),
+            vision_url=body.get("vision_url", ""),
+        )
+        return {"ok": True, "node": node.to_dict()}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/nodes/{node_id}/heartbeat")
+async def nodes_heartbeat(node_id: str, request: Request):
+    """Update heartbeat for a node (called periodically by overlay app)."""
+    body = (
+        await request.json()
+        if request.headers.get("content-type") == "application/json"
+        else {}
+    )
+    try:
+        from node_registry import get_node_registry
+
+        registry = get_node_registry()
+        ok = registry.heartbeat(
+            node_id,
+            battery_pct=body.get("battery_pct", -1),
+            camera_active=body.get("camera_active", False),
+            face_engine_active=body.get("face_engine_active", False),
+            gps_lat=body.get("gps_lat", 0),
+            gps_lng=body.get("gps_lng", 0),
+            gps_accuracy=body.get("gps_accuracy", 0),
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="Node not found")
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/nodes/{node_id}")
+async def nodes_unregister(node_id: str):
+    """Remove a phone node."""
+    try:
+        from node_registry import get_node_registry
+
+        registry = get_node_registry()
+        ok = registry.unregister(node_id)
+        return {"removed": ok}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/nodes/{node_id}/sensors")
+async def node_sensors(node_id: str):
+    """Proxy sensor read from a specific node."""
+    try:
+        from node_registry import get_node_registry
+
+        registry = get_node_registry()
+        node = registry.get(node_id)
+        if not node:
+            raise HTTPException(status_code=404, detail="Node not found")
+        import httpx
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{node.sensor_url}/sensors/all")
+            return r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # ─── AUTH ENDPOINTS ──────────────────────────────────────────────
@@ -12590,6 +12851,143 @@ async def describe_vision():
     }
 
 
+# ─── FACE RECOGNITION MANAGEMENT ──────────────────────────────────────
+
+
+@app.get("/api/faces")
+async def api_list_faces():
+    """List all known faces."""
+    try:
+        from face_recognition_engine import get_face_engine
+
+        engine = get_face_engine()
+        return {"faces": engine.list_known_faces()}
+    except Exception as e:
+        return {"faces": [], "error": str(e)}
+
+
+@app.post("/api/faces/enroll")
+async def api_enroll_face(request: Request):
+    """Enroll a known face from a base64 image."""
+    try:
+        from face_recognition_engine import get_face_engine
+
+        engine = get_face_engine()
+
+        body = await request.json()
+        name = body.get("name", "").strip()
+        image_b64 = body.get("image_b64", "")
+        source = body.get("source", "api")
+
+        if not name:
+            return JSONResponse(status_code=400, content={"error": "name required"})
+        if not image_b64:
+            return JSONResponse(
+                status_code=400, content={"error": "image_b64 required"}
+            )
+
+        raw = base64.b64decode(image_b64)
+        buf = np.frombuffer(raw, dtype=np.uint8)
+        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if frame is None:
+            return JSONResponse(
+                status_code=400, content={"error": "could not decode image"}
+            )
+
+        faces = engine.detect_faces(frame)
+        if not faces:
+            return JSONResponse(status_code=400, content={"error": "no face detected"})
+
+        largest = max(faces, key=lambda f: f["w"] * f["h"])
+        success = engine.add_known_face(name, frame, largest, source=source)
+        return {"ok": success, "name": name}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.delete("/api/faces/{name}")
+async def api_remove_face(name: str):
+    """Remove a known face by name."""
+    try:
+        from face_recognition_engine import get_face_engine
+
+        engine = get_face_engine()
+        success = engine.remove_known_face(name)
+        return {"ok": success, "name": name}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ─── PERSON TRACKER ───────────────────────────────────────────────────
+
+
+@app.get("/api/tracker/map")
+async def api_tracker_map():
+    """Get all tracking data for the radar map."""
+    try:
+        from person_tracker import get_person_tracker
+
+        return get_person_tracker().get_map_data()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/tracker/trail/{name}")
+async def api_tracker_trail(name: str):
+    """Get movement trail for a person."""
+    try:
+        from person_tracker import get_person_tracker
+
+        trail = get_person_tracker().get_person_trail(name)
+        return {"name": name, "trail": trail, "points": len(trail)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/tracker/sightings")
+async def api_tracker_sightings(name: str = None, limit: int = 100):
+    """Get recent sightings."""
+    try:
+        from person_tracker import get_person_tracker
+
+        return {"sightings": get_person_tracker().get_sightings(name=name, limit=limit)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/tracker/devices")
+async def api_tracker_devices():
+    """Get devices correlated to people."""
+    try:
+        from person_tracker import get_person_tracker
+
+        return {"devices": get_person_tracker().get_tracked_devices()}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/tracker/activity")
+async def api_tracker_activity(minutes: int = 30):
+    """Get recent activity summary."""
+    try:
+        from person_tracker import get_person_tracker
+
+        return get_person_tracker().get_recent_activity(minutes=minutes)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/tracker/scan")
+async def api_tracker_scan():
+    """Force immediate BLE/WiFi scan."""
+    try:
+        from person_tracker import get_person_tracker
+
+        return get_person_tracker().scan_nearby_devices()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/vision/status")
 async def vision_status():
     cv2_ok = _try_import_cv2() is not None
@@ -12600,6 +12998,18 @@ async def vision_status():
         "opencv": cv2_ok,
         "yolo": yolo_ok or external,
         "external_vision_server": external,
+        "vision_server_url": VISION_SERVER_URL or None,
+    }
+
+
+@app.get("/api/health")
+async def api_health():
+    """General health check endpoint."""
+    return {
+        "status": "ok",
+        "service": "lilly-ai",
+        "vision_enabled": _vision_enabled,
+        "yolo_model_loaded": _YOLO_MODEL is not None,
         "vision_server_url": VISION_SERVER_URL or None,
     }
 
@@ -14373,80 +14783,98 @@ pre{position:relative;overflow-x:auto}
 </div>
 
 <!-- Hamburger Dropdown Menu -->
-<div id="hamburgerMenu" style="display:none;position:fixed;top:60px;left:16px;width:220px;max-width:calc(100vw - 32px);z-index:210;background:rgba(255,255,255,0.9);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:8px;box-shadow:0 8px 40px rgba(180,140,180,0.15)">
+<div id="hamburgerMenu" style="display:none;position:fixed;top:60px;left:16px;width:240px;max-width:calc(100vw - 32px);z-index:210;background:rgba(255,255,255,0.9);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:8px;box-shadow:0 8px 40px rgba(180,140,180,0.15)">
   <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;margin-bottom:4px">
     <div style="font-size:12px;font-weight:600;color:#5d4e6d;text-transform:uppercase;letter-spacing:0.5px">Menu</div>
     <button onclick="toggleHamburgerMenu()" style="background:none;border:none;cursor:pointer;padding:2px 6px;color:rgba(93,78,109,0.5);transition:color 0.2s" title="Close">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
     </button>
   </div>
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:4px">
+  <!-- 3×3 grid: Chat · Mic · Radar · Tracker · Nodes · Settings · Pair · Skills · Close -->
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:4px">
+    <!-- Chat -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
       <button class="ham-icon-btn" data-action="chat" title="Chat">
         <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
       </button>
       <span class="ham-label">Chat</span>
     </div>
+    <!-- Mic -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
       <button class="ham-icon-btn" data-action="mic" title="Mic">
         <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
       </button>
       <span class="ham-label">Mic</span>
     </div>
+    <!-- Radar (BT/WiFi scan) -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="radar" title="Radar">
+      <button class="ham-icon-btn" data-action="radar" title="Radar Scan">
         <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg>
       </button>
       <span class="ham-label">Radar</span>
     </div>
+    <!-- Tracker (person map) -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="map" title="Map">
+      <button class="ham-icon-btn" data-action="tracker" title="Person Tracker">
         <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 21 18 21 2 16 6 8 2 1 6"/><line x1="16" y1="6" x2="16" y2="22"/><line x1="8" y1="2" x2="8" y2="18"/></svg>
       </button>
-      <span class="ham-label">Map</span>
+      <span class="ham-label">Tracker</span>
     </div>
+    <!-- Nodes (phone status) -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="car" title="Car Game">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 16H9m10 0h3v-3.15a1 1 0 0 0-.84-.99L16 11l-2.7-3.6a1 1 0 0 0-.8-.4H5.24a2 2 0 0 0-1.8 1.1l-.8 1.63A6 6 0 0 0 2 12.42V16h2"/><circle cx="6.5" cy="16.5" r="2.5"/><circle cx="16.5" cy="16.5" r="2.5"/></svg>
+      <button class="ham-icon-btn" data-action="nodes" title="Phone Nodes">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
       </button>
-      <span class="ham-label">Car</span>
+      <span class="ham-label">Nodes</span>
     </div>
-    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="fetch" title="Fetch Game">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="4" r="2"/><circle cx="18" cy="8" r="2"/><circle cx="20" cy="16" r="2"/><path d="M9 10a5 5 0 0 1 5 5v3.5a3.5 3.5 0 0 1-6.84 1.045Q6.52 17.48 4.46 16.84A3.5 3.5 0 0 1 5.5 10H9z"/><path d="M10.64 17.64A3.5 3.5 0 0 1 9 10H5.5a3.5 3.5 0 0 1 .46 6.54A5 5 0 0 1 9 17.5"/></svg>
-      </button>
-      <span class="ham-label">Fetch</span>
-    </div>
+    <!-- Settings -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
       <button class="ham-icon-btn" data-action="settings" title="Settings">
         <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0-2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
       <span class="ham-label">Settings</span>
     </div>
+    <!-- Pair -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
       <button class="ham-icon-btn" data-action="pair" title="Pair Device">
         <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
       </button>
       <span class="ham-label">Pair</span>
     </div>
-    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="download" title="Download App">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      </button>
-      <span class="ham-label">Download</span>
-    </div>
+    <!-- Skills -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
       <button class="ham-icon-btn" data-action="skills" title="Skills Market">
         <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
       </button>
       <span class="ham-label">Skills</span>
     </div>
+    <!-- Download APK -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="close" title="Close">
+      <button class="ham-icon-btn" data-action="download" title="Download App">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      </button>
+      <span class="ham-label">Download</span>
+    </div>
+    <!-- Close -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="close" title="Close Menu">
         <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
       <span class="ham-label">Close</span>
     </div>
+  </div>
+</div>
+
+<!-- Nodes Panel (glassmorphism) -->
+<div id="nodesPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:250;width:min(380px,90vw);background:rgba(255,255,255,0.88);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:20px;padding:20px;box-shadow:0 12px 48px rgba(93,78,109,0.2)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+    <div style="font-size:14px;font-weight:700;color:#5d4e6d">📡 Phone Nodes</div>
+    <button onclick="closeNodesPanel()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);font-size:18px;padding:2px 6px">✕</button>
+  </div>
+  <div id="nodesPanelList" style="margin-bottom:12px;font-size:13px;color:rgba(93,78,109,0.6)">Loading...</div>
+  <div style="display:flex;gap:8px">
+    <button onclick="openTrackerMap()" style="flex:1;padding:10px;border:none;border-radius:12px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:13px;font-weight:600;cursor:pointer;border:1px solid rgba(139,122,158,0.3)">🗺️ Open Tracker Map</button>
+    <button onclick="scanAllNodes()" style="flex:1;padding:10px;border:none;border-radius:12px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:13px;font-weight:600;cursor:pointer;border:1px solid rgba(139,122,158,0.3)">⚡ Scan All</button>
   </div>
 </div>
 
@@ -17092,13 +17520,12 @@ document.getElementById('clearBtn').onclick=async()=>{
       case 'chat': toggleChat(); break;
       case 'mic': toggleBrowserMic(); break;
       case 'radar': openRadarFromMenu(!!paired); break;
-      case 'map': openLocationMap(!!paired); break;
-      case 'car': startCarGameFromMenu(!!paired); break;
-      case 'fetch': startFetchGameFromMenu(!!paired); break;
+      case 'tracker': openTrackerMap(); break;
+      case 'nodes': openNodesPanel(); break;
       case 'settings': toggleSettings(); break;
       case 'pair': openPairPanel(); break;
-      case 'download': downloadApk(); break;
       case 'skills': openSkillsMarket(); break;
+      case 'download': downloadApk(); break;
       case 'close': break;
     }
   }
@@ -17127,6 +17554,43 @@ document.getElementById('clearBtn').onclick=async()=>{
         addChatMessage('system','Radar: sensor scan unavailable from web UI');
       });
     }
+  }
+  function openTrackerMap(){
+    const host=location.hostname;
+    const url='http://'+host+':8198/tracker';
+    addChatMessage('system','Opening person tracker map...');
+    window.open(url,'_blank');
+  }
+  async function openNodesPanel(){
+    const panel=document.getElementById('nodesPanel');
+    panel.style.display='flex';
+    const list=document.getElementById('nodesPanelList');
+    list.innerHTML='<div style="text-align:center;color:rgba(93,78,109,0.4)">Loading nodes...</div>';
+    try{
+      const r=await fetch('/api/nodes');
+      const d=await r.json();
+      const nodes=d.nodes||[];
+      if(!nodes.length){list.innerHTML='<div style="text-align:center;color:rgba(93,78,109,0.4)">No nodes registered</div>';return}
+      const colors=['#8b7a9e','#c084fc','#69f0ae'];
+      let html='';
+      nodes.forEach((n,i)=>{
+        const online=n.online;
+        const col=colors[i%colors.length];
+        const bat=n.battery>=0?' | '+Math.round(n.battery)+'%':'';
+        html+='<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;margin-bottom:6px;background:rgba(255,255,255,0.5);border:1px solid rgba(255,255,255,0.5);border-left:3px solid '+col+'">'
+          +'<div style="width:10px;height:10px;border-radius:50%;background:'+col+';flex-shrink:0"></div>'
+          +'<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:13px;color:#5d4e6d">'+n.name+'</div>'
+          +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+n.node_id+bat+'</div></div>'
+          +'<span style="font-size:10px;padding:2px 8px;border-radius:10px;font-weight:700;background:'+(online?'rgba(76,175,80,0.15)':'rgba(93,78,109,0.08)')+';color:'+(online?'#2e7d32':'rgba(93,78,109,0.4)')+'">'+(online?'ONLINE':'OFF')+'</span></div>';
+      });
+      html+='<div style="font-size:11px;color:rgba(93,78,109,0.4);margin-top:4px">'+(d.online_count||0)+' of '+nodes.length+' online · Max '+d.max_nodes+'</div>';
+      list.innerHTML=html;
+    }catch(e){list.innerHTML='<div style="text-align:center;color:#e57373">Failed to load nodes</div>'}
+  }
+  function closeNodesPanel(){document.getElementById('nodesPanel').style.display='none'}
+  async function scanAllNodes(){
+    addChatMessage('system','Scanning all nodes...');
+    try{await fetch('/api/tracker/scan');addChatMessage('system','Scan complete')}catch(e){addChatMessage('system','Scan failed')}
   }
   function openLocationMap(paired){
     if(paired){
@@ -17597,7 +18061,54 @@ function stopBrowserMic(){
   if(btn){btn.classList.remove('recording');btn.style.opacity='1';}
 }
 async function toggleBrowserMic(){
-  if(browserMicActive){stopBrowserMic();}else{await startBrowserMic();}
+  if(browserMicActive){stopBrowserMic();return;}
+  // Try server-side Whisper pipeline first
+  try{
+    await startBrowserMic();
+    // If mic started but no audio processed in 5s, fall back to Web Speech API
+    setTimeout(()=>{
+      if(browserMicActive && !_micRecording){
+        console.log('Whisper pipeline slow — enabling Web Speech API fallback');
+        _startWebSpeechFallback();
+      }
+    },5000);
+  }catch(e){
+    //getUserMedia failed — try Web Speech API
+    _startWebSpeechFallback();
+  }
+}
+
+// ── Web Speech API fallback (no server needed) ──
+let _webSpeechRec=null;
+function _startWebSpeechFallback(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){displaySpeech('Speech recognition not available in this browser.');return;}
+  stopBrowserMic(); // stop Whisper mic
+  if(_webSpeechRec){try{_webSpeechRec.stop()}catch(e){}}
+  _webSpeechRec=new SR();
+  _webSpeechRec.continuous=false;
+  _webSpeechRec.interimResults=true;
+  _webSpeechRec.lang='en-US';
+  const btn=document.getElementById('micBtn');
+  if(btn)btn.classList.add('recording');
+  _webSpeechRec.onresult=(e)=>{
+    let final='',interim='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const t=e.results[i][0].transcript;
+      if(e.results[i].isFinal)final+=t;else interim+=t;
+    }
+    if(interim)displaySpeech(interim);
+    if(final.trim()){
+      displaySpeech(final);
+      sendReply(final.trim());
+    }
+  };
+  _webSpeechRec.onend=()=>{if(btn)btn.classList.remove('recording');};
+  _webSpeechRec.onerror=(e)=>{
+    if(btn)btn.classList.remove('recording');
+    if(e.error!=='no-speech'&&e.error!=='aborted')displaySpeech('Voice error: '+e.error);
+  };
+  try{_webSpeechRec.start();}catch(e){displaySpeech('Could not start speech recognition.');}
 }
 let _micRecording=false;
 
@@ -18549,6 +19060,24 @@ async def serve_skills_market():
     )
 
 
+@app.get("/wiki.html")
+async def serve_wiki():
+    """Serve the Lilly AI Wiki page."""
+    page_path = WORKSPACE / "wiki.html"
+    if not page_path.exists():
+        return Response("Wiki page not found", status_code=404, media_type="text/html")
+    content = page_path.read_text(encoding="utf-8")
+    return Response(
+        content=content,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 @app.get("/Readme.md")
 async def serve_readme():
     """Serve the UI/app Readme.md for droolingwithsanity.ca/Readme.md."""
@@ -18611,6 +19140,189 @@ def _resolve_user(request: Request) -> dict | None:
     if token and token in _device_tokens:
         return _device_tokens[token]
     return None
+
+
+# ─── APK DOWNLOAD ────────────────────────────────────────────────────────
+@app.get("/api/apk/download")
+@app.get("/download/apk")
+async def download_apk():
+    """Serve the Lilly overlay APK for download."""
+    from fastapi.responses import FileResponse
+
+    apk_path = os.path.join(os.path.dirname(__file__), "lilly-overlay-v8.apk")
+    if not os.path.exists(apk_path):
+        raise HTTPException(status_code=404, detail="APK not found")
+    return FileResponse(
+        apk_path,
+        media_type="application/vnd.android.package-archive",
+        filename="lilly-overlay-v8.apk",
+        headers={"Content-Disposition": 'attachment; filename="lilly-overlay-v8.apk"'},
+    )
+
+
+# ─── VOICE POST ENDPOINT ────────────────────────────────────────────
+# Voice accessibility: Android app POSTs transcribed text here,
+# gets back a response with sensor context + mood.
+
+_voice_sessions: dict = {}  # session_id -> [{"role","content"}]
+
+
+@app.post("/api/voice")
+async def voice_command(data: dict, request: Request):
+    """
+    Accept a voice-transcribed text command from the Android overlay app.
+    Returns a response with sensor context, mood, and optional actions.
+
+    POST body: { "text": "what's the battery", "session_id": "optional" }
+    Returns:   { "ok": true, "response": "...", "mood": "curious", "sensors": {...} }
+    """
+    text = (data.get("text") or data.get("message") or "").strip()
+    session_id = data.get("session_id", "default")
+    if not text:
+        return JSONResponse({"ok": False, "error": "Empty text"}, status_code=400)
+
+    # Per-session conversation memory (last 12 turns)
+    if session_id not in _voice_sessions:
+        _voice_sessions[session_id] = []
+    history = _voice_sessions[session_id]
+    history.append({"role": "user", "content": text})
+    if len(history) > 24:
+        _voice_sessions[session_id] = history[-24:]
+        history = _voice_sessions[session_id]
+
+    # Sensor context
+    snapshot = {}
+    try:
+        snapshot = await get_sensor_snapshot()
+    except Exception:
+        pass
+    sensor_ctx = snapshot_to_narrative(snapshot) if snapshot else ""
+
+    # Recent face detections
+    face_ctx = ""
+    try:
+        from person_tracker import person_tracker
+
+        recent = person_tracker.sightings[-5:] if person_tracker.sightings else []
+        if recent:
+            names = list({s.get("name", "Unknown") for s in recent})
+            face_ctx = f"Recently saw: {', '.join(names)}"
+    except Exception:
+        pass
+
+    # Recent notifications
+    notif_ctx = ""
+    try:
+        sensor_url = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8099")
+        async with httpx.AsyncClient(timeout=4) as nc:
+            nr = await nc.get(f"{sensor_url}/notification/list")
+            if nr.status_code == 200:
+                notifs = nr.json()
+                if isinstance(notifs, list) and notifs:
+                    top = notifs[:3]
+                    notif_ctx = "Recent notifications: " + "; ".join(
+                        f"{n.get('title', '?')}: {n.get('text', '')[:40]}" for n in top
+                    )
+    except Exception:
+        pass
+
+    # Build context
+    context_parts = [f"User said (via voice): {text}"]
+    if sensor_ctx:
+        context_parts.append(f"Phone sensors: {sensor_ctx}")
+    if face_ctx:
+        context_parts.append(face_ctx)
+    if notif_ctx:
+        context_parts.append(notif_ctx)
+    context_parts.append(
+        "Respond conversationally in 1-2 sentences. Be helpful, warm, and direct. "
+        "If the user asked about sensors/battery/location, use the sensor data above. "
+        "If they asked to open an app or do something, acknowledge it."
+    )
+    full_context = "\n".join(context_parts)
+
+    # History messages for LLM
+    msgs = [
+        {
+            "role": "system",
+            "content": (
+                "You are Lilly, a warm and helpful AI companion living on the user's phone. "
+                "You have access to 23 phone sensors, camera vision, face recognition, and notifications. "
+                "Speak naturally and concisely. Use sensor data when relevant. "
+                "Never mention being an AI model or language model."
+            ),
+        }
+    ]
+    for h in history:
+        msgs.append(h)
+    msgs.append({"role": "user", "content": full_context})
+
+    # Call LLM
+    reply = ""
+    mood = "calm"
+    try:
+        reply = strip_json_wrapper(
+            await llama_backend.chat(msgs, temperature=0.7, max_tokens=120, timeout=15)
+        )
+    except Exception as e:
+        logger.warning(f"Voice LLM call failed: {e}")
+        reply = "I'm having trouble thinking right now. Try again in a moment."
+
+    if not reply:
+        reply = "I'm here!"
+
+    # Store assistant reply in session
+    history.append({"role": "assistant", "content": reply})
+
+    # Infer mood from content
+    lower = reply.lower()
+    if any(w in lower for w in ["!", "excited", "amazing", "wow", "great"]):
+        mood = "excited"
+    elif any(w in lower for w in ["hmm", "wonder", "curious", "interesting"]):
+        mood = "curious"
+    elif any(w in lower for w in ["sorry", "sad", "unfortunately", "worried"]):
+        mood = "worried"
+    elif any(w in lower for w in ["hey", "hi", "hello", "welcome"]):
+        mood = "cheerful"
+
+    # Compact sensor summary for the app
+    sensor_summary = {}
+    if snapshot:
+        sensor_summary = {
+            "battery": snapshot.get("battery_level"),
+            "light": snapshot.get("light"),
+            "steps": snapshot.get("step_counter"),
+            "charging": snapshot.get("charging"),
+        }
+
+    return {
+        "ok": True,
+        "response": reply,
+        "mood": mood,
+        "sensors": sensor_summary,
+        "session_id": session_id,
+    }
+
+
+@app.delete("/api/voice/session/{session_id}")
+async def voice_session_clear(session_id: str):
+    """Clear a voice session's conversation history."""
+    _voice_sessions.pop(session_id, None)
+    return {"ok": True}
+
+
+# ─── RADAR HUB ─────────────────────────────────────────────────────
+@app.get("/radar")
+@app.get("/radar.html")
+async def radar_hub():
+    """Canvas-animated Lilly Vision Hub — avatar, vision sphere, tracker, nodes, voice."""
+    hub_path = os.path.join(os.path.dirname(__file__), "radar_hub.html")
+    if os.path.exists(hub_path):
+        from fastapi.responses import HTMLResponse
+
+        with open(hub_path, "r") as f:
+            return HTMLResponse(content=f.read())
+    raise HTTPException(status_code=404, detail="radar_hub.html not found")
 
 
 # ─── v6.0 UNIFIED PAIRING ──────────────────────────────────────────────

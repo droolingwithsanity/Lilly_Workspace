@@ -25,3 +25,7 @@ python-dotenv>=1.0.0
 
 # ─── Whisper STT (runs inside container on :8001) ───
 faster-whisper-server==0.0.1
+
+# ─── Vision / Object Detection (YOLOv8) ───
+ultralytics>=8.1.0
+opencv-python-headless>=4.8.0

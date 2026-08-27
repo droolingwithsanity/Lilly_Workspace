@@ -47,8 +47,24 @@ services:
       - FAST_MODEL=${FAST_MODEL:-qwen2.5:7b}
       # OpenLive settings
       - OPENLIVE_AGENT_SECRET=${OPENLIVE_AGENT_SECRET:-lilly-openlive-secret-2026}
+      # Vision server — proxy YOLO inference to dedicated container
+      - VISION_SERVER_URL=${VISION_SERVER_URL:-http://127.0.0.1:8198}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  lilly-vision:
+    build:
+      context: .
+      dockerfile: Dockerfile.vision
+    container_name: lilly-vision
+    network_mode: host
+    environment:
+      - PORT=8198
+      - CONF_THRESHOLD=0.35
+      - YOLO_MODEL=yolov8n.pt
+    volumes:
+      - lilly-tts-cache:/tmp/lilly_tts
     restart: unless-stopped
 
 volumes:
@@ -56,3 +72,4 @@ volumes:
   connector-data:
   openlive-data:
   openlive-voice:
+  lilly-tts-cache:

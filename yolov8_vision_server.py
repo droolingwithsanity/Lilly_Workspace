@@ -21,6 +21,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, FileResponse
 from ultralytics import YOLO
 
+# Face recognition (optional — loaded lazily)
+try:
+    from face_recognition_engine import get_face_engine
+
+    FACE_ENGINE = None  # initialized on first use
+except ImportError:
+    FACE_ENGINE = None
+    log_face = logging.getLogger("lilly-vision")
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("lilly-vision")
 
@@ -553,10 +562,22 @@ def generate_agent_replies(detections: list, sensors: dict, avatar: str) -> list
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global MODEL
+    global MODEL, FACE_ENGINE
     log.info(f"Loading YOLO model: {MODEL_NAME}")
     MODEL = YOLO(MODEL_NAME)
     log.info(f"YOLO model loaded. Confidence threshold: {CONF_THRESHOLD}")
+
+    # Initialize face recognition engine
+    if FACE_ENGINE is None and get_face_engine is not None:
+        try:
+            FACE_ENGINE = get_face_engine()
+            log.info(
+                f"Face recognition engine loaded — {len(FACE_ENGINE.known_faces)} known faces"
+            )
+        except Exception as e:
+            log.warning(f"Face recognition engine failed to load: {e}")
+            FACE_ENGINE = False
+
     yield
     log.info("Shutting down.")
 
@@ -657,6 +678,20 @@ async def vision_detect(request: Request):
                     "distance_desc": distance_desc(est) if est else None,
                 }
             )
+
+    # ── Face recognition: rename "person" → "John" etc. ──────────────
+    global FACE_ENGINE
+    if FACE_ENGINE is None:
+        try:
+            FACE_ENGINE = get_face_engine()
+        except Exception:
+            FACE_ENGINE = False  # prevent retry
+
+    if FACE_ENGINE and any(d["label"] == "person" for d in detections):
+        try:
+            detections = FACE_ENGINE.enrich_person_detections(frame, detections)
+        except Exception as e:
+            log.warning(f"Face recognition error: {e}")
 
     elapsed = round(time.time() - t0, 3)
     reply = generate_reply(detections)
@@ -824,6 +859,193 @@ async def chat_cmd(request: Request):
     return {"reply": f"Lilly received: {text}", "audio_id": 0}
 
 
+# ── Face Recognition Management ────────────────────────────────────────
+
+
+@app.get("/api/faces")
+async def list_faces():
+    """List all known faces in the database."""
+    if FACE_ENGINE is None:
+        return {"faces": [], "error": "face engine not loaded"}
+    return {"faces": FACE_ENGINE.list_known_faces()}
+
+
+@app.post("/api/faces/enroll")
+async def enroll_face(request: Request):
+    """
+    Enroll a face from a base64 image.
+    Body: {"name": "John", "image_b64": "...", "source": "manual"}
+    """
+    if not FACE_ENGINE:
+        return JSONResponse(
+            status_code=503, content={"error": "face engine not loaded"}
+        )
+
+    body = await request.json()
+    name = body.get("name", "").strip()
+    image_b64 = body.get("image_b64", "")
+    source = body.get("source", "api")
+
+    if not name:
+        return JSONResponse(status_code=400, content={"error": "name required"})
+    if not image_b64:
+        return JSONResponse(status_code=400, content={"error": "image_b64 required"})
+
+    try:
+        raw = base64.b64decode(image_b64)
+        buf = np.frombuffer(raw, dtype=np.uint8)
+        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if frame is None:
+            return JSONResponse(
+                status_code=400, content={"error": "could not decode image"}
+            )
+
+        faces = FACE_ENGINE.detect_faces(frame)
+        if not faces:
+            return JSONResponse(
+                status_code=400, content={"error": "no face detected in image"}
+            )
+
+        largest = max(faces, key=lambda f: f["w"] * f["h"])
+        success = FACE_ENGINE.add_known_face(name, frame, largest, source=source)
+        if success:
+            return {"ok": True, "name": name, "faces_detected": len(faces)}
+        return JSONResponse(status_code=500, content={"error": "enrollment failed"})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.delete("/api/faces/{name}")
+async def remove_face(name: str):
+    """Remove a known face by name."""
+    if not FACE_ENGINE:
+        return JSONResponse(
+            status_code=503, content={"error": "face engine not loaded"}
+        )
+    success = FACE_ENGINE.remove_known_face(name)
+    return {"ok": success, "name": name}
+
+
+@app.get("/api/faces/identify")
+async def identify_test(request: Request):
+    """
+    Test face identification on an image.
+    Body: {"image_b64": "..."}
+    """
+    if not FACE_ENGINE:
+        return JSONResponse(
+            status_code=503, content={"error": "face engine not loaded"}
+        )
+
+    body = await request.json()
+    image_b64 = body.get("image_b64", "")
+    if not image_b64:
+        return JSONResponse(status_code=400, content={"error": "image_b64 required"})
+
+    try:
+        raw = base64.b64decode(image_b64)
+        buf = np.frombuffer(raw, dtype=np.uint8)
+        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if frame is None:
+            return JSONResponse(
+                status_code=400, content={"error": "could not decode image"}
+            )
+
+        faces = FACE_ENGINE.detect_faces(frame)
+        results = []
+        for face in faces:
+            match = FACE_ENGINE.identify_face(frame, face)
+            results.append(
+                {
+                    "box": face,
+                    "identified": match is not None,
+                    "name": match["name"] if match else None,
+                    "confidence": match["confidence"] if match else None,
+                }
+            )
+
+        return {"faces_found": len(results), "results": results}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ── Person Tracker Endpoints ────────────────────────────────────────────
+
+
+@app.get("/api/tracker/map")
+async def tracker_map_data():
+    """Get all tracking data for the radar map."""
+    try:
+        from person_tracker import get_person_tracker
+
+        tracker = get_person_tracker()
+        return tracker.get_map_data()
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/tracker/trail/{name}")
+async def tracker_trail(name: str):
+    """Get movement trail for a specific person."""
+    try:
+        from person_tracker import get_person_tracker
+
+        tracker = get_person_tracker()
+        trail = tracker.get_person_trail(name)
+        return {"name": name, "trail": trail, "points": len(trail)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/tracker/sightings")
+async def tracker_sightings(name: str = None, limit: int = 100):
+    """Get recent sightings, optionally filtered by name."""
+    try:
+        from person_tracker import get_person_tracker
+
+        tracker = get_person_tracker()
+        return {"sightings": tracker.get_sightings(name=name, limit=limit)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/tracker/devices")
+async def tracker_devices():
+    """Get all devices correlated to people."""
+    try:
+        from person_tracker import get_person_tracker
+
+        tracker = get_person_tracker()
+        return {"devices": tracker.get_tracked_devices()}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/tracker/activity")
+async def tracker_activity(minutes: int = 30):
+    """Get recent activity summary."""
+    try:
+        from person_tracker import get_person_tracker
+
+        tracker = get_person_tracker()
+        return tracker.get_recent_activity(minutes=minutes)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/tracker/scan")
+async def tracker_scan_now():
+    """Force an immediate BLE/WiFi scan."""
+    try:
+        from person_tracker import get_person_tracker
+
+        tracker = get_person_tracker()
+        result = tracker.scan_nearby_devices()
+        return result
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
 @app.get("/api/ui_state")
 async def ui_state():
     return {
@@ -832,6 +1054,277 @@ async def ui_state():
         "vision_active": False,
         "continuous_scan": False,
     }
+
+
+# ── Node Registry (proxy to lilly-ai or local) ──────────────────────────
+
+
+@app.get("/api/nodes")
+async def api_nodes():
+    """List all phone nodes. Tries lilly-ai first, falls back to local registry."""
+    # Try proxying to lilly-ai
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=3) as client:
+            r = await client.get("http://127.0.0.1:8098/api/nodes")
+            if r.status_code == 200:
+                return r.json()
+    except Exception:
+        pass
+    # Fallback: local node registry
+    try:
+        from node_registry import get_node_registry
+
+        registry = get_node_registry()
+        return registry.to_dict()
+    except Exception as e:
+        return {"nodes": [], "online_count": 0, "total_count": 0, "error": str(e)}
+
+
+# ── Radar Map Dashboard ─────────────────────────────────────────────────
+
+
+@app.get("/tracker")
+@app.get("/tracker/")
+async def tracker_dashboard():
+    """Radar map dashboard — tracks recognized people on a Leaflet map."""
+    from fastapi.responses import HTMLResponse
+
+    return HTMLResponse(TRACKER_MAP_HTML)
+
+
+TRACKER_MAP_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Lilly Tracker — Multi-Node Radar</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{width:100%;height:100%;overflow:hidden;font-family:-apple-system,'Segoe UI',system-ui,sans-serif;color:#5d4e6d;background:#f0e6ef;display:flex}
+#sidebar{width:340px;background:rgba(255,255,255,0.45);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);padding:14px;display:flex;flex-direction:column;border-right:1px solid rgba(255,255,255,0.6);overflow-y:auto}
+#map{flex:1;height:100%}
+h2{margin:0 0 10px;font-size:1.1rem;color:#8b7a9e}
+h3{font-size:.85rem;color:rgba(93,78,109,0.5);margin:10px 0 6px;text-transform:uppercase;letter-spacing:0.5px}
+.stat-box{background:rgba(255,255,255,0.55);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);padding:10px;border-radius:12px;margin-bottom:10px;font-size:.82rem;border:1px solid rgba(255,255,255,0.6);box-shadow:0 4px 20px rgba(180,140,180,0.12)}
+.stat-box strong{color:#8b7a9e}
+.node-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;margin-bottom:6px;background:rgba(255,255,255,0.5);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);cursor:pointer;border-left:3px solid #b8a9c9;transition:all .2s;border:1px solid rgba(255,255,255,0.5)}
+.node-row:hover{background:rgba(255,255,255,0.7);box-shadow:0 2px 12px rgba(180,140,180,0.15)}
+.node-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;box-shadow:0 0 8px currentColor}
+.node-info{flex:1;min-width:0}
+.node-name{font-weight:700;font-size:.85rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.node-meta{font-size:.7rem;color:rgba(93,78,109,0.5);margin-top:2px}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.65rem;font-weight:700;margin-left:6px}
+.badge-on{background:rgba(76,175,80,0.15);color:#2e7d32}
+.badge-off{background:rgba(93,78,109,0.08);color:rgba(93,78,109,0.4)}
+.person-card{padding:10px;border-radius:12px;margin-bottom:8px;border-left:3px solid #b8a9c9;cursor:pointer;transition:all .2s;background:rgba(255,255,255,0.5);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,0.5);box-shadow:0 2px 12px rgba(180,140,180,0.1)}
+.person-card:hover{background:rgba(255,255,255,0.7);box-shadow:0 4px 20px rgba(180,140,180,0.18)}
+.person-card .name{font-weight:700;font-size:.9rem}
+.person-card .meta{color:rgba(93,78,109,0.5);font-size:.75rem;margin-top:3px}
+.sighting-item{padding:8px;border-radius:10px;margin-bottom:5px;font-size:.78rem;border-left:2px solid #a892b8;background:rgba(255,255,255,0.45);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.4)}
+.view-toggle{display:flex;gap:4px;margin-bottom:10px}
+.view-btn{flex:1;padding:7px;border:1px solid rgba(255,255,255,0.5);border-radius:10px;background:rgba(255,255,255,0.4);color:rgba(93,78,109,0.5);font-size:.75rem;font-weight:600;cursor:pointer;text-align:center;transition:all .2s;backdrop-filter:blur(12px)}
+.view-btn.active{background:rgba(139,122,158,0.25);color:#5d4e6d;border-color:rgba(139,122,158,0.4);box-shadow:0 2px 8px rgba(180,140,180,0.2)}
+.btn{width:100%;padding:10px;border:none;border-radius:12px;font-weight:700;cursor:pointer;font-size:.85rem;margin-bottom:8px;transition:all .2s;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.btn:active{transform:scale(0.97)}
+.btn-scan{background:rgba(139,122,158,0.25);color:#5d4e6d;border:1px solid rgba(139,122,158,0.3)}
+.btn-scan:hover{background:rgba(139,122,158,0.35)}
+.btn-enroll{background:rgba(255,255,255,0.4);color:rgba(93,78,109,0.6);border:1px solid rgba(255,255,255,0.5)}
+.btn-enroll:hover{background:rgba(255,255,255,0.6)}
+.empty{text-align:center;color:rgba(93,78,109,0.4);padding:20px;font-size:.8rem}
+#enroll-modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(93,78,109,0.3);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:2000;justify-content:center;align-items:center}
+#enroll-modal .modal{background:rgba(255,255,255,0.85);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);padding:24px;border-radius:20px;width:340px;border:1px solid rgba(255,255,255,0.6);box-shadow:0 12px 48px rgba(93,78,109,0.2)}
+#enroll-modal input,#enroll-modal select{width:100%;padding:10px 14px;border-radius:12px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);color:#5d4e6d;margin-bottom:10px;font-size:.9rem;outline:none;box-sizing:border-box}
+#enroll-modal input:focus{border-color:rgba(139,122,158,0.5);box-shadow:0 0 0 2px rgba(184,169,201,0.2)}
+#enroll-modal .btn-row{display:flex;gap:8px}
+#enroll-modal .btn-row button{flex:1}
+#enroll-modal select option{background:#f0e6ef;color:#5d4e6d}
+@media(max-width:768px){body{flex-direction:column-reverse}#sidebar{width:100%;height:50vh;border-right:none;border-top:1px solid rgba(255,255,255,0.6)}#map{height:50vh}}
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h2>📡 Multi-Node Radar</h2>
+
+  <div class="view-toggle">
+    <button class="view-btn active" onclick="setView('combined')" id="v-all">All Nodes</button>
+    <button class="view-btn" onclick="setView('n1')" id="v-n1">Node 1</button>
+    <button class="view-btn" onclick="setView('n2')" id="v-n2">Node 2</button>
+    <button class="view-btn" onclick="setView('n3')" id="v-n3">Node 3</button>
+  </div>
+
+  <button class="btn btn-scan" onclick="forceScan()">⚡ Scan All Nodes</button>
+  <button class="btn btn-enroll" onclick="showEnroll()">👤 Enroll Face</button>
+
+  <div class="stat-box">
+    <div><strong>Network:</strong> <span id="net-status" style="color:#8b7a9e">Connecting...</span></div>
+    <div><strong>People:</strong> <span id="ppl-count">0</span> | <strong>Sightings:</strong> <span id="sight-count">0</span></div>
+    <div><strong>Spread:</strong> <span id="node-spread">—</span></div>
+  </div>
+
+  <h3>Phone Nodes</h3>
+  <div id="nodes-list"></div>
+
+  <h3>Known People</h3>
+  <div id="people-list"></div>
+
+  <h3>Recent Sightings</h3>
+  <div id="sightings-list"></div>
+</div>
+<div id="map"></div>
+
+<div id="enroll-modal">
+  <div class="modal">
+    <h3 style="margin-bottom:12px;color:#8b7a9e">Enroll New Face</h3>
+    <input id="enroll-name" placeholder="Person name..." />
+    <select id="enroll-node">
+      <option value="">Auto (closest node)</option>
+    </select>
+    <input id="enroll-source" placeholder="Source (manual, instagram...)" value="manual" />
+    <div class="btn-row">
+      <button class="btn btn-scan" onclick="doEnroll()">Enroll</button>
+      <button class="btn btn-enroll" onclick="hideEnroll()">Cancel</button>
+    </div>
+    <p id="enroll-status" style="font-size:.75rem;color:rgba(93,78,109,0.5);margin-top:8px"></p>
+  </div>
+</div>
+
+<script>
+/* ── Theme-matched node colours (lavender palette) ── */
+const NODE_COLORS = ['#8b7a9e','#c084fc','#69f0ae'];
+const HUMAN_COLORS = ['#a892b8','#c084fc','#69f0ae','#f0abfc','#fbbf24','#67e8f9'];
+
+const map = L.map('map',{zoomControl:false}).setView([0,0],2);
+L.control.zoom({position:'topright'}).addTo(map);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
+  maxZoom:19,attribution:'©CartoDB ©OSM'
+}).addTo(map);
+
+let currentView='combined';
+let nodeMarkers={};
+let personMarkers={};
+let personTrails={};
+let humanColorIdx=0;
+function hColor(){const c=HUMAN_COLORS[humanColorIdx%HUMAN_COLORS.length];humanColorIdx++;return c}
+
+function haversine(lat1,lng1,lat2,lng2){
+  const R=6371000,dLat=(lat2-lat1)*Math.PI/180,dLng=(lng2-lng1)*Math.PI/180;
+  const a=Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+
+function setView(v){
+  currentView=v;
+  document.querySelectorAll('.view-btn').forEach(b=>b.classList.remove('active'));
+  const el=document.getElementById('v-'+v);if(el)el.classList.add('active');
+  for(const[nid,m] of Object.entries(nodeMarkers)){
+    if(v==='combined'){m.setStyle({opacity:1,fillOpacity:0.9})}
+    else{const show=nid===v||nid===('phone-'+v.replace('n',''));m.setStyle({opacity:show?1:0.12,fillOpacity:show?0.9:0.12})}
+  }
+  for(const[name,data] of Object.entries(personTrails)){
+    data.polyline.setStyle({opacity:v==='combined'?0.65:0.15});
+  }
+  if(v!=='combined'){
+    const target='phone-'+v.replace('n','');
+    const m=nodeMarkers[target];
+    if(m)map.setView(m.getLatLng(),17);
+  }else{fitAllNodes()}
+}
+
+function fitAllNodes(){
+  const coords=Object.values(nodeMarkers).map(m=>m.getLatLng());
+  if(coords.length>1)map.fitBounds(L.latLngBounds(coords).pad(0.3));
+  else if(coords.length===1)map.setView(coords[0],16);
+}
+
+async function poll(){
+  try{
+    const[mapR,nodesR,sightR]=await Promise.all([
+      fetch('/api/tracker/map').then(r=>r.json()),
+      fetch('/api/nodes').then(r=>r.json()).catch(()=>({nodes:[]})),
+      fetch('/api/tracker/sightings?limit=30').then(r=>r.json()).catch(()=>({sightings:[]}))
+    ]);
+    const nodes=nodesR.nodes||[];
+    let nodeHtml='',onlineCount=0;
+    const gpsNodes=nodes.filter(n=>n.lat&&n.lng);
+
+    for(let i=0;i<nodes.length;i++){
+      const n=nodes[i],online=n.online;if(online)onlineCount++;
+      const col=NODE_COLORS[i%NODE_COLORS.length];
+      const bat=n.battery>=0?' | '+Math.round(n.battery)+'%':'';
+      if(n.lat&&n.lng){
+        if(!nodeMarkers[n.node_id]){
+          nodeMarkers[n.node_id]=L.circleMarker([n.lat,n.lng],{radius:14,fillColor:col,color:'#fff',weight:3,opacity:1,fillOpacity:0.9}).addTo(map).bindPopup('<b>'+n.name+'</b><br>'+n.sensor_url);
+        }else{nodeMarkers[n.node_id].setLatLng([n.lat,n.lng])}
+        nodeMarkers[n.node_id].setStyle({fillColor:col});
+      }
+      nodeHtml+='<div class="node-row" style="border-left-color:'+col+'" onclick="focusNode(\\''+n.node_id+'\\',\\''+i+'\\')">'
+        +'<div class="node-dot" style="background:'+col+';color:'+col+'"></div>'
+        +'<div class="node-info"><div class="node-name">'+n.name+'</div>'
+        +'<div class="node-meta">'+(n.sensor_url||'').replace('http://','')+bat+'</div></div>'
+        +'<span class="badge '+(online?'badge-on':'badge-off')+'">'+(online?'ONLINE':'OFF')+'</span></div>';
+    }
+    if(gpsNodes.length>=2){
+      let maxD=0;
+      for(let i=0;i<gpsNodes.length;i++)for(let j=i+1;j<gpsNodes.length;j++){
+        const d=haversine(gpsNodes[i].lat,gpsNodes[i].lng,gpsNodes[j].lat,gpsNodes[j].lng);if(d>maxD)maxD=d;
+      }
+      const spreadEl=document.getElementById('node-spread');
+      if(maxD>1000){spreadEl.textContent=(maxD/1000).toFixed(1)+' km apart';spreadEl.style.color='#c084fc'}
+      else if(maxD>0){spreadEl.textContent=Math.round(maxD)+'m apart';spreadEl.style.color='#69f0ae'}
+      else{spreadEl.textContent='Same location';spreadEl.style.color='rgba(93,78,109,0.4)'}
+    }else{document.getElementById('node-spread').textContent='Need 2+ nodes with GPS'}
+    document.getElementById('nodes-list').innerHTML=nodeHtml||'<div class="empty">No nodes registered</div>';
+    const sel=document.getElementById('enroll-node'),curVal=sel.value;
+    sel.innerHTML='<option value="">Auto (closest node)</option>';
+    nodes.forEach((n,i)=>{sel.innerHTML+='<option value="'+n.node_id+'">'+n.name+'</option>'});sel.value=curVal;
+
+    const trails=mapR.trails||{};let pplHtml='';
+    for(const[name,pts]of Object.entries(trails)){
+      if(!pts||pts.length<1)continue;
+      if(!personTrails[name]){const col=hColor();personTrails[name]={color:col,pts:pts,polyline:L.polyline(pts.map(p=>[p[0],p[1]]),{color:col,weight:3,opacity:0.65,dashArray:'6,4'}).addTo(map)}}
+      else{personTrails[name].pts=pts;personTrails[name].polyline.setLatLngs(pts.map(p=>[p[0],p[1]]))}
+      const last=pts[pts.length-1],col=personTrails[name].color;
+      if(!personMarkers[name]){personMarkers[name]=L.circleMarker([last[0],last[1]],{radius:8,fillColor:col,color:'#fff',weight:2,opacity:1,fillOpacity:0.9}).addTo(map).bindPopup('<b>'+name+'</b><br>'+pts.length+' points')}
+      else{personMarkers[name].setLatLng([last[0],last[1]])}
+      const age=Math.floor((Date.now()/1000-last[2])/60);
+      pplHtml+='<div class="person-card" style="border-left-color:'+col+'" onclick="focusPerson(\\''+name+'\\')"><span class="name" style="color:'+col+'">'+name+'</span><span class="badge '+(age<5?'badge-on':'badge-off')+'">'+(age<5?'LIVE':age+'m ago')+'</span><div class="meta">'+pts.length+' trail pts | '+age+'m ago</div></div>';
+    }
+    document.getElementById('people-list').innerHTML=pplHtml||'<div class="empty">No people tracked</div>';
+
+    const sightings=sightR.sightings||[];
+    document.getElementById('ppl-count').textContent=mapR.people_count||0;
+    document.getElementById('sight-count').textContent=sightings.length;
+    let sh='';sightings.reverse().slice(0,20).forEach(s=>{
+      const t=new Date(s.timestamp*1000).toLocaleTimeString();
+      const nodeTag=s.node_id?'<span style="color:'+(NODE_COLORS[nodes.findIndex(n=>n.node_id===s.node_id)%NODE_COLORS.length]||'rgba(93,78,109,0.4)')+';font-size:.65rem"> ● '+s.node_id+'</span>':'';
+      sh+='<div class="sighting-item"><strong>'+s.name+'</strong> <span style="color:rgba(93,78,109,0.4)">'+t+'</span>'+nodeTag+'</div>';
+    });
+    document.getElementById('sightings-list').innerHTML=sh||'<div class="empty">No sightings</div>';
+    document.getElementById('net-status').textContent=onlineCount+' of '+nodes.length+' nodes online';
+    document.getElementById('net-status').style.color=onlineCount>0?'#69f0ae':'#e57373';
+    if(!window._fitted){window._fitted=true;if(gpsNodes.length>=2)fitAllNodes();else if(gpsNodes.length===1)map.setView([gpsNodes[0].lat,gpsNodes[0].lng],16)}
+  }catch(e){document.getElementById('net-status').textContent='Offline';document.getElementById('net-status').style.color='#e57373'}
+}
+
+function focusNode(nid,idx){setView('n'+(parseInt(idx)+1))}
+function focusPerson(name){const m=personMarkers[name];if(m){map.setView(m.getLatLng(),18);m.openPopup()}}
+async function forceScan(){document.getElementById('net-status').textContent='Scanning all nodes...';document.getElementById('net-status').style.color='#c084fc';await fetch('/api/tracker/scan')}
+function showEnroll(){document.getElementById('enroll-modal').style.display='flex'}
+function hideEnroll(){document.getElementById('enroll-modal').style.display='none'}
+async function doEnroll(){
+  const name=document.getElementById('enroll-name').value.trim();
+  if(!name){document.getElementById('enroll-status').textContent='Enter a name';return}
+  document.getElementById('enroll-status').textContent='Enrolling from camera...';
+  try{const stream=await navigator.mediaDevices.getUserMedia({video:{width:320,height:240}});const video=document.createElement('video');video.srcObject=stream;video.play();await new Promise(r=>setTimeout(r,1500));const canvas=document.createElement('canvas');canvas.width=320;canvas.height=240;canvas.getContext('2d').drawImage(video,0,0,320,240);stream.getTracks().forEach(t=>t.stop());const b64=canvas.toDataURL('image/jpeg',0.8).split(',')[1];const r=await fetch('/api/faces/enroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,image_b64:b64,source:document.getElementById('enroll-source').value||'manual'})});const res=await r.json();document.getElementById('enroll-status').textContent=res.ok?'Enrolled: '+name:(res.error||'Failed');if(res.ok)setTimeout(hideEnroll,1500)}catch(e){document.getElementById('enroll-status').textContent='Camera error: '+e.message}
+}
+setInterval(poll,3000);poll();
+</script>
+</body>
+</html>"""
 
 
 if __name__ == "__main__":

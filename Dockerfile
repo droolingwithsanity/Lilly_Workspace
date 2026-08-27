@@ -169,6 +169,8 @@ RUN chmod +x /start.sh
 # Application files
 COPY lilly_ai.py .
 COPY lilly_skills.json .
+COPY phone_broker.py .
+COPY wiki.html .
 COPY openhuman_bridge.py .
 COPY auth.py .
 COPY auth0_auth.py .
