@@ -19145,19 +19145,37 @@ def _resolve_user(request: Request) -> dict | None:
 # ─── APK DOWNLOAD ────────────────────────────────────────────────────────
 @app.get("/api/apk/download")
 @app.get("/download/apk")
-async def download_apk():
-    """Serve the Lilly overlay APK for download."""
+async def download_apk(type: str = "light"):
+    """Serve the Lilly overlay APK for download.
+
+    Variants are discovered from file_share/ via _apk_variants() so the served
+    filename and label track the real version (e.g. lilly-overlay-v8.1.0-debug.apk).
+    """
     from fastapi.responses import FileResponse
 
+    variants = _apk_variants()
+    match = next((v for v in variants if v["type"] == type), None)
+    if match and Path(match["path"]).is_file():
+        return FileResponse(
+            str(match["path"]),
+            media_type="application/vnd.android.package-archive",
+            filename=match["name"],
+            headers={
+                "Content-Disposition": 'attachment; filename="' + match["name"] + '"'
+            },
+        )
+    # Fallback: legacy app-root copy (kept for compatibility)
     apk_path = os.path.join(os.path.dirname(__file__), "lilly-overlay-v8.apk")
-    if not os.path.exists(apk_path):
-        raise HTTPException(status_code=404, detail="APK not found")
-    return FileResponse(
-        apk_path,
-        media_type="application/vnd.android.package-archive",
-        filename="lilly-overlay-v8.apk",
-        headers={"Content-Disposition": 'attachment; filename="lilly-overlay-v8.apk"'},
-    )
+    if os.path.exists(apk_path):
+        return FileResponse(
+            apk_path,
+            media_type="application/vnd.android.package-archive",
+            filename="lilly-overlay-v8.1.0.apk",
+            headers={
+                "Content-Disposition": 'attachment; filename="lilly-overlay-v8.1.0.apk"'
+            },
+        )
+    raise HTTPException(status_code=404, detail="APK not found")
 
 
 # ─── VOICE POST ENDPOINT ────────────────────────────────────────────
@@ -19653,22 +19671,6 @@ async def apk_latest():
     if not light:
         raise HTTPException(status_code=404, detail="No overlay build found")
     return light
-
-
-@app.get("/api/apk/download")
-async def apk_download(type: str = "light"):
-    variants = _apk_variants()
-    match = next((v for v in variants if v["type"] == type), None)
-    if not match:
-        raise HTTPException(status_code=404, detail="APK variant not found")
-    path = Path(match["path"])
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="APK file missing")
-    return FileResponse(
-        str(path),
-        media_type="application/vnd.android.package-archive",
-        filename=match["name"],
-    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
