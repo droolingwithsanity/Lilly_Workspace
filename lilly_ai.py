@@ -3679,12 +3679,15 @@ async def send_notification(
 
 
 async def dismiss_notification(notification_id: int):
-    """Dismiss a notification via the sensor server."""
+    """Dismiss a notification via the app server's /command endpoint."""
     try:
         c = await _get_sensor_client()
         await c.post(
-            f"{SENSOR_SERVER_URL}/shell",
-            params={"cmd": f"termux-notification --cancel {notification_id}"},
+            f"{SENSOR_SERVER_URL}/command",
+            json={
+                "action": "dismiss_notification",
+                "id": int(notification_id),
+            },
             timeout=3.0,
         )
     except Exception:
@@ -3901,11 +3904,13 @@ async def background_mic_loop():
         PHONE_SSH_LAST_CHECK = time.strftime("%H:%M:%S")
         PHONE_SSH_LAST_ERROR = ""
 
-        # Clean up stale sshd sessions every 20 cycles
-        cycle_count = getattr(background_mic_loop, "_cycle_count", 0) + 1
-        background_mic_loop._cycle_count = cycle_count  # type: ignore[reportFunctionMemberAccess]
-        if cycle_count % 20 == 0:
-            await ssh_cleanup_stale()
+        # NOTE: periodic sshd-session cleanup DISABLED — `pkill -f "sshd-session -R"`
+        # killed the user's active Termux SSH sessions along with stale ones.
+        # (Use ssh_cleanup_stale() manually when convenient.)
+        # cycle_count = getattr(background_mic_loop, "_cycle_count", 0) + 1
+        # background_mic_loop._cycle_count = cycle_count  # type: ignore[reportFunctionMemberAccess]
+        # if cycle_count % 20 == 0:
+        #     await ssh_cleanup_stale()
 
         try:
             logger.debug("Mic loop: starting recording cycle")
@@ -10271,8 +10276,17 @@ async def conversation_timeout_loop():
 
 
 # ─── LIFESPAN MANAGER ────────────────────────────────────────────
+
+# Success counter reset for the (now passive) watchdog. The overlay app owns
+# the phone's :8099 server — the host only health-checks it, it never SSHes
+# in to kill/restart anything.
+
+
 async def _sensor_server_watchdog():
-    """Periodically check sensor server health; restart via SSH if it dies."""
+    """Periodically check sensor server health. The overlay app owns the server
+    (embedded :8099 micro webserver) — the host never SSHes in to restart it,
+    so no more Termux session churn."""
+    global SENSOR_SERVER_OK
     await asyncio.sleep(30)
     while True:
         await asyncio.sleep(30)
@@ -10284,14 +10298,23 @@ async def _sensor_server_watchdog():
                 continue
         except Exception:
             pass
-        logger.warning("Sensor server watchdog: health check failed, restarting...")
-        await _ensure_sensor_server()
+        logger.warning(
+            "Sensor server watchdog: phone app server unreachable. "
+            "Ensure the overlay app is running with its sensor server enabled."
+        )
+        SENSOR_SERVER_OK = False
 
 
 async def _ensure_sensor_server():
-    """Check if sensor server is reachable; if not, start it on Termux via SSH."""
+    """Check if the phone's app-embedded sensor server is reachable.
+
+    The overlay APK owns the :8099 micro webserver (readings, message broker,
+    and /command dispatch). The host does NOT restart it via SSH anymore — that
+    SSH pkill/nohup cycle was what crashed Termux sessions. If the phone server
+    is down, the answer is "turn the overlay app's sensor server on", not
+    "SSH in and massacre processes".
+    """
     global SENSOR_SERVER_OK
-    # Quick health check
     try:
         c = await _get_sensor_client()
         r = await c.get(f"{SENSOR_SERVER_URL}/health", timeout=3.0)
@@ -10301,41 +10324,11 @@ async def _ensure_sensor_server():
             return True
     except Exception:
         pass
-
-    # Not reachable — try to start it via SSH
-    logger.warning("Sensor server not reachable, attempting to start via SSH...")
-    host = os.environ.get("TERMUX_SSH_HOST", "")
-    port = os.environ.get("TERMUX_SSH_PORT", "8022")
-    user = os.environ.get("TERMUX_SSH_USER", "")
-    if not host or not user:
-        logger.error("Cannot start sensor server: SSH not configured")
-        return False
-
-    # Kill any stale sensor processes
-    await termux_run(["pkill", "-f", "termux_sensor_server"], timeout=3.0)
-    await asyncio.sleep(1.0)
-
-    # Start the sensor server in background on the phone
-    pair_env = f"LILLY_PAIR_TOKEN={LILLY_PAIR_TOKEN} " if LILLY_PAIR_TOKEN else ""
-    cmd = f"nohup {pair_env}python3 ~/termux_sensor_server.py --port 8099 > ~/sensor_server.log 2>&1 &"
-    await termux_run(["sh", "-c", cmd], timeout=5.0)
-
-    # Wait for it to come up (retry up to 8 seconds)
-    for i in range(8):
-        await asyncio.sleep(1.0)
-        try:
-            c = await _get_sensor_client()
-            r = await c.get(f"{SENSOR_SERVER_URL}/health", timeout=2.0)
-            if r.status_code == 200:
-                SENSOR_SERVER_OK = True
-                logger.info(
-                    f"Sensor server started successfully at {SENSOR_SERVER_URL}"
-                )
-                return True
-        except Exception:
-            pass
-
-    logger.error("Failed to start sensor server")
+    SENSOR_SERVER_OK = False
+    logger.warning(
+        f"Sensor server NOT reachable at {SENSOR_SERVER_URL}. "
+        "Start the overlay app (Lilly) and enable its sensor server in Settings."
+    )
     return False
 
 
