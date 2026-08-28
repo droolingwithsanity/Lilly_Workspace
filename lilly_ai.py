@@ -17779,9 +17779,13 @@ async function loadApkOptions(){
     if (full){
       const size2=(full.size/1024/1024).toFixed(1);
       const date2=new Date(full.updated*1000).toLocaleDateString();
+      const ver2 = full.variant && full.variant !== 'latest' ? ' v' + full.variant : '';
+      const fullTitle = full.name.endsWith('.zip')
+        ? 'Full App' + ver2 + ' + Termux'
+        : 'Full App' + ver2 + ' (Termux Server Bundle)';
       html+='<a href="/api/apk/download?type=full" download style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;margin-top:6px;border-radius:12px;background:rgba(74,222,128,0.06);border:1px solid rgba(74,222,128,0.18);text-decoration:none;color:#5d4e6d;transition:all 0.2s">'
-        +'<div><div style="font-size:13px;font-weight:600">Full App (Termux Server Bundle)</div>'
-        +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+full.name+' · '+size2+' MB · Updated '+date2+'</div></div>'
+        +'<div><div style="font-size:13px;font-weight:600">'+fullTitle+'</div>'
+        +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+full.name+' · '+size2+' MB · Updated '+date2+(full.name.endsWith('.zip')?' · Overlay + Termux + Termux:API + F-Droid':'')+'</div></div>'
         +'<span style="font-size:16px">⬇️</span></a>';
     }
     area.innerHTML=html;
@@ -19199,9 +19203,14 @@ async def download_apk(type: str = "light"):
     variants = _apk_variants()
     match = next((v for v in variants if v["type"] == type), None)
     if match and Path(match["path"]).is_file():
+        is_zip = Path(match["path"]).suffix.lower() == ".zip"
         return FileResponse(
             str(match["path"]),
-            media_type="application/vnd.android.package-archive",
+            media_type=(
+                "application/zip"
+                if is_zip
+                else "application/vnd.android.package-archive"
+            ),
             filename=match["name"],
             headers={
                 "Content-Disposition": 'attachment; filename="' + match["name"] + '"'
@@ -19687,15 +19696,22 @@ def _apk_variants() -> list[dict]:
     light = _best_light()
     if light:
         _add("light", light)
-    # Full: largest lilly-overlay-*.apk (Termux-server bundle, typically >50MB)
+    # Full: newest full-kit bundle (zip — overlay + Termux APKs) first; legacy
+    # fallback is the largest lilly-overlay-*.apk >50MB (old Termux-server bundle).
     if fs_dir.exists():
-        fulls = sorted(
-            fs_dir.glob("lilly-overlay-*.apk"),
-            key=lambda p: p.stat().st_size,
+        fullkits = sorted(
+            [p for p in fs_dir.glob("lilly-overlay-full-*.zip") if p.is_file()],
+            key=lambda p: (_version_tuple(p), p.stat().st_mtime),
             reverse=True,
         )
-        # Pick the largest file that's clearly a full bundle (>50MB)
-        full = next((p for p in fulls if p.stat().st_size > 50_000_000), None)
+        full = fullkits[0] if fullkits else None
+        if full is None:
+            fulls = sorted(
+                fs_dir.glob("lilly-overlay-*.apk"),
+                key=lambda p: p.stat().st_size,
+                reverse=True,
+            )
+            full = next((p for p in fulls if p.stat().st_size > 50_000_000), None)
         if full:
             _add("full", full)
     return variants
