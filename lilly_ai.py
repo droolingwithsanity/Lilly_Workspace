@@ -4820,21 +4820,39 @@ async def _list_termux_sensors(timeout: float = 5.0) -> list[str]:
     return []
 
 
+def _canonical_sensor_def(canon: str) -> Optional[str]:
+    """Map a canonical /sensors/all key (lowercase, app-owned :8099) back to
+    the hardware-name key in SENSOR_DEFS, so the storytelling narrative
+    formatter still applies to the app server's canonical readings."""
+    if not canon:
+        return None
+    norm = normalize_text(canon).replace("_", " ")
+    for dname in SENSOR_DEFS:
+        if norm and norm in normalize_text(dname):
+            return dname
+    return None
+
+
 async def get_sensor_snapshot() -> dict:
     """Gather multiple sensor readings at once for storytelling context.
 
     Returns a dict of sensor_name -> formatted_string for each available sensor.
     Uses batch read (single SSH call) instead of individual sensor reads.
     """
-    # Skip if phone SSH is not connected
-    if not PHONE_SSH_OK:
+    # Gate on sensor-server liveness (the overlay app owns :8099). SSH is
+    # no longer required for sensor data — it's only optional for background
+    # mic streaming.
+    if not SENSOR_SERVER_OK and not PHONE_SSH_OK:
         return {"status": {"text": "Phone not connected", "raw": []}}
 
-    # Core sensors to always try (most interesting for storytelling)
+    # Core sensors to always try (most interesting for storytelling).
+    # Keys are the app-owned :8099 server's canonical lowercase names (the
+    # hardware display names are resolved back to a SENSOR_DEFS entry purely
+    # so the narrative formatter still applies).
     core_sensors = [
-        ("TMD3743 Ambient Light", "light"),
-        ("ICM45631 Accelerometer", "motion"),
-        ("Step Counter", "steps"),
+        ("light", "light"),
+        ("accelerometer", "motion"),
+        ("step_counter", "steps"),
     ]
 
     # Single batch read for all sensors (cached, so this is usually instant)
@@ -4844,7 +4862,8 @@ async def get_sensor_snapshot() -> dict:
     for sensor_name, label in core_sensors:
         values = all_data.get(sensor_name)
         if values is not None:
-            cfg = SENSOR_DEFS.get(sensor_name, {})
+            dname = _canonical_sensor_def(sensor_name)
+            cfg = SENSOR_DEFS.get(dname, {}) if dname else {}
             fmt = cfg.get("format", lambda v: f"{label}: {v}")
             snapshot[label] = {"text": fmt(values), "raw": values}
 
