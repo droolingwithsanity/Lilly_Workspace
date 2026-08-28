@@ -10525,6 +10525,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(conversation_timeout_loop())
     # Periodic sensor server health check — restart if it dies
     asyncio.create_task(_sensor_server_watchdog())
+    # Multi-node fleet poller — snapshots sensors/tracking from every node
+    asyncio.create_task(node_fleet_poller())
     archetype_inferrer.load()
     yield
 
@@ -10725,6 +10727,194 @@ async def node_sensors(node_id: str):
         raise
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ─── NODE FLEET (per-node sensor/tracking snapshots) ─────────────────────
+# Each registered node runs a Termux sensor server (:8099). A background
+# poller caches per-node snapshots (health, sensors, battery, gps, wifi,
+# bluetooth, notifications) and persists the last-known state so the fleet
+# map keeps showing data even when a node is offline.
+
+NODES_SNAPSHOTS_DB = WORKSPACE / "data" / "nodes_snapshots.json"
+FLEET_POLL_FAST = float(os.environ.get("FLEET_POLL_FAST", "15"))
+FLEET_POLL_SLOW = float(os.environ.get("FLEET_POLL_SLOW", "60"))
+FLEET_HTTP_TIMEOUT = float(os.environ.get("FLEET_HTTP_TIMEOUT", "6"))
+
+_node_snapshots: dict = {}  # node_id -> snapshot dict
+
+
+def _persist_node_snapshots():
+    try:
+        NODES_SNAPSHOTS_DB.parent.mkdir(parents=True, exist_ok=True)
+        NODES_SNAPSHOTS_DB.write_text(json.dumps(_node_snapshots, indent=2))
+    except Exception as e:
+        logger.warning(f"Failed to save node snapshots: {e}")
+
+
+def _load_node_snapshots():
+    global _node_snapshots
+    try:
+        if NODES_SNAPSHOTS_DB.exists():
+            _node_snapshots = json.loads(NODES_SNAPSHOTS_DB.read_text())
+    except Exception:
+        pass
+
+
+async def _node_fetch(client: httpx.AsyncClient, base_url: str, path: str):
+    try:
+        r = await client.get(base_url.rstrip("/") + path, timeout=FLEET_HTTP_TIMEOUT)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
+def _snap_battery_level(snap: dict) -> float:
+    bat = snap.get("battery") if isinstance(snap.get("battery"), dict) else {}
+    b = (bat.get("battery") if isinstance(bat.get("battery"), dict) else bat) or {}
+    try:
+        return float(b.get("level", -1))
+    except Exception:
+        return -1.0
+
+
+def _auto_register_sensor_node(url: str):
+    """Register a sensor-server URL as a fleet node (id derived from URL)."""
+    if not url or "://" not in url:
+        return
+    try:
+        from node_registry import get_node_registry
+
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        host = parsed.hostname or "unknown"
+        port = parsed.port or 8099
+        node_id = f"phone-{host}-{port}"
+        registry = get_node_registry()
+        if not registry.get(node_id):
+            name = f"Phone {host}"
+            registry.register(
+                node_id=node_id, name=name, sensor_url=url.rstrip("/"), role="node"
+            )
+    except Exception as e:
+        logger.warning(f"Auto-register node failed ({url}): {e}")
+
+
+async def node_fleet_poller():
+    """Continuously snapshot every registered node."""
+    _load_node_snapshots()
+    slow_ts = 0.0
+    while True:
+        try:
+            from node_registry import get_node_registry
+
+            registry = get_node_registry()
+            nodes = registry.get_all()
+            now = time.time()
+            async with httpx.AsyncClient() as client:
+                for n in nodes:
+                    sid = n.node_id
+                    snap = _node_snapshots.setdefault(sid, {})
+                    snap["_node"] = {
+                        "name": n.name,
+                        "model": n.model,
+                        "role": n.role,
+                        "sensor_url": n.sensor_url,
+                    }
+                    health = await _node_fetch(client, n.sensor_url, "/health")
+                    snap["health"] = health
+                    snap["health_ts"] = now
+                    sensors = await _node_fetch(client, n.sensor_url, "/sensors/all")
+                    snap["sensors"] = sensors
+                    snap["sensors_ts"] = now
+                    battery = await _node_fetch(client, n.sensor_url, "/battery")
+                    snap["battery"] = battery
+                    snap["battery_ts"] = now
+                    if health:
+                        level = _snap_battery_level(snap)
+                        registry.heartbeat(
+                            sid,
+                            battery_pct=level if level >= 0 else -1,
+                            camera_active=bool(snap.get("camera_active")),
+                            face_engine_active=bool(snap.get("face_engine_active")),
+                        )
+                # Slower cadence: location + tracking + notifications
+                if now - slow_ts >= FLEET_POLL_SLOW:
+                    slow_ts = now
+                    for n in nodes:
+                        sid = n.node_id
+                        snap = _node_snapshots.setdefault(sid, {})
+                        gps = await _node_fetch(client, n.sensor_url, "/location")
+                        if gps:
+                            snap["gps"] = gps
+                            snap["gps_ts"] = now
+                            loc = (
+                                gps.get("location")
+                                if isinstance(gps.get("location"), dict)
+                                else gps
+                            )
+                            lat = loc.get("latitude") or loc.get("lat")
+                            lng = loc.get("longitude") or loc.get("lng")
+                            if lat and lng:
+                                registry.heartbeat(
+                                    sid,
+                                    gps_lat=float(lat),
+                                    gps_lng=float(lng),
+                                    gps_accuracy=float(loc.get("accuracy", 0) or 0),
+                                )
+                        snap["wifi"] = await _node_fetch(
+                            client, n.sensor_url, "/wifi/scan"
+                        )
+                        snap["wifi_ts"] = now
+                        snap["bluetooth"] = await _node_fetch(
+                            client, n.sensor_url, "/bluetooth/scan"
+                        )
+                        snap["bluetooth_ts"] = now
+                        snap["notifications"] = await _node_fetch(
+                            client, n.sensor_url, "/notification/list"
+                        )
+                        snap["notifications_ts"] = now
+            _persist_node_snapshots()
+        except Exception as e:
+            logger.warning(f"Fleet poller error: {e}")
+        await asyncio.sleep(FLEET_POLL_FAST)
+
+
+@app.get("/api/nodes/fleet")
+async def nodes_fleet():
+    """Full fleet view: every node + its latest cached snapshot."""
+    from node_registry import get_node_registry, MAX_NODES
+
+    registry = get_node_registry()
+    out = []
+    for n in registry.get_all():
+        snap = dict(_node_snapshots.get(n.node_id, {}))
+        snap.pop("_node", None)
+        snap["online"] = bool(snap.get("health"))
+        out.append({"node": n.to_dict(), "snapshot": snap})
+    return {
+        "nodes": out,
+        "online_count": len(registry.get_online()),
+        "total_count": len(registry.nodes),
+        "max_nodes": MAX_NODES,
+    }
+
+
+@app.get("/api/nodes/{node_id}/snapshot")
+async def node_snapshot(node_id: str):
+    """Latest cached snapshot for a single node (works offline)."""
+    from node_registry import get_node_registry
+
+    registry = get_node_registry()
+    node = registry.get(node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+    snap = dict(_node_snapshots.get(node_id, {}))
+    snap.pop("_node", None)
+    snap["online"] = node.is_online()
+    return {"node": node.to_dict(), "snapshot": snap}
 
 
 # ─── AUTH ENDPOINTS ──────────────────────────────────────────────
@@ -14921,6 +15111,22 @@ pre{position:relative;overflow-x:auto}
   <div id="pairStatus" style="font-size:11px;color:rgba(93,78,109,0.5);margin-top:6px"></div>
 </div>
 
+<!-- Download App Panel (temp: also hosts build upload) -->
+<div id="downloadPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:250;width:min(380px,90vw);background:rgba(255,255,255,0.92);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:2px solid rgba(139,122,158,0.3);border-radius:24px;padding:24px;box-shadow:0 12px 48px rgba(93,78,109,0.25)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <div style="font-size:14px;font-weight:700;color:#5d4e6d">Download App</div>
+    <button onclick="closeDownloadPanel()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);font-size:18px;padding:2px 6px">✕</button>
+  </div>
+  <div id="apk-dl-area" style="margin-bottom:6px">Loading builds...</div>
+  <div id="apk-dl-status" style="font-size:11px;color:rgba(93,78,109,0.5);margin-bottom:10px"></div>
+  <div style="border-top:1px solid rgba(184,169,201,0.2);padding-top:12px">
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Temp upload (APK or ZIP)</div>
+    <input id="apk-upload-input" type="file" accept=".apk,.zip" style="width:100%;font-size:12px;color:#5d4e6d;margin-bottom:8px">
+    <button onclick="uploadApkBuild()" style="width:100%;padding:10px;border:none;border-radius:12px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:13px;font-weight:600;cursor:pointer">Upload</button>
+    <div id="apk-upload-status" style="font-size:11px;color:rgba(93,78,109,0.5);margin-top:6px"></div>
+  </div>
+</div>
+
 <!-- Movement Break Game Area -->
 <div id="moveGameArea" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:250;width:min(360px,88vw);background:rgba(255,255,255,0.92);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:2px solid rgba(139,122,158,0.3);border-radius:24px;padding:24px;box-shadow:0 12px 48px rgba(93,78,109,0.25);text-align:center">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
@@ -17556,7 +17762,7 @@ document.getElementById('clearBtn').onclick=async()=>{
       case 'settings': toggleSettings(); break;
       case 'pair': openPairPanel(); break;
       case 'skills': openSkillsMarket(); break;
-      case 'download': downloadApk(); break;
+      case 'download': openDownloadPanel(); break;
       case 'close': break;
     }
   }
@@ -17598,24 +17804,31 @@ document.getElementById('clearBtn').onclick=async()=>{
     const list=document.getElementById('nodesPanelList');
     list.innerHTML='<div style="text-align:center;color:rgba(93,78,109,0.4)">Loading nodes...</div>';
     try{
-      const r=await fetch('/api/nodes');
+      const r=await fetch('/api/nodes/fleet');
       const d=await r.json();
       const nodes=d.nodes||[];
-      if(!nodes.length){list.innerHTML='<div style="text-align:center;color:rgba(93,78,109,0.4)">No nodes registered</div>';return}
+      list.innerHTML='<div style="text-align:center;margin-bottom:8px"><button onclick="window.open(\'/nodes.html\',\'_blank\')" style="padding:8px 14px;border:none;border-radius:10px;background:#b78ae0;color:#fff;font-weight:700;font-size:12px;cursor:pointer">🗺️ Open Fleet Map</button></div>';
+      if(!nodes.length){list.innerHTML+='<div style="text-align:center;color:rgba(93,78,109,0.4)">No nodes registered</div>';return}
       const colors=['#8b7a9e','#c084fc','#69f0ae'];
       let html='';
       nodes.forEach((n,i)=>{
         const online=n.online;
         const col=colors[i%colors.length];
-        const bat=n.battery>=0?' | '+Math.round(n.battery)+'%':'';
+        const batPct=(n.battery_pct!=null&&n.battery_pct>0)?n.battery_pct:((n.battery!=null&&n.battery>=0)?n.battery:-1);
+        const bat=batPct>=0?' | '+Math.round(batPct)+'%':'';
+        const snap=n.snapshot||{};
+        const wifi=(snap.wifi&&snap.wifi.networks)?snap.wifi.networks.length:'–';
+        const bt=(snap.bluetooth&&snap.bluetooth.devices)?snap.bluetooth.devices.length:'–';
+        const notif=(snap.notifications&&snap.notifications.notifications)?snap.notifications.notifications.length:'–';
+        const sCount=(snap.sensors&&snap.sensors.sensors)?Object.keys(snap.sensors.sensors).length:'–';
         html+='<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;margin-bottom:6px;background:rgba(255,255,255,0.5);border:1px solid rgba(255,255,255,0.5);border-left:3px solid '+col+'">'
           +'<div style="width:10px;height:10px;border-radius:50%;background:'+col+';flex-shrink:0"></div>'
           +'<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:13px;color:#5d4e6d">'+n.name+'</div>'
-          +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+n.node_id+bat+'</div></div>'
+          +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+sCount+' sensors · 📡 '+wifi+' wifi · 📶 '+bt+' bt · 🔔 '+notif+bat+'</div></div>'
           +'<span style="font-size:10px;padding:2px 8px;border-radius:10px;font-weight:700;background:'+(online?'rgba(76,175,80,0.15)':'rgba(93,78,109,0.08)')+';color:'+(online?'#2e7d32':'rgba(93,78,109,0.4)')+'">'+(online?'ONLINE':'OFF')+'</span></div>';
       });
       html+='<div style="font-size:11px;color:rgba(93,78,109,0.4);margin-top:4px">'+(d.online_count||0)+' of '+nodes.length+' online · Max '+d.max_nodes+'</div>';
-      list.innerHTML=html;
+      list.innerHTML+=html;
     }catch(e){list.innerHTML='<div style="text-align:center;color:#e57373">Failed to load nodes</div>'}
   }
   function closeNodesPanel(){document.getElementById('nodesPanel').style.display='none'}
@@ -17666,6 +17879,44 @@ document.getElementById('clearBtn').onclick=async()=>{
   function downloadApk(){
     try{ window.open('/api/apk/download','_blank'); }
     catch(e){ addChatMessage('system','Download: unable to start download.'); }
+  }
+  function openDownloadPanel(){
+    const panel=document.getElementById('downloadPanel');
+    if(!panel){ downloadApk(); return; }
+    panel.style.display='block';
+    loadApkOptions();
+  }
+  function closeDownloadPanel(){
+    const panel=document.getElementById('downloadPanel');
+    if(panel) panel.style.display='none';
+  }
+  async function uploadApkBuild(){
+    const input=document.getElementById('apk-upload-input');
+    const status=document.getElementById('apk-upload-status');
+    if(!input || !input.files || !input.files.length){
+      if(status){ status.textContent='Choose an .apk or .zip first'; status.style.color='rgba(232,90,110,0.8)'; }
+      return;
+    }
+    const f=input.files[0];
+    if(status){ status.textContent='Uploading '+f.name+'...'; status.style.color='rgba(93,78,109,0.5)'; }
+    const fd=new FormData();
+    fd.append('file', f);
+    try{
+      const r=await fetch('/api/apk/upload',{method:'POST',body:fd});
+      const d=await r.json();
+      if(r.ok && d.status==='ok'){
+        if(status){
+          status.textContent='✓ '+d.filename+' staged ('+(d.size/1048576).toFixed(2)+' MB, sha '+d.sha256.slice(0,12)+'…)';
+          status.style.color='rgba(76,175,80,0.8)';
+        }
+        if (input) input.value='';
+        loadApkOptions();
+      } else {
+        if(status){ status.textContent='Upload failed: '+(d.detail||d.error||'unknown'); status.style.color='rgba(232,90,110,0.8)'; }
+      }
+    }catch(e){
+      if(status){ status.textContent='Network error during upload'; status.style.color='rgba(232,90,110,0.8)'; }
+    }
   }
   function openSkillsMarket(){
     window.open('/skills-market.html','_blank');
@@ -19170,6 +19421,24 @@ async def serve_wiki():
     )
 
 
+@app.get("/nodes.html")
+async def serve_nodes_map():
+    """Serve the multi-node fleet map page."""
+    page_path = WORKSPACE / "nodes.html"
+    if not page_path.exists():
+        return Response("Fleet map not found", status_code=404, media_type="text/html")
+    content = page_path.read_text(encoding="utf-8")
+    return Response(
+        content=content,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
 @app.get("/Readme.md")
 async def serve_readme():
     """Serve the UI/app Readme.md for droolingwithsanity.ca/Readme.md."""
@@ -19784,6 +20053,39 @@ async def apk_latest():
     return light
 
 
+@app.post("/api/apk/upload")
+async def apk_upload(file: UploadFile = File(...)):
+    """TEMP upload: stage an APK/ZIP from the WebUI into file_share/.
+
+    Used to move build artifacts (e.g. lilly-overlay-v6.6-debug.apk) from a phone
+    browser onto the host without SSH. Restrict to .apk/.zip names only.
+    """
+    import hashlib
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename")
+    name = file.filename.replace("\\", "/").split("/")[-1]
+    if not re.search(r"\.(apk|zip)$", name, re.IGNORECASE):
+        raise HTTPException(
+            status_code=400, detail="Only .apk or .zip files may be staged"
+        )
+    safe = re.sub(r"[^\w\.\-]", "_", name)
+    FILE_SHARE_DIR.mkdir(parents=True, exist_ok=True)
+    dest = FILE_SHARE_DIR / safe
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty upload")
+    dest.write_bytes(data)
+    return {
+        "status": "ok",
+        "filename": safe,
+        "path": str(dest),
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "note": "Staged in file_share/ — temp upload.",
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TASK 3 — PERSONA EVOLUTION SCALE DASHBOARD
 # GET /api/persona_scores  →  per-persona composite score, rank, evolution history
@@ -20021,6 +20323,7 @@ async def save_sensor_setting(req):
     _set_user_settings(uid, {"sensor_server_url": url})
     global SENSOR_SERVER_URL
     SENSOR_SERVER_URL = url
+    _auto_register_sensor_node(url)
     return {"ok": True}
 
 
