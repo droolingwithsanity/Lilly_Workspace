@@ -17793,8 +17793,7 @@ document.getElementById('clearBtn').onclick=async()=>{
     }
   }
   function openTrackerMap(){
-    const host=location.hostname;
-    const url='http://'+host+':8198/tracker';
+    const url=location.origin+'/tracker.html';
     addChatMessage('system','Opening person tracker map...');
     window.open(url,'_blank');
   }
@@ -19427,6 +19426,26 @@ async def serve_nodes_map():
     page_path = WORKSPACE / "nodes.html"
     if not page_path.exists():
         return Response("Fleet map not found", status_code=404, media_type="text/html")
+    content = page_path.read_text(encoding="utf-8")
+    return Response(
+        content=content,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@app.get("/tracker.html")
+async def serve_tracker_map():
+    """Serve the person tracker map page."""
+    page_path = WORKSPACE / "tracker.html"
+    if not page_path.exists():
+        return Response(
+            "Tracker map not found", status_code=404, media_type="text/html"
+        )
     content = page_path.read_text(encoding="utf-8")
     return Response(
         content=content,
