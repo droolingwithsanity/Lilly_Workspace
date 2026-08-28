@@ -17753,26 +17753,39 @@ async function loadApkOptions(){
   const status=document.getElementById('apk-dl-status');
   if (!area) return;
   try {
-    const r=await fetch('/api/apk/latest');
+    const r=await fetch('/api/apk/variants');
     if (!r.ok) {
       area.innerHTML='<div style="font-size:12px;color:rgba(93,78,109,0.5)">No overlay builds found</div>';
       return;
     }
-    const light=await r.json();
-    const size=(light.size/1024/1024).toFixed(1);
-    const date=new Date(light.updated*1000).toLocaleDateString();
-    const version = light.variant && light.variant !== 'latest' ? 'v' + light.variant : '';
-    const title = version ? 'Latest Overlay ' + version : 'Latest Overlay';
-    const html='<a href="/api/apk/download?type=light" download style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:12px;background:rgba(74,222,128,0.12);border:1px solid rgba(74,222,128,0.25);text-decoration:none;color:#5d4e6d;transition:all 0.2s">'
-      +'<div><div style="font-size:13px;font-weight:600">'+title+'</div>'
-      +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+light.name+' · '+size+' MB · Updated '+date+'</div></div>'
-      +'<span style="font-size:16px">⬇️</span></a>';
+    const variants=await r.json();
+    const light=variants.find(v=>v.type==='light');
+    const full=variants.find(v=>v.type==='full');
+    let html='';
+    if (light){
+      const size=(light.size/1024/1024).toFixed(1);
+      const date=new Date(light.updated*1000).toLocaleDateString();
+      const version = light.variant && light.variant !== 'latest' ? 'v' + light.variant : '';
+      const title = version ? 'Latest Overlay ' + version : 'Latest Overlay';
+      html+='<a href="/api/apk/download?type=light" download style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:12px;background:rgba(74,222,128,0.12);border:1px solid rgba(74,222,128,0.25);text-decoration:none;color:#5d4e6d;transition:all 0.2s">'
+        +'<div><div style="font-size:13px;font-weight:600">'+title+'</div>'
+        +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+light.name+' · '+size+' MB · Updated '+date+'</div></div>'
+        +'<span style="font-size:16px">⬇️</span></a>';
+      const aboutVer = document.getElementById('aboutVersion');
+      if (aboutVer && version) {
+        aboutVer.textContent = 'Lilly AI · 9 Avatars · Termux + Docker · Overlay ' + version;
+      }
+    }
+    if (full){
+      const size2=(full.size/1024/1024).toFixed(1);
+      const date2=new Date(full.updated*1000).toLocaleDateString();
+      html+='<a href="/api/apk/download?type=full" download style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;margin-top:6px;border-radius:12px;background:rgba(74,222,128,0.06);border:1px solid rgba(74,222,128,0.18);text-decoration:none;color:#5d4e6d;transition:all 0.2s">'
+        +'<div><div style="font-size:13px;font-weight:600">Full App (Termux Server Bundle)</div>'
+        +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+full.name+' · '+size2+' MB · Updated '+date2+'</div></div>'
+        +'<span style="font-size:16px">⬇️</span></a>';
+    }
     area.innerHTML=html;
     if (status) status.textContent='Install from unknown sources must be enabled on your phone.';
-    const aboutVer = document.getElementById('aboutVersion');
-    if (aboutVer && version) {
-      aboutVer.textContent = 'Lilly AI · 9 Avatars · Termux + Docker · Overlay ' + version;
-    }
   } catch(e){
     if (status) status.textContent='Failed to load APK info';
   }
