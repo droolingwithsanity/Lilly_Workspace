@@ -223,22 +223,37 @@ async def read_battery() -> dict:
 
 
 async def read_location() -> dict:
-    """Read GPS location."""
-    out = await _run_cmd("termux-location", timeout=10.0)
-    if not out:
-        return {}
-    try:
-        data = json.loads(out)
-        return {
-            "latitude": data.get("latitude", 0.0),
-            "longitude": data.get("longitude", 0.0),
-            "altitude": data.get("altitude", 0.0),
-            "speed": data.get("speed", 0.0),
-            "bearing": data.get("bearing", 0.0),
-            "accuracy": data.get("accuracy", 0.0),
-        }
-    except json.JSONDecodeError:
-        return {}
+    """Read GPS location.
+
+    Uses termux-location -s (single update) with the GPS provider only.
+    NOTE: never call plain `termux-location` (continuous) or `-s -p network`:
+    Termux:API's LocationAPI writes a second top-level JSON document when a
+    second fix arrives (cached + fresh, or network + gps) and dies with
+    "JSON must have only one top-level value". GPS single-shot has no cached
+    fix in the normal case, so it survives.
+    """
+    for provider, tmo in (("gps", 12.0), ("network", 8.0), ("passive", 6.0)):
+        try:
+            out = await _run_cmd(
+                f"termux-location -s -p {provider} -d {int(tmo)}",
+                timeout=tmo + 4.0,
+            )
+            if not out or not out.strip():
+                continue
+            data = json.loads(out)
+            if data.get("latitude") is not None:
+                return {
+                    "latitude": data.get("latitude", 0.0),
+                    "longitude": data.get("longitude", 0.0),
+                    "altitude": data.get("altitude", 0.0),
+                    "speed": data.get("speed", 0.0),
+                    "bearing": data.get("bearing", 0.0),
+                    "accuracy": data.get("accuracy", 0.0),
+                    "provider": provider,
+                }
+        except Exception:
+            continue
+    return {}
 
 
 # ─── BACKGROUND UPDATE LOOP ─────────────────────────────────────

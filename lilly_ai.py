@@ -14914,9 +14914,10 @@ pre{position:relative;overflow-x:auto}
     <div style="font-size:14px;font-weight:700;color:#5d4e6d">Pair Device</div>
     <button onclick="closePairPanel()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);font-size:18px;padding:2px 6px">✕</button>
   </div>
-  <div style="margin-bottom:6px;font-size:12px;color:rgba(93,78,109,0.6)">Enter your device's 8-character token:</div>
-  <input type="text" id="pairInput" maxlength="8" placeholder="XXXXXXXX" style="width:100%;padding:10px;font-size:14px;border:1px solid rgba(93,78,109,0.2);border-radius:10px;margin-bottom:10px;text-align:center;letter-spacing:2px;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace">
-  <button onclick="verifyPairCode()" style="width:100%;padding:10px;border:none;border-radius:12px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:13px;font-weight:600;cursor:pointer">Pair Device</button>
+  <div style="margin-bottom:10px;font-size:12px;color:rgba(93,78,109,0.6)">Generate a code, then enter it in the Lilly app to pair this device:</div>
+  <button id="btnPairGenerate" onclick="generatePairCode()" style="width:100%;padding:10px;border:none;border-radius:12px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:13px;font-weight:600;cursor:pointer">Generate pairing code</button>
+  <div id="pairCodeDisplay" style="display:none;margin:14px 0 4px;font-size:38px;font-weight:700;letter-spacing:8px;color:#a892b8;font-family:ui-monospace,Consolas,monospace"></div>
+  <div id="pairCountdown" style="font-size:11px;color:rgba(93,78,109,0.5);margin-bottom:4px"></div>
   <div id="pairStatus" style="font-size:11px;color:rgba(93,78,109,0.5);margin-top:6px"></div>
 </div>
 
@@ -17677,29 +17678,73 @@ document.getElementById('clearBtn').onclick=async()=>{
     const panel=document.getElementById('pairPanel');
     if(panel) panel.style.display='none';
   }
-  async function verifyPairCode(){
-    const input=document.getElementById('pairInput');
+  let pairCodeTimer=null;
+  let pairCodeValue='';
+  async function generatePairCode(){
     const status=document.getElementById('pairStatus');
-    if(!input) return;
-    const code=input.value.trim().replace(/\s/g,'').toUpperCase();
-    if(code.length!==8){
-      if(status) status.textContent='Enter the 8-character code from your phone';
-      return;
-    }
-    if(status) status.textContent='Pairing...';
+    const btn=document.getElementById('btnPairGenerate');
+    const display=document.getElementById('pairCodeDisplay');
+    if(btn) btn.disabled=true;
+    if(status) status.textContent='Generating code...';
     try{
-      // Phone tokens are native identifiers, not ephemeral codes.
-      // Use /api/phone_pair so the phone's own ~/.lilly_pair_token is accepted directly.
-      const r=await fetch('/api/phone_pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:code})});
+      const r=await fetch('/api/pair/initiate',{method:'POST',credentials:'include'});
       const data=await r.json();
-      if(data.ok){
-        if(status) status.textContent='Paired successfully! Device registered.';
-        if(input) input.value='';
+      if(data.ok && data.code){
+        pairCodeValue=data.code;
+        if(display){ display.style.display='block'; display.textContent=data.code; }
+        window.pairExpiresAt=Date.now()+((data.expires_in||300)*1000);
+        if(status) status.textContent='Enter this code in the Lilly app:';
+        startPairCountdown();
+        pollPairStatus();
       }else{
-        if(status) status.textContent='Pairing failed: '+((data.detail)||'invalid token');
+        if(status) status.textContent='Failed: '+(data.detail||'could not generate code');
+        if(btn) btn.disabled=false;
       }
     }catch(e){
-      if(status) status.textContent='Error verifying code';
+      if(status) status.textContent='Error generating code';
+      if(btn) btn.disabled=false;
+    }
+  }
+  function startPairCountdown(){
+    const cd=document.getElementById('pairCountdown');
+    if(!cd) return;
+    if(pairCodeTimer) clearInterval(pairCodeTimer);
+    pairCodeTimer=setInterval(function(){
+      const left=Math.max(0,Math.round(((window.pairExpiresAt||0)-Date.now())/1000));
+      cd.textContent='Code expires in '+left+'s';
+      if(left<=0){
+        clearInterval(pairCodeTimer); pairCodeTimer=null;
+        const s=document.getElementById('pairStatus');
+        if(s) s.textContent='Code expired — generate a new one';
+        const b=document.getElementById('btnPairGenerate');
+        if(b) b.disabled=false;
+      }
+    },1000);
+  }
+  async function pollPairStatus(){
+    if(!pairCodeValue) return;
+    const status=document.getElementById('pairStatus');
+    try{
+      const r=await fetch('/api/pair/status?code='+encodeURIComponent(pairCodeValue));
+      const data=await r.json();
+      if(data.valid===true){
+        setTimeout(pollPairStatus,2000);
+      }else if(data.reason==='not_found'){
+        // Code consumed by /api/pair/confirm -> the app paired.
+        if(status) status.textContent='✓ Paired! Device connected.';
+        const btn=document.getElementById('btnPairGenerate');
+        if(btn) btn.disabled=false;
+        const cd=document.getElementById('pairCountdown');
+        if(cd) cd.textContent='';
+        const display=document.getElementById('pairCodeDisplay');
+        if(display) display.style.display='none';
+        if(pairCodeTimer){ clearInterval(pairCodeTimer); pairCodeTimer=null; }
+      }else{
+        if(status) status.textContent=(data.reason==='expired'?'Code expired — generate a new one':'Waiting for app…');
+        setTimeout(pollPairStatus,3000);
+      }
+    }catch(e){
+      setTimeout(pollPairStatus,3000);
     }
   }
   document.addEventListener('DOMContentLoaded',function(){
@@ -19398,15 +19443,22 @@ async def radar_hub():
 # ─── v6.0 UNIFIED PAIRING ──────────────────────────────────────────────
 @app.post("/api/pair/initiate")
 async def pair_initiate(request: Request):
-    """Generate a 6-digit pairing code for web UI → overlay pairing."""
+    """Generate a 6-digit pairing code for WebUI -> overlay pairing.
+
+    Auth-free flow: anyone may generate a code; the code itself is what the
+    app presents back at /api/pair/confirm (proves possession of the screen).
+    If Auth0 is available AND there is a session, tag the user for display.
+    """
+    user_id = "web_session"
+    user_name = "WebUI"
     if AUTH_AVAILABLE:
-        user = await get_current_user(request)
-        if not user or not user.get("id"):
-            raise HTTPException(status_code=401, detail="Not authenticated")
-        user_id = user["id"]
-        user_name = user.get("name", user.get("email", "User"))
-    else:
-        raise HTTPException(status_code=503, detail="Auth not configured")
+        try:
+            user = await get_current_user(request)
+            if user and user.get("id"):
+                user_id = user["id"]
+                user_name = user.get("name", user.get("email", user_id))
+        except Exception:
+            pass
     code = _generate_pairing_code()
     _pairing_codes[code] = {
         "user_id": user_id,
