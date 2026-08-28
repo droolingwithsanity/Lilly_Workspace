@@ -19802,16 +19802,23 @@ async def get_notifications():
         )
 
     # Build a concise summary for TTS / chat display
+    # Priority tolerant: app listener pushes lowercase "high"/"max", push scripts
+    # may send uppercase "HIGH"/"MAX" — compare case-insensitively.
     high_priority = [
-        n for n in _cached_notifications if n.get("priority") in ("HIGH", "MAX")
+        n
+        for n in _cached_notifications
+        if str(n.get("priority", "") or "").upper() in ("HIGH", "MAX")
     ]
     display_list = high_priority if high_priority else _cached_notifications[:5]
 
     summary_parts = []
     for n in display_list[:5]:
-        app_name = n.get("appName") or n.get("packageName", "Unknown")
-        title = n.get("title", "").strip()
-        text = n.get("text", "").strip()
+        app_name = (
+            n.get("appName") or n.get("package") or n.get("packageName", "Unknown")
+        )
+        title = (n.get("title") or "").strip()
+        # App listener sends "content"; older push paths send "text".
+        text = (n.get("text") or n.get("content") or "").strip()
         if title and text:
             summary_parts.append(f"{app_name}: {title} — {text}")
         elif title:
