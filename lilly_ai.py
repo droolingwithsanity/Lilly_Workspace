@@ -6009,6 +6009,24 @@ SENSOR_MAP = {
     "Lift to Wake Sensor (wake-up)": "lift",
     "Double Twist (wake-up)": "twist",
     "Quick Pickup Sensor (wake-up)": "pickup",
+    # ── Android-native lowercase keys (hitomi overlay app owns :8099) ──
+    # The overlay's embedded LillySensorServer serves canonical lowercase
+    # names; these aliases let take_snapshot() populate the same fields when
+    # the phone's :8099 is app-owned instead of the Python/Termux server.
+    "accelerometer": "accel",
+    "gyroscope": "gyro",
+    "magnetometer": "mag",
+    "barometer": "pressure",
+    "pressure": "pressure",
+    "light": "light",
+    "proximity": "prox",
+    "step_counter": "steps",
+    "step_detector": "step_detect",
+    "gravity": "gravity",
+    "linear_acceleration": "lin_accel",
+    "ambient_temperature": "imu_temp",
+    "sig_motion": "sig_motion",
+    "pickup": "pickup",
 }
 
 
