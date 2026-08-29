@@ -7045,6 +7045,7 @@ How you talk:
 - Short. One sentence usually. Two if it matters. Three only if it's worth it.
 - Match their energy. Short message? Short reply. Long ramble? You're there.
 - No fillers. No "uh", no "like", no "you know". Say what you mean.
+- Never open a reply with rambling small-talk setups like "You know what I was thinking about...", "You know what?", "You know what I've been wondering?", "Here's a thought...". Cut the setup — answer the question directly from the first word.
 - Never end every reply with a question. Let the conversation breathe.
 - Never fish for follow-ups. Do NOT end with "want me to tell you more?", "curious what you think?", "should I...?", "what do you think?", "want to hear more?", or any probing question about the Alpha's inner state. Answer, then stop. If the Alpha wants more, they'll ask.
 - Never ask what the Alpha is thinking or feeling unless it's directly relevant to something they just said. No "what are you thinking?" as a conversation filler — it's annoying, not curious.
@@ -10510,6 +10511,7 @@ async def lifespan(app: FastAPI):
         PHONE_BROKER_AVAILABLE = False
         phone_broker = None
         logger.warning(f"Phone Broker not loaded: {_broker_err}")
+    _register_automation_handlers()
 
     asyncio.create_task(background_mic_loop())
     # Sensor conversation engine removed — no unsolicited sensor commentary
@@ -10527,6 +10529,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_sensor_server_watchdog())
     # Multi-node fleet poller — snapshots sensors/tracking from every node
     asyncio.create_task(node_fleet_poller())
+    # Real-data automation eval loop (only acts when rules exist)
+    asyncio.create_task(automation_eval_loop())
     archetype_inferrer.load()
     yield
 
@@ -10546,6 +10550,10 @@ app.add_middleware(
 # Deferred to startup (in lifespan) — _device_tokens is defined later in the module.
 phone_broker = None
 PHONE_BROKER_AVAILABLE = False
+
+# Real automation audit trail: every rule that fires appends here so the web UI
+# chat can show the user what actually happened (no fake data — only real fires).
+_AUTO_EVENTS: deque = deque(maxlen=100)
 
 
 @app.get("/api/broker/status")
@@ -10620,6 +10628,177 @@ async def broker_automations_delete(rule_id: str):
         return JSONResponse({"error": "broker not available"}, status_code=503)
     removed = phone_broker.automation.remove_rule(rule_id)
     return {"removed": removed}
+
+
+# ─── Automation execution wiring (real, no fake data) ────────────────────────
+# These make the AutomationEngine actually act on live phone state:
+#   - action handlers for "chat" and "notify" (delivered to web UIs + audit log)
+#   - a background loop that feeds the real battery/sensor snapshot into evaluate()
+#   - an honest "test" endpoint that evaluates a rule against current live data
+
+
+# Healthy battery/sensor snapshot → broker message shape for automation rules.
+# Field names deliberately mirrored so wiki-style conditions like
+# "data.battery_level < 20" resolve against real values.
+async def _build_automation_message() -> dict:
+    """Build a {'type','data'} message from the latest REAL phone battery state."""
+    msg = {"type": "battery", "data": {}, "ts": time.time()}
+    try:
+        c = await _get_sensor_client()
+        r = await c.get(f"{SENSOR_SERVER_URL}/battery", timeout=2.0)
+        if r.status_code == 200:
+            b = r.json().get("battery", {})
+            pct = b.get("percentage", 0)
+            msg["data"].update(
+                {
+                    "battery_level": pct,
+                    "percentage": pct,
+                    "charging": bool(b.get("charging", False)),
+                    "status": b.get("status", ""),
+                }
+            )
+    except Exception:
+        pass
+    # Try to enrich with light (useful for the "dark mode" example) when reachable
+    try:
+        snap = await get_sensor_snapshot()
+        light = snap.get("light", {}).get("raw")
+        if isinstance(light, (list, tuple)) and light:
+            msg["data"]["light"] = light[0]
+    except Exception:
+        pass
+    return msg
+
+
+async def _automation_deliver(action_type: str, payload: dict, msg: dict):
+    """Deliver a fired automation action (chat/notify) to visible channels.
+
+    Uses the same broker channel the web UI listens on (push_chat → web UIs) and
+    records to the real audit trail. If no web UI is currently connected, the
+    event is still recorded so nothing is lost/fabricated.
+    """
+    text = (
+        (payload or {}).get("text")
+        or (payload or {}).get("body")
+        or (payload or {}).get("title", "")
+    )
+    if action_type == "notify":
+        title = (payload or {}).get("title", "Lilly Automation")
+        body = (payload or {}).get("body", "") or (payload or {}).get("text", "")
+        text = f"{title}: {body}".strip() or "Automation alert"
+    event = {
+        "ts": time.time(),
+        "action_type": action_type,
+        "text": text,
+        "source": msg.get("type", ""),
+        "value": msg.get("data", {}),
+    }
+    _AUTO_EVENTS.appendleft(event)
+    logger.info(f"Automation [{action_type}] fired: {text}")
+    # Push to any connected web UIs over the real broker channel
+    if phone_broker is not None:
+        try:
+            for wid in list(phone_broker.webuis.keys()):
+                w = phone_broker.webuis.get(wid)
+                if w is not None:
+                    await w.ws.send_json(
+                        {
+                            "type": "automation",
+                            "action_type": action_type,
+                            "text": text,
+                            "ts": event["ts"],
+                        }
+                    )
+        except Exception as e:
+            logger.warning(f"Automation web UI delivery failed: {e}")
+
+
+def _register_automation_handlers():
+    """Wire real action handlers onto the automation engine at startup."""
+    if not PHONE_BROKER_AVAILABLE or phone_broker is None:
+        return
+    eng = phone_broker.automation
+
+    async def _chat(payload, msg):
+        await _automation_deliver("chat", payload, msg)
+
+    async def _notify(payload, msg):
+        await _automation_deliver("notify", payload, msg)
+
+    eng.register_action_handler("chat", _chat)
+    eng.register_action_handler("notify", _notify)
+    # shell / webhook / tts are intentionally deferred (not wired yet). If a rule
+    # uses them, evaluate() logs "no handler" — an honest no-op, never fake.
+
+
+async def automation_eval_loop():
+    """Feed real phone battery/sensor state into the automation engine.
+
+    Rules react to actual live data even when no phone is WS-paired, because the
+    data comes from the HTTP sensor server the web UI already trusts.
+    """
+    await asyncio.sleep(10)  # let startup settle
+    while True:
+        await asyncio.sleep(6)
+        if not PHONE_BROKER_AVAILABLE or phone_broker is None:
+            continue
+        if not phone_broker.automation.rules:
+            continue  # nothing to evaluate
+        try:
+            msg = await _build_automation_message()
+            await phone_broker.automation.evaluate(msg)
+        except Exception as e:
+            logger.warning(f"Automation eval loop error: {e}")
+
+
+def _evaluate_rule_against_message(rule, msg: dict) -> bool:
+    """Honest single-shot evaluation of a rule's condition against a message,
+    without touching the cooldown timer. Returns whether it would fire."""
+    if phone_broker is None:
+        return False
+    if msg.get("type", "").replace("data_", "").replace("update_", "") != rule.topic:
+        return False
+    return phone_broker.automation._evaluate_condition(msg, rule.condition)
+
+
+@app.get("/api/broker/automations/events")
+async def broker_automations_events():
+    """Real audit trail of automation actions that actually fired."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    return {"events": list(_AUTO_EVENTS)}
+
+
+@app.post("/api/broker/automations/test")
+async def broker_automations_test(request: Request):
+    """Honestly evaluate a rule against CURRENT live phone data (no fake values).
+
+    Returns whether the rule would fire right now plus the real data it saw.
+    """
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    body = await request.json()
+    from phone_broker import AutomationRule
+
+    rule = AutomationRule(
+        id=body.get("id", "test"),
+        name=body.get("name", "Test rule"),
+        enabled=True,
+        topic=body.get("topic", ""),
+        condition=body.get("condition", {}),
+        action_type=body.get("action_type", ""),
+        action_payload=body.get("action_payload", {}),
+        cooldown_seconds=0.0,
+    )
+    msg = await _build_automation_message()
+    fired = _evaluate_rule_against_message(rule, msg)
+    return {
+        "fired": fired,
+        "topic": rule.topic,
+        "condition": rule.condition,
+        "actual_data": msg.get("data", {}),
+        "note": "Evaluated against real current phone data",
+    }
 
 
 # ─── NODE REGISTRY (multi-phone sensor network) ─────────────────────────
@@ -13956,7 +14135,10 @@ async def lilly_skills_api(limit: int = Query(100, description="Max skills to re
             {
                 "id": key,
                 "name": skill.get("label", key),
-                "description": skill.get("canned_reply", skill.get("description", "")),
+                "description": (
+                    skill.get("description") or skill.get("canned_reply") or ""
+                ),
+                "guide": skill.get("guide", "") or skill.get("description", ""),
                 "source": "builtin",
                 "category": skill.get("category", ""),
                 "tags": skill.get("tags", []),
@@ -14047,6 +14229,117 @@ async def openhuman_refresh_skills():
         "avatars": list(HIVE_PERSONAS.keys()),
         "catalog_url": OPENHUMAN_BRIDGE_URL,
     }
+
+
+# ─── Menu & Radial Shortcuts ────────────────────────────────────────
+# Skills a user explicitly added via the Skills Market ("add to
+# hamburger" / "add to radial"). Persisted to shortcuts.json so they
+# survive restarts. Not seeded: only the real additions the user makes.
+_SHORTCUTS_FILE = WORKSPACE / "shortcuts.json"
+_SHORTCUTS_STORE: dict = {"menu": [], "radial": []}
+
+
+def _load_shortcuts_store() -> dict:
+    if _SHORTCUTS_STORE["menu"] or _SHORTCUTS_STORE["radial"]:
+        return _SHORTCUTS_STORE
+    try:
+        if _SHORTCUTS_FILE.exists():
+            data = json.loads(_SHORTCUTS_FILE.read_text())
+            _SHORTCUTS_STORE["menu"] = data.get("menu", [])
+            _SHORTCUTS_STORE["radial"] = data.get("radial", [])
+    except Exception as e:
+        logger.warning(f"shortcuts load failed: {e}")
+    return _SHORTCUTS_STORE
+
+
+def _save_shortcuts_store() -> None:
+    try:
+        _SHORTCUTS_FILE.write_text(json.dumps(_SHORTCUTS_STORE, indent=2, default=str))
+    except Exception as e:
+        logger.warning(f"shortcuts save failed: {e}")
+
+
+@app.get("/api/menu_shortcuts")
+async def get_menu_shortcuts():
+    """List hamburger (Web UI) shortcuts the user added from the Skills Market."""
+    store = _load_shortcuts_store()
+    return {"ok": True, "shortcuts": store.get("menu", [])}
+
+
+@app.post("/api/menu_shortcuts")
+async def add_menu_shortcut(payload: dict = Body(default={})):
+    """Add a hamburger (Web UI) shortcut. Body: {id, name, description?, global?, added_by?}"""
+    sid = str(payload.get("id") or "").strip()
+    name = str(payload.get("name") or sid).strip()
+    if not sid:
+        return JSONResponse({"ok": False, "error": "missing 'id'"}, status_code=400)
+    store = _load_shortcuts_store()
+    menu = store.setdefault("menu", [])
+    for s in menu:
+        if s.get("id") == sid:
+            return {"ok": True, "existing": True, "shortcuts": menu}
+    menu.append(
+        {
+            "id": sid,
+            "name": name or sid,
+            "description": payload.get("description", ""),
+            "global": bool(payload.get("global", False)),
+            "added_by": payload.get("added_by", "skills-market"),
+        }
+    )
+    _save_shortcuts_store()
+    return {"ok": True, "shortcuts": menu}
+
+
+@app.delete("/api/menu_shortcuts/{shortcut_id}")
+async def remove_menu_shortcut(shortcut_id: str):
+    store = _load_shortcuts_store()
+    menu = store.setdefault("menu", [])
+    before = len(menu)
+    store["menu"] = [s for s in menu if s.get("id") != shortcut_id]
+    if len(store["menu"]) != before:
+        _save_shortcuts_store()
+    return {"ok": True, "shortcuts": store["menu"]}
+
+
+@app.get("/api/radial_shortcuts")
+async def get_radial_shortcuts():
+    """List phone radial-dialer shortcuts the user added from the Skills Market."""
+    store = _load_shortcuts_store()
+    return {"ok": True, "shortcuts": store.get("radial", [])}
+
+
+@app.post("/api/radial_shortcuts")
+async def add_radial_shortcut(payload: dict = Body(default={})):
+    """Add a phone radial-dialer shortcut. Body: {skill_id, name?}"""
+    sid = str(payload.get("skill_id") or "").strip()
+    if not sid:
+        # tolerate clients that send {id, name}
+        sid = str(payload.get("id") or "").strip()
+    if not sid:
+        return JSONResponse(
+            {"ok": False, "error": "missing 'skill_id'"}, status_code=400
+        )
+    name = str(payload.get("name") or sid).strip()
+    store = _load_shortcuts_store()
+    radial = store.setdefault("radial", [])
+    for s in radial:
+        if s.get("skill_id") == sid:
+            return {"ok": True, "existing": True, "shortcuts": radial}
+    radial.append({"skill_id": sid, "name": name or sid})
+    _save_shortcuts_store()
+    return {"ok": True, "shortcuts": radial}
+
+
+@app.delete("/api/radial_shortcuts/{shortcut_id}")
+async def remove_radial_shortcut(shortcut_id: str):
+    store = _load_shortcuts_store()
+    radial = store.setdefault("radial", [])
+    before = len(radial)
+    store["radial"] = [s for s in radial if s.get("skill_id") != shortcut_id]
+    if len(store["radial"]) != before:
+        _save_shortcuts_store()
+    return {"ok": True, "shortcuts": store["radial"]}
 
 
 @app.get("/api/openhuman/avatars")
@@ -14438,7 +14731,7 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 .indicator.active{background:#b8a9c9;box-shadow:0 0 10px rgba(184,169,201,0.5);animation:pulse 2s infinite}
 
 /* ─── Mood Badge ─── */
-#moodBadge{position:absolute;top:16px;left:20px;z-index:30;display:flex;gap:6px;align-items:center;font-size:11px;color:rgba(93,78,109,0.5);background:rgba(255,255,255,0.3);backdrop-filter:blur(12px);padding:5px 12px;border-radius:20px;border:1px solid rgba(255,255,255,0.4);transition:all 0.5s}
+#moodBadge{position:fixed;top:76px;left:14px;z-index:30;display:flex;gap:6px;align-items:center;font-size:11px;color:rgba(93,78,109,0.5);background:rgba(255,255,255,0.3);backdrop-filter:blur(12px);padding:5px 12px;border-radius:20px;border:1px solid rgba(255,255,255,0.4);transition:all 0.5s}
 #moodDot{width:6px;height:6px;border-radius:50%;background:#c0b0d0;transition:background 0.6s}
 
 /* ─── Thinking Indicator ─── */
@@ -14455,7 +14748,7 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 @keyframes pulse{0%{opacity:1}50%{opacity:0.5}100%{opacity:1}}
   /* ─── Input Panel ─── */
 
-  .input-panel{position:absolute;bottom:28px;left:50%;transform:translateX(-50%);width:92%;max-width:620px;z-index:25;background:rgba(255,255,255,0.45);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:28px;padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;box-shadow:0 4px 30px rgba(180,140,180,0.12);pointer-events:auto}
+  .input-panel{position:fixed;bottom:calc(12px + var(--kb,0px));left:8px;right:8px;width:auto;max-width:720px;margin:0 auto;z-index:25;background:rgba(255,255,255,0.5);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:28px;padding:10px;display:flex;flex-wrap:nowrap;gap:8px;align-items:center;box-shadow:0 4px 30px rgba(180,140,180,0.14);pointer-events:auto}
 .input-panel input{flex:1;background:rgba(255,255,255,0.4);border:none;outline:none;border-radius:16px;font-size:15px;padding:12px 16px;color:#5d4e6d;font-weight:400}
 .input-panel input::placeholder{color:rgba(93,78,109,0.3)}
 .btn-mic{background:rgba(255,255,255,0.4);border:none;border-radius:50%;width:44px;height:44px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.25s}
@@ -14467,13 +14760,27 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 .btn-clear:hover{background:rgba(255,255,255,0.6);color:#5d4e6d}
 .btn-mic.active{background:rgba(139,122,158,0.35);border:2px solid rgba(139,122,158,0.5)}
 
-/* ─── Coding Mode Chat (merged into VibeCode Coding Assistant) ─── */
-#chatContainer{position:absolute;bottom:80px;left:50%;transform:translateX(-50%);width:92%;max-width:620px;max-height:30vh;z-index:15;background:rgba(255,255,255,0.35);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.5);border-radius:16px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 4px 20px rgba(180,140,180,0.12)}
+/* ─── Lilly Pup Profile Face (chat partner avatar, top-left) ─── */
+#profileFace{position:fixed;top:14px;left:14px;z-index:35;display:flex;align-items:center;gap:10px;background:rgba(255,255,255,0.5);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.6);border-radius:22px;padding:8px 14px 8px 8px;box-shadow:0 6px 24px rgba(180,140,180,0.18);cursor:pointer;pointer-events:auto;user-select:none}
+#profileFace .pf-canvas-wrap{position:relative;width:64px;height:64px;border-radius:50%;overflow:hidden;background:radial-gradient(circle at 30% 30%,#f0ddf3,#d9cce6);flex-shrink:0;box-shadow:inset 0 0 0 2px rgba(255,255,255,0.7)}
+#profileFace canvas{position:absolute;inset:0;width:100%;height:100%}
+#profileFace .pf-name{display:flex;flex-direction:column;line-height:1.2;min-width:0}
+#profileFace .pf-name b{font-size:13px;color:#5d4e6d;white-space:nowrap}
+#profileFace .pf-name span{font-size:10px;color:rgba(93,78,109,0.55);white-space:nowrap;display:flex;align-items:center;gap:4px}
+#profileFace .pf-dot{width:6px;height:6px;border-radius:50%;background:#7fcf8f;box-shadow:0 0 8px rgba(127,207,143,0.8)}
+#profileFace .pf-dot.idle{background:#c0b0d0;box-shadow:none}
+#profileFace .pf-dot.thinking{background:#e0c060;box-shadow:0 0 8px rgba(224,192,96,0.8)}
+
+/* ─── Coding Mode Chat (merged into VibeCode Coding Assistant) ───
+     Docked bottom, expands horizontally (full width), height bounded,
+     messages scroll internally. Anchored above the mobile keyboard via
+     the --kb CSS var (set by JS from visualViewport.height). */
+#chatContainer{position:fixed;left:8px;right:8px;bottom:calc(84px + var(--kb,0px));width:auto;max-height:52vh;z-index:15;background:rgba(255,255,255,0.5);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);border:1px solid rgba(255,255,255,0.6);border-radius:18px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 8px 32px rgba(180,140,180,0.16)}
 #chatContainer.active{display:flex}
-#chatMessages{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:8px;scroll-behavior:smooth}
+#chatMessages{flex:1;overflow-y:auto;overflow-x:hidden;padding:12px 14px;display:flex;flex-direction:column;gap:8px;scroll-behavior:smooth;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
 @media (max-width:640px){
-  #chatContainer{max-height:40vh;width:min(96vw,520px)}
-  .input-panel{width:96%;bottom:16px;padding:8px}
+  #chatContainer{left:6px;right:6px;bottom:calc(76px + var(--kb,0px));max-height:48vh}
+  .input-panel{left:6px;right:6px;width:auto;bottom:calc(10px + var(--kb,0px))}
   .input-panel input{font-size:14px;padding:10px 12px}
 }
 #chatMessages::-webkit-scrollbar{width:4px}
@@ -15120,8 +15427,8 @@ pre{position:relative;overflow-x:auto}
   <div id="apk-dl-area" style="margin-bottom:6px">Loading builds...</div>
   <div id="apk-dl-status" style="font-size:11px;color:rgba(93,78,109,0.5);margin-bottom:10px"></div>
   <div style="border-top:1px solid rgba(184,169,201,0.2);padding-top:12px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Temp upload (APK or ZIP)</div>
-    <input id="apk-upload-input" type="file" accept=".apk,.zip" style="width:100%;font-size:12px;color:#5d4e6d;margin-bottom:8px">
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Temp upload (any file)</div>
+    <input id="apk-upload-input" type="file" accept="*" style="width:100%;font-size:12px;color:#5d4e6d;margin-bottom:8px">
     <button onclick="uploadApkBuild()" style="width:100%;padding:10px;border:none;border-radius:12px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:13px;font-weight:600;cursor:pointer">Upload</button>
     <div id="apk-upload-status" style="font-size:11px;color:rgba(93,78,109,0.5);margin-top:6px"></div>
   </div>
@@ -15227,6 +15534,15 @@ pre{position:relative;overflow-x:auto}
   <span id="moodDot"></span>
   <span id="moodLabel">calm</span>
   <span id="prosodyHint" style="font-size:9px;color:rgba(93,78,109,0.3);margin-left:4px"></span>
+</div>
+
+<!-- Lilly Pup Profile Face — the animated avatar you talk to (top-left) -->
+<div id="profileFace" onclick="toggleChat()" title="Tap to chat with Lilly">
+  <div class="pf-canvas-wrap"><canvas id="profilePupCanvas" width="128" height="128"></canvas></div>
+  <div class="pf-name">
+    <b id="profileName">Lilly</b>
+    <span><span class="pf-dot" id="profileStatusDot"></span><span id="profileStatusLabel">here</span></span>
+  </div>
 </div>
 
 <div id="thinkingDots">
@@ -17508,6 +17824,113 @@ function drawPup(){
 
 function breatheOffset(){return Math.sin(frame*0.03)*3}
 
+/* ─── Profile Face (top-left avatar you talk to) ─────────────────
+   Self-contained mini pup renderer on #profilePupCanvas, synced to the
+   same live state (mood, blink, mouth while speaking, thinking, avatar). */
+const _pfCanvas=document.getElementById('profilePupCanvas');
+const _pfCtx=_pfCanvas? _pfCanvas.getContext('2d') : null;
+function drawPupProfile(){
+  if(!_pfCanvas||!_pfCtx)return;
+  const W=_pfCanvas.width,H=_pfCanvas.height;
+  _pfCtx.clearRect(0,0,W,H);
+  // soft glow disc
+  const S=Math.min(W,H)*0.5/150;   // same scale as the canonical drawPup
+  _pfCtx.save();
+  _pfCtx.translate(W/2,H/2+4);
+  _pfCtx.scale(S,S);
+  const glowCol=MOOD_COLORS[pupMood]||MOOD_COLORS.calm;
+  const g=_pfCtx.createRadialGradient(0,0,20,0,0,96);
+  g.addColorStop(0,glowCol+'55');g.addColorStop(1,glowCol+'00');
+  _pfCtx.fillStyle=g; _pfCtx.beginPath(); _pfCtx.arc(0,0,96,0,Math.PI*2); _pfCtx.fill();
+
+  const animal=selectedAvatar||'puppy';
+  if(animal!=='puppy'){ try{ drawAnimalFace(_pfCtx,animal,0,-2,S,frame,true);}catch(e){} _pfCtx.restore(); requestAnimationFrame(drawPupProfile); return; }
+
+  const isSpeaking=lastMouthVal>0.1;
+  const isExcited=pupMood==='excited'||pupMood==='cheerful';
+  const earActive=isSpeaking||isExcited||isThinking;
+  const breathe=Math.sin(frame*0.03)*3;
+
+  _pfCtx.translate(0,breathe-6);
+
+  if(isThinking){_pfCtx.shadowColor='rgba(200,180,220,0.35)';_pfCtx.shadowBlur=6}
+  const earWiggle=earActive?Math.sin(frame*0.18)*0.1:0;
+  const earBob=earActive?Math.sin(frame*0.14)*2:0;
+  _pfCtx.save();_pfCtx.translate(-62,-46+earBob);_pfCtx.rotate(-0.22+earWiggle);_pfCtx.fillStyle='#c8c8d0';_pfCtx.beginPath();_pfCtx.ellipse(0,0,26,50,0,0,Math.PI*2);_pfCtx.fill();_pfCtx.fillStyle='#f0d8e4';_pfCtx.beginPath();_pfCtx.ellipse(0,6,14,36,0,0,Math.PI*2);_pfCtx.fill();_pfCtx.restore();
+  _pfCtx.save();_pfCtx.translate(62,-46+earBob);_pfCtx.rotate(0.22-earWiggle);_pfCtx.fillStyle='#c8c8d0';_pfCtx.beginPath();_pfCtx.ellipse(0,0,26,50,0,0,Math.PI*2);_pfCtx.fill();_pfCtx.fillStyle='#f0d8e4';_pfCtx.beginPath();_pfCtx.ellipse(0,6,14,36,0,0,Math.PI*2);_pfCtx.fill();_pfCtx.restore();
+  _pfCtx.shadowBlur=0;
+  _pfCtx.fillStyle='#d0d0d8';_pfCtx.beginPath();if(_pfCtx.roundRect)_pfCtx.roundRect(-72,-48,144,112,[38,38,28,28]);_pfCtx.fill();
+  _pfCtx.fillStyle='#c0c0c8';_pfCtx.beginPath();_pfCtx.ellipse(0,32,42,22,0,0,Math.PI*2);_pfCtx.fill();
+  // eyes
+  _pfCtx.fillStyle='#ffffff';
+  if(isBlinking){
+    _pfCtx.strokeStyle='#8b7a9e';_pfCtx.lineWidth=2.5;_pfCtx.lineCap='round';
+    _pfCtx.beginPath();_pfCtx.moveTo(-38,0);_pfCtx.lineTo(-18,0);_pfCtx.stroke();
+    _pfCtx.beginPath();_pfCtx.moveTo(18,0);_pfCtx.lineTo(38,0);_pfCtx.stroke();
+  }else{
+    _pfCtx.beginPath();_pfCtx.arc(-28,2,11,0,Math.PI*2);_pfCtx.fill();
+    _pfCtx.beginPath();_pfCtx.arc(28,2,11,0,Math.PI*2);_pfCtx.fill();
+    let pX=0,pY=0;
+    if(lookAt==='heart'){pX=-3;pY=4;} else if(lookAt==='dashboard'||lookAt==='name'){pY=-4;} else if(lookAt==='input'){pY=3;} else {if(pupMood==='curious'||pupMood==='excited')pY=-3; if(isThinking)pX=-1;}
+    _pfCtx.fillStyle='#8b7a9e';_pfCtx.beginPath();_pfCtx.arc(-28+pX,2+pY,4,0,Math.PI*2);_pfCtx.fill();_pfCtx.beginPath();_pfCtx.arc(28+pX,2+pY,4,0,Math.PI*2);_pfCtx.fill();
+  }
+  // nose + blush
+  _pfCtx.fillStyle='#d4a0b0';_pfCtx.beginPath();_pfCtx.ellipse(0,18,10,7,0,0,Math.PI*2);_pfCtx.fill();
+  // mouth
+  if(isSpeaking&&!isBlinking){
+    const open=Math.min(1,lastMouthVal)*10+Math.abs(Math.sin(frame*0.25))*3;
+    _pfCtx.fillStyle='#c8889a';_pfCtx.beginPath();_pfCtx.ellipse(0,28,14,4+open*0.8,0,0,Math.PI*2);_pfCtx.fill();
+    _pfCtx.fillStyle='#e8a0b0';_pfCtx.beginPath();_pfCtx.ellipse(0,30+open*0.4,8,2+open*0.4,0,0,Math.PI*2);_pfCtx.fill();
+  }else{
+    _pfCtx.strokeStyle='#c0a0b0';_pfCtx.lineWidth=2;_pfCtx.lineCap='round';
+    _pfCtx.beginPath();_pfCtx.arc(-8,26,8,0,Math.PI*0.85);_pfCtx.stroke();
+    _pfCtx.beginPath();_pfCtx.arc(8,26,8,Math.PI*0.15,Math.PI);_pfCtx.stroke();
+  }
+  // eyebrows
+  const eb=(typeof EYEBROWS!=='undefined'&&EYEBROWS[pupMood])||[[-42,-12],[-16,-16],[16,-16],[42,-12]];
+  _pfCtx.strokeStyle='rgba(139,122,158,0.4)';_pfCtx.lineWidth=2.5;_pfCtx.lineCap='round';
+  _pfCtx.beginPath();_pfCtx.moveTo(eb[0][0],eb[0][1]);_pfCtx.lineTo(eb[1][0],eb[1][1]);_pfCtx.stroke();
+  _pfCtx.beginPath();_pfCtx.moveTo(eb[2][0],eb[2][1]);_pfCtx.lineTo(eb[3][0],eb[3][1]);_pfCtx.stroke();
+  _pfCtx.restore();
+  requestAnimationFrame(drawPupProfile);
+}
+if(_pfCanvas) requestAnimationFrame(drawPupProfile);
+
+/* ─── Profile name/status sync ─────────────────────────────────── */
+function syncProfile(){
+  const nameEl=document.getElementById('profileName');
+  if(nameEl){const m=chatAvatarMeta(selectedAvatar);nameEl.textContent=(m&&m.name)||'Lilly'}
+  const dot=document.getElementById('profileStatusDot');
+  const lab=document.getElementById('profileStatusLabel');
+  if(dot&&lab){
+    const thinking=isThinking||isStreaming;
+    const speaking=!!(lillySpeaking||lastMouthVal>0.1);
+    if(speaking){dot.className='pf-dot';lab.textContent='speaking';}
+    else if(thinking){dot.className='pf-dot thinking';lab.textContent='thinking…';}
+    else {dot.className='pf-dot';lab.textContent='here';}
+  }
+}
+setInterval(syncProfile,400);
+
+/* ─── Mobile keyboard handling ────────────────────────────────────
+   Keep chat + input docked above the on-screen keyboard using the
+   visualViewport API. Exposes keyboard height as CSS var --kb. */
+(function(){
+  const setKb=()=>{
+    let kb=0;
+    if(window.visualViewport){
+      const vh=window.visualViewport.height;
+      const ir=window.visualViewport.offsetTop||0;
+      kb=Math.max(0, window.innerHeight-(vh+ir));
+    }
+    document.documentElement.style.setProperty('--kb', Math.round(kb)+'px');
+  };
+  setKb();
+  if(window.visualViewport){window.visualViewport.addEventListener('resize',setKb);window.visualViewport.addEventListener('scroll',setKb);}
+  else{window.addEventListener('resize',setKb);}
+})();
+
+
 let _speechWords=[],_speechWordIdx=0,_speechWordTimer=0;
 const WORD_RATE_MS=380;
 
@@ -17893,7 +18316,7 @@ document.getElementById('clearBtn').onclick=async()=>{
     const input=document.getElementById('apk-upload-input');
     const status=document.getElementById('apk-upload-status');
     if(!input || !input.files || !input.files.length){
-      if(status){ status.textContent='Choose an .apk or .zip first'; status.style.color='rgba(232,90,110,0.8)'; }
+      if(status){ status.textContent='Choose a file first'; status.style.color='rgba(232,90,110,0.8)'; }
       return;
     }
     const f=input.files[0];
@@ -18518,10 +18941,12 @@ async function sendStreamingReply(text){
                if(evt.delegate_to){
                  senderName = evt.delegate_name || senderName;
                }
-               // Convert to rendered HTML (code blocks etc.) now that the reply is complete
-               msgDiv.innerHTML='<div class="chat-sender">'+escapeHtml(senderName)+
-                 '</div><div class="chat-content">'+renderCodeBlocks(finalText)+'</div>';
-              displaySpeech(finalText);
+               // Update in place (no DOM node replacement) to avoid flicker.
+               const senderEl=msgDiv.querySelector('.chat-sender');
+               if(senderEl){senderEl.textContent=senderName;}
+               const contentElFinal=msgDiv.querySelector('.chat-content');
+               if(contentElFinal){contentElFinal.innerHTML=renderCodeBlocks(finalText);contentElFinal.classList.remove('streaming');}
+               displaySpeech(finalText);
               pupSpeech=finalText;
               speechTimer=999;
               lastSpoken=finalText;
@@ -18561,9 +18986,9 @@ async function sendStreamingReply(text){
         if(d.delegate_to){
           fallbackName = d.delegate_name || fallbackName;
         }
-        // Render as HTML (with code blocks) since it's a complete message
-        msgDiv.innerHTML='<div class="chat-sender">'+escapeHtml(fallbackName)+
-          '</div><div class="chat-content">'+renderCodeBlocks(d.reply)+'</div>';
+        // Render as HTML (with code blocks) — update in place to avoid flicker
+        const _fbName=msgDiv.querySelector('.chat-sender'); if(_fbName)_fbName.textContent=fallbackName;
+        const _fbContent=msgDiv.querySelector('.chat-content'); if(_fbContent){_fbContent.innerHTML=renderCodeBlocks(d.reply);_fbContent.classList.remove('streaming');}
         displaySpeech(d.reply);
         lastSpoken=d.reply;
         if(d.audio_id){playAudio(d.audio_id); _lastPollAudioId = d.audio_id;}
@@ -18594,6 +19019,136 @@ async function sendReply(text){
   addChatMessage('user',text);
   statusLabel.textContent='thinking...';
   await sendStreamingReply(text);
+}
+
+/* ═══ Automation assistant (guided, real rules — no fake data) ═══
+   Detect automation intent in the main chat and walk the user through
+   building a rule field-by-field. Each step is clarified by the avatar and
+   the finished rule is TESTED against real current phone data before saving. */
+let autoFlow=null; // {step,topic,field,op,value,actionType,title,body,name}
+const AUTO_OPS=['==','!=','<','<=','>','>=','contains','not_contains','regex'];
+const AUTO_ACTION_NAMES={chat:'Chat message to you in the web UI',notify:'Alert (delivered to web UI chat)'};
+
+function detectAutomationIntent(lower){
+  // Conservative: only trigger on clear automation framing so we never hijack
+  // normal conversational "when is dinner"-type questions.
+  if(/\b(automation|automate|set up a rule|create a rule|automations?)\b/.test(lower))return true;
+  if(/remind me when|notify me when|if .* then|when .* (drop|drops|below|above|reach|reaches|goes below|goes above|battery|light|brightness|notification|message|slack)\b/.test(lower))return true;
+  return false;
+}
+
+function autoAvatarSay(html){
+  showMainChat();
+  const div=document.createElement('div');
+  div.className='chat-msg assistant';
+  const m=chatAvatarMeta(selectedAvatar);
+  div.innerHTML='<div class="chat-sender">'+escapeHtml(m.name||'Lilly')+'</div><div class="chat-content">'+html+'</div>';
+  chatMessages.appendChild(div);
+  chatMessages.scrollTop=chatMessages.scrollHeight;
+}
+const AUTO_NUM='<span style="color:#c4b5fd">';
+
+function startAutoFlow(text){
+  autoFlow={step:1,topic:'',field:'',op:'',value:'',actionType:'',title:'',body:'',name:''};
+  autoAvatarSay(
+    "Great — let me set that up for you. I'll clarify each piece so nothing is guessed.<br><br>"+
+    "<b>What should trigger the rule?</b><br>"+
+    AUTO_NUM+"1)</span> Battery<br>"+
+    AUTO_NUM+"2)</span> Light (ambient)<br>"+
+    AUTO_NUM+"3)</span> A notification/message<br>"+
+    AUTO_NUM+"4)</span> My location"+
+    "<br><br><i>Reply with the number, or rephrase your trigger.</i>"
+  );
+  statusLabel.textContent='clarify automation';
+}
+async function continueAutoFlow(text){
+  const lower=text.trim().toLowerCase();
+  const F=autoFlow;
+  if(/cancel|cancel it|never mind|stop this|forget it/.test(lower)){autoFlow=null;autoAvatarSay("No problem — I've cancelled that automation setup.");statusLabel.textContent='idle';return;}
+  if(F.step===1){ // topic
+    let topic='',field='';
+    if(/^1\b|battery|charge|low batt/.test(lower)){topic='battery';field='data.battery_level';}
+    else if(/^2\b|light|bright|dark|ambient|lux/.test(lower)){topic='sensor';field='data.light';}
+    else if(/^3\b|notification|message|alert|slack/.test(lower)){topic='notification';field='data.notification.title';}
+    else if(/^4\b|location|home|arrive|leave|geo/.test(lower)){topic='location';field='data.location';}
+    else{autoAvatarSay("I didn't catch that. Reply <b>1</b> (battery), <b>2</b> (light), <b>3</b> (a notification), or <b>4</b> (location).");return;}
+    F.topic=topic;F.field=field;F.step=2;
+    autoAvatarSay("Got it — trigger is <b>"+topic+"</b>. Now, the condition field is <code>"+field+"</code>.<br><br><b>Which comparison?</b><br>"+AUTO_NUM+"1)</span> less than<br>"+AUTO_NUM+"2)</span> greater than<br>"+AUTO_NUM+"3)</span> equals<br>"+AUTO_NUM+"4)</span> contains<br><br><i>Reply with the number <b>and</b> the value, e.g. \"1 20\" (less than 20).</i>");
+    return;
+  }
+  if(F.step===2){ // op + value
+    const m=text.match(/^\s*([1-4])\s+([\d.\-]+)$/)||text.match(/^\s*([1-4])\s+(.+)$/);
+    if(!m){autoAvatarSay("Please reply with a number <b>and</b> the value, like <b>1 20</b> (less than 20).");return;}
+    const ops=[['<','less'],['>','greater'],['==','equals'],['contains','contains']];
+    // match word intent too
+    let opNum=m[1];let val=m[2].trim();
+    if(/less|below|under|drops|under/i.test(val)&&/^[0-9.-]+$/.test(val.replace(/[^\d.\-]/g,''))){val=val.replace(/[^\d.\-]/g,'');}
+    const opMap={1:'<',2:'>',3:'==',4:'contains'};
+    if(!opMap[opNum]){autoAvatarSay("Pick 1-4 for the operator.");return;}
+    F.op=opMap[opNum];
+    // extract numeric value
+    const vm=val.match(/-?\d+(\.\d+)?/);
+    if(F.op==='contains'){F.value=val;}
+    else if(vm){F.value=vm[0];}
+    else{autoAvatarSay("I need a numeric value, like <b>20</b>.");return;}
+    F.step=3;
+    autoAvatarSay("So the trigger will be: <b>when "+F.topic+" "
+      +F.op+" "+F.value+"</b>.<br><br><b>What should I do?</b><br>"+
+      AUTO_NUM+"1)</span> "+AUTO_ACTION_NAMES.notify+"<br>"+
+      AUTO_NUM+"2)</span> "+AUTO_ACTION_NAMES.chat+"<br><br><i>Reply 1 or 2.</i>");
+    return;
+  }
+  if(F.step===3){ // action type
+    if(/^1\b/.test(lower)){F.actionType='notify';F.title=text.replace(/^1\b/,'').trim()||'Lilly Automation';}
+    else if(/^2\b/.test(lower)){F.actionType='chat';F.title=text.replace(/^2\b/,'').trim()||'Lilly Automation';}
+    else{autoAvatarSay("Reply <b>1</b> (alert) or <b>2</b> (chat message).");return;}
+    F.step=4;
+    autoAvatarSay("Almost done. "+(F.actionType==='notify'?"Give the alert a <b>title</b>":"What <b>message text</b> should you see?")+
+      "<br><i>(or type <b>default</b>)</i>");
+    return;
+  }
+  if(F.step===4){ // body/title
+    if(F.actionType==='notify'){F.title=text.trim();F.step=5;autoAvatarSay("Got it — title \""+F.title+"\". Now the <b>body</b> of the alert:");return;}
+    else{F.body=text.trim();F.step=5;/* fall through to preview */ }
+  }
+  if(F.step===5){ // body for notify, then preview for both
+    if(F.actionType==='notify'){F.body=text.trim();}
+    F.name=(F.actionType==='notify'?('Notify when '+F.topic+' '+F.op+' '+F.value):('Chat when '+F.topic+' '+F.op+' '+F.value));
+    const preview={
+      name:F.name,topic:F.topic,
+      condition:{field:F.field,op:F.op,value:isNaN(Number(F.value))?F.value:Number(F.value)},
+      action_type:F.actionType,
+      action_payload:F.actionType==='notify'?{title:F.title,body:F.body||''}:{text:F.title}
+    };
+    // TEST against REAL current data before saving
+    statusLabel.textContent='testing rule...';
+    let test='';
+    try{
+      const resp=await fetch('/api/broker/automations/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({topic:preview.topic,condition:preview.condition})});
+      const t=await resp.json();
+      var dataStr=JSON.stringify(t.actual_data||{});
+      test="<br><br>I tested it against <b>real current phone data</b>: actual data = "+escapeHtml(dataStr)+
+        "<br>Result: <b>"+(t.fired?"it would fire now ✅":"it would NOT fire right now ⚠️")+"</b> "+
+        (dataStr==='{}'?"<i>(no live sensor data right now — phone not reporting)</i>":"")+".";
+    }catch(e){test="<br><br><i>(couldn't reach test endpoint)</i>";}
+    autoAvatarSay("Here's the rule I'll save:<br><pre style='font-size:11px'>"+escapeHtml(JSON.stringify(preview,null,2))+"</pre>"+test+
+      "<br><br><b>Save it?</b> — reply <b>yes</b> to save, or describe a change.");
+    F.step=6;F.preview=preview;
+    return;
+  }
+  if(F.step===6){ // confirm save
+    if(/^yes|save|ok|sure|confirm|go ahead|do it/.test(lower)){
+      statusLabel.textContent='saving rule...';
+      try{
+        const resp=await fetch('/api/broker/automations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(F.preview)});
+        const j=await resp.json();
+        if(j.created){autoAvatarSay("✅ Saved! Rule <b>"+escapeHtml(j.rule.name)+"</b> (id <code>"+escapeHtml(j.rule.id)+"</code>) is now live. It will fire whenever the real condition is met.");}
+        else{autoAvatarSay("Sorry, the rule wasn't saved: "+escapeHtml(JSON.stringify(j)));}
+      }catch(err){autoAvatarSay("Save failed: "+escapeHtml(String(err)));}
+      autoFlow=null;statusLabel.textContent='idle';return;
+    }
+    autoFlow=null;autoAvatarSay("OK, I've cancelled the save — no rule was created.");statusLabel.textContent='idle';return;
+  }
 }
 
 function recordMicChunk(){
@@ -18680,6 +19235,35 @@ function encodeWav(audioBuffer){
   return buf;
 }
 
+/* ═══ Automation event poller — surface REAL fired rules in the chat ═══
+   Polls the broker's audit trail and shows each automation that actually fired
+   as an inline notice (real data only — never fabricated). */
+let _lastAutoEventTs=0;
+async function pollAutomationEvents(){
+  try{
+    const r=await fetch('/api/broker/automations/events');
+    if(!r.ok)return;
+    const j=await r.json();
+    const evs=(j.events||[]).filter(e=>e&&e.ts>_lastAutoEventTs);
+    if(evs.length){
+      _lastAutoEventTs=evs[0].ts;
+      for(let i=evs.length-1;i>=0;i--){ // newest first as a single combined notice
+        // only surface the newest to avoid spam
+        if(i>0)continue;
+        const ev=evs[i];
+        showMainChat();
+        const sys=document.createElement('div');
+        sys.className='chat-msg system';
+        sys.textContent='⚡ Automation fired — '+ev.text+'';
+        chatMessages.appendChild(sys);
+        chatMessages.scrollTop=chatMessages.scrollHeight;
+      }
+    }
+  }catch(e){/* ignore transient errors */}
+  setTimeout(pollAutomationEvents,5000);
+}
+setTimeout(()=>{_lastAutoEventTs=Date.now()/1000;pollAutomationEvents();},4000);
+
 inputField.addEventListener('keydown',async(e)=>{
   if(e.key==='Enter'&&inputField.value.trim()){
     const text=inputField.value.trim();inputField.value='';
@@ -18687,6 +19271,20 @@ inputField.addEventListener('keydown',async(e)=>{
     // In hive group chat mode, route to group chat
     if(hiveActive){
       sendHiveMessageUnified(text);
+      return;
+    }
+
+    // ─── Automation assistant (multi-turn clarifying flow) ───
+    if(autoFlow){
+      addChatMessage('user',text);
+      await continueAutoFlow(text);
+      return;
+    }
+    const autoLower=text.toLowerCase();
+    if(detectAutomationIntent(autoLower)){
+      addChatMessage('user',text);
+      startAutoFlow(text);
+      statusLabel.textContent='clarify automation';
       return;
     }
 
@@ -19330,6 +19928,113 @@ async def serve_ui():
             "Expires": "0",
         },
     )
+
+
+# ── Figranium reverse proxy ──────────────────────────────────────────────
+# Expose the locally-running Figranium dashboard (localhost:11345) through
+# the public Lilly server at /Figranium. Prefix is stripped on the way in;
+# HTML responses get a <base href="/Figranium/"> injected so the SPA's
+# relative asset references resolve under the proxy prefix.
+FIGRANIUM_TARGET = os.environ.get("FIGRANIUM_TARGET", "http://localhost:11345")
+_FIGRANIUM_PREFIX = "/Figranium"
+
+
+async def _figranium_proxy(request: Request, path: str = ""):
+    rest = path.rstrip("/")
+    url = f"{FIGRANIUM_TARGET}/{rest}" if rest else f"{FIGRANIUM_TARGET}/"
+
+    # Forward method, body and relevant headers.
+    headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower() not in ("host", "content-length", "connection")
+    }
+    body = await request.body()
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            req = client.build_request(
+                request.method, url, headers=headers, content=body or None
+            )
+            resp = await client.send(req, stream=True)
+
+            # Buffer the body so we can rewrite HTML if needed.
+            content = b"".join([chunk async for chunk in resp.aiter_bytes()])
+    except Exception as e:  # pragma: no cover - networking edge
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+
+    resp_headers = {}
+    for k, v in resp.headers.items():
+        kl = k.lower()
+        if kl in (
+            "content-encoding",
+            "content-length",
+            "transfer-encoding",
+            "connection",
+        ):
+            continue
+        # Prefix redirect Location headers so they stay under /Figranium.
+        if (
+            kl == "location"
+            and v.startswith("/")
+            and not v.startswith(_FIGRANIUM_PREFIX)
+        ):
+            v = _FIGRANIUM_PREFIX + v
+        resp_headers[k] = v
+
+    ctype = resp.headers.get("content-type", "").lower()
+    # Inject a <base href> into HTML so the SPA resolves relative assets.
+    if "text/html" in ctype and b"<head" in content.lower():
+        base = f'<base href="{_FIGRANIUM_PREFIX}/">'.encode("utf-8")
+        lower = content.lower()
+        idx = lower.find(b"<head")
+        content = content[: idx + 5] + base + content[idx + 5 :]
+
+        # Vite emits ABSOLUTE paths (/assets/..., /favicon...) that ignore
+        # <base>. Rewrite in-app absolute references to be prefixed so the
+        # JS/CSS/favicon etc. load through the proxy.
+        prefix_b = _FIGRANIUM_PREFIX.encode()
+        # Match a quote followed by a root app path (assets/, favicon{/.*}, etc.).
+        patterns = [
+            rb"""(["'])/(assets/)""",
+            rb"""(["'])/(favicon[^"']*)""",
+            rb"""(["'])/(src/)""",
+            rb"""(["'])/(manifest\.json)""",
+            rb"""(["'])/(vite\.svg)""",
+        ]
+        for pat in patterns:
+            content = re.sub(
+                pat,
+                lambda m: (
+                    m.group(1)
+                    + prefix_b
+                    + b"/"
+                    + (m.group(2) if m.lastindex and m.lastindex >= 2 else b"")
+                ),
+                content,
+            )
+
+    return Response(
+        content=content,
+        status_code=resp.status_code,
+        media_type=resp.headers.get("content-type"),
+        headers=resp_headers,
+    )
+
+
+@app.api_route(
+    "/Figranium", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+)
+async def figranium_root(request: Request):
+    return await _figranium_proxy(request, "")
+
+
+@app.api_route(
+    "/Figranium/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+)
+async def figranium_path(request: Request, path: str):
+    return await _figranium_proxy(request, path)
 
 
 def _serve_phone_page(name: str) -> Response:
@@ -20072,22 +20777,34 @@ async def apk_latest():
     return light
 
 
+@app.get("/api/app_version")
+async def app_version():
+    """Version + download info for the overlay's version badge (/api/app_version)."""
+    variants = _apk_variants()
+    light = next((v for v in variants if v["type"] == "light"), None)
+    if not light:
+        return {"version": "", "download_url": ""}
+    return {
+        "version": light.get("variant", ""),
+        "download_url": "/api/apk/download?type=light",
+        "name": light.get("name", ""),
+        "size": light.get("size", 0),
+    }
+
+
 @app.post("/api/apk/upload")
 async def apk_upload(file: UploadFile = File(...)):
-    """TEMP upload: stage an APK/ZIP from the WebUI into file_share/.
+    """TEMP upload: stage any file (APK/ZIP/txt/py/html…) from the WebUI into file_share/.
 
-    Used to move build artifacts (e.g. lilly-overlay-v6.6-debug.apk) from a phone
-    browser onto the host without SSH. Restrict to .apk/.zip names only.
+    Used to move build artifacts (e.g. lilly-overlay-v6.6-debug.apk) or share files
+    (text, code, configs) from a phone browser onto the host without SSH.
+    Accepts any filename — no extension restriction.
     """
     import hashlib
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename")
     name = file.filename.replace("\\", "/").split("/")[-1]
-    if not re.search(r"\.(apk|zip)$", name, re.IGNORECASE):
-        raise HTTPException(
-            status_code=400, detail="Only .apk or .zip files may be staged"
-        )
     safe = re.sub(r"[^\w\.\-]", "_", name)
     FILE_SHARE_DIR.mkdir(parents=True, exist_ok=True)
     dest = FILE_SHARE_DIR / safe

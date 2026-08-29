@@ -3,71 +3,108 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>Lilly Vision Hub</title>
+<title>Lilly Radar</title>
+<!-- Leaflet (real map tiles) — matches the pyfile reference -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{width:100vw;height:100vh;overflow:hidden;font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:#0d0a12;color:#e8e0f0}
-canvas{display:block}
-#hub{width:100%;height:100%;position:relative}
-#mainCanvas{width:100%;height:100%}
-#overlay{position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;z-index:2}
-#sidebar{position:absolute;top:16px;right:16px;width:260px;background:rgba(255,255,255,0.08);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:14px;z-index:10;pointer-events:auto;max-height:calc(100vh - 32px);overflow-y:auto}
-#sidebar h2{font-size:13px;font-weight:700;color:#a892b8;margin-bottom:10px;letter-spacing:0.5px;text-transform:uppercase}
-.node-card{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:10px;margin-bottom:6px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.08);transition:all .3s}
-.node-card:hover{background:rgba(255,255,255,0.1)}
-.node-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;box-shadow:0 0 6px currentColor}
-.node-name{font-size:12px;font-weight:600;flex:1}
-.node-status{font-size:10px;padding:2px 6px;border-radius:8px;font-weight:700}
-.node-on{background:rgba(105,240,174,0.15);color:#69f0ae}
-.node-off{background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.3)}
-.detection-log{margin-top:10px;font-size:11px;color:rgba(255,255,255,0.4);max-height:120px;overflow-y:auto}
-.detection-log div{padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.05)}
-.detection-log .det-name{color:#c084fc;font-weight:600}
-.detection-log .det-time{color:rgba(255,255,255,0.25);font-size:10px}
-#title{position:absolute;top:16px;left:16px;z-index:10;pointer-events:auto}
-.title-row{display:flex;align-items:flex-start;gap:12px}
-#title h1{font-size:18px;font-weight:700;color:#a892b8;text-shadow:0 0 20px rgba(168,146,184,0.3)}
-#title p{font-size:11px;color:rgba(255,255,255,0.3);margin-top:2px}
-.win-controls{display:flex;gap:6px;margin-top:2px}
-.win-controls button{width:30px;height:30px;border-radius:10px;border:1px solid rgba(255,255,255,0.16);background:rgba(255,255,255,0.07);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);color:#c084fc;font-size:15px;font-weight:700;line-height:1;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center}
-.win-controls button:hover{background:rgba(192,132,252,0.22);border-color:rgba(192,132,252,0.5);box-shadow:0 0 12px rgba(192,132,252,0.25)}
-.win-controls .min-btn:hover{background:rgba(105,240,174,0.18);border-color:rgba(105,240,174,0.4);color:#69f0ae}
-.win-controls .close-btn:hover{background:rgba(229,115,115,0.2);border-color:rgba(229,115,115,0.5);color:#e57373}
-/* ── Minimized pill ── */
-#minPill{position:absolute;bottom:24px;left:50%;transform:translateX(-50%);z-index:20;pointer-events:auto;padding:10px 22px;border-radius:999px;border:1px solid rgba(192,132,252,0.4);background:rgba(29,23,38,0.75);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);color:#e8e0f0;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 0 24px rgba(192,132,252,0.2);transition:all .25s}
-#minPill:hover{background:rgba(192,132,252,0.2)}
-/* ── Device card ── */
-.device-card{display:flex;align-items:center;gap:8px;padding:10px;border-radius:12px;margin-bottom:8px;background:linear-gradient(135deg,rgba(105,240,174,0.12),rgba(192,132,252,0.08));border:1px solid rgba(105,240,174,0.28)}
-.device-card .node-name{color:#d7ffe9}
-.section-title{margin-top:12px}
-/* ── Voice button ── */
-#voiceBtn{position:absolute;bottom:24px;left:50%;transform:translateX(-50%);z-index:10;pointer-events:auto;width:64px;height:64px;border-radius:50%;border:2px solid rgba(192,132,252,0.4);background:rgba(255,255,255,0.08);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .25s;box-shadow:0 0 20px rgba(192,132,252,0.15)}
-#voiceBtn:hover{background:rgba(192,132,252,0.15);border-color:rgba(192,132,252,0.6);box-shadow:0 0 30px rgba(192,132,252,0.3)}
-#voiceBtn.listening{background:rgba(192,132,252,0.25);border-color:#c084fc;animation:voicePulse 1.2s infinite}
-#voiceBtn svg{width:28px;height:28px;fill:#c084fc;transition:fill .2s}
-#voiceBtn.listening svg{fill:#e8b4f8}
-@keyframes voicePulse{0%,100%{box-shadow:0 0 20px rgba(192,132,252,0.3)}50%{box-shadow:0 0 40px rgba(192,132,252,0.6)}}
-/* ── Transcript bar ── */
-#transcript{position:absolute;bottom:100px;left:50%;transform:translateX(-50%);z-index:10;pointer-events:none;max-width:500px;width:90%;text-align:center;opacity:0;transition:opacity .3s}
-#transcript.show{opacity:1}
-#transcript .text{font-size:14px;color:#e8e0f0;background:rgba(255,255,255,0.08);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.1);border-radius:14px;padding:10px 20px;display:inline-block}
-#transcript .speaker{font-size:10px;color:#c084fc;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:3px}
-/* ── Response bubble (Lilly speaks) ── */
-#lillyResponse{position:absolute;bottom:170px;left:50%;transform:translateX(-50%);z-index:10;pointer-events:none;max-width:520px;width:90%;text-align:center;opacity:0;transition:opacity .4s}
-#lillyResponse.show{opacity:1}
-#lillyResponse .text{font-size:13px;color:#e8e0f0;background:rgba(168,146,184,0.12);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(168,146,184,0.2);border-radius:14px;padding:10px 18px;display:inline-block;line-height:1.4}
-#lillyResponse .speaker{font-size:10px;color:#69f0ae;font-weight:600;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:3px}
+  :root{
+    --bg:#0d0a12;
+    --lavender:#a892b8;
+    --purple:#8b7a9e;
+    --lilac:#c084fc;
+    --mint:#69f0ae;
+    --rose:#f0abfc;
+    --gold:#fbbf24;
+    --cyan:#67e8f9;
+    --danger:#e57373;
+    --text:#e8e0f0;
+    --dim:rgba(255,255,255,0.45);
+    --faint:rgba(255,255,255,0.07);
+    --glass:rgba(255,255,255,0.08);
+    --glass-border:rgba(255,255,255,0.12);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text)}
+  #hub{position:fixed;inset:0}
+  #map{position:absolute;inset:0;background:#141019;z-index:1}
+  /* ── Glass panel helpers ── */
+  .glass{background:var(--glass);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--glass-border);border-radius:18px}
+
+  /* ── Title (top-left) ── */
+  #title{position:absolute;top:16px;left:16px;z-index:10;pointer-events:auto}
+  .title-row{display:flex;align-items:flex-start;gap:12px}
+  #title h1{font-size:18px;font-weight:700;color:var(--lavender);text-shadow:0 0 20px rgba(168,146,184,0.35);letter-spacing:.3px}
+  #title p{font-size:11px;color:var(--dim);margin-top:2px}
+  .win-controls{display:flex;gap:6px;margin-top:2px}
+  .win-controls button{width:30px;height:30px;border-radius:10px;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(12px);color:var(--lilac);font-size:15px;font-weight:700;line-height:1;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center}
+  .win-controls button:hover{background:rgba(192,132,252,0.22);border-color:rgba(192,132,252,0.5);box-shadow:0 0 12px rgba(192,132,252,.25)}
+  .win-controls .min-btn:hover{background:rgba(105,240,174,.18);border-color:rgba(105,240,174,.4);color:var(--mint)}
+  .win-controls .close-btn:hover{background:rgba(229,115,115,.2);border-color:rgba(229,115,115,.5);color:var(--danger)}
+
+  /* ── Sidebar (right, lavender glass) ── */
+  #sidebar{position:absolute;top:16px;right:16px;width:288px;z-index:10;pointer-events:auto;max-height:calc(100vh - 32px);display:flex;flex-direction:column;background:var(--glass);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--glass-border);border-radius:18px;padding:14px;box-shadow:0 8px 40px rgba(0,0,0,.45)}
+  .side-h2{font-size:11px;font-weight:700;color:var(--lavender);margin:0 0 8px;letter-spacing:.6px;text-transform:uppercase}
+  .side-h2.top{margin-top:0}
+  .side-section{margin-top:12px}
+  /* Status bar */
+  #statusBox{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;background:rgba(255,255,255,.05);border:1px solid var(--glass-border);font-size:11px}
+  .pulse-dot{width:8px;height:8px;border-radius:50%;background:#555;flex-shrink:0;box-shadow:0 0 6px currentColor}
+  .pulse-dot.live{background:var(--mint);color:var(--mint);animation:pulse 1.6s infinite}
+  #statusText{flex:1;color:var(--dim)}
+  #gpsRead{color:var(--cyan);font-family:ui-monospace,monospace;font-size:9px}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  /* Buttons */
+  .btn-group{display:flex;gap:8px;margin-top:10px}
+  .btn{flex:1;padding:9px;border:none;border-radius:12px;font-weight:700;font-size:12px;cursor:pointer;color:#fff;transition:opacity .2s;background:linear-gradient(140deg,#8b7a9e,#a892b8)}
+  .btn:active{opacity:.7}
+  .btn-accent{background:linear-gradient(140deg,#6f9bd6,#8b7a9e)}
+  /* Node cards */
+  #nodeList{display:flex;flex-direction:column;gap:6px;max-height:34vh;overflow-y:auto}
+  .node-card{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;background:rgba(255,255,255,.05);border:1px solid var(--glass-border);border-left:3px solid var(--nc,#8b7a9e);transition:all .3s}
+  .node-card.off{opacity:.55}
+  .node-dot{width:10px;height:10px;border-radius:50%;background:var(--nc,#8b7a9e);box-shadow:0 0 6px var(--nc,#8b7a9e);flex-shrink:0;cursor:pointer}
+  .node-name{font-size:12px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .node-meta{font-size:9px;color:var(--dim)}
+  .node-status{font-size:9px;padding:2px 6px;border-radius:8px;font-weight:700;white-space:nowrap}
+  .node-on{background:rgba(105,240,174,.16);color:var(--mint)}
+  .node-off{background:rgba(255,255,255,.07);color:rgba(255,255,255,.35)}
+  /* Device feed */
+  #feed{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;min-height:60px;max-height:30vh}
+  .dev-item{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:10px;background:rgba(255,255,255,.05);border:1px solid var(--glass-border);font-size:11px;border-left:3px solid var(--dc,#8b7a9e)}
+  .dev-item .d-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--text);min-width:0}
+  .dev-item .d-meta{color:var(--dim);font-size:9px;white-space:nowrap}
+  .tag{display:inline-block;padding:1px 5px;border-radius:6px;font-size:8px;font-weight:700;background:var(--gold);color:#000;margin-left:5px;flex-shrink:0}
+  .tag.wifi{background:var(--cyan);color:#000}
+  .empty{color:rgba(255,255,255,.35);text-align:center;font-size:11px;padding:14px}
+
+  /* ── Lilly pup avatar (branding, bottom-left) ── */
+  #pupBox{position:absolute;left:16px;bottom:16px;z-index:10;pointer-events:auto;padding:8px;width:116px;text-align:center}
+  #pupBox .pup-glare{font-size:9px;color:var(--lilac);font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-top:2px}
+  #pupCanvas{display:block;width:100%;height:auto;filter:drop-shadow(0 6px 18px rgba(192,132,252,.35))}
+
+  /* Minimized pill */
+  #minPill{position:absolute;bottom:24px;left:50%;transform:translateX(-50%);z-index:20;pointer-events:auto;padding:10px 22px;border-radius:999px;border:1px solid rgba(192,132,252,.4);background:rgba(29,23,38,.75);backdrop-filter:blur(16px);color:var(--text);font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 0 24px rgba(192,132,252,.2)}
+  .leaflet-popup-content-wrapper{background:rgba(29,23,38,.92)!important;color:var(--text)!important;border-radius:12px!important;backdrop-filter:blur(10px)}
+  .leaflet-popup-tip{background:rgba(29,23,38,.92)!important}
+  .leaflet-popup-content{font-family:system-ui,sans-serif!important;font-size:11px!important;margin:10px 12px!important;line-height:1.5}
+  ::-webkit-scrollbar{width:6px;height:6px}
+  ::-webkit-scrollbar-thumb{background:rgba(168,146,184,.35);border-radius:3px}
+  @media (max-width:720px){
+    #sidebar{width:min(288px,86vw);top:auto;bottom:12px;right:12px;max-height:54vh}
+    #pupBox{display:none}
+  }
 </style>
 </head>
 <body>
 <div id="hub">
-  <canvas id="mainCanvas"></canvas>
-  <div id="overlay"></div>
+  <div id="map"></div>
+
   <div id="title">
     <div class="title-row">
       <div>
-        <h1>🐾 Lilly Vision Hub</h1>
-        <p id="subtitle">3 nodes · live tracking</p>
+        <h1>🐾 Lilly Radar</h1>
+        <p id="subtitle">0 nodes online · triangulation</p>
       </div>
       <div class="win-controls">
         <button class="min-btn" onclick="minimizeHub()" title="Minimize">−</button>
@@ -75,691 +112,368 @@ canvas{display:block}
       </div>
     </div>
   </div>
+
   <div id="sidebar">
-    <h2>🖥️ Device</h2>
-    <div id="deviceCard"></div>
-    <h2 class="section-title">📡 Phone Nodes</h2>
-    <div id="nodeList"></div>
-    <h2 class="section-title">👁️ Recent Detections</h2>
-    <div id="detectionLog" class="detection-log"></div>
+    <div class="side-h2 top">Proximity Radar</div>
+    <div id="statusBox">
+      <span class="pulse-dot" id="statusDot"></span>
+      <span id="statusText">Connecting…</span>
+      <span id="gpsRead"></span>
+    </div>
+    <div class="btn-group">
+      <button class="btn btn-accent" onclick="forceRescan()">⚡ Rescan</button>
+      <button class="btn" onclick="openAMSettings()">⚙ Settings</button>
+    </div>
+    <div class="side-section">
+      <div class="side-h2">📡 Nodes <span id="nodeCount"></span></div>
+      <div id="nodeList"><div class="empty">No nodes registered yet.</div></div>
+    </div>
+    <div class="side-section">
+      <div class="side-h2">👀 Devices <span id="devCount"></span></div>
+      <div id="feed"><div class="empty">Scanning for nearby devices…</div></div>
+    </div>
   </div>
-  <div id="minPill" style="display:none" onclick="restoreHub()">🐾 Lilly Vision Hub — tap to expand</div>
-  <!-- Voice control -->
-  <div id="lillyResponse"><div class="speaker">Lilly</div><div class="text" id="lillyText"></div></div>
-  <div id="transcript"><div class="speaker">You</div><div class="text" id="transcriptText"></div></div>
-  <div id="voiceBtn" onclick="toggleVoice()">
-    <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+
+  <div id="pupBox" class="glass">
+    <canvas id="pupCanvas" width="240" height="240"></canvas>
+    <div class="pup-glare">Lilly</div>
   </div>
+
+  <div id="minPill" style="display:none" onclick="restoreHub()">🐾 Lilly Radar — tap to expand</div>
 </div>
 
 <script>
-// ═══════════════════════════════════════════════════════════════════════
-// Lilly Vision Hub — Canvas Avatar + Vision Sphere + Tracker + Nodes
-// ═══════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════
+// Lilly Radar — Multi-node proximity radar on a real map.
+// Aggregates GPS + WiFi + Bluetooth scans from every online phone node
+// (via the host's cached /api/nodes/fleet), triangulates each detected
+// device by intersecting range circles, and plots movement trails.
+// Theme: WebUI lavender + glassmorphism, with the Lilly pup avatar.
+// ══════════════════════════════════════════════════════════════════
 
-const canvas = document.getElementById('mainCanvas');
-const ctx = canvas.getContext('2d');
-let W, H, cx, cy, t = 0;
+const EARTH_R = 6378137;
+const NODE_COLORS = ['#c084fc', '#f0abfc', '#69f0ae', '#67e8f9', '#fbbf24', '#e57373'];
+const KNOWN_TRACKERS = ['tile', 'chipolo', 'pebblebee', 'smarttag', 'moto tag', 'airtag'];
 
-// ── Theme colours ──
-const COL = {
-  bg: '#0d0a12',
-  lavender: '#a892b8',
-  purple: '#8b7a9e',
-  lilac: '#c084fc',
-  mint: '#69f0ae',
-  rose: '#f0abfc',
-  gold: '#fbbf24',
-  cyan: '#67e8f9',
-  white: 'rgba(255,255,255,0.9)',
-  dim: 'rgba(255,255,255,0.15)',
-  faint: 'rgba(255,255,255,0.05)',
-};
+const map = L.map('map', { zoomControl: false }).setView([45, -75], 13);
+L.control.zoom({ position: 'topright' }).addTo(map);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
 
-// ── Node state ──
-const NODE_COLORS = [COL.lilac, COL.rose, COL.mint];
-const NODE_DEFAULTS = [
-  { id:'phone-1', name:'Primary', online:false, lat:0, lng:0, battery:-1, detections:0 },
-  { id:'phone-2', name:'Kitchen', online:false, lat:0, lng:0, battery:-1, detections:0 },
-  { id:'phone-3', name:'Garage',  online:false, lat:0, lng:0, battery:-1, detections:0 },
-];
-let nodes = JSON.parse(JSON.stringify(NODE_DEFAULTS));
-let detections = [];
-let scanPulse = 0; // 0–1 for scan animation
+const nodeMarkers = {};      // node_id -> L.circleMarker
+let    nodeEntries = [];     // [{node_id,name,lat,lng,online,battery,color}]
+let    deviceState = {};     // key -> {history, marker, polyline, color, name}
 
-// ── Resize ──
-function resize(){
-  const dpr = window.devicePixelRatio || 1;
-  W = window.innerWidth; H = window.innerHeight;
-  canvas.width = W * dpr; canvas.height = H * dpr;
-  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  cx = W / 2; cy = H / 2;
+function hashAngle(str){
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = str.charCodeAt(i) + ((h << 5) - h);
+  return (Math.abs(h) % 360) * (Math.PI / 180);
 }
-window.addEventListener('resize', resize);
-resize();
-
-// ═══════════════════════════════════════════════════════════════════════
-// DRAW: Background grid
-// ═══════════════════════════════════════════════════════════════════════
-function drawGrid(){
-  const spacing = 40;
-  ctx.strokeStyle = COL.faint;
-  ctx.lineWidth = 0.5;
-  for(let x = 0; x < W; x += spacing){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
-  for(let y = 0; y < H; y += spacing){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+// RSSI -> distance (meters) using the free-space path-loss reference from the pyfile.
+function rssiToDist(rssi, freq){
+  if (rssi === null || rssi === undefined || rssi === 0) return null;
+  const f = (!freq || freq < 2000) ? 2412 : freq;
+  const exp = (27.55 - (20 * Math.log10(f)) + Math.abs(rssi)) / 20.0;
+  const d = Math.pow(10, exp);
+  return Math.min(d, 300);
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// DRAW: Vision Sphere (rotating detection rings)
-// ═══════════════════════════════════════════════════════════════════════
-function drawVisionSphere(radius){
-  const rings = 5;
-  const breathe = Math.sin(t * 0.8) * 8;
-
-  // Outer glow
-  const grd = ctx.createRadialGradient(cx, cy, radius * 0.3, cx, cy, radius + 30);
-  grd.addColorStop(0, 'rgba(139,122,158,0.08)');
-  grd.addColorStop(0.7, 'rgba(192,132,252,0.04)');
-  grd.addColorStop(1, 'transparent');
-  ctx.fillStyle = grd;
-  ctx.beginPath(); ctx.arc(cx, cy, radius + 30, 0, Math.PI*2); ctx.fill();
-
-  // Rings
-  for(let i = 0; i < rings; i++){
-    const r = (radius * 0.35) + (radius * 0.65) * (i / rings) + breathe;
-    const alpha = 0.08 + (1 - i/rings) * 0.12;
-    const rotSpeed = (i % 2 === 0 ? 1 : -1) * (0.2 + i * 0.08);
-
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(t * rotSpeed);
-
-    // Draw ellipse (tilted ring)
-    ctx.strokeStyle = `rgba(168,146,184,${alpha})`;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, r, r * 0.4, i * 0.3, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Detection dots on ring
-    const dotCount = 3 + i;
-    for(let d = 0; d < dotCount; d++){
-      const angle = (d / dotCount) * Math.PI * 2 + t * (0.5 + i * 0.1);
-      const dx = Math.cos(angle) * r;
-      const dy = Math.sin(angle) * r * 0.4;
-      const dotAlpha = 0.3 + Math.sin(t * 2 + d) * 0.3;
-      ctx.fillStyle = `rgba(192,132,252,${dotAlpha})`;
-      ctx.beginPath(); ctx.arc(dx, dy, 2, 0, Math.PI * 2); ctx.fill();
+function offsetFrom(lat, lng, distM, angleRad){
+  const dLat = (distM * Math.cos(angleRad)) / EARTH_R;
+  const dLng = (distM * Math.sin(angleRad)) / (EARTH_R * Math.cos(Math.PI * lat / 180));
+  return { lat: lat + (dLat * 180 / Math.PI), lng: lng + (dLng * 180 / Math.PI) };
+}
+function toLocal(lat, lng, refLat, refLng){
+  return {
+    x: EARTH_R * Math.cos(refLat * Math.PI / 180) * (lng - refLng) * Math.PI / 180,
+    y: EARTH_R * (lat - refLat) * Math.PI / 180,
+  };
+}
+function toLatLng(x, y, refLat, refLng){
+  return {
+    lat: refLat + (y / EARTH_R) * 180 / Math.PI,
+    lng: refLng + (x / (EARTH_R * Math.cos(refLat * Math.PI / 180))) * 180 / Math.PI,
+  };
+}
+// Triangulate a device given observations [{lat,lng,rssi,freq}] across nodes.
+function triangulate(obs){
+  const est = obs.map(o => offsetFrom(o.lat, o.lng, rssiToDist(o.rssi, o.freq) || 20, hashAngle(o.key + o.node_id)));
+  if (obs.length >= 2){
+    const ds = obs.map(o => rssiToDist(o.rssi, o.freq) || 20);
+    const refL = toLocal(obs[0].lat, obs[0].lng, obs[0].lat, obs[0].lng);
+    const A = [], b = [];
+    for (let i = 1; i < obs.length; i++){
+      const pi = toLocal(obs[i].lat, obs[i].lng, obs[0].lat, obs[0].lng);
+      A.push([2*(pi.x - refL.x), 2*(pi.y - refL.y)]);
+      b.push(ds[0]*ds[0] - ds[i]*ds[i] + (pi.x*pi.x + pi.y*pi.y) - (refL.x*refL.x + refL.y*refL.y));
     }
-
-    ctx.restore();
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// DRAW: Animated Lilly Puppy (center)
-// ═══════════════════════════════════════════════════════════════════════
-function drawLilly(){
-  const breathe = Math.sin(t * 1.2) * 3;
-  const tilt = Math.sin(t * 0.7) * 0.03;
-  const earWiggle = Math.sin(t * 2.5) * 2;
-  const tailWag = Math.sin(t * 3) * 0.15;
-  const eyeBlink = Math.sin(t * 0.4) > 0.97 ? 1 : 0; // occasional blink
-
-  const s = Math.min(W, H) * 0.07; // scale
-
-  ctx.save();
-  ctx.translate(cx, cy + breathe);
-  ctx.rotate(tilt);
-
-  // ── Body (soft oval) ──
-  ctx.fillStyle = 'rgba(168,146,184,0.15)';
-  ctx.strokeStyle = 'rgba(168,146,184,0.5)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.ellipse(0, s * 0.3, s * 1.1, s * 1.4, 0, 0, Math.PI * 2);
-  ctx.fill(); ctx.stroke();
-
-  // ── Head ──
-  ctx.fillStyle = 'rgba(168,146,184,0.2)';
-  ctx.beginPath();
-  ctx.arc(0, -s * 0.8, s * 0.85, 0, Math.PI * 2);
-  ctx.fill(); ctx.stroke();
-
-  // ── Ears (floppy) ──
-  ctx.fillStyle = 'rgba(192,132,252,0.2)';
-  ctx.strokeStyle = 'rgba(192,132,252,0.5)';
-  // Left ear
-  ctx.save();
-  ctx.translate(-s * 0.55, -s * 1.3);
-  ctx.rotate(-0.2 + earWiggle * 0.02);
-  ctx.beginPath();
-  ctx.ellipse(0, s * 0.4, s * 0.35, s * 0.65, -0.15, 0, Math.PI * 2);
-  ctx.fill(); ctx.stroke();
-  ctx.restore();
-  // Right ear
-  ctx.save();
-  ctx.translate(s * 0.55, -s * 1.3);
-  ctx.rotate(0.2 - earWiggle * 0.02);
-  ctx.beginPath();
-  ctx.ellipse(0, s * 0.4, s * 0.35, s * 0.65, 0.15, 0, Math.PI * 2);
-  ctx.fill(); ctx.stroke();
-  ctx.restore();
-
-  // ── Eyes ──
-  const eyeY = -s * 0.9;
-  const eyeSpacing = s * 0.3;
-  if(eyeBlink < 1){
-    // Left eye
-    ctx.fillStyle = 'rgba(105,240,174,0.9)';
-    ctx.beginPath();
-    ctx.arc(-eyeSpacing, eyeY, s * 0.12, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#0d0a12';
-    ctx.beginPath();
-    ctx.arc(-eyeSpacing, eyeY, s * 0.05, 0, Math.PI * 2);
-    ctx.fill();
-    // Eye highlight
-    ctx.fillStyle = 'rgba(255,255,255,0.8)';
-    ctx.beginPath();
-    ctx.arc(-eyeSpacing - s*0.03, eyeY - s*0.03, s * 0.03, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Right eye
-    ctx.fillStyle = 'rgba(105,240,174,0.9)';
-    ctx.beginPath();
-    ctx.arc(eyeSpacing, eyeY, s * 0.12, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#0d0a12';
-    ctx.beginPath();
-    ctx.arc(eyeSpacing, eyeY, s * 0.05, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.8)';
-    ctx.beginPath();
-    ctx.arc(eyeSpacing - s*0.03, eyeY - s*0.03, s * 0.03, 0, Math.PI * 2);
-    ctx.fill();
-  } else {
-    // Blink (closed eyes)
-    ctx.strokeStyle = 'rgba(105,240,174,0.9)';
-    ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(-eyeSpacing - s*0.1, eyeY); ctx.lineTo(-eyeSpacing + s*0.1, eyeY); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(eyeSpacing - s*0.1, eyeY); ctx.lineTo(eyeSpacing + s*0.1, eyeY); ctx.stroke();
-  }
-
-  // ── Nose ──
-  ctx.fillStyle = 'rgba(240,171,252,0.7)';
-  ctx.beginPath();
-  ctx.moveTo(0, -s * 0.6);
-  ctx.lineTo(-s * 0.08, -s * 0.52);
-  ctx.lineTo(s * 0.08, -s * 0.52);
-  ctx.closePath();
-  ctx.fill();
-
-  // ── Mouth (happy curve) ──
-  ctx.strokeStyle = 'rgba(168,146,184,0.5)';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.arc(-s * 0.12, -s * 0.45, s * 0.12, 0.2, Math.PI - 0.2);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(s * 0.12, -s * 0.45, s * 0.12, 0.2, Math.PI - 0.2);
-  ctx.stroke();
-
-  // ── Tail ──
-  ctx.strokeStyle = 'rgba(168,146,184,0.5)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(s * 0.7, s * 0.1);
-  ctx.quadraticCurveTo(s * 1.3, -s * 0.3 + Math.sin(t * 3) * s * 0.4, s * 1.1, -s * 0.8 + Math.sin(t * 3) * s * 0.3);
-  ctx.stroke();
-
-  // ── Paws ──
-  ctx.fillStyle = 'rgba(168,146,184,0.15)';
-  ctx.strokeStyle = 'rgba(168,146,184,0.4)';
-  ctx.lineWidth = 1.5;
-  // Left paw
-  ctx.beginPath(); ctx.ellipse(-s*0.4, s*1.5, s*0.25, s*0.15, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-  // Right paw
-  ctx.beginPath(); ctx.ellipse(s*0.4, s*1.5, s*0.25, s*0.15, 0, 0, Math.PI*2); ctx.fill(); ctx.stroke();
-
-  ctx.restore();
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// DRAW: Node positions on outer ring
-// ═══════════════════════════════════════════════════════════════════════
-function drawNodes(){
-  const ringR = Math.min(W, H) * 0.38;
-  const onlineCount = nodes.filter(n => n.online).length;
-
-  // Draw track ring
-  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-  ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.arc(cx, cy, ringR, 0, Math.PI * 2); ctx.stroke();
-
-  // Position nodes evenly on ring
-  const angleStep = (Math.PI * 2) / nodes.length;
-  const nodePositions = [];
-
-  nodes.forEach((node, i) => {
-    const angle = -Math.PI/2 + angleStep * i;
-    const nx = cx + Math.cos(angle) * ringR;
-    const ny = cy + Math.sin(angle) * ringR;
-    nodePositions.push({ x: nx, y: ny });
-
-    const col = NODE_COLORS[i];
-    const online = node.online;
-
-    // Pulse ring for online nodes
-    if(online){
-      const pulse = (Math.sin(t * 2 + i) + 1) * 0.5;
-      ctx.strokeStyle = col;
-      ctx.globalAlpha = 0.1 + pulse * 0.15;
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(nx, ny, 20 + pulse * 10, 0, Math.PI * 2); ctx.stroke();
-      ctx.globalAlpha = 1;
-    }
-
-    // Node circle
-    ctx.fillStyle = online ? col : 'rgba(255,255,255,0.08)';
-    ctx.globalAlpha = online ? 0.9 : 0.3;
-    ctx.beginPath(); ctx.arc(nx, ny, 14, 0, Math.PI * 2); ctx.fill();
-    ctx.globalAlpha = 1;
-
-    // Border
-    ctx.strokeStyle = online ? col : 'rgba(255,255,255,0.15)';
-    ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(nx, ny, 14, 0, Math.PI * 2); ctx.stroke();
-
-    // Phone icon (center dot)
-    ctx.fillStyle = online ? '#0d0a12' : 'rgba(255,255,255,0.2)';
-    ctx.beginPath(); ctx.arc(nx, ny, 4, 0, Math.PI * 2); ctx.fill();
-
-    // Label
-    ctx.fillStyle = online ? col : 'rgba(255,255,255,0.3)';
-    ctx.font = '600 11px -apple-system, system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(node.name, nx, ny + 28);
-
-    // Battery indicator
-    if(node.battery >= 0){
-      ctx.font = '10px -apple-system, system-ui, sans-serif';
-      ctx.fillStyle = node.battery > 20 ? 'rgba(105,240,174,0.6)' : 'rgba(229,115,115,0.8)';
-      ctx.fillText(Math.round(node.battery) + '%', nx, ny + 40);
-    }
-  });
-
-  // ── Inter-node detection lines ──
-  for(let i = 0; i < nodePositions.length; i++){
-    for(let j = i + 1; j < nodePositions.length; j++){
-      const a = nodes[i], b = nodes[j];
-      const pa = nodePositions[i], pb = nodePositions[j];
-
-      if(a.online && b.online){
-        // Active detection line (animated)
-        const pulse = (Math.sin(t * 1.5 + i + j) + 1) * 0.5;
-        ctx.strokeStyle = `rgba(192,132,252,${0.15 + pulse * 0.2})`;
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([4, 6]);
-        ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
-        ctx.setLineDash([]);
-
-        // Detection beam particles
-        const progress = (t * 0.5 + i * 0.3) % 1;
-        const px = pa.x + (pb.x - pa.x) * progress;
-        const py = pa.y + (pb.y - pa.y) * progress;
-        ctx.fillStyle = `rgba(192,132,252,${0.6 + pulse * 0.3})`;
-        ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2); ctx.fill();
-
-        // Midpoint label
-        const mx = (pa.x + pb.x) / 2;
-        const my = (pa.y + pb.y) / 2 - 8;
-        ctx.fillStyle = 'rgba(192,132,252,0.4)';
-        ctx.font = '9px -apple-system, system-ui, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('detecting', mx, my);
-      } else if(a.online || b.online){
-        // One online — faint dotted line
-        ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([2, 8]);
-        ctx.beginPath(); ctx.moveTo(pa.x, pa.y); ctx.lineTo(pb.x, pb.y); ctx.stroke();
-        ctx.setLineDash([]);
-      }
+    const ATA00 = A.reduce((s,r)=>s+r[0]*r[0],0), ATA01 = A.reduce((s,r)=>s+r[0]*r[1],0), ATA11 = A.reduce((s,r)=>s+r[1]*r[1],0);
+    const ATb0  = A.reduce((s,r,i)=>s+r[0]*b[i],0), ATb1 = A.reduce((s,r,i)=>s+r[1]*b[i],0);
+    const det = ATA00*ATA11 - ATA01*ATA01;
+    if (Math.abs(det) > 1e-12){
+      const x = (ATA11*ATb0 - ATA01*ATb1) / det;
+      const y = (ATA00*ATb1 - ATA01*ATb0) / det;
+      const sol = toLatLng(x + refL.x, y + refL.y, obs[0].lat, obs[0].lng);
+      const maxD = Math.max(...obs.map(o=>distM(sol.lat,sol.lng,o.lat,o.lng)));
+      if (maxD < 400) return sol;   // plausible intersection
     }
   }
+  return { lat: est.reduce((s,p)=>s+p.lat,0)/est.length, lng: est.reduce((s,p)=>s+p.lng,0)/est.length };
+}
+function distM(lat1,lng1,lat2,lng2){
+  const R = EARTH_R, dLat=(lat2-lat1)*Math.PI/180, dLng=(lng2-lng1)*Math.PI/180;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// DRAW: Scan pulse (ripple from center)
-// ═══════════════════════════════════════════════════════════════════════
-function drawScanPulse(){
-  if(scanPulse <= 0) return;
-  const maxR = Math.min(W, H) * 0.45;
-  const r = maxR * (1 - scanPulse);
-  ctx.strokeStyle = `rgba(192,132,252,${scanPulse * 0.4})`;
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
-  scanPulse -= 0.008;
+function setStatus(text, live){
+  document.getElementById('statusText').textContent = text;
+  document.getElementById('statusDot').className = 'pulse-dot' + (live ? ' live' : '');
 }
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-// ═══════════════════════════════════════════════════════════════════════
-// DRAW: Floating particles
-// ═══════════════════════════════════════════════════════════════════════
-const particles = Array.from({length: 30}, () => ({
-  x: Math.random(), y: Math.random(),
-  vx: (Math.random() - 0.5) * 0.0003,
-  vy: (Math.random() - 0.5) * 0.0003,
-  r: Math.random() * 2 + 0.5,
-  a: Math.random() * 0.3 + 0.05,
-}));
-
-function drawParticles(){
-  particles.forEach(p => {
-    p.x += p.vx; p.y += p.vy;
-    if(p.x < 0) p.x = 1; if(p.x > 1) p.x = 0;
-    if(p.y < 0) p.y = 1; if(p.y > 1) p.y = 0;
-    const flicker = 0.5 + Math.sin(t * 2 + p.x * 10) * 0.5;
-    ctx.fillStyle = `rgba(168,146,184,${p.a * flicker})`;
-    ctx.beginPath(); ctx.arc(p.x * W, p.y * H, p.r, 0, Math.PI * 2); ctx.fill();
+function updateNodeMarkers(){
+  for (const k in nodeMarkers){ if(!nodeEntries.some(n=>n.node_id===k)){ map.removeLayer(nodeMarkers[k]); delete nodeMarkers[k]; } }
+  nodeEntries.forEach(n => {
+    const col = n.color;
+    if (nodeMarkers[n.node_id]){
+      if (n.lat && n.lng) nodeMarkers[n.node_id].setLatLng([n.lat,n.lng]);
+      nodeMarkers[n.node_id].setStyle({color:col, fillColor:col, fillOpacity:n.online?0.85:0.3});
+    } else {
+      const m = L.circleMarker([n.lat||0,n.lng||0], {radius:10,color:'#fff',weight:2,fillColor:col,fillOpacity:n.online?0.85:0.3})
+        .addTo(map).bindPopup(`<b>${esc(n.name)}</b><br>${n.online?'🟢 online':'⚫ offline'}${n.lat&&n.lng?'<br>📍 '+n.lat.toFixed(5)+', '+n.lng.toFixed(5):''}${n.battery>=0?'<br>🔋 '+Math.round(n.battery)+'%':''}`);
+      nodeMarkers[n.node_id] = m;
+    }
   });
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// MAIN LOOP
-// ═══════════════════════════════════════════════════════════════════════
-function frame(){
-  t += 0.016;
-  ctx.clearRect(0, 0, W, H);
-
-  // Background
-  const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.7);
-  bg.addColorStop(0, 'rgba(30,20,45,1)');
-  bg.addColorStop(1, COL.bg);
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
-
-  drawGrid();
-  drawParticles();
-  drawVisionSphere(Math.min(W, H) * 0.25);
-  drawNodes();
-  drawLilly();
-  drawScanPulse();
-
-  requestAnimationFrame(frame);
+function updateDevice(key, lat, lng, name, color, isWifi, isTracker){
+  let d = deviceState[key];
+  if (!d){
+    d = deviceState[key] = { history: [], marker: null, polyline: null, color, name };
+    d.marker = L.circleMarker([lat,lng], {radius:6,color:'#fff',weight:1.5,fillColor:color,fillOpacity:.9}).addTo(map).bindPopup('');
+    d.polyline = L.polyline([], {color,weight:2.5,opacity:.65,dashArray:'5, 5'}).addTo(map);
+  }
+  if (d.color!==color){ d.color=color; d.marker.setStyle({fillColor:color}); d.polyline.setStyle({color}); }
+  d.name = name;
+  const last = d.history[d.history.length-1];
+  if (!last || distM(last[0],last[1],lat,lng) > 1.5){
+    d.history.push([lat,lng]);
+    if (d.history.length > 40) d.history.shift();
+  }
+  d.marker.setLatLng([lat,lng]);
+  d.polyline.setLatLngs(d.history);
+  d.marker.bindPopup(`<b>${esc(name)}</b>${isTracker?'<br>🏷️ Tracker':''}${isWifi?'<br>📶 WiFi':''}<br>📏 ${d.history.length} ping${d.history.length>1?'s':''}<br>📍 ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
 }
-frame();
-
-// ═══════════════════════════════════════════════════════════════════════
-// DATA POLLING
-// ═══════════════════════════════════════════════════════════════════════
-async function pollNodes(){
-  try {
-    const r = await fetch('/api/nodes');
-    const d = await r.json();
-    if(d.nodes && d.nodes.length){
-      nodes = d.nodes.slice(0, 3).map((n, i) => ({
-        id: n.node_id,
-        name: n.name || n.node_id,
-        online: n.online,
-        lat: n.last_gps_lat || 0,
-        lng: n.last_gps_lng || 0,
-        battery: n.battery_pct,
-        detections: 0,
-      }));
-      // Pad to 3 if fewer
-      while(nodes.length < 3) nodes.push({...NODE_DEFAULTS[nodes.length], online: false});
+function pruneDevices(present){
+  for (const k in deviceState){
+    if (!present.has(k)){
+      map.removeLayer(deviceState[k].marker);
+      if (deviceState[k].polyline) map.removeLayer(deviceState[k].polyline);
+      delete deviceState[k];
     }
-    updateSidebar();
-  } catch(e){}
+  }
+}
 
-  // Fetch recent detections from tracker
+async function load(){
   try {
-    const r = await fetch('/api/tracker/sightings?limit=5');
-    const d = await r.json();
-    if(d.sightings){
-      detections = d.sightings.reverse().slice(0, 5);
-      updateDetections();
-      // Update detection count on nodes
-      detections.forEach(s => {
-        const node = nodes.find(n => n.id === s.node_id);
-        if(node) node.detections++;
+    const d = await (await fetch('/api/nodes/fleet')).json();
+    const nodes = d.nodes || [];
+    nodeEntries = [];
+    const observations = {};
+    let haveGps = false, onlineCount = 0;
+
+    nodes.forEach(({node, snapshot}, idx) => {
+      const onlineFlag = node.online === true;
+      if (onlineFlag) onlineCount++;
+      const color = NODE_COLORS[idx % NODE_COLORS.length];
+      const snap = snapshot || {};
+      const gps = snap.gps || {};
+      const gl = (gps.location && typeof gps.location === 'object') ? gps.location : gps;
+      let lat = parseFloat(gl.latitude || gl.lat || node.last_gps_lat || 0);
+      let lng = parseFloat(gl.longitude || gl.lng || node.last_gps_lng || 0);
+      const battery = _batteryLevel(snap.battery);
+      nodeEntries.push({ node_id: node.node_id || idx, name: node.name || node.node_id || idx, lat, lng, online: onlineFlag, battery, color });
+
+      if (!onlineFlag) return;
+      if (lat && lng) haveGps = true;
+
+      const wifi = snap.wifi || {};
+      const wnets = Array.isArray(wifi) ? wifi : (wifi.networks || []);
+      wnets.forEach(n => {
+        const key = n.bssid || ('wifi:' + (n.ssid||'?'));
+        if (!observations[key]) observations[key] = [];
+        observations[key].push({ node_id: node.node_id||idx, lat, lng, rssi: n.rssi, freq: n.frequency, key, name: n.ssid || 'Hidden WiFi', isWifi: true, isTracker: false });
       });
+      const bt = snap.bluetooth || {};
+      const bdevs = Array.isArray(bt) ? bt : (bt.devices || []);
+      bdevs.forEach(b => {
+        const key = 'bt:' + (b.address || (b.name||'?'));
+        const nm = b.name || 'Unknown BLE Tag';
+        const isTracker = KNOWN_TRACKERS.some(t => nm.toLowerCase().includes(t)) || nm === 'Unknown BLE Tag';
+        if (!observations[key]) observations[key] = [];
+        observations[key].push({ node_id: node.node_id||idx, lat, lng, rssi: b.rssi, freq: 2400, key, name: nm, isWifi: false, isTracker });
+      });
+    });
+
+    // Triangulate each device across all nodes that see it.
+    const present = new Set();
+    const feed = [];
+    for (const key in observations){
+      const good = observations[key].filter(o => o.lat && o.lng && o.rssi);
+      if (!good.length) continue;
+      const pos = triangulate(good);
+      const src = observations[key][0];
+      const color = src.isWifi ? '#67e8f9' : (src.isTracker ? '#fbbf24' : '#c084fc');
+      updateDevice(key, pos.lat, pos.lng, src.name, color, src.isWifi, src.isTracker);
+      present.add(key);
+      const avgD = Math.round(good.reduce((s,o)=>s+(rssiToDist(o.rssi,o.freq)||20),0)/good.length);
+      feed.push(`<div class="dev-item" style="--dc:${color}"><span class="d-name">${esc(src.name)}</span>${src.isTracker?'<span class="tag">TRACKER</span>':''}${src.isWifi?'<span class="tag wifi">WIFI</span>':''}<span class="d-meta">~${avgD}m · ${good.length}n</span></div>`);
     }
-  } catch(e){}
-}
+    pruneDevices(present);
+    document.getElementById('feed').innerHTML = feed.length ? feed.join('') : '<div class="empty">No devices in range.</div>';
+    document.getElementById('devCount').textContent = feed.length ? `· ${feed.length}` : '';
 
-function updateSidebar(){
-  const el = document.getElementById('nodeList');
-  // Device = this phone / primary node (first online node, else nodes[0])
-  const dev = nodes.find(n => n.online) || nodes[0];
-  if(dev){
-    const dstatus = dev.online ? 'ONLINE' : 'OFF';
-    const dstatusClass = dev.online ? 'node-on' : 'node-off';
-    const dbat = dev.battery >= 0 ? ` · ${Math.round(dev.battery)}%` : '';
-    document.getElementById('deviceCard').innerHTML = `<div class="device-card">
-      <div class="node-dot" style="background:#69f0ae;color:#69f0ae"></div>
-      <div class="node-name">${dev.name}${dbat}</div>
-      <span class="node-status ${dstatusClass}">${dstatus}</span>
-    </div>`;
+    const onlineNm = nodeEntries.filter(n=>n.online);
+    document.getElementById('nodeCount').textContent = onlineNm.length ? `· ${onlineNm.length}/${nodeEntries.length} online` : '';
+    document.getElementById('subtitle').textContent = `${onlineCount} node${onlineCount!==1?'s':''} · ${haveGps?'triangulation active':'awaiting GPS'}`;
+    const nl = document.getElementById('nodeList');
+    if (!nodeEntries.length){ nl.innerHTML = '<div class="empty">No nodes registered yet.</div>'; }
+    else {
+      nl.innerHTML = nodeEntries.map(n=>`
+        <div class="node-card ${n.online?'':'off'}" style="--nc:${n.color}">
+          <span class="node-dot" title="Center map on node" onclick="centerOnNode(${n.lat||0},${n.lng||0})"></span>
+          <div style="flex:1;min-width:0">
+            <div class="node-name">${esc(n.name)}</div>
+            <div class="node-meta">${n.lat&&n.lng? n.lat.toFixed(4)+', '+n.lng.toFixed(4) : 'no GPS'}</div>
+          </div>
+          <span class="node-status ${n.online?'node-on':'node-off'}">${n.online?'ONLINE':'OFF'}</span>
+        </div>`).join('');
+    }
+    document.getElementById('gpsRead').textContent = (()=>{
+      const g = nodeEntries.find(n=>n.online && n.lat && n.lng);
+      return g ? g.lat.toFixed(4)+', '+g.lng.toFixed(4) : '';
+    })();
+    updateNodeMarkers();
+    setStatus(haveGps ? `Live · ${onlineCount}/${nodeEntries.length} online` : (onlineCount? 'Online — waiting for GPS' : 'No nodes online'), haveGps || onlineCount>0);
+  } catch(e){
+    setStatus('Cant reach server', false);
   }
-  el.innerHTML = nodes.map((n, i) => {
-    const col = NODE_COLORS[i];
-    const status = n.online ? 'ONLINE' : 'OFF';
-    const statusClass = n.online ? 'node-on' : 'node-off';
-    const bat = n.battery >= 0 ? ` · ${Math.round(n.battery)}%` : '';
-    return `<div class="node-card" style="border-left:3px solid ${col}">
-      <div class="node-dot" style="background:${col};color:${col}"></div>
-      <div class="node-name">${n.name}${bat}</div>
-      <span class="node-status ${statusClass}">${status}</span>
-    </div>`;
-  }).join('');
 }
 
-function updateDetections(){
-  const el = document.getElementById('detectionLog');
-  if(!detections.length){ el.innerHTML = '<div>No detections yet</div>'; return; }
-  el.innerHTML = detections.map(d => {
-    const time = new Date(d.timestamp * 1000).toLocaleTimeString();
-    return `<div><span class="det-name">${d.name}</span> <span class="det-time">${time}</span></div>`;
-  }).join('');
+function _batteryLevel(bat){
+  const b = (bat && bat.battery) || bat || {};
+  if (b.level != null) return parseFloat(b.level);
+  return -1;
 }
 
-// Initial + periodic poll
-pollNodes();
-setInterval(pollNodes, 4000);
+function centerOnNode(lat,lng){ if (lat && lng) map.flyTo([lat,lng], 16, {duration:1.2}); }
 
-// Trigger scan animation on click
-canvas.addEventListener('click', () => { scanPulse = 1; });
+(async function init(){
+  const t = setInterval(() => {
+    const n = nodeEntries.find(n => n.online && n.lat && n.lng);
+    if (n){ map.setView([n.lat,n.lng], 16); clearInterval(t); }
+  }, 3000);
+  load();
+  setInterval(load, 2500);
+})();
 
-// ═══════════════════════════════════════════════════════════════════════
-// WINDOW CONTROLS — full-display mode (opened from the Android overlay)
-// ═══════════════════════════════════════════════════════════════════════
-const isApp = new URLSearchParams(location.search).get('from') === 'app';
+async function forceRescan(){
+  setStatus('Triggering rescan…', false);
+  try {
+    const d = await (await fetch('/api/nodes/fleet')).json();
+    const tasks = (d.nodes||[]).filter(x=>x.node&&x.node.online).map(async ({node}) => {
+      const base = (node.sensor_url||'').replace(/\/$/,'');
+      if (!base) return;
+      try{ await fetch(base+'/wifi/scan/live'); }catch(e){}
+      try{ await fetch(base+'/bluetooth/scan/live'); }catch(e){}
+      try{ await fetch(base+'/location/live'); }catch(e){}
+    });
+    await Promise.all(tasks);
+  } catch(e){}
+  await new Promise(r=>setTimeout(r,1500));
+  load();
+  setStatus('Scan complete', true);
+}
+function openAMSettings(){
+  // Best-effort: open system settings on the primary node's sensor server (proxied).
+  try{ fetch('/api/termux/exec', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cmd:'am start -a android.settings.SETTINGS'})}).catch(()=>{}); }catch(e){}
+}
 
+// ── Window controls ──
 function minimizeHub(){
-  if(window.RadarBridge && RadarBridge.minimize){ try{ RadarBridge.minimize(); }catch(e){} }
+  if (window.RadarBridge && RadarBridge.minimize){ try{ RadarBridge.minimize(); }catch(e){} }
   document.getElementById('hub').style.display = 'none';
   document.getElementById('minPill').style.display = 'block';
 }
-
 function restoreHub(){
-  if(window.RadarBridge && RadarBridge.restore){ try{ RadarBridge.restore(); }catch(e){} }
+  if (window.RadarBridge && RadarBridge.restore){ try{ RadarBridge.restore(); }catch(e){} }
   document.getElementById('hub').style.display = 'block';
   document.getElementById('minPill').style.display = 'none';
 }
-
 function closeHub(){
-  // Native overlay close via JS bridge (added to the radar WebView)
-  try{
-    if(window.RadarBridge && RadarBridge.close){ RadarBridge.close(); return; }
-    if(window.LillyBridge && LillyBridge.close){ LillyBridge.close(); return; }
-  }catch(e){}
+  try{ if(window.RadarBridge&&RadarBridge.close){RadarBridge.close();return;} if(window.LillyBridge&&LillyBridge.close){LillyBridge.close();return;} }catch(e){}
   try{ window.close(); }catch(e){}
-  minimizeHub(); // last-resort collapse
+  minimizeHub();
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// VOICE CONTROL — Web Speech API + Lilly chat
-// ═══════════════════════════════════════════════════════════════════════
-let recognition = null;
-let isListening = false;
-let ttsEnabled = true;
-
-function initSpeech(){
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if(!SR) return null;
-  const r = new SR();
-  r.continuous = false;
-  r.interimResults = true;
-  r.lang = 'en-US';
-  r.onresult = (e) => {
-    let final = '';
-    let interim = '';
-    for(let i = e.resultIndex; i < e.results.length; i++){
-      const transcript = e.results[i][0].transcript;
-      if(e.results[i].isFinal) final += transcript;
-      else interim += transcript;
+// ── Lilly pup avatar (branded clay pup) ──
+(function drawPup(){
+  const cv = document.getElementById('pupCanvas');
+  if (!cv) return;
+  const c = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  const cx = W/2, cy = H*0.54;
+  const pupCol = '#b18ac2', pupDark = '#8a6a9e', ear = '#c084fc', nose = '#e57373';
+  function frame(){
+    c.clearRect(0,0,W,H);
+    const t = performance.now()/1000;
+    const bounce = Math.sin(t*1.5)*3;
+    const tailW = Math.sin(t*3)*0.5;
+    const blink = Math.sin(t*0.7)%1.0 > 0.92;
+    c.save();
+    c.translate(cx, cy+bounce);
+    // Body
+    c.fillStyle = pupCol; c.strokeStyle = pupDark; c.lineWidth = 1.5;
+    c.beginPath(); c.ellipse(0,14,30,26,0,0,Math.PI*2); c.fill(); c.stroke();
+    // Paws
+    c.beginPath(); c.ellipse(-16,38,9,6,0,0,Math.PI*2); c.fill();
+    c.beginPath(); c.ellipse(16,38,9,6,0,0,Math.PI*2); c.fill();
+    c.lineWidth=1; c.beginPath(); c.ellipse(-16,38,9,6,0,0,Math.PI*2); c.stroke();
+    c.beginPath(); c.ellipse(16,38,9,6,0,0,Math.PI*2); c.stroke();
+    // Tail
+    c.strokeStyle=pupDark; c.lineWidth=3; c.lineCap='round';
+    c.beginPath(); c.moveTo(26,0); c.quadraticCurveTo(44,-8+tailW*6,40,-24+tailW*8); c.stroke();
+    // Head
+    c.fillStyle=pupCol; c.lineWidth=1.5;
+    c.beginPath(); c.arc(0,-22,26,0,Math.PI*2); c.fill(); c.stroke();
+    // Ears
+    c.fillStyle=ear;
+    c.beginPath(); c.ellipse(-20,-42,10,16,-0.3,0,Math.PI*2); c.fill();
+    c.beginPath(); c.ellipse(20,-42,10,16,0.3,0,Math.PI*2); c.fill();
+    c.strokeStyle=pupDark; c.stroke();
+    // Snout
+    c.fillStyle='#d9c4e4';
+    c.beginPath(); c.ellipse(0,-13,10,7,0,0,Math.PI*2); c.fill();
+    // Eyes
+    c.fillStyle='#1a1220';
+    if(blink){ c.lineWidth=2; c.beginPath(); c.moveTo(-9,-24); c.lineTo(-3,-24); c.moveTo(3,-24); c.lineTo(9,-24); c.stroke(); }
+    else {
+      c.beginPath(); c.arc(-6,-24,3.4,0,Math.PI*2); c.fill();
+      c.beginPath(); c.arc(6,-24,3.4,0,Math.PI*2); c.fill();
+      c.fillStyle='#fff'; c.beginPath(); c.arc(-4.8,-25,1.2,0,Math.PI*2); c.fill();
+      c.beginPath(); c.arc(7.2,-25,1.2,0,Math.PI*2); c.fill();
     }
-    showTranscript(interim || final, false);
-    if(final.trim()) handleVoiceCommand(final.trim());
-  };
-  r.onend = () => {
-    isListening = false;
-    document.getElementById('voiceBtn').classList.remove('listening');
-    setTimeout(() => hideTranscript(), 2000);
-  };
-  r.onerror = (e) => {
-    if(e.error !== 'no-speech' && e.error !== 'aborted'){
-      console.warn('Speech error:', e.error);
-    }
-    isListening = false;
-    document.getElementById('voiceBtn').classList.remove('listening');
-  };
-  return r;
-}
+    // Nose
+    c.fillStyle=nose; c.beginPath(); c.arc(0,-15,4,0,Math.PI*2); c.fill();
+    // Mouth
+    c.strokeStyle=pupDark; c.lineWidth=1.2;
+    c.beginPath(); c.moveTo(-5,-11); c.quadraticCurveTo(0,-7,5,-11); c.stroke();
+    c.restore();
+    requestAnimationFrame(frame);
+  }
+  frame();
+})();
 
-function toggleVoice(){
-  if(!recognition) recognition = initSpeech();
-  if(!recognition){
-    showLillyResponse("Speech recognition isn't available in this browser. Try Chrome!");
-    return;
-  }
-  if(isListening){
-    recognition.stop();
-  } else {
-    recognition.start();
-    isListening = true;
-    document.getElementById('voiceBtn').classList.add('listening');
-    showTranscript('Listening...', true);
-  }
-}
-
-function showTranscript(text, isFinal){
-  const el = document.getElementById('transcript');
-  const txt = document.getElementById('transcriptText');
-  txt.textContent = text;
-  el.classList.add('show');
-}
-function hideTranscript(){
-  document.getElementById('transcript').classList.remove('show');
-}
-
-let responseTimeout = null;
-function showLillyResponse(text){
-  const el = document.getElementById('lillyResponse');
-  const txt = document.getElementById('lillyText');
-  txt.textContent = text;
-  el.classList.add('show');
-  if(responseTimeout) clearTimeout(responseTimeout);
-  responseTimeout = setTimeout(() => el.classList.remove('show'), 12000);
-
-  // TTS
-  if(ttsEnabled && 'speechSynthesis' in window){
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.0;
-    u.pitch = 1.1;
-    u.volume = 0.85;
-    // Prefer a warm female voice
-    const voices = window.speechSynthesis.getVoices();
-    const preferred = voices.find(v => /samantha|zira|google uk english female|google.*female/i.test(v.name));
-    if(preferred) u.voice = preferred;
-    window.speechSynthesis.speak(u);
-  }
-
-  // Visual: pulse the avatar
-  scanPulse = 1;
-}
-
-async function handleVoiceCommand(text){
-  const lower = text.toLowerCase();
-  scanPulse = 1; // visual feedback
-
-  // ── Quick local commands (no server needed) ──
-  if(lower.includes('scan') || lower.includes('refresh')){
-    pollNodes();
-    showLillyResponse("Scanning all nodes now!");
-    return;
-  }
-  if(lower.includes('battery') || lower.includes('charge')){
-    const online = nodes.filter(n => n.online);
-    if(!online.length){ showLillyResponse("No nodes online right now."); return; }
-    const bat = online.map(n => `${n.name}: ${n.battery >= 0 ? Math.round(n.battery) + '%' : 'unknown'}`).join(', ');
-    showLillyResponse(`Battery levels: ${bat}`);
-    return;
-  }
-  if(lower.includes('status') || lower.includes('nodes')){
-    const online = nodes.filter(n => n.online).length;
-    showLillyResponse(`${online} of ${nodes.length} nodes online. ${detections.length} recent detections.`);
-    return;
-  }
-  if(lower.includes('detections') || lower.includes('faces') || lower.includes('people')){
-    if(!detections.length){ showLillyResponse("No detections yet. Let's wait a bit."); return; }
-    const names = [...new Set(detections.map(d => d.name))];
-    showLillyResponse(`I see: ${names.join(', ')}`);
-    return;
-  }
-  if(lower.includes('mute') || lower.includes('quiet')){
-    ttsEnabled = false;
-    showLillyResponse("TTS muted. I'll still show text.");
-    return;
-  }
-  if(lower.includes('unmute') || lower.includes('speak')){
-    ttsEnabled = true;
-    showLillyResponse("Voice is back on!");
-    return;
-  }
-
-  // ── Send to Lilly AI server ──
-  try {
-    const resp = await fetch('/api/chat', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ message: text, context: 'radar_hub' }),
-    });
-    const data = await resp.json();
-    const reply = data.response || data.reply || data.message || "I didn't understand that.";
-    showLillyResponse(reply);
-  } catch(e){
-    // Fallback if /api/chat doesn't exist
-    showLillyResponse(`I heard: "${text}" — but I can't reach the chat server right now.`);
-  }
-}
-
-// Load voices for TTS
-if('speechSynthesis' in window){
-  window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
-}
-
-// Keyboard shortcut: Space to toggle voice
-document.addEventListener('keydown', (e) => {
-  if(e.code === 'Space' && e.target === document.body){
-    e.preventDefault();
-    toggleVoice();
-  }
-});
+window.addEventListener('resize', ()=>{ try{ map.invalidateSize(); }catch(e){} });
 </script>
 </body>
 </html>
