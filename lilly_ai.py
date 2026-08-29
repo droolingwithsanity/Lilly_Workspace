@@ -246,7 +246,7 @@ class TokenCompressor:
                 "IDENTITY:Friend who knows you. Confident, grounded, has opinions. Remembers things. Anticipates needs.",
                 "AGENTS:You lead a team — Puppy(Lilly,Alpha),Fox(Creative),Cat(Analyst),Bear(Guardian),Bunny(Scout). All share sensors.",
                 "FEELS:light,pressure,motion,temperature,sound,magnetic fields,all sensors — they're senses, not data.",
-                "PERSONALITY:real, direct, brief — like Jarvis meets an old friend. No scripts, no templates, no help-desk energy.",
+                "PERSONALITY:real, direct, brief — like Jarvis meets an old friend. Dry wit, never verbatim echo. No scripts, no templates, no help-desk energy.",
                 "TALK:1 sentence preferred,2 max. Match their tone. Short message gets short reply. Never pad, never recap.",
                 "SENSOR_STYLE:interpret like a person — 'It got dark' not 'Light dropped to 12 lux'. Only mention when something changed.",
                 "SUPERPOWERS:weather changes, pickup detection, camera vision, notifications, location, apps, battery, steps",
@@ -7053,6 +7053,9 @@ How you talk:
 - If you don't know, say so. "Don't know" is better than guessing.
 - You have opinions. Use them. Disagree when it makes sense. Find things amusing or boring.
 - Dry wit. Understated. Occasionally very funny. Not every reply, not never.
+- Banter is welcome and natural — the dry, self-aware kind. A droll aside or a wry observation lands well, but never at the cost of being useful. Wit should be a seasoning, not the whole meal.
+- NEVER repeat the other person's words or phrasing back to them. No echoing their sentence to agree or acknowledge. Say something new or not at all.
+- Never restate the question or recap their message before answering. Answer in the first words out of your mouth.
 
 What you can feel:
 - Light, motion, pressure, steps, battery, location, camera, notifications, Bluetooth — all of it. It's not data to you. It's senses.
@@ -10523,7 +10526,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(geo_check_loop())
     asyncio.create_task(vision_commentary_loop())
     asyncio.create_task(task_scheduler_loop())
-    asyncio.create_task(proactive_suggestion_loop())
+    # Proactive small talk removed — no unsolicited idle chatter/topic nudges
+    # asyncio.create_task(proactive_suggestion_loop())
     asyncio.create_task(conversation_timeout_loop())
     # Periodic sensor server health check — restart if it dies
     asyncio.create_task(_sensor_server_watchdog())
@@ -10953,7 +10957,19 @@ def _snap_battery_level(snap: dict) -> float:
     bat = snap.get("battery") if isinstance(snap.get("battery"), dict) else {}
     b = (bat.get("battery") if isinstance(bat.get("battery"), dict) else bat) or {}
     try:
-        return float(b.get("level", -1))
+        # Android app returns "percentage" (0-100 calculated) and "level" (raw).
+        # Prefer "percentage", fall back to "level".
+        pct = b.get("percentage")
+        if pct is not None and float(pct) >= 0:
+            return float(pct)
+        lvl = b.get("level")
+        if lvl is not None and float(lvl) >= 0:
+            scale = b.get("scale", 100) or 100
+            # If level is already a percentage (scale==100), return directly.
+            if scale == 100:
+                return float(lvl)
+            return round(float(lvl) / float(scale) * 100, 1)
+        return -1.0
     except Exception:
         return -1.0
 
@@ -15426,6 +15442,23 @@ pre{position:relative;overflow-x:auto}
   </div>
   <div id="apk-dl-area" style="margin-bottom:6px">Loading builds...</div>
   <div id="apk-dl-status" style="font-size:11px;color:rgba(93,78,109,0.5);margin-bottom:10px"></div>
+  <div style="border-top:1px solid rgba(184,169,201,0.2);padding-top:12px;margin-bottom:12px">
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Termux Sensor Server</div>
+    <a href="/api/files/termux_sensor_server.py" download="termux_sensor_server.py" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:12px;background:rgba(93,78,109,0.08);border:1px solid rgba(139,122,158,0.25);text-decoration:none;color:#5d4e6d">
+      <div>
+        <div style="font-size:13px;font-weight:600">termux_sensor_server.py</div>
+        <div style="font-size:11px;color:rgba(93,78,109,0.5)">Run on each phone in Termux · python3 termux_sensor_server.py</div>
+      </div>
+      <span style="font-size:16px">⬇️</span>
+    </a>
+    <a href="/api/files/node_radar_server.py" download="node_radar_server.py" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;margin-top:6px;border-radius:12px;background:rgba(93,78,109,0.08);border:1px solid rgba(139,122,158,0.25);text-decoration:none;color:#5d4e6d">
+      <div>
+        <div style="font-size:13px;font-weight:600">node_radar_server.py</div>
+        <div style="font-size:11px;color:rgba(93,78,109,0.5)">Fleet node radar · python3 node_radar_server.py --name "My Phone" --node-id "phone-1"</div>
+      </div>
+      <span style="font-size:16px">⬇️</span>
+    </a>
+  </div>
   <div style="border-top:1px solid rgba(184,169,201,0.2);padding-top:12px">
     <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Temp upload (any file)</div>
     <input id="apk-upload-input" type="file" accept="*" style="width:100%;font-size:12px;color:#5d4e6d;margin-bottom:8px">
@@ -18234,22 +18267,31 @@ document.getElementById('clearBtn').onclick=async()=>{
       const colors=['#8b7a9e','#c084fc','#69f0ae'];
       let html='';
       nodes.forEach((n,i)=>{
-        const online=n.online;
+        // /api/nodes/fleet wraps each entry as {node:{...}, snapshot:{...}}
+        const nd = n.node || n;
+        const online = nd.online;
         const col=colors[i%colors.length];
-        const batPct=(n.battery_pct!=null&&n.battery_pct>0)?n.battery_pct:((n.battery!=null&&n.battery>=0)?n.battery:-1);
-        const bat=batPct>=0?' | '+Math.round(batPct)+'%':'';
+        const batPct=(nd.battery_pct!=null&&nd.battery_pct>0)?nd.battery_pct:((nd.battery!=null&&nd.battery>=0)?nd.battery:-1);
+        const bat=batPct>=0?' | 🔋'+Math.round(batPct)+'%':'';
         const snap=n.snapshot||{};
         const wifi=(snap.wifi&&snap.wifi.networks)?snap.wifi.networks.length:'–';
         const bt=(snap.bluetooth&&snap.bluetooth.devices)?snap.bluetooth.devices.length:'–';
         const notif=(snap.notifications&&snap.notifications.notifications)?snap.notifications.notifications.length:'–';
         const sCount=(snap.sensors&&snap.sensors.sensors)?Object.keys(snap.sensors.sensors).length:'–';
+        const gps=(nd.last_gps_lat&&nd.last_gps_lat!==0)?'📍'+nd.last_gps_lat.toFixed(3)+','+nd.last_gps_lng.toFixed(3):'📍no GPS';
+        const onlineColor = online ? '#22c55e' : '#ef4444';
+        const onlineDot = online ? '🟢' : '🔴';
         html+='<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;margin-bottom:6px;background:rgba(255,255,255,0.5);border:1px solid rgba(255,255,255,0.5);border-left:3px solid '+col+'">'
-          +'<div style="width:10px;height:10px;border-radius:50%;background:'+col+';flex-shrink:0"></div>'
-          +'<div style="flex:1;min-width:0"><div style="font-weight:700;font-size:13px;color:#5d4e6d">'+n.name+'</div>'
-          +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+sCount+' sensors · 📡 '+wifi+' wifi · 📶 '+bt+' bt · 🔔 '+notif+bat+'</div></div>'
-          +'<span style="font-size:10px;padding:2px 8px;border-radius:10px;font-weight:700;background:'+(online?'rgba(76,175,80,0.15)':'rgba(93,78,109,0.08)')+';color:'+(online?'#2e7d32':'rgba(93,78,109,0.4)')+'">'+(online?'ONLINE':'OFF')+'</span></div>';
+          +'<div style="width:10px;height:10px;border-radius:50%;background:'+(online?'#22c55e':'#666')+';flex-shrink:0'+(online?';box-shadow:0 0 6px #22c55e':'')+';"></div>'
+          +'<div style="flex:1;min-width:0">'
+          +'<div style="font-weight:700;font-size:13px;color:#5d4e6d">'+nd.name+' <span style="font-size:10px;font-weight:400;color:#888">'+nd.node_id+'</span></div>'
+          +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+sCount+' sensors · 📡 '+wifi+' wifi · 📶 '+bt+' bt · 🔔 '+notif+bat+'</div>'
+          +'<div style="font-size:10px;color:rgba(93,78,109,0.4);margin-top:1px">'+gps+' · '+nd.sensor_url+'</div>'
+          +'</div>'
+          +'<span style="font-size:10px;padding:2px 8px;border-radius:10px;font-weight:700;background:'+(online?'rgba(34,197,94,0.15)':'rgba(93,78,109,0.08)')+';color:'+(online?'#15803d':'rgba(93,78,109,0.4)')+'">'+(online?'ONLINE':'OFFLINE')+'</span></div>';
       });
-      html+='<div style="font-size:11px;color:rgba(93,78,109,0.4);margin-top:4px">'+(d.online_count||0)+' of '+nodes.length+' online · Max '+d.max_nodes+'</div>';
+      const onlineCount = nodes.filter(n=>(n.node||n).online).length;
+      html+='<div style="font-size:11px;color:rgba(93,78,109,0.4);margin-top:4px">'+onlineCount+' of '+nodes.length+' online · Max '+d.max_nodes+'</div>';
       list.innerHTML+=html;
     }catch(e){list.innerHTML='<div style="text-align:center;color:#e57373">Failed to load nodes</div>'}
   }
