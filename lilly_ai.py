@@ -7487,15 +7487,17 @@ async def _personalize_notification_announcement(
     priority: str,
     has_url: bool,
     activity_context: str,
+    interests: Optional[list[str]] = None,
 ) -> str:
-    """Turn a raw phone notification into a persona-voiced spoken summary.
+    """Turn a raw phone notification into an assistant-style spoken briefing.
 
     Uses the LLM with the CURRENT avatar's persona (the same HIVE_PERSONAS
-    voice that OpenHuman/OpenLive skills speak through) so the announcement
-    sounds like Lilly/her teammate noticing something — not a notification
-    bell reading a title. The model is given live phone-activity context and
-    must end with exactly one follow-up question tailored to the notification,
-    so every broadcast invites a next step.
+    voice that OpenHuman/OpenLive skills speak through) but in a personal-
+    ASSISTANT register: a crisp summary of what arrived and why it matters,
+    never a word-for-word read-out. The model is given live phone-activity
+    context plus any trained interests (KeywordLearner dataset) the
+    notification matches, and must end with exactly one follow-up question
+    tailored to the notification, so every broadcast invites a next step.
 
     Returns "" on any failure/timeout so the caller falls back to the
     template-based announcement.
@@ -7513,18 +7515,19 @@ async def _personalize_notification_announcement(
     spoken_title = re.sub(r"https?://\S+", "", title).strip()[:120]
 
     system_prompt = (
-        f"You are {persona['name']}, {persona['role']}. "
-        f"Personality: {persona['personality']}\n"
-        f"A notification just arrived on {user_name}'s phone. Announce it the way "
-        "YOU would — a living presence in the phone who noticed something, not a "
-        "notification bell reading a title.\n"
+        f"You are {persona['name']}, {user_name}'s personal assistant "
+        f"({persona['role']}). Personality: {persona['personality']}\n"
+        f"A notification just arrived on {user_name}'s phone. Brief them the "
+        "way a sharp personal assistant would — a crisp spoken summary of what "
+        "it is and why it matters, never a word-for-word read-out.\n"
         "Rules:\n"
-        "- 1-2 sentences that SUMMARISE what the notification means. Digest it, "
-        "never read it word-for-word.\n"
+        "- 1-2 sentences: the bottom line first, then why it matters.\n"
+        "- If it touches one of their known interests, mention why it's "
+        "relevant to them in passing.\n"
         "- Weave in the phone-activity context ONLY when it changes what matters "
         "(e.g. they're walking, battery low, it's late).\n"
-        "- End with exactly ONE short follow-up question tailored to THIS "
-        "notification (reply? open it? read it? deal with it later?).\n"
+        "- End with exactly ONE short follow-up question offering the obvious "
+        "next action (reply? open it? read it? deal with it later?).\n"
         "- Never speak URLs. No emoji, no markdown, no lists. Plain spoken text."
     )
     user_prompt = (
@@ -7536,6 +7539,8 @@ async def _personalize_notification_announcement(
         f"- Sender: {sender or 'unknown'}\n"
         f"- Ticket/ID: {ticket_id or 'none'}\n"
         f"- Contains a link: {'yes' if has_url else 'no'}\n"
+        f"- Matches user's trained interests: "
+        f"{', '.join(interests) if interests else 'none'}\n"
         f"Phone activity right now: {activity_context or 'unavailable'}"
     )
 
@@ -7577,6 +7582,133 @@ async def _personalize_notification_announcement(
     return msg
 
 
+# ─── NOTIFICATION ACTION TRACKING (clicked on phone = actioned) ──────────
+# Every announced notification is tracked here. Termux's
+# termux-notification-list only returns ACTIVE shade notifications, so when
+# an announced tag disappears from the list the user has interacted with it
+# on the phone (tapped it open or swiped it away) → actioned. Entries that
+# stay active get an assistant-style follow-up nudge, up to a cap.
+_NOTIF_TRACKED: dict[str, dict] = {}
+_NOTIF_ACTIONED_LOG: list[dict] = []  # last 50 actioned notifications
+_NOTIF_FOLLOWUP_AFTER_S = 600.0  # first nudge when untouched for 10 min
+_NOTIF_FOLLOWUP_INTERVAL_S = 900.0  # 15 min between repeat nudges
+_NOTIF_MAX_FOLLOWUPS = 2  # then stop nagging
+_NOTIF_TRACK_MAX_AGE_S = 6 * 3600.0  # drop stale entries after 6 h
+
+# High-frequency words that survive the learner's noise filter but carry no
+# signal for notification relevance.
+_NOTIF_INTEREST_NOISE = {
+    "much", "don", "dont", "things", "something", "sorry", "getting",
+    "really", "yeah", "okay", "people", "going", "know", "think", "want",
+    "time", "love", "good", "just", "like", "that", "this", "what",
+}
+
+
+def _trained_interest_hits(text: str, limit: int = 3) -> list[str]:
+    """Match notification text against interests trained from conversations.
+
+    Uses the KeywordLearner dataset (learned_keywords.json) — topics the user
+    actually talks about — so notifications about trained interests get
+    announced even at default priority, and the LLM briefing is told WHY the
+    notification matters to the user.
+    """
+    if not text:
+        return []
+    try:
+        interests = keyword_learner.top_interests(n=30)
+    except Exception:
+        return []
+    low = text.lower()
+    hits: list[str] = []
+    for kw, count in interests:
+        if len(kw) < 4 or count < 20 or kw in _NOTIF_INTEREST_NOISE:
+            continue
+        if re.search(rf"\b{re.escape(kw)}\b", low):
+            hits.append(kw)
+            if len(hits) >= limit:
+                break
+    return hits
+
+
+def _mark_notif_actioned(tag: str, source: str) -> None:
+    """Move a tracked notification to the actioned log (clicked/confirmed)."""
+    entry = _NOTIF_TRACKED.pop(tag, None)
+    if not entry:
+        return
+    entry["actioned"] = True
+    entry["actioned_at"] = time.time()
+    entry["actioned_via"] = source
+    _NOTIF_ACTIONED_LOG.append(entry)
+    del _NOTIF_ACTIONED_LOG[:-50]
+
+
+def _notif_confirm_payload(entry: dict) -> Optional[dict]:
+    """Rebuild the yes/no gate payload for a tracked notification.
+
+    Mirrors the priority used when the announcement first fired: open the
+    extracted link → launch the notifying app on the phone → read the full
+    notification content aloud.
+    """
+    expires = time.time() + CONFIRM_TIMEOUT
+    base: dict = {"notif_tag": entry.get("tag", ""), "expires": expires}
+    url = entry.get("url")
+    package = entry.get("package") or ""
+    app_label = entry.get("app_label") or "the app"
+    full_text = entry.get("full_text") or ""
+    if url:
+        return {
+            **base,
+            "desc": f"open {url}",
+            "skill": None,
+            "skill_arg": "",
+            "open_url": url,
+        }
+    if package:
+        return {
+            **base,
+            "desc": f"open {app_label}",
+            "skill": {
+                "action_type": "intent_launch",
+                "type": "intent_launch",
+                "package": package,
+                "label": app_label,
+            },
+            "skill_arg": "",
+        }
+    if full_text:
+        return {
+            **base,
+            "desc": "read the full notification",
+            "skill": None,
+            "skill_arg": "",
+            "notif_detail": full_text,
+        }
+    return None
+
+
+def _notif_followup_message(entry: dict) -> str:
+    """Assistant-style nudge for a notification the user hasn't actioned yet."""
+    app_label = entry.get("app_label") or "an app"
+    title = (entry.get("title") or "").strip()
+    what = title if title else f"that {app_label} notification"
+    if entry.get("followups", 0) <= 1:
+        return _pick_fresh(
+            "notif-followup:first",
+            [
+                f"Quick follow-up — you haven't looked at {what} yet. Want me to open it?",
+                f"Just checking in: {what} is still waiting on your phone. Should I open it?",
+                f"Following up on {what} — still untouched. Want me to deal with it?",
+            ],
+        )
+    return _pick_fresh(
+        "notif-followup:last",
+        [
+            f"Last call on {what} — it's still sitting there. Open it, or shall I leave it?",
+            f"{what} is still pending. I'll stop reminding you after this — want it opened?",
+        ],
+    )
+
+
 async def notification_monitor_loop():
     """Background task: reads HIGH/URGENT notifications in a natural, contextual way.
 
@@ -7610,13 +7742,18 @@ async def notification_monitor_loop():
                     continue
                 _NOTIFICATION_SEEN.add(tag)
                 priority = n.get("priority", "default") or "default"
-                if priority not in ("high", "max"):
-                    continue
 
                 title = (n.get("title", "") or "").strip()
                 content = (n.get("content", "") or "").strip()
                 package = (n.get("package", "") or "").strip()
                 full_text = f"{title} {content}".strip()
+
+                # Trained-interest boost: default-priority notifications still
+                # get announced when they match topics learned from past
+                # conversations (the KeywordLearner dataset).
+                interest_hits = _trained_interest_hits(full_text)
+                if priority not in ("high", "max") and not interest_hits:
+                    continue
 
                 # ── 1. Extract any URL from the content ──────────────────────
                 url_match = re.search(r"https?://[^\s\)\]>\"']+", full_text)
@@ -7788,6 +7925,7 @@ async def notification_monitor_loop():
                     priority=priority,
                     has_url=bool(extracted_url),
                     activity_context=activity_context,
+                    interests=interest_hits,
                 )
                 if personalised:
                     msg = personalised
@@ -7807,6 +7945,7 @@ async def notification_monitor_loop():
                             "skill": None,
                             "skill_arg": "",
                             "open_url": extracted_url,
+                            "notif_tag": tag,
                             "expires": time.time() + CONFIRM_TIMEOUT,
                         }
                         PENDING_OPEN_URL = None  # set on "yes" confirmation
@@ -7821,6 +7960,7 @@ async def notification_monitor_loop():
                                 "label": app_label_full,
                             },
                             "skill_arg": "",
+                            "notif_tag": tag,
                             "expires": time.time() + CONFIRM_TIMEOUT,
                         }
                     elif full_text:
@@ -7830,11 +7970,59 @@ async def notification_monitor_loop():
                             "skill": None,
                             "skill_arg": "",
                             "notif_detail": full_text,
+                            "notif_tag": tag,
                             "expires": time.time() + CONFIRM_TIMEOUT,
                         }
 
+                # ── 9. Track for actioned-status + follow-ups ──────────────
+                _NOTIF_TRACKED[tag] = {
+                    "tag": tag,
+                    "app_label": app_label_full,
+                    "title": title,
+                    "summary": msg,
+                    "package": package,
+                    "url": extracted_url,
+                    "full_text": full_text,
+                    "interests": interest_hits,
+                    "announced_at": time.time(),
+                    "next_followup": time.time() + _NOTIF_FOLLOWUP_AFTER_S,
+                    "followups": 0,
+                    "actioned": False,
+                }
+
                 asyncio.create_task(speak(msg))
                 await asyncio.sleep(3)
+
+            # ── 10. Reconcile tracked notifications against the Termux list ─
+            # termux-notification-list only returns ACTIVE shade entries, so a
+            # tracked tag that vanished was clicked open or dismissed on the
+            # phone — that is the "actioned" signal. Entries still active and
+            # untouched past the follow-up window get an assistant nudge.
+            now = time.time()
+            for tracked_tag, entry in list(_NOTIF_TRACKED.items()):
+                if tracked_tag not in current_tags:
+                    logger.info(
+                        f"Notification actioned on phone: "
+                        f"{entry.get('app_label')} — {entry.get('title')}"
+                    )
+                    _mark_notif_actioned(tracked_tag, "phone_click")
+                    continue
+                if now - entry.get("announced_at", now) > _NOTIF_TRACK_MAX_AGE_S:
+                    del _NOTIF_TRACKED[tracked_tag]
+                    continue
+                if entry.get("followups", 0) >= _NOTIF_MAX_FOLLOWUPS:
+                    continue
+                if now < entry.get("next_followup", 0):
+                    continue
+                entry["followups"] = entry.get("followups", 0) + 1
+                entry["next_followup"] = now + _NOTIF_FOLLOWUP_INTERVAL_S
+                payload = _notif_confirm_payload(entry)
+                if payload:
+                    PENDING_CONFIRM = payload
+                    PENDING_OPEN_URL = None
+                asyncio.create_task(speak(_notif_followup_message(entry)))
+                await asyncio.sleep(3)
+                break  # one nudge per tick — never stack follow-ups
 
             _NOTIFICATION_SEEN &= current_tags  # keep only still-active tags
             # Trim the seen set so it doesn't grow unbounded across sessions,
@@ -8519,6 +8707,9 @@ async def handle_intent(
             if conf == "yes":
                 pending = PENDING_CONFIRM
                 PENDING_CONFIRM = None
+                # A confirmed notification follow-up counts as actioned.
+                if isinstance(pending, dict) and pending.get("notif_tag"):
+                    _mark_notif_actioned(pending["notif_tag"], "voice_confirm")
                 pending_skill = (
                     pending.get("skill") if isinstance(pending, dict) else None
                 )
@@ -8570,7 +8761,11 @@ async def handle_intent(
                 await speak(reply)
                 return {"action": "handled", "text": reply}
             if conf == "no":
+                pending_no = PENDING_CONFIRM
                 PENDING_CONFIRM = None
+                # Explicitly declining a notification follow-up = handled.
+                if isinstance(pending_no, dict) and pending_no.get("notif_tag"):
+                    _mark_notif_actioned(pending_no["notif_tag"], "voice_declined")
                 reply = "OK, no problem — I'll leave it."
                 await memory.add("user", text)
                 await memory.add("assistant", reply)
@@ -25444,6 +25639,30 @@ async def get_notifications():
             "fresh": True,
             "age_seconds": round(age, 1),
             "spoken_summary": spoken_summary,
+            # Announced notifications still awaiting action on the phone
+            "tracked": [
+                {
+                    "tag": e.get("tag"),
+                    "app": e.get("app_label"),
+                    "title": e.get("title"),
+                    "summary": e.get("summary"),
+                    "interests": e.get("interests", []),
+                    "announced_at": e.get("announced_at"),
+                    "followups_sent": e.get("followups", 0),
+                    "actioned": False,
+                }
+                for e in _NOTIF_TRACKED.values()
+            ],
+            # Recently actioned (clicked on phone / confirmed / declined)
+            "recently_actioned": [
+                {
+                    "app": e.get("app_label"),
+                    "title": e.get("title"),
+                    "actioned_at": e.get("actioned_at"),
+                    "actioned_via": e.get("actioned_via"),
+                }
+                for e in _NOTIF_ACTIONED_LOG[-10:]
+            ],
         }
     )
 
