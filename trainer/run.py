@@ -62,6 +62,13 @@ def main():
         "--skip-download", action="store_true", help="Skip dataset download"
     )
     parser.add_argument(
+        "--embodiment",
+        type=int,
+        default=0,
+        help="Mix in N embodiment self-model examples (phone=body, "
+        "server=brain, camera=eyes) from real workspace data; 0 = off",
+    )
+    parser.add_argument(
         "--fineweb-samples",
         type=int,
         default=0,
@@ -179,6 +186,20 @@ def main():
     dataset = prepare_training_data(
         raw, personas_to_use=personas, max_samples=config.max_train_samples
     )
+
+    # Mix in the embodiment self-model dataset (phone=body, server=brain,
+    # camera=eyes) mined from real workspace data
+    if args.embodiment > 0:
+        from datasets import Dataset as _DS, concatenate_datasets
+
+        from trainer.prepare_embodiment_data import build_embodiment_texts
+
+        emb_texts = build_embodiment_texts(max_examples=args.embodiment)
+        if emb_texts:
+            dataset = concatenate_datasets(
+                [dataset, _DS.from_dict({"text": emb_texts})]
+            ).shuffle(seed=42)
+            logger.info(f"Mixed in {len(emb_texts)} embodiment examples")
 
     logger.info("Starting training...")
     final_path = train(dataset, config, resume_from=args.resume_from)
