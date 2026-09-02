@@ -1,0 +1,12 @@
+{
+  "menu": [
+    {
+      "id": "osint_abuseipdb",
+      "name": "AbuseIPDB",
+      "description": "",
+      "global": false,
+      "added_by": "skills-market"
+    }
+  ],
+  "radial": []
+}

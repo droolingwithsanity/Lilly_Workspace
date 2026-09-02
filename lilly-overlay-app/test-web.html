@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+    <title>Lilly Overlay Preview — v6.15.3</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    background:#0f172a;
+    color:#e2e8f0;
+    font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+    display:flex;flex-direction:column;align-items:center;padding:20px;
+    min-height:100vh;
+  }
+  h1{font-size:18px;margin-bottom:4px;color:#7dd3fc}
+  .subtitle{font-size:12px;color:rgba(226,232,240,0.6);margin-bottom:16px}
+  #preview{
+    width:320px;height:320px;
+    border:2px solid rgba(125,211,252,0.3);
+    border-radius:24px;
+    overflow:hidden;
+    background:#000;
+    box-shadow:0 20px 60px rgba(0,0,0,0.5);
+  }
+  #preview iframe{
+    width:100%;height:100%;border:none;
+  }
+  .note{margin-top:12px;font-size:11px;color:rgba(226,232,240,0.5);text-align:center;max-width:320px}
+  .badge{display:inline-block;padding:3px 8px;border-radius:999px;background:rgba(74,222,128,0.15);color:#4ade80;font-size:10px;margin-top:8px}
+</style>
+</head>
+<body>
+  <h1>🐶 Lilly Overlay Preview</h1>
+  <div class="subtitle">Smart-watch face • Long-press radial menu • Vision + Acoustics</div>
+  <div id="preview">
+    <iframe src="app/src/main/res/raw/overlay_local.html" id="overlayFrame"></iframe>
+  </div>
+  <div class="badge">v4.0</div>
+  <div class="note">
+    This is a browser preview of the Android overlay.<br>
+    Camera and microphone require HTTPS or localhost.<br>
+    Long-press the avatar to open the radial menu.
+  </div>
+
+  <script>
+    // Mock Android LillyBridge for browser testing
+    window.LillyBridge = {
+      onDrag: function(dx, dy) { console.log('[Bridge] onDrag', dx, dy); },
+      startChatSpeech: function() { console.log('[Bridge] startChatSpeech'); },
+      executeAction: function(json) { console.log('[Bridge] executeAction', json); },
+      sendText: function(text) { console.log('[Bridge] sendText', text); },
+      recordTranscript: function(isUser, text) { console.log('[Bridge] transcript', isUser, text); },
+      toggleExpand: function() { console.log('[Bridge] toggleExpand'); },
+      showQuickActions: function() { console.log('[Bridge] showQuickActions'); },
+      toggleMic: function() { console.log('[Bridge] toggleMic'); },
+      launchApp: function(url) { console.log('[Bridge] launchApp', url); window.open(url, '_blank'); },
+      runTermux: function(json) { console.log('[Bridge] runTermux', json); },
+      playTTS: function(url) { console.log('[Bridge] playTTS', url); },
+      getServerUrl: function() { return 'http://localhost:8098'; },
+      hasPermission: function(p) { console.log('[Bridge] hasPermission', p); return false; },
+      requestPermission: function(p) { console.log('[Bridge] requestPermission', p); alert('Permission requested: ' + p + '\\nIn the real app, this opens the system dialog.'); return true; },
+      getPermissionLabel: function(p) { return p.replace('android.permission.', ''); }
+    };
+
+    // Log bridge calls
+    const orig = window.LillyBridge;
+    for (const key of Object.keys(orig)) {
+      const fn = orig[key];
+      window.LillyBridge[key] = function(...args) {
+        console.log('[LillyBridge] ' + key, args);
+        return fn.apply(this, args);
+      };
+    }
+  </script>
+</body>
+</html>

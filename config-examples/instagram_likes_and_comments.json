@@ -1,0 +1,24 @@
+{
+  "_comment": "Likes + comments automation for Instagram. Engages with posts using preset comments.",
+  "name": "instagram_likes_and_comments",
+  "platform": "instagram",
+  "package": "com.instagram.android",
+  "actions": [
+    {"type": "open_app", "comment": "Open Instagram"},
+    {"type": "wait", "seconds": 3},
+    {"type": "swipe", "x1": 500, "y1": 1200, "x2": 500, "y2": 400, "comment": "Scroll feed"},
+    {"type": "like", "count": 8, "comment": "Like 8 posts"},
+    {"type": "comment", "text": "Great shot!", "count": 2, "comment": "Comment on 2 posts"}
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "times": ["09:00", "17:00"],
+    "comment": "Morning and evening runs"
+  },
+  "limits": {
+    "max_likes_per_run": 15,
+    "max_comments_per_run": 3,
+    "delay_between_actions": [2, 5],
+    "comment": "Low comment count to avoid spam detection"
+  }
+}

@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  model-cascade:
+    build:
+      context: .
+      dockerfile: Dockerfile.cascade
+    container_name: model-cascade
+    ports:
+      - "8099:8099"
+    environment:
+      - OLLAMA_URL=http://100.73.249.14:11434
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8099/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

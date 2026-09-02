@@ -1,0 +1,38 @@
+###############################################
+# Lilly Vision Server — Standalone YOLOv8
+# Multi-agent commentary with Edge TTS
+###############################################
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+    fastapi uvicorn numpy \
+    opencv-python-headless \
+    ultralytics \
+    insightface \
+    edge-tts \
+    httpx
+
+# Pre-download InsightFace models (buffalo_l: detection + 512-dim ArcFace embeddings)
+RUN python3 -c "from insightface.app import FaceAnalysis; FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']).prepare(ctx_id=0, det_size=(320, 320))"
+
+# Copy YOLO model
+COPY yolov8n.pt .
+COPY yunet.onnx .
+
+# Copy vision server + face recognition + person tracker + node registry
+COPY yolov8_vision_server.py .
+COPY face_recognition_engine.py .
+COPY person_tracker.py .
+COPY node_registry.py .
+
+EXPOSE 8198
+
+CMD ["python3", "yolov8_vision_server.py"]

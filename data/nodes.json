@@ -1,0 +1,48 @@
+{
+  "nodes": [
+    {
+      "node_id": "host-127.0.0.1-8096",
+      "name": "Host (127.0.0.1)",
+      "sensor_url": "http://127.0.0.1:8096",
+      "vision_url": "",
+      "model": "",
+      "role": "host",
+      "online": true,
+      "last_heartbeat": 1788348099.140821,
+      "last_gps_lat": 0.0,
+      "last_gps_lng": 0.0,
+      "last_gps_accuracy": 0.0,
+      "battery_pct": -1.0,
+      "camera_active": false,
+      "face_engine_active": false,
+      "capabilities": [
+        "wifi",
+        "ble",
+        "gps"
+      ]
+    },
+    {
+      "node_id": "phone-100.126.40.84-8099",
+      "name": "Phone 100.126.40.84",
+      "sensor_url": "http://100.126.40.84:8099",
+      "vision_url": "",
+      "model": "",
+      "role": "node",
+      "online": false,
+      "last_heartbeat": 0.0,
+      "last_gps_lat": 0.0,
+      "last_gps_lng": 0.0,
+      "last_gps_accuracy": 0.0,
+      "battery_pct": -1.0,
+      "camera_active": false,
+      "face_engine_active": false,
+      "capabilities": [
+        "sensors",
+        "gps",
+        "ble",
+        "wifi",
+        "camera"
+      ]
+    }
+  ]
+}

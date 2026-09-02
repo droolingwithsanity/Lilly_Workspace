@@ -1,0 +1,20 @@
+{
+  "_comment": "Read and dismiss notifications. Useful for cleaning up the notification shade.",
+  "name": "read_and_dismiss_notifications",
+  "platform": "android_system",
+  "package": "com.android.systemui",
+  "actions": [
+    {"type": "shell", "command": "termux-notification-list", "comment": "List all notifications"},
+    {"type": "wait", "seconds": 2},
+    {"type": "shell", "command": "termux-notification-remove --tag 'all'", "comment": "Dismiss non-critical notifications"},
+    {"type": "press_key", "key": "HOME", "comment": "Return home"}
+  ],
+  "schedule": {
+    "repeat": "hourly",
+    "comment": "Run every hour to clean notifications"
+  },
+  "limits": {
+    "max_runs_per_day": 24,
+    "delay_between_actions": [1, 2]
+  }
+}

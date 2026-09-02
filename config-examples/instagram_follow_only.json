@@ -1,0 +1,24 @@
+{
+  "_comment": "Follow-only automation for Instagram. Searches a hashtag/user and follows accounts.",
+  "name": "instagram_follow_only",
+  "platform": "instagram",
+  "package": "com.instagram.android",
+  "actions": [
+    {"type": "open_app", "comment": "Open Instagram"},
+    {"type": "wait", "seconds": 3},
+    {"type": "tap", "x": 540, "y": 96, "comment": "Tap search bar"},
+    {"type": "input_text", "text": "photography", "comment": "Search hashtag"},
+    {"type": "wait", "seconds": 2},
+    {"type": "tap", "x": 540, "y": 300, "comment": "Tap top result"},
+    {"type": "follow", "count": 5, "comment": "Follow 5 accounts"}
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "time": "10:00"
+  },
+  "limits": {
+    "max_follows_per_run": 8,
+    "delay_between_actions": [3, 6],
+    "comment": "Slow follow rate to avoid flags"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "_comment": "Bedtime routine: enable dark mode, lower volume, open sleep sounds app.",
+  "name": "bedtime_routine",
+  "platform": "android_system",
+  "package": "com.android.settings",
+  "actions": [
+    {"type": "open_app", "app": "settings", "comment": "Open Settings"},
+    {"type": "wait", "seconds": 2},
+    {"type": "shell", "command": "settings put secure ui_night_mode 2", "comment": "Enable dark mode"},
+    {"type": "shell", "command": "media volume set 3", "comment": "Lower media volume"},
+    {"type": "shell", "command": "notification volume set 2", "comment": "Lower notification volume"},
+    {"type": "shell", "command": "alarm volume set 4", "comment": "Keep alarm volume moderate"},
+    {"type": "open_app", "app": "youtube_music", "comment": "Open sleep sounds playlist"}
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "time": "22:00",
+    "comment": "Run at bedtime"
+  },
+  "limits": {
+    "max_runs_per_day": 1,
+    "delay_between_actions": [1, 2]
+  }
+}

@@ -1,0 +1,840 @@
+{
+  "youtube": {
+    "skill_id": "youtube",
+    "title": "How to Watch YouTube",
+    "description": "Open YouTube in Picture-in-Picture mode and watch videos hands-free",
+    "difficulty": "easy",
+    "icon": "\u25b6\ufe0f",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"open youtube\" or \"watch [video name]\"",
+        "tip": "You can also say \"play music videos\" or \"watch funny cats\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly processes your request",
+        "description": "Lilly listens, recognizes the intent, and launches the app",
+        "duration": 2000,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "YouTube opens in PiP",
+        "description": "The YouTube app opens in Picture-in-Picture mode on top of everything",
+        "duration": 3000,
+        "visual": "youtube"
+      },
+      {
+        "step": 4,
+        "type": "result",
+        "title": "Watch while you work",
+        "description": "Browse videos, search, or just enjoy. Say \"skip ad\" if an ad plays.",
+        "duration": 2500,
+        "visual": "screen"
+      }
+    ]
+  },
+  "gmail": {
+    "skill_id": "gmail",
+    "title": "How to Check Email",
+    "description": "Open Gmail and read your inbox with a voice command",
+    "difficulty": "easy",
+    "icon": "\ud83d\udce7",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"open gmail\" or \"check my email\"",
+        "tip": "You can also say \"read my emails\" or \"check my inbox\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly processes your request",
+        "description": "Lilly authenticates and opens your Gmail inbox",
+        "duration": 2000,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Gmail opens",
+        "description": "Your Gmail inbox opens showing recent emails",
+        "duration": 3000,
+        "visual": "gmail"
+      },
+      {
+        "step": 4,
+        "type": "result",
+        "title": "Browse your inbox",
+        "description": "Scroll through emails, tap to read, or say \"reply\" to respond",
+        "duration": 2500,
+        "visual": "screen"
+      }
+    ]
+  },
+  "maps": {
+    "skill_id": "maps",
+    "title": "How to Use Maps",
+    "description": "Open Google Maps and navigate to a destination",
+    "difficulty": "easy",
+    "icon": "\ud83d\uddfa\ufe0f",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"open maps\" or \"navigate to [place]\"",
+        "tip": "Examples: \"navigate to Starbucks\" or \"directions to the airport\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly processes your request",
+        "description": "Lilly gets your location and opens Maps with the destination",
+        "duration": 2000,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Maps opens with route",
+        "description": "Google Maps opens showing the route to your destination",
+        "duration": 3000,
+        "visual": "maps"
+      },
+      {
+        "step": 4,
+        "type": "result",
+        "title": "Start navigation",
+        "description": "Tap start to begin turn-by-turn navigation",
+        "duration": 2500,
+        "visual": "screen"
+      }
+    ]
+  },
+  "camera": {
+    "skill_id": "camera",
+    "title": "How to Use the Camera",
+    "description": "Open the camera app to take photos or record videos",
+    "difficulty": "easy",
+    "icon": "\ud83d\udcf8",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"open camera\" or \"take a photo\"",
+        "tip": "You can also say \"take a picture\" or \"open camera app\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly processes your request",
+        "description": "Lilly opens the camera app for you",
+        "duration": 2000,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Camera opens",
+        "description": "The camera app opens and is ready to capture",
+        "duration": 3000,
+        "visual": "camera"
+      },
+      {
+        "step": 4,
+        "type": "result",
+        "title": "Take a shot",
+        "description": "Point and tap the shutter button, or say \"take photo\" again",
+        "duration": 2500,
+        "visual": "screen"
+      }
+    ]
+  },
+  "music": {
+    "skill_id": "music",
+    "title": "How to Play Music",
+    "description": "Open YouTube Music and play your favorite songs",
+    "difficulty": "easy",
+    "icon": "\ud83c\udfb5",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"open music\" or \"play music\"",
+        "tip": "You can also say \"play [song name]\" or \"listen to [artist]\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly processes your request",
+        "description": "Lilly opens YouTube Music and starts playback",
+        "duration": 2000,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Music opens",
+        "description": "YouTube Music opens and starts playing your last playlist or recommended music",
+        "duration": 3000,
+        "visual": "music"
+      },
+      {
+        "step": 4,
+        "type": "result",
+        "title": "Enjoy your music",
+        "description": "Say \"pause\", \"next\", or \"volume up/down\" to control playback",
+        "duration": 2500,
+        "visual": "screen"
+      }
+    ]
+  },
+  "search": {
+    "skill_id": "search",
+    "title": "How to Search the Web",
+    "description": "Search the web using Scrapling-powered search",
+    "difficulty": "easy",
+    "icon": "\ud83d\udd0d",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"google [query]\" or \"search for [query]\"",
+        "tip": "Examples: \"google best pizza near me\" or \"search for AI news\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly searches the web",
+        "description": "Lilly uses Scrapling to search and extract clean results",
+        "duration": 2500,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Results displayed",
+        "description": "Lilly reads you the top results or shows them in chat",
+        "duration": 3000,
+        "visual": "search"
+      },
+      {
+        "step": 4,
+        "type": "result",
+        "title": "Get more details",
+        "description": "Say \"tell me more\" or \"open the first result\" to dive deeper",
+        "duration": 2500,
+        "visual": "screen"
+      }
+    ]
+  },
+  "notifications": {
+    "skill_id": "notifications",
+    "title": "How to Check Notifications",
+    "description": "View and manage your phone notifications hands-free",
+    "difficulty": "easy",
+    "icon": "\ud83d\udd14",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"what notifications\" or \"any alerts\"",
+        "tip": "Also try: \"what did I miss\" or \"check my notifications\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly reads notifications",
+        "description": "Lilly reads your notification list and sorts by priority",
+        "duration": 2000,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Notifications displayed",
+        "description": "Lilly tells you about important alerts: calls, messages, app notifications",
+        "duration": 3000,
+        "visual": "notifications"
+      },
+      {
+        "step": 4,
+        "type": "result",
+        "title": "Take action",
+        "description": "Say \"reply\" to respond, \"call back\" to return a call, or \"dismiss\" to clear",
+        "duration": 2500,
+        "visual": "screen"
+      }
+    ]
+  },
+  "battery": {
+    "skill_id": "battery",
+    "title": "How to Check Battery",
+    "description": "Ask Lilly about your phone's battery status",
+    "difficulty": "easy",
+    "icon": "\ud83d\udd0b",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"how much battery\" or \"what's my charge\"",
+        "tip": "Also try: \"is my battery low\" or \"battery status\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly checks sensors",
+        "description": "Lilly reads the battery sensor from your Android phone",
+        "duration": 1500,
+        "visual": "sensor"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Battery status reported",
+        "description": "Lilly tells you the percentage, charging status, and health",
+        "duration": 3000,
+        "visual": "battery"
+      }
+    ]
+  },
+  "bluetooth": {
+    "skill_id": "bluetooth",
+    "title": "How to Scan Bluetooth",
+    "description": "Discover nearby Bluetooth devices",
+    "difficulty": "easy",
+    "icon": "\ud83d\udce1",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"who's near me\" or \"bluetooth scan\"",
+        "tip": "Also try: \"scan bluetooth\" or \"find nearby devices\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly scans for devices",
+        "description": "Lilly activates Bluetooth and scans for nearby devices",
+        "duration": 3000,
+        "visual": "sensor"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Devices found",
+        "description": "Lilly lists nearby devices with names and signal strength",
+        "duration": 3000,
+        "visual": "bluetooth"
+      }
+    ]
+  },
+  "location": {
+    "skill_id": "location",
+    "title": "How to Get Location",
+    "description": "Ask Lilly where you are using GPS",
+    "difficulty": "easy",
+    "icon": "\ud83d\udccd",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"where are we\" or \"what's my location\"",
+        "tip": "Also try: \"where am I\" or \"current location\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly gets GPS fix",
+        "description": "Lilly reads the GPS sensor to get your coordinates",
+        "duration": 2500,
+        "visual": "sensor"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Location reported",
+        "description": "Lilly tells you your current city, neighborhood, or coordinates",
+        "duration": 3000,
+        "visual": "location"
+      }
+    ]
+  },
+  "screenshot": {
+    "skill_id": "screenshot",
+    "title": "How to Take a Screenshot",
+    "description": "Capture your screen with a voice command",
+    "difficulty": "easy",
+    "icon": "\ud83d\udcf7",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"screenshot\" or \"take a screenshot\"",
+        "tip": "Also try: \"capture screen\" or \"screen capture\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly captures screen",
+        "description": "Lilly takes a screenshot of your current screen",
+        "duration": 1500,
+        "visual": "camera"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Screenshot saved",
+        "description": "The screenshot is saved to your Photos app",
+        "duration": 2000,
+        "visual": "photos"
+      }
+    ]
+  },
+  "volume": {
+    "skill_id": "volume",
+    "title": "How to Control Volume",
+    "description": "Adjust volume up or down with your voice",
+    "difficulty": "easy",
+    "icon": "\ud83d\udd0a",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"volume up\", \"louder\", \"volume down\", or \"quieter\"",
+        "tip": "You can also say \"mute\" or \"set volume to 50%\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly adjusts volume",
+        "description": "Lilly sends the volume key event to your phone",
+        "duration": 1500,
+        "visual": "volume"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Volume changed",
+        "description": "Your phone volume is adjusted as requested",
+        "duration": 2000,
+        "visual": "screen"
+      }
+    ]
+  },
+  "settings": {
+    "skill_id": "settings",
+    "title": "How to Open Settings",
+    "description": "Launch Android Settings with a voice command",
+    "difficulty": "easy",
+    "icon": "\u2699\ufe0f",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"open settings\" or \"go to settings\"",
+        "tip": "Also try: \"phone settings\" or \"system preferences\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly opens Settings",
+        "description": "Lilly launches the Android Settings app",
+        "duration": 1500,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Settings opens",
+        "description": "The Settings app opens showing all system options",
+        "duration": 3000,
+        "visual": "settings"
+      }
+    ]
+  },
+  "calculator": {
+    "skill_id": "calculator",
+    "title": "How to Use Calculator",
+    "description": "Open the calculator app for quick math",
+    "difficulty": "easy",
+    "icon": "\ud83e\uddee",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"open calculator\" or \"calculator\"",
+        "tip": "You can also say \"do math\" or \"calculate\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly opens Calculator",
+        "description": "Lilly launches the Android Calculator app",
+        "duration": 1500,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Calculator opens",
+        "description": "The Calculator app is ready for your math",
+        "duration": 3000,
+        "visual": "calculator"
+      }
+    ]
+  },
+  "wifi": {
+    "skill_id": "wifi",
+    "title": "How to Check WiFi",
+    "description": "Check your WiFi connection status",
+    "difficulty": "easy",
+    "icon": "\ud83d\udcf6",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"check wifi\" or \"wifi status\"",
+        "tip": "Also try: \"is wifi working\" or \"network status\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly checks WiFi",
+        "description": "Lilly reads your WiFi sensor and connection state",
+        "duration": 2000,
+        "visual": "sensor"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Status reported",
+        "description": "Lilly tells you if WiFi is connected, the SSID, and signal strength",
+        "duration": 3000,
+        "visual": "wifi"
+      }
+    ]
+  },
+  "weather": {
+    "skill_id": "weather",
+    "title": "How to Check Weather",
+    "description": "Ask Lilly about the current weather conditions",
+    "difficulty": "easy",
+    "icon": "\ud83c\udf24\ufe0f",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"what's the weather\" or \"is it raining\"",
+        "tip": "Also try: \"how's the weather\" or \"will it rain today\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly checks sensors",
+        "description": "Lilly reads barometer, temperature, and pressure sensors",
+        "duration": 2500,
+        "visual": "sensor"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Weather report",
+        "description": "Lilly gives you a weather summary based on sensor data",
+        "duration": 3000,
+        "visual": "weather"
+      }
+    ]
+  },
+  "netflix": {
+    "skill_id": "netflix",
+    "title": "How to Watch Netflix",
+    "description": "Open Netflix and start streaming",
+    "difficulty": "easy",
+    "icon": "\ud83c\udfac",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"open netflix\" or \"watch netflix\"",
+        "tip": "Also try: \"netflix\" or \"stream netflix\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly opens Netflix",
+        "description": "Lilly launches the Netflix app",
+        "duration": 2000,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Netflix opens",
+        "description": "Netflix opens showing your continue watching list",
+        "duration": 3000,
+        "visual": "netflix"
+      }
+    ]
+  },
+  "spotify": {
+    "skill_id": "spotify",
+    "title": "How to Use Spotify",
+    "description": "Open Spotify and play your music",
+    "difficulty": "easy",
+    "icon": "\ud83c\udfa7",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"open spotify\" or \"play spotify\"",
+        "tip": "Also try: \"spotify\" or \"music on spotify\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly opens Spotify",
+        "description": "Lilly launches the Spotify app",
+        "duration": 2000,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Spotify opens",
+        "description": "Spotify opens to your last played playlist or home",
+        "duration": 3000,
+        "visual": "spotify"
+      }
+    ]
+  },
+  "photos": {
+    "skill_id": "photos",
+    "title": "How to View Photos",
+    "description": "Open your photo gallery",
+    "difficulty": "easy",
+    "icon": "\ud83d\uddbc\ufe0f",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"open photos\" or \"show photos\"",
+        "tip": "Also try: \"gallery\" or \"my pictures\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly opens Photos",
+        "description": "Lilly launches your photo gallery app",
+        "duration": 1500,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Photos opens",
+        "description": "Your photo gallery opens showing recent pictures",
+        "duration": 3000,
+        "visual": "photos"
+      }
+    ]
+  },
+  "sensor_battery": {
+    "skill_id": "sensor_battery",
+    "title": "How to Check Battery Sensor",
+    "description": "Get detailed battery information from sensors",
+    "difficulty": "easy",
+    "icon": "\ud83d\udd0b",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"battery status\" or \"check battery sensor\"",
+        "tip": "Also try: \"how much battery\" or \"is my phone charging\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly reads sensor",
+        "description": "Lilly queries the Android battery sensor directly",
+        "duration": 1500,
+        "visual": "sensor"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Detailed battery info",
+        "description": "Lilly reports level, charging state, voltage, temperature, and health",
+        "duration": 3000,
+        "visual": "battery"
+      }
+    ]
+  },
+  "sensor_light": {
+    "skill_id": "sensor_light",
+    "title": "How to Check Light Level",
+    "description": "Ask Lilly how bright your environment is",
+    "difficulty": "easy",
+    "icon": "\ud83d\udca1",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"how bright is it\" or \"light level\"",
+        "tip": "Also try: \"is it dark\" or \"ambient light\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly reads light sensor",
+        "description": "Lilly queries the ambient light sensor",
+        "duration": 1500,
+        "visual": "sensor"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Light level reported",
+        "description": "Lilly tells you the brightness in lux and interprets it",
+        "duration": 3000,
+        "visual": "light"
+      }
+    ]
+  },
+  "sensor_location": {
+    "skill_id": "sensor_location",
+    "title": "How to Check GPS Location",
+    "description": "Get your current GPS coordinates and location",
+    "difficulty": "easy",
+    "icon": "\ud83d\udccd",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"where are we\" or \"current location\"",
+        "tip": "Also try: \"my coordinates\" or \"where am I\"",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly gets GPS fix",
+        "description": "Lilly reads the GPS sensor for coordinates",
+        "duration": 2500,
+        "visual": "sensor"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Location reported",
+        "description": "Lilly tells you your city, neighborhood, and coordinates",
+        "duration": 3000,
+        "visual": "location"
+      }
+    ]
+  },
+  "skip_ad": {
+    "skill_id": "skip_ad",
+    "title": "How to Skip Ads",
+    "description": "Automatically skip video ads with a voice command",
+    "difficulty": "easy",
+    "icon": "\u23ed\ufe0f",
+    "steps": [
+      {
+        "step": 1,
+        "type": "voice",
+        "title": "Speak the command",
+        "description": "Say \"skip ad\" when an ad is playing",
+        "tip": "This works in YouTube and most video players",
+        "duration": 3000,
+        "visual": "mic"
+      },
+      {
+        "step": 2,
+        "type": "processing",
+        "title": "Lilly finds skip button",
+        "description": "Lilly looks for the skip button coordinates on screen",
+        "duration": 2000,
+        "visual": "brain"
+      },
+      {
+        "step": 3,
+        "type": "action",
+        "title": "Ad skipped",
+        "description": "Lilly taps the skip button and the ad is dismissed",
+        "duration": 2000,
+        "visual": "screen"
+      }
+    ]
+  }
+}

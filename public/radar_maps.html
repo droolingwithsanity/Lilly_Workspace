@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>Radar Maps — Lilly AI</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;font-family:'Segoe UI',system-ui,sans-serif;background:#0f0f18}
+  #map{height:100vh;width:100vw}
+  .leaflet-popup-content-wrapper{background:rgba(255,255,255,0.95);border-radius:12px;color:#1a1a2e}
+  .radar-legend{position:absolute;top:10px;right:10px;z-index:1000;background:rgba(255,255,255,0.92);padding:10px;border-radius:10px;font-size:11px;box-shadow:0 2px 10px rgba(0,0,0,0.2);max-width:140px}
+  .legend-item{display:flex;align-items:center;gap:6px;margin:3px 0}
+  .legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+  #status{position:absolute;bottom:10px;left:10px;z-index:1000;background:rgba(0,0,0,0.75);color:#fff;padding:6px 12px;border-radius:8px;font-size:11px}
+  @keyframes pinPulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,0.4)}50%{box-shadow:0 0 0 8px rgba(239,68,68,0)}}
+  .pin-changed{animation:pinPulse 0.6s ease-in-out 3}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="radar-legend">
+  <strong>Devices</strong>
+  <div class="legend-item"><div class="legend-dot" style="background:#3b82f6"></div>iOS</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#22c55e"></div>Android</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div>Tracker</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#a855f7"></div>Computer</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div>Audio / IoT</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#6b7280"></div>Other</div>
+</div>
+<div id="status">Connecting...</div>
+<script>
+const PLATFORM_COLORS = {
+  ios: '#3b82f6', android: '#22c55e', apple: '#3b82f6',
+  computer: '#a855f7', audio: '#f59e0b', iot: '#f59e0b',
+  tracker: '#ef4444', other: '#6b7280', unknown: '#6b7280',
+};
+const DEVICE_ICONS = {
+  phone: '📱', tracker: '📍', computer: '💻', tablet: '📱',
+  audio: '🎧', speaker: '🔊', iot: '🏠', wearable: '⌚',
+  tv: '📺', unknown: '❓',
+};
+
+let map, centerMarker, deviceMarkers = {};
+let lastDeviceIds = new Set();
+
+function createDeviceIcon(device) {
+  const color = PLATFORM_COLORS[device.platform] || '#6b7280';
+  const icon = DEVICE_ICONS[device.device_class] || '📡';
+  const size = device.position_changed ? 36 : 30;
+  const extraClass = device.position_changed ? 'pin-changed' : '';
+  return L.divIcon({
+    className: 'device-icon-wrapper',
+    html: `<div class="${extraClass}" style="width:${size}px;height:${size}px;background:${color};border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,0.3);border:2px solid #fff">${icon}</div>`,
+    iconSize: [size, size],
+    iconAnchor: [size/2, size/2],
+  });
+}
+
+async function initMap() {
+  map = L.map('map').setView([45.0, -75.0], 13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap', maxZoom: 19,
+  }).addTo(map);
+  setInterval(pollRadar, 2500);
+  pollRadar();
+}
+
+async function pollRadar() {
+  try {
+    const r = await fetch('/api/radar/map');
+    const data = await r.json();
+    const devices = data.devices || [];
+
+    if (data.center && data.center.lat) {
+      const lat = data.center.lat, lng = data.center.lng;
+      if (!centerMarker) {
+        centerMarker = L.marker([lat, lng], {
+          icon: L.divIcon({
+            className: 'you-are-here',
+            html: '<div style="background:#ef4444;width:18px;height:18px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 12px rgba(239,68,68,0.7)"></div>',
+            iconSize: [18, 18], iconAnchor: [9, 9],
+          })
+        }).addTo(map).bindPopup('You are here');
+        map.setView([lat, lng], 15);
+      } else {
+        centerMarker.setLatLng([lat, lng]);
+      }
+    }
+
+    const currentIds = new Set();
+    devices.forEach(d => {
+      currentIds.add(d.id);
+      const lat = d.estimated_lat, lng = d.estimated_lng;
+      if (lat == null || lng == null) return;
+
+      if (deviceMarkers[d.id]) {
+        const m = deviceMarkers[d.id];
+        const old = m.getLatLng();
+        if (old.distanceTo([lat, lng]) > 2) {
+          m.setLatLng([lat, lng]);
+          m.setIcon(createDeviceIcon(d));
+        }
+      } else {
+        const marker = L.marker([lat, lng], { icon: createDeviceIcon(d) })
+          .addTo(map)
+          .bindPopup(
+            `<strong>${d.name}</strong><br>${d.platform} · ${d.device_class}<br>` +
+            `RSSI: ${d.rssi} dBm<br>` +
+            `Distance: ~${d.distance_m ? d.distance_m.toFixed(1) : '?'}m`
+          );
+        deviceMarkers[d.id] = marker;
+      }
+    });
+
+    Object.keys(deviceMarkers).forEach(id => {
+      if (!currentIds.has(id)) {
+        map.removeLayer(deviceMarkers[id]);
+        delete deviceMarkers[id];
+      }
+    });
+
+    lastDeviceIds = currentIds;
+    document.getElementById('status').textContent =
+      `Updated ${new Date().toLocaleTimeString()} — ${devices.length} devices`;
+  } catch (e) {
+    console.error('Poll failed', e);
+  }
+}
+
+initMap();
+</script>
+</body>
+</html>

@@ -4,476 +4,1105 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Lilly Radar</title>
-<!-- Leaflet (real map tiles) — matches the pyfile reference -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-  :root{
-    --bg:#0d0a12;
-    --lavender:#a892b8;
-    --purple:#8b7a9e;
-    --lilac:#c084fc;
-    --mint:#69f0ae;
-    --rose:#f0abfc;
-    --gold:#fbbf24;
-    --cyan:#67e8f9;
-    --danger:#e57373;
-    --text:#e8e0f0;
-    --dim:rgba(255,255,255,0.45);
-    --faint:rgba(255,255,255,0.07);
-    --glass:rgba(255,255,255,0.08);
-    --glass-border:rgba(255,255,255,0.12);
-  }
-  *{margin:0;padding:0;box-sizing:border-box}
-  html,body{width:100%;height:100%;overflow:hidden;font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text)}
-  #hub{position:fixed;inset:0}
-  #map{position:absolute;inset:0;background:#141019;z-index:1}
-  /* ── Glass panel helpers ── */
-  .glass{background:var(--glass);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--glass-border);border-radius:18px}
+/* ══════════════════════════════════════════
+   Lilly Radar — CSS
+   Palette: dark slate bg, lavender/purple accents
+   Text is legible first, decorative second
+═══════════════════════════════════════════ */
+:root {
+  --bg:        #0e0c14;
+  --surface:   #1a1725;
+  --card:      #221f2e;
+  --border:    rgba(255,255,255,0.09);
+  --lavender:  #b38de8;
+  --purple:    #8b6abf;
+  --mint:      #5de6a8;
+  --cyan:      #5bcde8;
+  --amber:     #f5c542;
+  --rose:      #e87a8b;
+  --blue:      #5b9de8;
+  --text:      #e8e2f4;
+  --muted:     rgba(232,226,244,0.5);
+  --faint:     rgba(255,255,255,0.05);
+  --glow-lav:  0 0 18px rgba(179,141,232,0.3);
+  /* node colour slots */
+  --n0: #b38de8; --n1: #5de6a8; --n2: #5bcde8; --n3: #f5c542; --n4: #e87a8b; --n5: #e8a85b;
+}
 
-  /* ── Title (top-left) ── */
-  #title{position:absolute;top:16px;left:16px;z-index:10;pointer-events:auto}
-  .title-row{display:flex;align-items:flex-start;gap:12px}
-  #title h1{font-size:18px;font-weight:700;color:var(--lavender);text-shadow:0 0 20px rgba(168,146,184,0.35);letter-spacing:.3px}
-  #title p{font-size:11px;color:var(--dim);margin-top:2px}
-  .win-controls{display:flex;gap:6px;margin-top:2px}
-  .win-controls button{width:30px;height:30px;border-radius:10px;border:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(12px);color:var(--lilac);font-size:15px;font-weight:700;line-height:1;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center}
-  .win-controls button:hover{background:rgba(192,132,252,0.22);border-color:rgba(192,132,252,0.5);box-shadow:0 0 12px rgba(192,132,252,.25)}
-  .win-controls .min-btn:hover{background:rgba(105,240,174,.18);border-color:rgba(105,240,174,.4);color:var(--mint)}
-  .win-controls .close-btn:hover{background:rgba(229,115,115,.2);border-color:rgba(229,115,115,.5);color:var(--danger)}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-  /* ── Sidebar (right, lavender glass) ── */
-  #sidebar{position:absolute;top:16px;right:16px;width:288px;z-index:10;pointer-events:auto;max-height:calc(100vh - 32px);display:flex;flex-direction:column;background:var(--glass);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:1px solid var(--glass-border);border-radius:18px;padding:14px;box-shadow:0 8px 40px rgba(0,0,0,.45)}
-  .side-h2{font-size:11px;font-weight:700;color:var(--lavender);margin:0 0 8px;letter-spacing:.6px;text-transform:uppercase}
-  .side-h2.top{margin-top:0}
-  .side-section{margin-top:12px}
-  /* Status bar */
-  #statusBox{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;background:rgba(255,255,255,.05);border:1px solid var(--glass-border);font-size:11px}
-  .pulse-dot{width:8px;height:8px;border-radius:50%;background:#555;flex-shrink:0;box-shadow:0 0 6px currentColor}
-  .pulse-dot.live{background:var(--mint);color:var(--mint);animation:pulse 1.6s infinite}
-  #statusText{flex:1;color:var(--dim)}
-  #gpsRead{color:var(--cyan);font-family:ui-monospace,monospace;font-size:9px}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-  /* Buttons */
-  .btn-group{display:flex;gap:8px;margin-top:10px}
-  .btn{flex:1;padding:9px;border:none;border-radius:12px;font-weight:700;font-size:12px;cursor:pointer;color:#fff;transition:opacity .2s;background:linear-gradient(140deg,#8b7a9e,#a892b8)}
-  .btn:active{opacity:.7}
-  .btn-accent{background:linear-gradient(140deg,#6f9bd6,#8b7a9e)}
-  /* Node cards */
-  #nodeList{display:flex;flex-direction:column;gap:6px;max-height:34vh;overflow-y:auto}
-  .node-card{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;background:rgba(255,255,255,.05);border:1px solid var(--glass-border);border-left:3px solid var(--nc,#8b7a9e);transition:all .3s}
-  .node-card.off{opacity:.55}
-  .node-dot{width:10px;height:10px;border-radius:50%;background:var(--nc,#8b7a9e);box-shadow:0 0 6px var(--nc,#8b7a9e);flex-shrink:0;cursor:pointer}
-  .node-name{font-size:12px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .node-meta{font-size:9px;color:var(--dim)}
-  .node-status{font-size:9px;padding:2px 6px;border-radius:8px;font-weight:700;white-space:nowrap}
-  .node-on{background:rgba(105,240,174,.16);color:var(--mint)}
-  .node-off{background:rgba(255,255,255,.07);color:rgba(255,255,255,.35)}
-  /* Device feed */
-  #feed{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;min-height:60px;max-height:30vh}
-  .dev-item{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:10px;background:rgba(255,255,255,.05);border:1px solid var(--glass-border);font-size:11px;border-left:3px solid var(--dc,#8b7a9e)}
-  .dev-item .d-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--text);min-width:0}
-  .dev-item .d-meta{color:var(--dim);font-size:9px;white-space:nowrap}
-  .tag{display:inline-block;padding:1px 5px;border-radius:6px;font-size:8px;font-weight:700;background:var(--gold);color:#000;margin-left:5px;flex-shrink:0}
-  .tag.wifi{background:var(--cyan);color:#000}
-  .empty{color:rgba(255,255,255,.35);text-align:center;font-size:11px;padding:14px}
+html, body {
+  width: 100%; height: 100%; overflow: hidden;
+  font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg); color: var(--text);
+  font-size: 14px; line-height: 1.45;
+}
 
-  /* ── Lilly pup avatar (branding, bottom-left) ── */
-  #pupBox{position:absolute;left:16px;bottom:16px;z-index:10;pointer-events:auto;padding:8px;width:116px;text-align:center}
-  #pupBox .pup-glare{font-size:9px;color:var(--lilac);font-weight:600;letter-spacing:.5px;text-transform:uppercase;margin-top:2px}
-  #pupCanvas{display:block;width:100%;height:auto;filter:drop-shadow(0 6px 18px rgba(192,132,252,.35))}
+/* ── Layout ── */
+#hub   { position: fixed; inset: 0; display: flex; }
+#map   { flex: 1; height: 100%; z-index: 1; }
+#panel {
+  width: 320px; flex-shrink: 0;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  overflow: hidden; z-index: 10;
+}
 
-  /* Minimized pill */
-  #minPill{position:absolute;bottom:24px;left:50%;transform:translateX(-50%);z-index:20;pointer-events:auto;padding:10px 22px;border-radius:999px;border:1px solid rgba(192,132,252,.4);background:rgba(29,23,38,.75);backdrop-filter:blur(16px);color:var(--text);font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 0 24px rgba(192,132,252,.2)}
-  .leaflet-popup-content-wrapper{background:rgba(29,23,38,.92)!important;color:var(--text)!important;border-radius:12px!important;backdrop-filter:blur(10px)}
-  .leaflet-popup-tip{background:rgba(29,23,38,.92)!important}
-  .leaflet-popup-content{font-family:system-ui,sans-serif!important;font-size:11px!important;margin:10px 12px!important;line-height:1.5}
-  ::-webkit-scrollbar{width:6px;height:6px}
-  ::-webkit-scrollbar-thumb{background:rgba(168,146,184,.35);border-radius:3px}
-  @media (max-width:720px){
-    #sidebar{width:min(288px,86vw);top:auto;bottom:12px;right:12px;max-height:54vh}
-    #pupBox{display:none}
-  }
+/* ── Panel header ── */
+#panel-header {
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.radar-title {
+  font-size: 17px; font-weight: 700;
+  color: var(--lavender); letter-spacing: .2px;
+  text-shadow: var(--glow-lav);
+}
+.radar-sub {
+  font-size: 11px; color: var(--muted); margin-top: 2px;
+}
+
+/* ── Status row ── */
+#status-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 16px; border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.pulse { width: 9px; height: 9px; border-radius: 50%; background: #555; flex-shrink: 0; }
+.pulse.live { background: var(--mint); animation: blink 1.6s infinite; }
+.pulse.warn { background: var(--amber); }
+#status-text { flex: 1; font-size: 12px; color: var(--muted); }
+#gps-coord   { font-size: 10px; font-family: ui-monospace, monospace; color: var(--cyan); }
+
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+/* ── Action buttons ── */
+.btn-row { display: flex; gap: 8px; padding: 10px 16px; flex-shrink: 0; }
+.btn {
+  flex: 1; padding: 9px 6px; border: none; border-radius: 10px;
+  font-size: 12px; font-weight: 700; color: #fff; cursor: pointer;
+  transition: opacity .15s;
+}
+.btn:active { opacity: .7; }
+.btn-primary { background: linear-gradient(135deg,#7256c2,#9b7bd6); }
+.btn-secondary { background: rgba(255,255,255,0.08); border: 1px solid var(--border); }
+
+/* ── Tab bar ── */
+#tabs {
+  display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.tab {
+  flex: 1; padding: 9px 4px; text-align: center;
+  font-size: 11px; font-weight: 700; letter-spacing: .4px;
+  text-transform: uppercase; color: var(--muted);
+  cursor: pointer; border-bottom: 2px solid transparent;
+  transition: color .15s, border-color .15s;
+}
+.tab.active { color: var(--lavender); border-bottom-color: var(--lavender); }
+
+/* ── Scrollable content area ── */
+#panel-body { flex: 1; overflow-y: auto; padding: 12px 12px 20px; }
+#panel-body::-webkit-scrollbar { width: 5px; }
+#panel-body::-webkit-scrollbar-thumb { background: rgba(179,141,232,.25); border-radius: 3px; }
+
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
+
+/* ── Section labels ── */
+.section-label {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px;
+  color: var(--muted); margin: 10px 0 6px; padding-left: 2px;
+}
+.section-label:first-child { margin-top: 0; }
+
+/* ── Node cards ── */
+.node-card {
+  background: var(--card); border: 1px solid var(--border);
+  border-left: 3px solid var(--nc, #8b6abf);
+  border-radius: 10px; padding: 10px 11px; margin-bottom: 8px;
+  cursor: pointer; transition: background .15s;
+}
+.node-card:hover { background: rgba(255,255,255,.06); }
+.node-card.selected { background: rgba(179,141,232,.12); border-color: rgba(179,141,232,.4); }
+.node-card.offline { opacity: .55; }
+
+.nc-header { display: flex; align-items: center; gap: 8px; }
+.nc-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--nc, #8b6abf); box-shadow: 0 0 8px var(--nc, #8b6abf); flex-shrink: 0; }
+.nc-name { font-size: 14px; font-weight: 700; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nc-badge {
+  font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 6px;
+  flex-shrink: 0;
+}
+.badge-on  { background: rgba(93,230,168,.18); color: var(--mint); }
+.badge-off { background: rgba(255,255,255,.06); color: rgba(255,255,255,.4); }
+
+.nc-meta { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 5px 0; }
+.nc-stat {
+  min-width: 50%; display: flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--muted);
+}
+.nc-stat strong { color: var(--text); }
+
+/* Sensor grid inside node detail panel */
+.sensor-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+  margin-top: 8px;
+}
+.sensor-tile {
+  background: rgba(255,255,255,.04); border: 1px solid var(--border);
+  border-radius: 8px; padding: 7px 9px;
+}
+.sensor-tile .s-label {
+  font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px;
+}
+.sensor-tile .s-val {
+  font-size: 13px; font-weight: 700; color: var(--text); margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ── Device list ── */
+.dev-card {
+  background: var(--card); border: 1px solid var(--border);
+  border-left: 3px solid var(--dc, #8b6abf);
+  border-radius: 10px; padding: 9px 11px; margin-bottom: 8px;
+  cursor: pointer; transition: background .15s;
+}
+.dev-card:hover { background: rgba(255,255,255,.05); }
+.dev-card.selected { background: rgba(179,141,232,.1); }
+
+.dc-header { display: flex; align-items: center; gap: 8px; }
+.dc-icon { font-size: 16px; flex-shrink: 0; }
+.dc-name { font-size: 13px; font-weight: 700; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dc-type-badge {
+  font-size: 9px; font-weight: 800; padding: 2px 6px; border-radius: 6px; flex-shrink: 0;
+  letter-spacing: .3px;
+}
+.type-wifi    { background: rgba(91,205,232,.2); color: var(--cyan); }
+.type-bt      { background: rgba(179,141,232,.2); color: var(--lavender); }
+.type-tracker { background: rgba(245,197,66,.22); color: var(--amber); }
+
+.dc-body { margin-top: 6px; }
+.dc-dist { font-size: 12px; color: var(--muted); }
+.dc-nodes { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px; }
+
+/* Access-point association badges */
+.dc-ap {
+  margin-top: 5px; font-size: 11px; font-weight: 600;
+  color: var(--cyan); background: rgba(91,205,232,.12);
+  border: 1px solid rgba(91,205,232,.25); border-radius: 8px;
+  padding: 2px 8px; display: inline-block;
+}
+.ap-summary {
+  margin-bottom: 8px; padding: 6px 8px; border-radius: 10px;
+  background: rgba(255,255,255,.04); border: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 3px;
+}
+.ap-summary .dc-ap { margin-top: 0; }
+
+/* Signal bar chip (shows per-node distance) */
+.sig-chip {
+  display: flex; align-items: center; gap: 4px;
+  background: rgba(255,255,255,.05); border: 1px solid var(--border);
+  border-radius: 6px; padding: 3px 7px; font-size: 10px;
+}
+.sig-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.sig-label { color: var(--muted); white-space: nowrap; }
+.sig-dist  { color: var(--text); font-weight: 700; }
+
+/* Permanent phone-name map labels + device/AP labels */
+.leaflet-tooltip.phone-label {
+  background: rgba(20,22,32,.82);
+  border: 1px solid rgba(255,255,255,.14);
+  color: #e7e9f2; border-radius: 8px; padding: 3px 8px;
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(0,0,0,.35);
+}
+.leaflet-tooltip.device-label {
+  background: rgba(20,22,32,.72);
+  border: 1px solid rgba(255,255,255,.12);
+  color: #dcdce6; border-radius: 6px; padding: 1px 6px;
+  font-size: 10px; font-weight: 500; white-space: nowrap;
+  box-shadow: 0 1px 5px rgba(0,0,0,.3);
+}
+
+/* Signal strength bars (4-bar icon) */
+.sig-bars { display: flex; align-items: flex-end; gap: 2px; height: 12px; flex-shrink: 0; }
+.sig-bars span {
+  width: 3px; border-radius: 1.5px; background: rgba(255,255,255,.18);
+  display: block;
+}
+.sig-bars span.lit { background: var(--nc-bar, var(--mint)); }
+
+/* triangulation confidence pill */
+.tri-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+  margin-top: 5px;
+}
+.tri-good { background: rgba(93,230,168,.18); color: var(--mint); }
+.tri-ok   { background: rgba(245,197,66,.18); color: var(--amber); }
+.tri-low  { background: rgba(232,122,139,.18); color: var(--rose); }
+
+/* ── Node detail drawer (overlays panel-body) ── */
+#node-drawer {
+  position: absolute; inset: 0; background: var(--surface);
+  overflow-y: auto; z-index: 20; display: none; flex-direction: column;
+}
+#node-drawer.open { display: flex; }
+#node-drawer::-webkit-scrollbar { width: 5px; }
+#node-drawer::-webkit-scrollbar-thumb { background: rgba(179,141,232,.25); border-radius: 3px; }
+
+.drawer-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 14px; border-bottom: 1px solid var(--border);
+  flex-shrink: 0; position: sticky; top: 0;
+  background: var(--surface); z-index: 1;
+}
+.drawer-back {
+  width: 30px; height: 30px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--faint);
+  color: var(--lavender); font-size: 16px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.drawer-title  { font-size: 15px; font-weight: 700; flex: 1; }
+.drawer-status { font-size: 11px; }
+
+.drawer-body { padding: 14px; }
+
+/* sensor reading rows inside drawer */
+.srow { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.srow:last-child { border-bottom: none; }
+.srow-icon { font-size: 18px; width: 28px; text-align: center; flex-shrink: 0; }
+.srow-info { flex: 1; min-width: 0; }
+.srow-name  { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.srow-val   { font-size: 14px; font-weight: 700; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow-bar   { height: 4px; border-radius: 2px; background: rgba(255,255,255,.08); margin-top: 4px; overflow: hidden; }
+.srow-bar-fill { height: 100%; border-radius: 2px; background: var(--lavender); transition: width .5s; }
+
+/* wifi / bt sub-lists in drawer */
+.sub-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.04);
+  font-size: 12px;
+}
+.sub-item:last-child { border-bottom: none; }
+.sub-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.sub-meta { color: var(--muted); white-space: nowrap; font-size: 11px; }
+
+/* ── Minimise pill ── */
+#min-pill {
+  display: none; position: fixed; bottom: 20px; left: 50%;
+  transform: translateX(-50%); z-index: 9999;
+  padding: 10px 22px; border-radius: 999px;
+  border: 1px solid rgba(179,141,232,.4);
+  background: rgba(22,18,34,.82); backdrop-filter: blur(12px);
+  color: var(--text); font-size: 13px; font-weight: 700;
+  cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,.4);
+}
+
+/* ── Leaflet overrides ── */
+.leaflet-popup-content-wrapper {
+  background: rgba(26,23,37,.95) !important; color: var(--text) !important;
+  border-radius: 12px !important; backdrop-filter: blur(10px);
+  border: 1px solid rgba(179,141,232,.25) !important;
+}
+.leaflet-popup-tip { background: rgba(26,23,37,.95) !important; }
+.leaflet-popup-content { font-family: system-ui,sans-serif !important; font-size: 12px !important; margin: 10px 14px !important; line-height: 1.55; }
+
+/* ── Empty state ── */
+.empty { color: var(--muted); text-align: center; padding: 18px 10px; font-size: 12px; }
+
+/* ── Mobile ── */
+@media (max-width: 760px) {
+  #hub    { flex-direction: column-reverse; }
+  #panel  { width: 100%; height: 52vh; border-left: none; border-top: 1px solid var(--border); }
+  #map    { height: 48vh; }
+}
 </style>
 </head>
 <body>
 <div id="hub">
   <div id="map"></div>
 
-  <div id="title">
-    <div class="title-row">
-      <div>
-        <h1>🐾 Lilly Radar</h1>
-        <p id="subtitle">0 nodes online · triangulation</p>
+  <div id="panel">
+    <!-- Header -->
+    <div id="panel-header">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <div class="radar-title">🐾 Lilly Radar</div>
+          <div class="radar-sub" id="subtitle">Connecting to nodes…</div>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-secondary" style="flex:none;width:32px;height:32px;padding:0;font-size:16px" title="Minimise" onclick="minimiseHub()">−</button>
+          <button class="btn btn-secondary" style="flex:none;width:32px;height:32px;padding:0;font-size:16px" title="Close" onclick="closeHub()">✕</button>
+        </div>
       </div>
-      <div class="win-controls">
-        <button class="min-btn" onclick="minimizeHub()" title="Minimize">−</button>
-        <button class="close-btn" onclick="closeHub()" title="Close">✕</button>
+    </div>
+
+    <!-- Status row -->
+    <div id="status-row">
+      <span class="pulse" id="pulse-dot"></span>
+      <span id="status-text">Connecting…</span>
+      <span id="gps-coord"></span>
+    </div>
+
+    <!-- Buttons -->
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="forceRescan()">⚡ Rescan All</button>
+      <button class="btn btn-secondary" onclick="openSettings()">⚙ Settings</button>
+    </div>
+
+    <!-- Tab bar -->
+    <div id="tabs">
+      <div class="tab active" data-tab="nodes" onclick="switchTab('nodes')">Nodes</div>
+      <div class="tab"       data-tab="devices" onclick="switchTab('devices')">Devices</div>
+    </div>
+
+    <!-- Scrollable body -->
+    <div id="panel-body" style="position:relative">
+
+      <!-- NODES TAB -->
+      <div class="tab-pane active" id="pane-nodes">
+        <div class="section-label" id="nodes-count-label">Paired nodes</div>
+        <div id="node-list"><div class="empty">No nodes registered yet.</div></div>
+      </div>
+
+      <!-- DEVICES TAB -->
+      <div class="tab-pane" id="pane-devices">
+        <div class="section-label" id="dev-count-label">Nearby devices</div>
+        <div id="dev-list"><div class="empty">Scanning for nearby devices…</div></div>
+      </div>
+
+      <!-- Node detail drawer (slides over both tabs) -->
+      <div id="node-drawer">
+        <div class="drawer-header">
+          <button class="drawer-back" onclick="closeDrawer()">‹</button>
+          <div class="drawer-title" id="drawer-title">Node</div>
+          <div class="drawer-status" id="drawer-status"></div>
+        </div>
+        <div class="drawer-body" id="drawer-body"></div>
       </div>
     </div>
   </div>
-
-  <div id="sidebar">
-    <div class="side-h2 top">Proximity Radar</div>
-    <div id="statusBox">
-      <span class="pulse-dot" id="statusDot"></span>
-      <span id="statusText">Connecting…</span>
-      <span id="gpsRead"></span>
-    </div>
-    <div class="btn-group">
-      <button class="btn btn-accent" onclick="forceRescan()">⚡ Rescan</button>
-      <button class="btn" onclick="openAMSettings()">⚙ Settings</button>
-    </div>
-    <div class="side-section">
-      <div class="side-h2">📡 Nodes <span id="nodeCount"></span></div>
-      <div id="nodeList"><div class="empty">No nodes registered yet.</div></div>
-    </div>
-    <div class="side-section">
-      <div class="side-h2">👀 Devices <span id="devCount"></span></div>
-      <div id="feed"><div class="empty">Scanning for nearby devices…</div></div>
-    </div>
-  </div>
-
-  <div id="pupBox" class="glass">
-    <canvas id="pupCanvas" width="240" height="240"></canvas>
-    <div class="pup-glare">Lilly</div>
-  </div>
-
-  <div id="minPill" style="display:none" onclick="restoreHub()">🐾 Lilly Radar — tap to expand</div>
 </div>
 
+<!-- Minimise pill -->
+<div id="min-pill" onclick="restoreHub()">🐾 Lilly Radar — tap to restore</div>
+
 <script>
-// ══════════════════════════════════════════════════════════════════
-// Lilly Radar — Multi-node proximity radar on a real map.
-// Aggregates GPS + WiFi + Bluetooth scans from every online phone node
-// (via the host's cached /api/nodes/fleet), triangulates each detected
-// device by intersecting range circles, and plots movement trails.
-// Theme: WebUI lavender + glassmorphism, with the Lilly pup avatar.
-// ══════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
+//  Lilly Radar — Multi-node proximity radar
+//  • Polls /api/nodes/fleet every 2.5 s
+//  • Triangulates each detected WiFi / BT device from all nodes that
+//    see it, using weighted least-squares from RSSI-derived distances
+//  • Renders node markers + device markers on a Leaflet map
+//  • Left panel: Nodes tab (per-node "what can I see/feel") +
+//                Devices tab (per-device triangulated position,
+//                             which nodes see it, signal chips)
+// ══════════════════════════════════════════════════════════════════════
 
 const EARTH_R = 6378137;
-const NODE_COLORS = ['#c084fc', '#f0abfc', '#69f0ae', '#67e8f9', '#fbbf24', '#e57373'];
-const KNOWN_TRACKERS = ['tile', 'chipolo', 'pebblebee', 'smarttag', 'moto tag', 'airtag'];
+const NODE_COLORS = [
+  getComputedStyle(document.documentElement).getPropertyValue('--n0').trim(),
+  getComputedStyle(document.documentElement).getPropertyValue('--n1').trim(),
+  getComputedStyle(document.documentElement).getPropertyValue('--n2').trim(),
+  getComputedStyle(document.documentElement).getPropertyValue('--n3').trim(),
+  getComputedStyle(document.documentElement).getPropertyValue('--n4').trim(),
+  getComputedStyle(document.documentElement).getPropertyValue('--n5').trim(),
+];
+const KNOWN_TRACKERS = ['tile','chipolo','pebblebee','smarttag','moto tag','airtag'];
 
-const map = L.map('map', { zoomControl: false }).setView([45, -75], 13);
-L.control.zoom({ position: 'topright' }).addTo(map);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+// ── Leaflet setup ──
+const mapEl = document.getElementById('map');
+const lmap = L.map(mapEl, { zoomControl: false }).setView([45, -75], 13);
+L.control.zoom({ position: 'topright' }).addTo(lmap);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '© OpenStreetMap'
+}).addTo(lmap);
 
-const nodeMarkers = {};      // node_id -> L.circleMarker
-let    nodeEntries = [];     // [{node_id,name,lat,lng,online,battery,color}]
-let    deviceState = {};     // key -> {history, marker, polyline, color, name}
+// ── State ──
+let nodeEntries = [];         // [{node_id, name, lat, lng, online, battery, color, snapshot}]
+let deviceState = {};         // key -> {history, marker, polyline, color, name}
+let nodeMarkers  = {};        // node_id -> L.circleMarker
+let selectedDevKey  = null;
+let selectedNodeId  = null;
+let mapCentred   = false;
+let currentTab   = 'nodes';
 
-function hashAngle(str){
+// ── Helpers ──
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function rssiToDist(rssi, freq) {
+  if (!rssi || rssi === 0) return null;
+  const f = (!freq || freq < 2000) ? 2412 : freq;
+  const d = Math.pow(10, (27.55 - 20 * Math.log10(f) + Math.abs(rssi)) / 20);
+  return Math.min(d, 400); // cap at 400 m — beyond that RSSI is noise
+}
+
+function rssiToStrength(rssi) {
+  // returns 0-4 bars
+  if (!rssi) return 0;
+  const a = Math.abs(rssi);
+  if (a < 50) return 4;
+  if (a < 65) return 3;
+  if (a < 75) return 2;
+  if (a < 85) return 1;
+  return 0;
+}
+
+function signalBars(strength, colorVar) {
+  const heights = [4, 7, 10, 13];
+  let html = `<span class="sig-bars" style="--nc-bar:${colorVar || 'var(--mint)'}">`;
+  for (let i = 0; i < 4; i++) {
+    html += `<span style="height:${heights[i]}px" class="${i < strength ? 'lit' : ''}"></span>`;
+  }
+  return html + '</span>';
+}
+
+function hashAngle(str) {
   let h = 0;
   for (let i = 0; i < str.length; i++) h = str.charCodeAt(i) + ((h << 5) - h);
   return (Math.abs(h) % 360) * (Math.PI / 180);
 }
-// RSSI -> distance (meters) using the free-space path-loss reference from the pyfile.
-function rssiToDist(rssi, freq){
-  if (rssi === null || rssi === undefined || rssi === 0) return null;
-  const f = (!freq || freq < 2000) ? 2412 : freq;
-  const exp = (27.55 - (20 * Math.log10(f)) + Math.abs(rssi)) / 20.0;
-  const d = Math.pow(10, exp);
-  return Math.min(d, 300);
-}
-function offsetFrom(lat, lng, distM, angleRad){
+
+function offsetFrom(lat, lng, distM, angleRad) {
   const dLat = (distM * Math.cos(angleRad)) / EARTH_R;
-  const dLng = (distM * Math.sin(angleRad)) / (EARTH_R * Math.cos(Math.PI * lat / 180));
-  return { lat: lat + (dLat * 180 / Math.PI), lng: lng + (dLng * 180 / Math.PI) };
+  const dLng = (distM * Math.sin(angleRad)) / (EARTH_R * Math.cos(lat * Math.PI / 180));
+  return { lat: lat + dLat * 180 / Math.PI, lng: lng + dLng * 180 / Math.PI };
 }
-function toLocal(lat, lng, refLat, refLng){
+
+function toLocal(lat, lng, refLat, refLng) {
   return {
     x: EARTH_R * Math.cos(refLat * Math.PI / 180) * (lng - refLng) * Math.PI / 180,
     y: EARTH_R * (lat - refLat) * Math.PI / 180,
   };
 }
-function toLatLng(x, y, refLat, refLng){
+
+function toLatLng(x, y, refLat, refLng) {
   return {
     lat: refLat + (y / EARTH_R) * 180 / Math.PI,
     lng: refLng + (x / (EARTH_R * Math.cos(refLat * Math.PI / 180))) * 180 / Math.PI,
   };
 }
-// Triangulate a device given observations [{lat,lng,rssi,freq}] across nodes.
-function triangulate(obs){
-  const est = obs.map(o => offsetFrom(o.lat, o.lng, rssiToDist(o.rssi, o.freq) || 20, hashAngle(o.key + o.node_id)));
-  if (obs.length >= 2){
-    const ds = obs.map(o => rssiToDist(o.rssi, o.freq) || 20);
-    const refL = toLocal(obs[0].lat, obs[0].lng, obs[0].lat, obs[0].lng);
+
+function haversineM(lat1, lng1, lat2, lng2) {
+  const R = EARTH_R, dL = (lat2 - lat1) * Math.PI / 180, dO = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dL / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dO / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Weighted least-squares triangulation — returns {lat, lng, confidence: 'high'|'ok'|'low'}
+function triangulate(obs) {
+  const fallbacks = obs.map(o => offsetFrom(o.lat, o.lng, rssiToDist(o.rssi, o.freq) || 20, hashAngle((o.key || '') + (o.node_id || ''))));
+  const centroid = {
+    lat: fallbacks.reduce((s, p) => s + p.lat, 0) / fallbacks.length,
+    lng: fallbacks.reduce((s, p) => s + p.lng, 0) / fallbacks.length,
+  };
+
+  const good = obs.filter(o => o.lat && o.lng && o.rssi);
+  if (good.length >= 2) {
+    const ds = good.map(o => rssiToDist(o.rssi, o.freq) || 20);
+    const refLat = good[0].lat, refLng = good[0].lng;
     const A = [], b = [];
-    for (let i = 1; i < obs.length; i++){
-      const pi = toLocal(obs[i].lat, obs[i].lng, obs[0].lat, obs[0].lng);
-      A.push([2*(pi.x - refL.x), 2*(pi.y - refL.y)]);
-      b.push(ds[0]*ds[0] - ds[i]*ds[i] + (pi.x*pi.x + pi.y*pi.y) - (refL.x*refL.x + refL.y*refL.y));
+    for (let i = 1; i < good.length; i++) {
+      const pi = toLocal(good[i].lat, good[i].lng, refLat, refLng);
+      const p0 = toLocal(refLat, refLng, refLat, refLng); // {0,0}
+      A.push([2 * (pi.x - p0.x), 2 * (pi.y - p0.y)]);
+      b.push(ds[0] ** 2 - ds[i] ** 2 + pi.x ** 2 + pi.y ** 2);
     }
-    const ATA00 = A.reduce((s,r)=>s+r[0]*r[0],0), ATA01 = A.reduce((s,r)=>s+r[0]*r[1],0), ATA11 = A.reduce((s,r)=>s+r[1]*r[1],0);
-    const ATb0  = A.reduce((s,r,i)=>s+r[0]*b[i],0), ATb1 = A.reduce((s,r,i)=>s+r[1]*b[i],0);
-    const det = ATA00*ATA11 - ATA01*ATA01;
-    if (Math.abs(det) > 1e-12){
-      const x = (ATA11*ATb0 - ATA01*ATb1) / det;
-      const y = (ATA00*ATb1 - ATA01*ATb0) / det;
-      const sol = toLatLng(x + refL.x, y + refL.y, obs[0].lat, obs[0].lng);
-      const maxD = Math.max(...obs.map(o=>distM(sol.lat,sol.lng,o.lat,o.lng)));
-      if (maxD < 400) return sol;   // plausible intersection
+    const ATA00 = A.reduce((s, r) => s + r[0] * r[0], 0);
+    const ATA01 = A.reduce((s, r) => s + r[0] * r[1], 0);
+    const ATA11 = A.reduce((s, r) => s + r[1] * r[1], 0);
+    const ATb0  = A.reduce((s, r, i) => s + r[0] * b[i], 0);
+    const ATb1  = A.reduce((s, r, i) => s + r[1] * b[i], 0);
+    const det = ATA00 * ATA11 - ATA01 * ATA01;
+    if (Math.abs(det) > 1e-10) {
+      const x = (ATA11 * ATb0 - ATA01 * ATb1) / det;
+      const y = (ATA00 * ATb1 - ATA01 * ATb0) / det;
+      const sol = toLatLng(x, y, refLat, refLng);
+      const maxResid = Math.max(...good.map(o => haversineM(sol.lat, sol.lng, o.lat, o.lng)));
+      if (maxResid < 600) {
+        return {
+          ...sol,
+          confidence: good.length >= 3 ? 'high' : 'ok',
+          node_count: good.length,
+        };
+      }
     }
   }
-  return { lat: est.reduce((s,p)=>s+p.lat,0)/est.length, lng: est.reduce((s,p)=>s+p.lng,0)/est.length };
-}
-function distM(lat1,lng1,lat2,lng2){
-  const R = EARTH_R, dLat=(lat2-lat1)*Math.PI/180, dLng=(lng2-lng1)*Math.PI/180;
-  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return { ...centroid, confidence: 'low', node_count: good.length };
 }
 
-function setStatus(text, live){
-  document.getElementById('statusText').textContent = text;
-  document.getElementById('statusDot').className = 'pulse-dot' + (live ? ' live' : '');
+// ── Node GPS extraction ──
+function nodeGps(node, snap) {
+  let lat = parseFloat(node.last_gps_lat || 0);
+  let lng = parseFloat(node.last_gps_lng || 0);
+  const gps = (snap && snap.gps) || {};
+  const loc = (gps.location && typeof gps.location === 'object') ? gps.location : gps;
+  if (loc.latitude) lat = parseFloat(loc.latitude);
+  if (loc.longitude) lng = parseFloat(loc.longitude);
+  return { lat, lng };
 }
-function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-function updateNodeMarkers(){
-  for (const k in nodeMarkers){ if(!nodeEntries.some(n=>n.node_id===k)){ map.removeLayer(nodeMarkers[k]); delete nodeMarkers[k]; } }
-  nodeEntries.forEach(n => {
-    const col = n.color;
-    if (nodeMarkers[n.node_id]){
-      if (n.lat && n.lng) nodeMarkers[n.node_id].setLatLng([n.lat,n.lng]);
-      nodeMarkers[n.node_id].setStyle({color:col, fillColor:col, fillOpacity:n.online?0.85:0.3});
-    } else {
-      const m = L.circleMarker([n.lat||0,n.lng||0], {radius:10,color:'#fff',weight:2,fillColor:col,fillOpacity:n.online?0.85:0.3})
-        .addTo(map).bindPopup(`<b>${esc(n.name)}</b><br>${n.online?'🟢 online':'⚫ offline'}${n.lat&&n.lng?'<br>📍 '+n.lat.toFixed(5)+', '+n.lng.toFixed(5):''}${n.battery>=0?'<br>🔋 '+Math.round(n.battery)+'%':''}`);
-      nodeMarkers[n.node_id] = m;
+function nodeBattery(snap) {
+  const b = (snap && snap.battery && snap.battery.battery) || {};
+  if (b.level != null) return Math.round(b.level);
+  return null;
+}
+
+// ── Sensor helpers ──
+function findSensor(snap, probe) {
+  const sensors = (snap && snap.sensors && snap.sensors.sensors) || {};
+  for (const k in sensors) {
+    if (k.toLowerCase().includes(probe)) return sensors[k];
+  }
+  return null;
+}
+
+function formatSensorVal(v) {
+  if (v == null) return '—';
+  if (Array.isArray(v)) return v.slice(0, 3).map(x => (Math.round(x * 100) / 100)).join(', ');
+  if (typeof v === 'number') return (Math.round(v * 100) / 100).toString();
+  return String(v);
+}
+
+// ── Tab switching ──
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.id === 'pane-' + tab));
+  closeDrawer();
+}
+
+// ── Node drawer ──
+function openDrawer(nodeId) {
+  const entry = nodeEntries.find(n => n.node_id === nodeId);
+  if (!entry) return;
+  selectedNodeId = nodeId;
+  document.getElementById('drawer-title').textContent = entry.name;
+  document.getElementById('drawer-status').innerHTML =
+    entry.online
+      ? `<span style="color:var(--mint)">● ONLINE</span>`
+      : `<span style="color:var(--muted)">● OFFLINE</span>`;
+
+  const snap = entry.snapshot || {};
+  const gps  = nodeGps(entry.rawNode, snap);
+  const bat  = nodeBattery(snap);
+  const wifi = (snap.wifi && (Array.isArray(snap.wifi) ? snap.wifi : snap.wifi.networks || [])) || [];
+  const bt   = (snap.bluetooth && (Array.isArray(snap.bluetooth) ? snap.bluetooth : snap.bluetooth.devices || [])) || [];
+  const notifs = (snap.notifications && snap.notifications.notifications) || [];
+  const col  = entry.color;
+
+  let html = '';
+
+  // ── Summary chips ──
+  html += `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">`;
+  if (gps.lat && gps.lng)
+    html += chip('📍', gps.lat.toFixed(4) + ', ' + gps.lng.toFixed(4), col);
+  if (bat != null)
+    html += chip('🔋', bat + '%', bat > 20 ? 'var(--mint)' : 'var(--rose)');
+  html += chip('📡', wifi.length + ' WiFi', 'var(--cyan)');
+  html += chip('📶', bt.length + ' BT', col);
+  if (notifs.length)
+    html += chip('🔔', notifs.length + ' notif', 'var(--amber)');
+  html += `</div>`;
+
+  // ── Sensor readings ──
+  const SENSOR_DEFS = [
+    { key: 'light',         label: 'Light',         icon: '💡', unit: 'lx',  max: 10000 },
+    { key: 'temperature',   label: 'Temperature',   icon: '🌡', unit: '°C',  max: 50    },
+    { key: 'pressure',      label: 'Pressure',      icon: '🌬', unit: 'hPa', max: 1100  },
+    { key: 'proximity',     label: 'Proximity',     icon: '👋', unit: 'cm',  max: 10    },
+    { key: 'step',          label: 'Steps',         icon: '👣', unit: '',    max: 10000 },
+    { key: 'accelerometer', label: 'Accel',         icon: '📳', unit: 'g',   max: 20    },
+    { key: 'gyro',          label: 'Gyroscope',     icon: '🌀', unit: '°/s', max: 360   },
+    { key: 'magnet',        label: 'Magnetometer',  icon: '🧲', unit: 'µT',  max: 100   },
+    { key: 'humidity',      label: 'Humidity',      icon: '💧', unit: '%',   max: 100   },
+  ];
+
+  const sensorsFound = SENSOR_DEFS.filter(d => findSensor(snap, d.key) != null);
+  if (sensorsFound.length) {
+    html += `<div class="section-label" style="margin-top:0">What I Can Feel</div>`;
+    html += `<div>`;
+    sensorsFound.forEach(d => {
+      const raw = findSensor(snap, d.key);
+      const val = formatSensorVal(Array.isArray(raw) ? raw[0] : raw);
+      const numVal = parseFloat(val);
+      const pct = isNaN(numVal) ? 0 : Math.min(100, Math.round((numVal / d.max) * 100));
+      html += `
+        <div class="srow">
+          <span class="srow-icon">${d.icon}</span>
+          <div class="srow-info">
+            <div class="srow-name">${d.label}</div>
+            <div class="srow-val">${esc(val)} ${d.unit}</div>
+            ${!isNaN(numVal) ? `<div class="srow-bar"><div class="srow-bar-fill" style="width:${pct}%;background:${col}"></div></div>` : ''}
+          </div>
+        </div>`;
+    });
+    html += `</div>`;
+  }
+
+  // ── What I can see: WiFi ──
+  if (wifi.length) {
+    html += `<div class="section-label">What I Can See — WiFi (${wifi.length})</div>`;
+    wifi.slice(0, 20).forEach(w => {
+      const str = rssiToStrength(w.rssi);
+      const dist = rssiToDist(w.rssi, w.frequency);
+      html += `
+        <div class="sub-item">
+          ${signalBars(str, col)}
+          <span class="sub-name">${esc(w.ssid || 'Hidden')}</span>
+          <span class="sub-meta">${dist != null ? '~' + Math.round(dist) + 'm' : ''} ${w.rssi != null ? w.rssi + ' dBm' : ''}</span>
+        </div>`;
+    });
+    if (wifi.length > 20) html += `<div class="empty" style="padding:6px 0">+ ${wifi.length - 20} more</div>`;
+  }
+
+  // ── What I can see: Bluetooth ──
+  if (bt.length) {
+    html += `<div class="section-label">What I Can See — Bluetooth (${bt.length})</div>`;
+    bt.slice(0, 20).forEach(b => {
+      const nm = b.name || 'Unknown';
+      const isTracker = KNOWN_TRACKERS.some(t => nm.toLowerCase().includes(t));
+      const dist = rssiToDist(b.rssi, 2400);
+      html += `
+        <div class="sub-item">
+          <span style="font-size:14px">${isTracker ? '🏷' : '📱'}</span>
+          <span class="sub-name">${esc(nm)}</span>
+          <span class="sub-meta">${dist != null ? '~' + Math.round(dist) + 'm' : ''} ${b.rssi != null ? b.rssi + ' dBm' : ''}</span>
+        </div>`;
+    });
+    if (bt.length > 20) html += `<div class="empty" style="padding:6px 0">+ ${bt.length - 20} more</div>`;
+  }
+
+  // ── Notifications ──
+  if (notifs.length) {
+    html += `<div class="section-label">Recent Notifications (${notifs.length})</div>`;
+    notifs.slice(0, 6).forEach(n => {
+      html += `
+        <div class="sub-item">
+          <span style="font-size:14px">🔔</span>
+          <div class="sub-name">
+            <span style="font-weight:700;font-size:11px">${esc(n.package || n.app || 'app')}</span>
+            ${n.title ? ' — ' + esc(n.title) : ''}
+          </div>
+        </div>`;
+    });
+  }
+
+  document.getElementById('drawer-body').innerHTML = html;
+  document.getElementById('node-drawer').classList.add('open');
+}
+
+function chip(icon, label, color) {
+  return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:999px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.05);font-size:11px;color:${color || 'var(--muted)'}">${icon} ${esc(label)}</span>`;
+}
+
+function closeDrawer() {
+  document.getElementById('node-drawer').classList.remove('open');
+  selectedNodeId = null;
+}
+
+// ── Map updates ──
+function updateNodeMarker(entry) {
+  const id  = entry.node_id;
+  const col = entry.color;
+  const lat = entry.lat, lng = entry.lng;
+  const pop = `<b>${esc(entry.name)}</b><br>${entry.online ? '🟢 Online' : '⚫ Offline'}${lat && lng ? '<br>📍 ' + lat.toFixed(5) + ', ' + lng.toFixed(5) : ''}${entry.battery != null ? '<br>🔋 ' + entry.battery + '%' : ''}`;
+  // Phone name label on the map (permanent, follows the marker)
+  const phoneLabel = entry.online
+    ? `${esc(entry.name)}${entry.battery != null ? ' · 🔋' + entry.battery + '%' : ''}`
+    : esc(entry.name);
+
+  if (nodeMarkers[id]) {
+    if (lat && lng) nodeMarkers[id].setLatLng([lat, lng]);
+    nodeMarkers[id].setStyle({ fillColor: col, color: col, fillOpacity: entry.online ? 0.85 : 0.3 });
+    nodeMarkers[id].bindPopup(pop);
+    if (nodeMarkers[id].__label) nodeMarkers[id].__label.setLatLng([lat || 0, lng || 0]);
+  } else {
+    nodeMarkers[id] = L.circleMarker([lat || 0, lng || 0], {
+      radius: 11, color: '#fff', weight: 2.5, fillColor: col, fillOpacity: entry.online ? 0.85 : 0.3
+    }).addTo(lmap).bindPopup(pop);
+    // Permanent phone-name tooltip so you can see which node is which on the map
+    nodeMarkers[id].__label = L.tooltip({
+      permanent: true, direction: 'top', offset: [0, -12],
+      className: 'phone-label', opacity: 1
+    }).setContent(phoneLabel).setLatLng([lat || 0, lng || 0]).addTo(lmap);
+  }
+  // Keep the label content current (battery/name changes)
+  if (nodeMarkers[id].__label) nodeMarkers[id].__label.setContent(phoneLabel);
+}
+
+function pruneNodeMarkers(activeIds) {
+  Object.keys(nodeMarkers).forEach(id => {
+    if (!activeIds.has(id)) {
+      if (nodeMarkers[id].__label) lmap.removeLayer(nodeMarkers[id].__label);
+      lmap.removeLayer(nodeMarkers[id]); delete nodeMarkers[id];
     }
   });
 }
 
-function updateDevice(key, lat, lng, name, color, isWifi, isTracker){
+function updateDeviceMarker(key, lat, lng, color, popupHtml, label) {
   let d = deviceState[key];
-  if (!d){
-    d = deviceState[key] = { history: [], marker: null, polyline: null, color, name };
-    d.marker = L.circleMarker([lat,lng], {radius:6,color:'#fff',weight:1.5,fillColor:color,fillOpacity:.9}).addTo(map).bindPopup('');
-    d.polyline = L.polyline([], {color,weight:2.5,opacity:.65,dashArray:'5, 5'}).addTo(map);
+  if (!d) {
+    d = deviceState[key] = { history: [], marker: null, polyline: null, labelLayer: null, color };
+    d.marker   = L.circleMarker([lat, lng], { radius: 7, color: '#fff', weight: 1.5, fillColor: color, fillOpacity: .9 }).addTo(lmap).bindPopup('');
+    d.polyline = L.polyline([], { color, weight: 2.5, opacity: .6, dashArray: '5,5' }).addTo(lmap);
+    if (label) {
+      d.labelLayer = L.tooltip({
+        permanent: true, direction: 'right', offset: [8, 0],
+        className: 'device-label', opacity: 1
+      }).setContent(label).setLatLng([lat, lng]).addTo(lmap);
+    }
   }
-  if (d.color!==color){ d.color=color; d.marker.setStyle({fillColor:color}); d.polyline.setStyle({color}); }
-  d.name = name;
-  const last = d.history[d.history.length-1];
-  if (!last || distM(last[0],last[1],lat,lng) > 1.5){
-    d.history.push([lat,lng]);
-    if (d.history.length > 40) d.history.shift();
+  if (d.color !== color) {
+    d.color = color;
+    d.marker.setStyle({ fillColor: color });
+    d.polyline.setStyle({ color });
   }
-  d.marker.setLatLng([lat,lng]);
+  const last = d.history[d.history.length - 1];
+  if (!last || haversineM(last[0], last[1], lat, lng) > 1.5) {
+    d.history.push([lat, lng]);
+    if (d.history.length > 50) d.history.shift();
+  }
+  d.marker.setLatLng([lat, lng]).bindPopup(popupHtml);
   d.polyline.setLatLngs(d.history);
-  d.marker.bindPopup(`<b>${esc(name)}</b>${isTracker?'<br>🏷️ Tracker':''}${isWifi?'<br>📶 WiFi':''}<br>📏 ${d.history.length} ping${d.history.length>1?'s':''}<br>📍 ${lat.toFixed(5)}, ${lng.toFixed(5)}`);
+  if (d.labelLayer) {
+    d.labelLayer.setLatLng([lat, lng]);
+    if (label) d.labelLayer.setContent(label);
+  }
 }
-function pruneDevices(present){
-  for (const k in deviceState){
-    if (!present.has(k)){
-      map.removeLayer(deviceState[k].marker);
-      if (deviceState[k].polyline) map.removeLayer(deviceState[k].polyline);
+
+function pruneDeviceMarkers(present) {
+  Object.keys(deviceState).forEach(k => {
+    if (!present.has(k)) {
+      lmap.removeLayer(deviceState[k].marker);
+      if (deviceState[k].polyline) lmap.removeLayer(deviceState[k].polyline);
+      if (deviceState[k].labelLayer) lmap.removeLayer(deviceState[k].labelLayer);
       delete deviceState[k];
     }
-  }
+  });
 }
 
-async function load(){
+// ── Main fetch + render ──
+async function load() {
+  let data;
   try {
-    const d = await (await fetch('/api/nodes/fleet')).json();
-    const nodes = d.nodes || [];
-    nodeEntries = [];
-    const observations = {};
-    let haveGps = false, onlineCount = 0;
+    const res = await fetch('/api/nodes/fleet');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    data = await res.json();
+  } catch (e) {
+    setStatus('Cannot reach server', false);
+    return;
+  }
 
-    nodes.forEach(({node, snapshot}, idx) => {
-      const onlineFlag = node.online === true;
-      if (onlineFlag) onlineCount++;
-      const color = NODE_COLORS[idx % NODE_COLORS.length];
-      const snap = snapshot || {};
-      const gps = snap.gps || {};
-      const gl = (gps.location && typeof gps.location === 'object') ? gps.location : gps;
-      let lat = parseFloat(gl.latitude || gl.lat || node.last_gps_lat || 0);
-      let lng = parseFloat(gl.longitude || gl.lng || node.last_gps_lng || 0);
-      const battery = _batteryLevel(snap.battery);
-      nodeEntries.push({ node_id: node.node_id || idx, name: node.name || node.node_id || idx, lat, lng, online: onlineFlag, battery, color });
+  const nodes = data.nodes || [];
+  nodeEntries = [];
+  const observations = {};  // key -> [{node_id, lat, lng, rssi, freq, name, isWifi, isTracker, key}]
+  let onlineCount = 0;
+  const activeNodeIds = new Set();
 
-      if (!onlineFlag) return;
-      if (lat && lng) haveGps = true;
+  nodes.forEach(({ node, snapshot }, idx) => {
+    const snap    = snapshot || {};
+    const online  = !!snap.health;
+    if (online) onlineCount++;
+    const color   = NODE_COLORS[idx % NODE_COLORS.length];
+    const gps     = nodeGps(node, snap);
+    const battery = nodeBattery(snap);
+    const nid     = node.node_id || String(idx);
 
-      const wifi = snap.wifi || {};
-      const wnets = Array.isArray(wifi) ? wifi : (wifi.networks || []);
-      wnets.forEach(n => {
-        const key = n.bssid || ('wifi:' + (n.ssid||'?'));
-        if (!observations[key]) observations[key] = [];
-        observations[key].push({ node_id: node.node_id||idx, lat, lng, rssi: n.rssi, freq: n.frequency, key, name: n.ssid || 'Hidden WiFi', isWifi: true, isTracker: false });
-      });
-      const bt = snap.bluetooth || {};
-      const bdevs = Array.isArray(bt) ? bt : (bt.devices || []);
-      bdevs.forEach(b => {
-        const key = 'bt:' + (b.address || (b.name||'?'));
-        const nm = b.name || 'Unknown BLE Tag';
-        const isTracker = KNOWN_TRACKERS.some(t => nm.toLowerCase().includes(t)) || nm === 'Unknown BLE Tag';
-        if (!observations[key]) observations[key] = [];
-        observations[key].push({ node_id: node.node_id||idx, lat, lng, rssi: b.rssi, freq: 2400, key, name: nm, isWifi: false, isTracker });
-      });
+    nodeEntries.push({
+      node_id:  nid,
+      rawNode:  node,
+      name:     node.name || nid,
+      lat:      gps.lat, lng: gps.lng,
+      online, battery, color, snapshot: snap,
+    });
+    activeNodeIds.add(nid);
+    updateNodeMarker(nodeEntries[nodeEntries.length - 1]);
+
+    if (!online) return;
+
+    const wifi  = Array.isArray(snap.wifi) ? snap.wifi : ((snap.wifi && snap.wifi.networks) || []);
+    const bt    = Array.isArray(snap.bluetooth) ? snap.bluetooth : ((snap.bluetooth && snap.bluetooth.devices) || []);
+
+    wifi.forEach(w => {
+      const key = 'wifi:' + (w.bssid || w.ssid || '?');
+      if (!observations[key]) observations[key] = [];
+      observations[key].push({ node_id: nid, lat: gps.lat, lng: gps.lng, rssi: w.rssi, freq: w.frequency, key, name: w.ssid || 'Hidden WiFi', isWifi: true, isTracker: false, color });
     });
 
-    // Triangulate each device across all nodes that see it.
-    const present = new Set();
-    const feed = [];
-    for (const key in observations){
-      const good = observations[key].filter(o => o.lat && o.lng && o.rssi);
-      if (!good.length) continue;
-      const pos = triangulate(good);
-      const src = observations[key][0];
-      const color = src.isWifi ? '#67e8f9' : (src.isTracker ? '#fbbf24' : '#c084fc');
-      updateDevice(key, pos.lat, pos.lng, src.name, color, src.isWifi, src.isTracker);
-      present.add(key);
-      const avgD = Math.round(good.reduce((s,o)=>s+(rssiToDist(o.rssi,o.freq)||20),0)/good.length);
-      feed.push(`<div class="dev-item" style="--dc:${color}"><span class="d-name">${esc(src.name)}</span>${src.isTracker?'<span class="tag">TRACKER</span>':''}${src.isWifi?'<span class="tag wifi">WIFI</span>':''}<span class="d-meta">~${avgD}m · ${good.length}n</span></div>`);
-    }
-    pruneDevices(present);
-    document.getElementById('feed').innerHTML = feed.length ? feed.join('') : '<div class="empty">No devices in range.</div>';
-    document.getElementById('devCount').textContent = feed.length ? `· ${feed.length}` : '';
+    bt.forEach(b => {
+      const nm = b.name || 'Unknown BLE Tag';
+      const isTracker = KNOWN_TRACKERS.some(t => nm.toLowerCase().includes(t));
+      const key = 'bt:' + (b.address || nm);
+      if (!observations[key]) observations[key] = [];
+      observations[key].push({ node_id: nid, lat: gps.lat, lng: gps.lng, rssi: b.rssi, freq: 2400, key, name: nm, isWifi: false, isTracker, color });
+    });
+  });
 
-    const onlineNm = nodeEntries.filter(n=>n.online);
-    document.getElementById('nodeCount').textContent = onlineNm.length ? `· ${onlineNm.length}/${nodeEntries.length} online` : '';
-    document.getElementById('subtitle').textContent = `${onlineCount} node${onlineCount!==1?'s':''} · ${haveGps?'triangulation active':'awaiting GPS'}`;
-    const nl = document.getElementById('nodeList');
-    if (!nodeEntries.length){ nl.innerHTML = '<div class="empty">No nodes registered yet.</div>'; }
-    else {
-      nl.innerHTML = nodeEntries.map(n=>`
-        <div class="node-card ${n.online?'':'off'}" style="--nc:${n.color}">
-          <span class="node-dot" title="Center map on node" onclick="centerOnNode(${n.lat||0},${n.lng||0})"></span>
-          <div style="flex:1;min-width:0">
-            <div class="node-name">${esc(n.name)}</div>
-            <div class="node-meta">${n.lat&&n.lng? n.lat.toFixed(4)+', '+n.lng.toFixed(4) : 'no GPS'}</div>
-          </div>
-          <span class="node-status ${n.online?'node-on':'node-off'}">${n.online?'ONLINE':'OFF'}</span>
-        </div>`).join('');
-    }
-    document.getElementById('gpsRead').textContent = (()=>{
-      const g = nodeEntries.find(n=>n.online && n.lat && n.lng);
-      return g ? g.lat.toFixed(4)+', '+g.lng.toFixed(4) : '';
-    })();
-    updateNodeMarkers();
-    setStatus(haveGps ? `Live · ${onlineCount}/${nodeEntries.length} online` : (onlineCount? 'Online — waiting for GPS' : 'No nodes online'), haveGps || onlineCount>0);
-  } catch(e){
-    setStatus('Cant reach server', false);
+  pruneNodeMarkers(activeNodeIds);
+
+  // Centre map on first online node with GPS
+  if (!mapCentred) {
+    const anchor = nodeEntries.find(n => n.online && n.lat && n.lng);
+    if (anchor) { lmap.setView([anchor.lat, anchor.lng], 16); mapCentred = true; }
   }
+
+  // Pass 1 — triangulate every observation; index AP (wifi) positions so we
+  // can associate each device with the access point it's nearest to.
+  const triByKey = {};
+  const apList = [];   // [{ key, name, lat, lng, avgDist }]
+  for (const key in observations) {
+    const goodObs = observations[key].filter(o => o.lat && o.lng && o.rssi);
+    if (!goodObs.length) continue;
+    const tri = triangulate(goodObs);
+    triByKey[key] = { tri, goodObs, src: observations[key][0] };
+    if (observations[key][0].isWifi) {
+      const avgDist = Math.round(goodObs.reduce((s, o) => s + (rssiToDist(o.rssi, o.freq) || 20), 0) / goodObs.length);
+      apList.push({ key, name: observations[key][0].name, lat: tri.lat, lng: tri.lng, avgDist });
+    }
+  }
+
+  // Nearest AP per point (used to print "which AP" for each device / point).
+  function nearestAp(lat, lng) {
+    let best = null, bestD = Infinity;
+    apList.forEach(ap => {
+      const d = haversineM(lat, lng, ap.lat, ap.lng);
+      if (d < bestD) { bestD = d; best = ap; }
+    });
+    return best ? { ssid: best.name, dist: bestD, apKey: best.key } : null;
+  }
+
+  // Pass 2 — build cards + update map markers
+  const presentDevs = new Set();
+  const devCards = [];
+
+  for (const key in observations) {
+    const { tri, goodObs, src } = triByKey[key] || {};
+    if (!tri) continue;
+
+    const name  = src.name;
+    const color = src.isWifi ? '#5bcde8' : (src.isTracker ? '#f5c542' : '#b38de8');
+    const avgDist = Math.round(goodObs.reduce((s, o) => s + (rssiToDist(o.rssi, o.freq) || 20), 0) / goodObs.length);
+
+    // Associated access point (nearest AP to this device/point)
+    let apInfo = '';
+    let apShort = '';
+    if (src.isWifi) {
+      // For an AP itself, list how many devices map to it below.
+      apInfo = `<br>📡 Access point · ${esc(name)}`;
+    } else {
+      const nap = nearestAp(tri.lat, tri.lng);
+      if (nap && nap.dist < 120) {
+        apShort = nap.ssid;
+        apInfo = `<br>📶 near AP <b>${esc(nap.ssid)}</b> ~${Math.round(nap.dist)}m`;
+      } else if (nap) {
+        apShort = nap.ssid;
+        apInfo = `<br>📶 nearest AP <b>${esc(nap.ssid)}</b> ~${Math.round(nap.dist)}m`;
+      }
+    }
+
+    // Map marker popup
+    const nodeNames = goodObs.map(o => {
+      const ne = nodeEntries.find(n => n.node_id === o.node_id);
+      return (ne ? ne.name : o.node_id) + ' ~' + Math.round(rssiToDist(o.rssi, o.freq) || 20) + 'm';
+    }).join('<br>');
+    const popHtml = `<b>${esc(name)}</b>${src.isTracker ? '<br>🏷 Tracker' : ''}${src.isWifi ? '<br>📡 WiFi' : ''}${apInfo}<br>📍 ${tri.lat.toFixed(5)}, ${tri.lng.toFixed(5)}<br>🎯 ${tri.confidence} triangulation (${tri.node_count} node${tri.node_count !== 1 ? 's' : ''})<br><small>${nodeNames}</small>`;
+
+    updateDeviceMarker(key, tri.lat, tri.lng, color, popHtml, name);
+    presentDevs.add(key);
+
+    // Sidebar card
+    const typeLabel = src.isTracker ? 'TRACKER' : (src.isWifi ? 'WIFI' : 'BT');
+    const typeClass = src.isTracker ? 'type-tracker' : (src.isWifi ? 'type-wifi' : 'type-bt');
+    const icon      = src.isTracker ? '🏷' : (src.isWifi ? '📡' : '📱');
+    const triClass  = tri.confidence === 'high' ? 'tri-good' : (tri.confidence === 'ok' ? 'tri-ok' : 'tri-low');
+    const triIcon   = tri.confidence === 'high' ? '🎯' : (tri.confidence === 'ok' ? '◎' : '○');
+
+    const sigChips = goodObs.map(o => {
+      const ne  = nodeEntries.find(n => n.node_id === o.node_id);
+      const nm  = ne ? ne.name : o.node_id;
+      const ncol = ne ? ne.color : '#888';
+      const d   = rssiToDist(o.rssi, o.freq);
+      const str = rssiToStrength(o.rssi);
+      return `<div class="sig-chip"><span class="sig-dot" style="background:${ncol}"></span>${signalBars(str, ncol)}<span class="sig-label">${esc(nm)}</span><span class="sig-dist">${d != null ? '~' + Math.round(d) + 'm' : '?'}</span></div>`;
+    }).join('');
+
+    const selected = key === selectedDevKey ? 'selected' : '';
+    const apBadge = (!src.isWifi && apShort) ? `<div class="dc-ap">📶 via ${esc(apShort)}</div>` : '';
+    devCards.push({
+      key, name, avgDist, tri,
+      html: `<div class="dev-card ${selected}" style="--dc:${color}" data-key="${esc(key)}" onclick="selectDevice('${esc(key.replace(/'/g, ''))}')">
+        <div class="dc-header">
+          <span class="dc-icon">${icon}</span>
+          <span class="dc-name">${esc(name)}</span>
+          <span class="dc-type-badge ${typeClass}">${typeLabel}</span>
+        </div>
+        <div class="dc-body">
+          <div class="dc-dist">~${avgDist}m avg · ${goodObs.length} node${goodObs.length !== 1 ? 's' : ''} see it</div>
+          <span class="tri-pill ${triClass}">${triIcon} ${tri.confidence} fix</span>
+          ${apBadge}
+          <div class="dc-nodes">${sigChips}</div>
+        </div>
+      </div>`,
+    });
+  }
+
+  // Append a small AP-association summary line listing APs and how many devices map to them.
+  const apCounts = {};
+  for (const key in triByKey) {
+    const { tri, src } = triByKey[key];
+    if (src.isWifi || !tri) continue;
+    const nap = nearestAp(tri.lat, tri.lng);
+    if (nap && nap.dist < 200) apCounts[nap.ssid] = (apCounts[nap.ssid] || 0) + 1;
+  }
+  const apSummary = Object.keys(apCounts)
+    .map(a => `<div class="dc-ap">${esc(a)} — ${apCounts[a]} device${apCounts[a] !== 1 ? 's' : ''}</div>`)
+    .join('');
+
+  pruneDeviceMarkers(presentDevs);
+
+  // Sort by distance ascending
+  devCards.sort((a, b) => a.avgDist - b.avgDist);
+
+  document.getElementById('dev-list').innerHTML =
+    (apSummary ? `<div class="ap-summary">${apSummary}</div>` : '')
+    + (devCards.length
+      ? devCards.map(d => d.html).join('')
+      : '<div class="empty">No devices detected in range.</div>');
+  document.getElementById('dev-count-label').textContent = devCards.length
+    ? `Nearby devices · ${devCards.length} found`
+    : 'Nearby devices';
+
+  // Nodes tab
+  const onlineNodes = nodeEntries.filter(n => n.online);
+  document.getElementById('nodes-count-label').textContent =
+    `Paired nodes · ${onlineNodes.length}/${nodeEntries.length} online`;
+
+  const nodeHtml = nodeEntries.length ? nodeEntries.map((n, i) => {
+    const wifi  = Array.isArray(n.snapshot.wifi) ? n.snapshot.wifi : ((n.snapshot.wifi && n.snapshot.wifi.networks) || []);
+    const bt    = Array.isArray(n.snapshot.bluetooth) ? n.snapshot.bluetooth : ((n.snapshot.bluetooth && n.snapshot.bluetooth.devices) || []);
+    const bat   = n.battery;
+    const selected = n.node_id === selectedNodeId ? 'selected' : '';
+    return `<div class="node-card ${n.online ? '' : 'offline'} ${selected}" style="--nc:${n.color}" onclick="openDrawer('${esc(n.node_id.replace(/'/g, ''))}')">
+      <div class="nc-header">
+        <span class="nc-dot"></span>
+        <span class="nc-name">${esc(n.name)}</span>
+        <span class="nc-badge ${n.online ? 'badge-on' : 'badge-off'}">${n.online ? 'ONLINE' : 'OFF'}</span>
+      </div>
+      <div class="nc-meta">
+        ${n.lat && n.lng ? `<div class="nc-stat">📍 <strong>${n.lat.toFixed(4)}, ${n.lng.toFixed(4)}</strong></div>` : `<div class="nc-stat" style="color:var(--muted)">📍 no GPS</div>`}
+        ${bat != null ? `<div class="nc-stat">🔋 <strong>${bat}%</strong></div>` : ''}
+        <div class="nc-stat">📡 <strong>${wifi.length}</strong> WiFi</div>
+        <div class="nc-stat">📶 <strong>${bt.length}</strong> BT</div>
+      </div>
+    </div>`;
+  }).join('') : '<div class="empty">No nodes registered yet.</div>';
+
+  document.getElementById('node-list').innerHTML = nodeHtml;
+
+  // Status bar
+  const hasGps = nodeEntries.some(n => n.online && n.lat && n.lng);
+  const statusText = !nodeEntries.length
+    ? 'No nodes registered'
+    : !onlineCount
+    ? 'All nodes offline'
+    : hasGps
+    ? `Live · ${onlineCount}/${nodeEntries.length} online`
+    : 'Online — waiting for GPS';
+
+  setStatus(statusText, onlineCount > 0);
+  document.getElementById('gps-coord').textContent = (() => {
+    const g = nodeEntries.find(n => n.online && n.lat && n.lng);
+    return g ? g.lat.toFixed(4) + ', ' + g.lng.toFixed(4) : '';
+  })();
+  document.getElementById('subtitle').textContent =
+    `${onlineCount} node${onlineCount !== 1 ? 's' : ''} · ${hasGps ? devCards.length + ' devices in range' : 'awaiting GPS'}`;
 }
 
-function _batteryLevel(bat){
-  const b = (bat && bat.battery) || bat || {};
-  if (b.level != null) return parseFloat(b.level);
-  return -1;
+function setStatus(text, live) {
+  document.getElementById('status-text').textContent = text;
+  const dot = document.getElementById('pulse-dot');
+  dot.className = 'pulse' + (live ? ' live' : ' warn');
 }
 
-function centerOnNode(lat,lng){ if (lat && lng) map.flyTo([lat,lng], 16, {duration:1.2}); }
+function selectDevice(key) {
+  selectedDevKey = key;
+  // Pan map to device
+  if (deviceState[key] && deviceState[key].marker) {
+    lmap.flyTo(deviceState[key].marker.getLatLng(), 18, { duration: 0.9 });
+    deviceState[key].marker.openPopup();
+  }
+  // Highlight card
+  document.querySelectorAll('.dev-card').forEach(c => c.classList.toggle('selected', c.dataset.key === key));
+}
 
-(async function init(){
-  const t = setInterval(() => {
-    const n = nodeEntries.find(n => n.online && n.lat && n.lng);
-    if (n){ map.setView([n.lat,n.lng], 16); clearInterval(t); }
-  }, 3000);
+// ── Force rescan on all online nodes ──
+async function forceRescan() {
+  setStatus('Triggering scan on all nodes…', false);
+  try {
+    const d = await (await fetch('/api/nodes/fleet')).json();
+    const tasks = (d.nodes || [])
+      .filter(x => x.node && x.node.online)
+      .map(async ({ node }) => {
+        const base = (node.sensor_url || '').replace(/\/+$/, '');
+        if (!base) return;
+        const endpoints = ['/wifi/scan/live', '/bluetooth/scan/live', '/location/live'];
+        await Promise.allSettled(endpoints.map(ep => fetch(base + ep).catch(() => {})));
+      });
+    await Promise.all(tasks);
+  } catch (e) { /* ignore — load() will show the error */ }
+  await new Promise(r => setTimeout(r, 1200));
+  await load();
+}
+
+function openSettings() {
+  try {
+    fetch('/api/termux/exec', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cmd: 'am start -a android.settings.SETTINGS' }),
+    }).catch(() => {});
+  } catch (e) {}
+}
+
+// ── Window controls ──
+function minimiseHub() {
+  document.getElementById('hub').style.display = 'none';
+  document.getElementById('min-pill').style.display = 'block';
+  try { if (window.RadarBridge) RadarBridge.minimize(); } catch (_) {}
+}
+function restoreHub() {
+  document.getElementById('hub').style.display = 'flex';
+  document.getElementById('min-pill').style.display = 'none';
+  lmap.invalidateSize();
+  try { if (window.RadarBridge) RadarBridge.restore(); } catch (_) {}
+}
+function closeHub() {
+  try { if (window.RadarBridge && RadarBridge.close) { RadarBridge.close(); return; } } catch (_) {}
+  try { if (window.LillyBridge && LillyBridge.close) { LillyBridge.close(); return; } } catch (_) {}
+  try { window.close(); } catch (_) {}
+  minimiseHub();
+}
+
+// ── Init ──
+(function init() {
   load();
   setInterval(load, 2500);
 })();
 
-async function forceRescan(){
-  setStatus('Triggering rescan…', false);
-  try {
-    const d = await (await fetch('/api/nodes/fleet')).json();
-    const tasks = (d.nodes||[]).filter(x=>x.node&&x.node.online).map(async ({node}) => {
-      const base = (node.sensor_url||'').replace(/\/$/,'');
-      if (!base) return;
-      try{ await fetch(base+'/wifi/scan/live'); }catch(e){}
-      try{ await fetch(base+'/bluetooth/scan/live'); }catch(e){}
-      try{ await fetch(base+'/location/live'); }catch(e){}
-    });
-    await Promise.all(tasks);
-  } catch(e){}
-  await new Promise(r=>setTimeout(r,1500));
-  load();
-  setStatus('Scan complete', true);
-}
-function openAMSettings(){
-  // Best-effort: open system settings on the primary node's sensor server (proxied).
-  try{ fetch('/api/termux/exec', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({cmd:'am start -a android.settings.SETTINGS'})}).catch(()=>{}); }catch(e){}
-}
-
-// ── Window controls ──
-function minimizeHub(){
-  if (window.RadarBridge && RadarBridge.minimize){ try{ RadarBridge.minimize(); }catch(e){} }
-  document.getElementById('hub').style.display = 'none';
-  document.getElementById('minPill').style.display = 'block';
-}
-function restoreHub(){
-  if (window.RadarBridge && RadarBridge.restore){ try{ RadarBridge.restore(); }catch(e){} }
-  document.getElementById('hub').style.display = 'block';
-  document.getElementById('minPill').style.display = 'none';
-}
-function closeHub(){
-  try{ if(window.RadarBridge&&RadarBridge.close){RadarBridge.close();return;} if(window.LillyBridge&&LillyBridge.close){LillyBridge.close();return;} }catch(e){}
-  try{ window.close(); }catch(e){}
-  minimizeHub();
-}
-
-// ── Lilly pup avatar (branded clay pup) ──
-(function drawPup(){
-  const cv = document.getElementById('pupCanvas');
-  if (!cv) return;
-  const c = cv.getContext('2d');
-  const W = cv.width, H = cv.height;
-  const cx = W/2, cy = H*0.54;
-  const pupCol = '#b18ac2', pupDark = '#8a6a9e', ear = '#c084fc', nose = '#e57373';
-  function frame(){
-    c.clearRect(0,0,W,H);
-    const t = performance.now()/1000;
-    const bounce = Math.sin(t*1.5)*3;
-    const tailW = Math.sin(t*3)*0.5;
-    const blink = Math.sin(t*0.7)%1.0 > 0.92;
-    c.save();
-    c.translate(cx, cy+bounce);
-    // Body
-    c.fillStyle = pupCol; c.strokeStyle = pupDark; c.lineWidth = 1.5;
-    c.beginPath(); c.ellipse(0,14,30,26,0,0,Math.PI*2); c.fill(); c.stroke();
-    // Paws
-    c.beginPath(); c.ellipse(-16,38,9,6,0,0,Math.PI*2); c.fill();
-    c.beginPath(); c.ellipse(16,38,9,6,0,0,Math.PI*2); c.fill();
-    c.lineWidth=1; c.beginPath(); c.ellipse(-16,38,9,6,0,0,Math.PI*2); c.stroke();
-    c.beginPath(); c.ellipse(16,38,9,6,0,0,Math.PI*2); c.stroke();
-    // Tail
-    c.strokeStyle=pupDark; c.lineWidth=3; c.lineCap='round';
-    c.beginPath(); c.moveTo(26,0); c.quadraticCurveTo(44,-8+tailW*6,40,-24+tailW*8); c.stroke();
-    // Head
-    c.fillStyle=pupCol; c.lineWidth=1.5;
-    c.beginPath(); c.arc(0,-22,26,0,Math.PI*2); c.fill(); c.stroke();
-    // Ears
-    c.fillStyle=ear;
-    c.beginPath(); c.ellipse(-20,-42,10,16,-0.3,0,Math.PI*2); c.fill();
-    c.beginPath(); c.ellipse(20,-42,10,16,0.3,0,Math.PI*2); c.fill();
-    c.strokeStyle=pupDark; c.stroke();
-    // Snout
-    c.fillStyle='#d9c4e4';
-    c.beginPath(); c.ellipse(0,-13,10,7,0,0,Math.PI*2); c.fill();
-    // Eyes
-    c.fillStyle='#1a1220';
-    if(blink){ c.lineWidth=2; c.beginPath(); c.moveTo(-9,-24); c.lineTo(-3,-24); c.moveTo(3,-24); c.lineTo(9,-24); c.stroke(); }
-    else {
-      c.beginPath(); c.arc(-6,-24,3.4,0,Math.PI*2); c.fill();
-      c.beginPath(); c.arc(6,-24,3.4,0,Math.PI*2); c.fill();
-      c.fillStyle='#fff'; c.beginPath(); c.arc(-4.8,-25,1.2,0,Math.PI*2); c.fill();
-      c.beginPath(); c.arc(7.2,-25,1.2,0,Math.PI*2); c.fill();
-    }
-    // Nose
-    c.fillStyle=nose; c.beginPath(); c.arc(0,-15,4,0,Math.PI*2); c.fill();
-    // Mouth
-    c.strokeStyle=pupDark; c.lineWidth=1.2;
-    c.beginPath(); c.moveTo(-5,-11); c.quadraticCurveTo(0,-7,5,-11); c.stroke();
-    c.restore();
-    requestAnimationFrame(frame);
-  }
-  frame();
-})();
-
-window.addEventListener('resize', ()=>{ try{ map.invalidateSize(); }catch(e){} });
+window.addEventListener('resize', () => {
+  try { lmap.invalidateSize(); } catch (_) {}
+});
 </script>
 </body>
 </html>

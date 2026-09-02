@@ -197,7 +197,8 @@ footer{text-align:center;padding:6px;font-size:10px;color:var(--text-dim);backgr
       <button class="drawer-item" id="menuClearChat"><span class="di-icon">🗑️</span><span class="di-label">Clear All Messages</span></button>
       <button class="drawer-item" id="menuCopyLast"><span class="di-icon">📋</span><span class="di-label">Copy Last Reply</span></button>
       <button class="drawer-item" id="menuNewChat"><span class="di-icon">✨</span><span class="di-label">New Conversation</span></button>
-      <button class="drawer-item" id="menuSettings"><span class="di-icon">⚙️</span><span class="di-label">Settings</span></button>
+       <button class="drawer-item" id="menuSettings"><span class="di-icon">⚙️</span><span class="di-label">Settings</span></button>
+       <button class="drawer-item" id="menuBroadcast"><span class="di-icon">📡</span><span class="di-label">Bluetooth Broadcast</span></button>
     </div>
   </div>
 
@@ -539,6 +540,36 @@ if(menuSettings) menuSettings.onclick = () => {
   appendSys('Settings — coming soon');
   closeDrawer();
 };
+const menuBroadcast = document.getElementById('menuBroadcast');
+if(menuBroadcast) menuBroadcast.onclick = () => {
+  openBroadcastPanelInDrawer();
+  closeDrawer();
+};
+
+async function openBroadcastPanelInDrawer() {
+  const panel = document.getElementById('broadcastPanel');
+  if(!panel) return;
+  panel.style.display = 'flex';
+  const status = document.getElementById('broadcastStatus');
+  if(status){ status.textContent='Checking...'; }
+  try{
+    const r = await fetch('/api/bluetooth/advertise/status');
+    const d = await r.json();
+    const advertising = d.advertising || false;
+    if(status){
+      status.innerHTML = advertising
+        ? '<span style="color:rgba(76,175,80,0.9)"> broadcasting</span>'
+        : '<span style="color:rgba(93,78,109,0.5)">not broadcasting</span>';
+    }
+    const startBtn = document.getElementById('broadcastStartBtn');
+    if(startBtn){
+      startBtn.textContent = advertising ? 'Stop Broadcast' : 'Start Broadcast';
+      startBtn.onclick = advertising ? stopBroadcast : startBroadcast;
+    }
+  }catch(e){
+    if(status){ status.textContent='Sensor server unreachable'; }
+  }
+}
 
 // ── Collapsible messages ──
 let messagesCollapsed = false;
@@ -561,5 +592,104 @@ if(msgHeader && collapseMsgsBtn) {
   };
 }
 </script>
+
+<!-- Bluetooth Broadcast Panel (inline, for the popout window) -->
+<div id="broadcastPanel" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:999;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center">
+  <div style="background:rgba(255,255,255,0.95);backdrop-filter:blur(12px);border-radius:16px;padding:20px;width:min(360px,90vw);max-height:80vh;overflow-y:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div style="font-size:16px;font-weight:700;color:#5d4e6d">📡 Bluetooth Broadcast</div>
+      <button onclick="document.getElementById('broadcastPanel').style.display='none'" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);font-size:18px;padding:2px 6px">✕</button>
+    </div>
+    <div id="broadcastStatus" style="font-size:12px;color:rgba(93,78,109,0.7);margin-bottom:14px">Checking...</div>
+    <div id="broadcastImageSelector" style="margin-bottom:14px">
+      <label style="display:block;font-size:11px;color:rgba(93,78,109,0.6);margin-bottom:4px">Avatar Image</label>
+      <select id="broadcastImage" onchange="toggleCustomImage(this.value)" style="width:100%;padding:8px;border-radius:10px;border:1px solid rgba(139,122,158,0.3);font-size:13px;background:rgba(255,255,255,0.6)">
+        <option value="/static/lilly/puppy-avatar.svg">🐶 Puppy (Lilly)</option>
+        <option value="/static/lilly/fox-avatar.svg">🦊 Fox</option>
+        <option value="/static/lilly/cat-avatar.svg">🐱 Cat</option>
+        <option value="/static/lilly/bear-avatar.svg">🐻 Bear</option>
+        <option value="/static/lilly/bunny-avatar.svg">🐰 Bunny</option>
+        <option value="/static/lilly/owl-avatar.svg">🦉 Owl</option>
+        <option value="/static/lilly/deer-avatar.svg">🦌 Deer</option>
+        <option value="/static/lilly/wolf-avatar.svg">🐺 Wolf</option>
+        <option value="/static/lilly/raccoon-avatar.svg">🦝 Raccoon</option>
+        <option value="custom">📷 Custom URL...</option>
+      </select>
+      <input type="text" id="broadcastCustomImage" placeholder="https://example.com/image.svg" style="width:100%;margin-top:6px;padding:8px;border-radius:10px;border:1px solid rgba(139,122,158,0.3);font-size:12px;background:rgba(255,255,255,0.6);display:none">
+    </div>
+    <div style="margin-bottom:14px">
+      <label style="display:block;font-size:11px;color:rgba(93,78,109,0.6);margin-bottom:4px">Device Name</label>
+      <input type="text" id="broadcastName" placeholder="Lilly Pup" value="Lilly Pup" style="width:100%;padding:8px;border-radius:10px;border:1px solid rgba(139,122,158,0.3);font-size:13px;background:rgba(255,255,255,0.6)">
+    </div>
+    <div style="display:flex;gap:8px">
+      <button id="broadcastStartBtn" onclick="startBroadcast()" style="flex:1;padding:10px;border:none;border-radius:12px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:13px;font-weight:600;cursor:pointer">Start Broadcast</button>
+      <button onclick="stopBroadcast()" style="flex:1;padding:10px;border:none;border-radius:12px;background:rgba(93,78,109,0.1);color:#5d4e6d;font-size:13px;font-weight:600;cursor:pointer;border:1px solid rgba(139,122,158,0.3)">Stop</button>
+    </div>
+    <div style="margin-top:10px;font-size:11px;color:rgba(93,78,109,0.5)">Phone will appear in Bluetooth scans like earbuds in pairing mode. Nearby devices see the chosen avatar image via this web UI.</div>
+  </div>
+  <script>
+function toggleCustomImage(value){
+  const customEl=document.getElementById('broadcastCustomImage');
+  if(!customEl) return;
+  if(value==='custom'){
+    customEl.style.display='block';
+  } else {
+    customEl.style.display='none';
+    customEl.value='';
+  }
+}
+
+async function startBroadcast(){
+  const status=document.getElementById('broadcastStatus');
+  const startBtn=document.getElementById('broadcastStartBtn');
+  const nameInput=document.getElementById('broadcastName');
+  const selectEl=document.getElementById('broadcastImage');
+  const customEl=document.getElementById('broadcastCustomImage');
+  if(status){ status.textContent='Starting...'; }
+  if(startBtn){ startBtn.disabled=true; }
+  let imagePath = selectEl ? selectEl.value : '/static/lilly/puppy-avatar.svg';
+  if(selectEl && selectEl.value==='custom' && customEl && customEl.value){
+    imagePath = customEl.value.trim();
+  }
+  const body={ name: nameInput ? nameInput.value.trim() : 'Lilly Pup', image: imagePath };
+  try{
+    const r=await fetch('/api/bluetooth/advertise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(d.ok){
+      if(status){ status.innerHTML='<span style="color:rgba(76,175,80,0.9)"> broadcasting as '+body.name+'</span>'; }
+      if(startBtn){ startBtn.textContent='Stop Broadcast'; startBtn.onclick=stopBroadcast; startBtn.disabled=false; }
+    } else {
+      if(status){ status.textContent='Failed: '+(d.error||'unknown'); }
+      if(startBtn){ startBtn.disabled=false; }
+    }
+  }catch(e){
+    if(status){ status.textContent='Error: '+String(e); }
+    if(startBtn){ startBtn.disabled=false; }
+  }
+}
+
+async function stopBroadcast(){
+  const status=document.getElementById('broadcastStatus');
+  const startBtn=document.getElementById('broadcastStartBtn');
+  if(status){ status.textContent='Stopping...'; }
+  if(startBtn){ startBtn.disabled=true; }
+  try{
+    const r=await fetch('/api/bluetooth/advertise/stop',{method:'POST'});
+    const d=await r.json();
+    if(d.ok){
+      if(status){ status.innerHTML='<span style="color:rgba(93,78,109,0.5)">not broadcasting</span>'; }
+      if(startBtn){ startBtn.textContent='Start Broadcast'; startBtn.onclick=startBroadcast; startBtn.disabled=false; }
+    } else {
+      if(status){ status.textContent='Failed to stop'; }
+      if(startBtn){ startBtn.disabled=false; }
+    }
+  }catch(e){
+    if(status){ status.textContent='Error: '+String(e); }
+    if(startBtn){ startBtn.disabled=false; }
+  }
+}
+  </script>
+</div>
+
 </body>
 </html>

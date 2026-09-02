@@ -62,9 +62,12 @@ def extract_conversations_personachat(example) -> List[List[str]]:
 
 
 def extract_conversations_dailydialog(example) -> List[List[str]]:
-    dialog = example.get("dialog", [])
-    if isinstance(dialog, list) and len(dialog) >= 2:
-        return [dialog]
+    """Extract from better_daily_dialog format (per-turn rows with dialog_id).
+
+    The dataset has columns: dialog_id, utterance, turn_type, emotion.
+    We don't use dialog grouping here — that's handled in prepare_dailydialog.
+    """
+    # Individual rows are handled by the grouped preparer
     return []
 
 
@@ -80,13 +83,20 @@ def extract_conversations_blended_skill_talk(example) -> List[List[str]]:
 
 
 def extract_conversations_empathetic_dialogues(example) -> List[List[str]]:
-    # ED has turn-by-turn structure; group by conversation_id
-    return []  # Handled via grouped extraction below
+    """Extract from empathetic_dialogues_for_lm format (pre-grouped conv lists)."""
+    conv = example.get("conv", [])
+    if isinstance(conv, list) and len(conv) >= 2:
+        return [conv]
+    return []
 
 
-def prepare_personachat(dataset, persona_id: str, persona_info: dict) -> List[str]:
+def prepare_personachat(
+    dataset, persona_id: str, persona_info: dict, max_samples: Optional[int] = None
+) -> List[str]:
     samples = []
-    for ex in dataset:
+    for i, ex in enumerate(dataset):
+        if max_samples and len(samples) >= max_samples:
+            break
         convos = extract_conversations_personachat(ex)
         personality = ex.get("personality", [])
         for convo in convos:
@@ -95,15 +105,31 @@ def prepare_personachat(dataset, persona_id: str, persona_info: dict) -> List[st
 
 
 def prepare_dailydialog(dataset, persona_id: str, persona_info: dict) -> List[str]:
-    samples = []
+    """Prepare from better_daily_dialog format.
+
+    Dataset has per-turn rows with columns: dialog_id, utterance, turn_type, emotion.
+    We group by dialog_id to reconstruct full conversations.
+    """
+    from collections import defaultdict
+
+    # Group turns by dialog_id
+    dialogs: Dict[str, List[str]] = defaultdict(list)
     for ex in dataset:
-        convos = extract_conversations_dailydialog(ex)
-        for convo in convos:
-            samples.append(format_conversation(convo, persona_id, persona_info))
+        dialog_id = str(ex.get("dialog_id", ""))
+        utterance = str(ex.get("utterance", "")).strip()
+        if utterance:
+            dialogs[dialog_id].append(utterance)
+
+    samples = []
+    for dialog_id, turns in dialogs.items():
+        if len(turns) >= 2:
+            samples.append(format_conversation(turns, persona_id, persona_info))
     return samples
 
 
-def prepare_blended_skill_talk(dataset, persona_id: str, persona_info: dict) -> List[str]:
+def prepare_blended_skill_talk(
+    dataset, persona_id: str, persona_info: dict
+) -> List[str]:
     samples = []
     for ex in dataset:
         convos = extract_conversations_blended_skill_talk(ex)
@@ -112,33 +138,69 @@ def prepare_blended_skill_talk(dataset, persona_id: str, persona_info: dict) -> 
     return samples
 
 
-def prepare_empathetic_dialogues(dataset, persona_id: str, persona_info: dict) -> List[str]:
+def prepare_empathetic_dialogues(
+    dataset, persona_id: str, persona_info: dict
+) -> List[str]:
+    """Prepare from empathetic_dialogues_for_lm format.
+
+    Each row has a 'conv' field which is already a list of utterances.
+    """
     samples = []
-    last_conv_id = None
-    current_conv = []
     for ex in dataset:
-        conv_id = ex.get("conv_id")
-        utterance = ex.get("utterance", "").strip()
-        if not utterance:
-            continue
-        if conv_id != last_conv_id and current_conv:
-            if len(current_conv) >= 2:
-                samples.append(format_conversation(current_conv, persona_id, persona_info))
-            current_conv = []
-        current_conv.append(utterance)
-        last_conv_id = conv_id
-    if len(current_conv) >= 2:
-        samples.append(format_conversation(current_conv, persona_id, persona_info))
+        conv = ex.get("conv", [])
+        if isinstance(conv, list) and len(conv) >= 2:
+            # Clean up tokens like _comma_
+            cleaned = [u.replace("_comma_", ",") for u in conv if u.strip()]
+            if len(cleaned) >= 2:
+                samples.append(format_conversation(cleaned, persona_id, persona_info))
     return samples
 
 
 def prepare_cornell(dataset, persona_id: str, persona_info: dict) -> List[str]:
+    """Prepare from mylesmharrison/cornell-movie-dialog format.
+
+    Each row has a 'text' field formatted as "CHARACTER   dialogue\\r\\n".
+    We parse into conversation pairs (consecutive speaker changes).
+    """
+    import re
+
     samples = []
+    current_speaker = None
+    current_lines: List[str] = []
+
     for ex in dataset:
-        utt = ex.get("utterance", "") or ex.get("text", "") or ""
-        resp = ex.get("response", "") or ""
-        if utt and resp:
-            samples.append(format_conversation([utt, resp], persona_id, persona_info))
+        text = str(ex.get("text", "")).strip()
+        if not text:
+            continue
+
+        # Parse "CHARACTER   dialogue" format
+        match = re.match(r"^([A-Z_]+)\s{2,}(.+)$", text)
+        if not match:
+            continue
+
+        speaker = match.group(1)
+        dialogue = match.group(2).strip()
+
+        if speaker != current_speaker:
+            # Speaker changed — save previous speaker's combined text
+            if current_lines:
+                combined = " ".join(current_lines)
+                current_lines = []
+            else:
+                combined = ""
+            current_speaker = speaker
+            if combined and dialogue:
+                # We have a turn pair
+                if len(samples) < 50000:  # cap to prevent huge dataset
+                    samples.append(
+                        format_conversation(
+                            [combined, dialogue], persona_id, persona_info
+                        )
+                    )
+        else:
+            # Same speaker continues
+            current_lines.append(dialogue)
+
     return samples
 
 
@@ -160,25 +222,43 @@ def prepare_training_data(
         personas_to_use = list_personas()
     logger.info(f"Preparing data for personas: {personas_to_use}")
 
+    # Per-persona hard cap to prevent OOM
+    per_persona_cap = None
+    if max_samples and personas_to_use:
+        per_persona_cap = max(10, max_samples // len(personas_to_use))
+
     all_texts: List[str] = []
     for persona_id in personas_to_use:
         p_info = PERSONA_BACKGROUNDS.get(persona_id)
         if not p_info:
             logger.warning(f"Unknown persona: {persona_id}, skipping")
             continue
+        persona_texts: List[str] = []
         for ds_name, ds_data in raw_datasets.items():
             preparer = DATASET_PREPARERS.get(ds_name)
             if preparer and ds_data is not None:
                 try:
                     samples = preparer(ds_data, persona_id, p_info)
                     if samples:
-                        all_texts.extend(samples)
-                        logger.info(f"  {persona_id} <- {ds_name}: {len(samples)} samples")
+                        persona_texts.extend(samples)
+                        logger.info(
+                            f"  {persona_id} <- {ds_name}: {len(samples)} samples"
+                        )
                 except Exception as e:
                     logger.warning(f"  {persona_id} <- {ds_name}: error ({e})")
+        # Hard cap per persona to keep memory bounded
+        if per_persona_cap and len(persona_texts) > per_persona_cap:
+            random.shuffle(persona_texts)
+            persona_texts = persona_texts[:per_persona_cap]
+        all_texts.extend(persona_texts)
+        logger.info(
+            f"  {persona_id}: total {len(persona_texts)} samples (cap={per_persona_cap})"
+        )
 
     if not all_texts:
-        logger.warning("No training data from datasets! Creating synthetic fallback data.")
+        logger.warning(
+            "No training data from datasets! Creating synthetic fallback data."
+        )
         all_texts = _create_fallback_data(personas_to_use)
 
     random.shuffle(all_texts)

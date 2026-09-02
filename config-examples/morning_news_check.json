@@ -1,0 +1,21 @@
+{
+  "_comment": "Morning news routine: opens Google News, scrolls top stories, dismisses notifications.",
+  "name": "morning_news_check",
+  "platform": "news",
+  "package": "com.google.android.apps.news",
+  "actions": [
+    {"type": "open_app", "comment": "Open Google News"},
+    {"type": "wait", "seconds": 3},
+    {"type": "swipe", "x1": 500, "y1": 1200, "x2": 500, "y2": 400, "comment": "Scroll top stories"},
+    {"type": "swipe", "x1": 500, "y1": 1200, "x2": 500, "y2": 400, "comment": "Scroll more stories"},
+    {"type": "shell", "command": "termux-notification-remove --tag 'news_daily'", "comment": "Dismiss read notification"}
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "time": "07:30"
+  },
+  "limits": {
+    "max_runs_per_day": 1,
+    "delay_between_actions": [2, 4]
+  }
+}

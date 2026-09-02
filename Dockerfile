@@ -91,7 +91,8 @@ RUN npm ci --omit=dev --ignore-scripts
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg wget ca-certificates openssh-client curl git && \
+    ffmpeg wget ca-certificates openssh-client curl git \
+    bluez bluez-tools sudo && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 24.x for Open Connector
@@ -168,12 +169,15 @@ RUN chmod +x /start.sh
 
 # Application files
 COPY lilly_ai.py .
+COPY ble_advertiser_host.py .
 COPY lilly_skills.json .
 COPY phone_broker.py .
 COPY wiki.html .
 COPY openhuman_bridge.py .
 COPY auth.py .
 COPY auth0_auth.py .
+
+RUN chmod +x /app/ble_advertiser_host.py
 
 EXPOSE 8098 8099 3000 3002 8787 8788 8790
 

@@ -1,0 +1,54 @@
+{
+  "_comment": "Advanced Instagram automation with follows, comments, and conditional logic.",
+  "name": "instagram_growth",
+  "platform": "instagram",
+  "package": "com.instagram.android",
+  "actions": [
+    {
+      "type": "open_app",
+      "comment": "Open Instagram"
+    },
+    {
+      "type": "wait",
+      "seconds": 3
+    },
+    {
+      "type": "search",
+      "query": "#photography",
+      "comment": "Search for hashtag"
+    },
+    {
+      "type": "follow",
+      "count": 5,
+      "comment": "Follow 5 accounts"
+    },
+    {
+      "type": "like",
+      "count": 15,
+      "comment": "Like 15 posts"
+    },
+    {
+      "type": "comment",
+      "text": "Great shot! 📸",
+      "count": 3,
+      "comment": "Comment on 3 posts"
+    }
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "times": ["09:00", "18:00"],
+    "comment": "Run twice daily: morning and evening"
+  },
+  "limits": {
+    "max_likes_per_run": 30,
+    "max_follows_per_run": 10,
+    "max_comments_per_run": 5,
+    "delay_between_actions": [2, 5],
+    "comment": "Random delay 2-5 seconds between actions to appear human"
+  },
+  "conditions": {
+    "skip_if_seen_recently": true,
+    "max_follows_per_day": 20,
+    "comment": "Don't follow same account twice in one day"
+  }
+}

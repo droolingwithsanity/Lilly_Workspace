@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Lilly AI — Wiki</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#0f0e17;color:#e0def4;line-height:1.6;padding:20px;max-width:900px;margin:0 auto}
+h1{font-size:28px;margin-bottom:8px;background:linear-gradient(135deg,#a78bfa,#6dd5ed);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+h2{font-size:20px;margin:28px 0 12px;color:#c4b5fd;border-bottom:1px solid rgba(167,139,250,0.2);padding-bottom:6px}
+h3{font-size:15px;margin:16px 0 8px;color:#a78bfa}
+p{margin:8px 0;color:#c4b5fd;font-size:14px}
+a{color:#6dd5ed;text-decoration:none}a:hover{text-decoration:underline}
+code{background:rgba(167,139,250,0.15);padding:2px 6px;border-radius:4px;font-size:13px;color:#e0def4}
+pre{background:rgba(167,139,250,0.08);border:1px solid rgba(167,139,250,0.15);border-radius:8px;padding:12px;overflow-x:auto;font-size:13px;margin:8px 0;color:#c4b5fd}
+table{width:100%;border-collapse:collapse;margin:12px 0}
+th,td{padding:8px 12px;text-align:left;border:1px solid rgba(167,139,250,0.15);font-size:13px}
+th{background:rgba(167,139,250,0.1);color:#c4b5fd;font-weight:600}
+td{color:#c4b5fd}
+.card{background:rgba(167,139,250,0.06);border:1px solid rgba(167,139,250,0.15);border-radius:12px;padding:16px;margin:12px 0}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
+.badge-violet{background:rgba(167,139,250,0.2);color:#a78bfa}
+.badge-green{background:rgba(74,222,128,0.2);color:#4ade80}
+.badge-amber{background:rgba(251,191,36,0.2);color:#fbbf24}
+nav{position:sticky;top:0;background:rgba(15,14,23,0.95);backdrop-filter:blur(12px);padding:12px 0;border-bottom:1px solid rgba(167,139,250,0.15);margin-bottom:20px;z-index:10}
+nav a{margin-right:16px;font-size:13px;color:#a78bfa}
+.emoji{font-size:18px;vertical-align:middle}
+</style>
+</head>
+<body>
+
+<nav>
+  <a href="#overview">Overview</a>
+  <a href="#avatars">Avatars</a>
+  <a href="#sensors">Sensors</a>
+  <a href="#vision">Vision</a>
+  <a href="#automation">Automation</a>
+  <a href="#skills">Skills</a>
+  <a href="#pairing">Pairing</a>
+  <a href="#bluetooth">Bluetooth Broadcast</a>
+  <a href="#api">API</a>
+</nav>
+
+<h1>🐕 Lilly AI Wiki</h1>
+<p>Your personal AI companion — 9 avatars, 23 sensors, natural language automation.</p>
+
+<h2 id="overview">Overview</h2>
+<div class="card">
+  <p>Lilly AI runs on your Android phone via Termux with a Docker backend. It has:</p>
+  <ul style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li><b>9 avatar agents</b> — each with distinct personality and strengths</li>
+    <li><b>23 phone sensors</b> — light, accelerometer, gyroscope, GPS, battery, etc.</li>
+    <li><b>Natural language automation</b> — "when X happens, do Y"</li>
+    <li><b>Notification intelligence</b> — reads and prioritizes Android notifications</li>
+    <li><b>Voice interaction</b> — speak to Lilly, she speaks back</li>
+    <li><b>Camera vision</b> — YOLOv8 object detection from phone camera or browser webcam</li>
+    <li><b>Picture-in-Picture</b> — YouTube while chatting</li>
+  </ul>
+</div>
+
+<h2 id="avatars">🐾 The 9 Avatars</h2>
+<p>Each avatar is a specialized agent. They share the same phone and sensors but have different personalities.</p>
+<table>
+  <tr><th>Avatar</th><th>Role</th><th>Strengths</th><th>Voice</th></tr>
+  <tr><td><span class="emoji">🐶</span> Puppy (Lilly)</td><td>Alpha Companion</td><td>Conversation, memory, emotional intelligence</td><td>Warm, normal pace</td></tr>
+  <tr><td><span class="emoji">🦊</span> Fox</td><td>Creative Strategist</td><td>Creative writing, storytelling, brainstorming</td><td>Fast, high-pitch, animated</td></tr>
+  <tr><td><span class="emoji">🐱</span> Cat</td><td>Precision Analyst</td><td>Data analysis, code review, fact-checking</td><td>Normal, flat, crisp</td></tr>
+  <tr><td><span class="emoji">🐻</span> Bear</td><td>Steadfast Guardian</td><td>Scheduling, reminders, practical advice</td><td>Slow, deep, calm</td></tr>
+  <tr><td><span class="emoji">🐰</span> Bunny</td><td>Energetic Scout</td><td>Real-time monitoring, alerts, notifications</td><td>Very fast, high-pitch</td></tr>
+  <tr><td><span class="emoji">🦉</span> Owl</td><td>Wisdom Keeper</td><td>Deep analysis, long-term planning</td><td>Very slow, low-pitch</td></tr>
+  <tr><td><span class="emoji">🦌</span> Deer</td><td>Gentle Healer</td><td>Emotional support, wellness, meditation</td><td>Normal, warm-breathy</td></tr>
+  <tr><td><span class="emoji">🐺</span> Wolf</td><td>Fierce Protector</td><td>Security, threat assessment, decisive action</td><td>Fast, low-pitch</td></tr>
+  <tr><td><span class="emoji">🦝</span> Raccoon</td><td>Tech Tinkerer</td><td>Coding, hacking, gadgets, troubleshooting</td><td>Fast, medium-pitch</td></tr>
+</table>
+
+<h3>Switching Avatars</h3>
+<p>Say <code>"switch to fox"</code> or tap the Agents button in the radial menu. You can also say <code>"have bear handle this"</code> to delegate.</p>
+
+<h2 id="sensors">📡 Phone Sensors</h2>
+<p>Lilly reads 23 Android sensors in real-time:</p>
+<div class="card">
+  <h3>Environment</h3>
+  <p><code>light</code> — ambient light (lux) · <code>pressure</code> — barometer · <code>temperature</code> — device temp</p>
+  <h3>Motion</h3>
+  <p><code>accelerometer</code> — linear acceleration · <code>gyroscope</code> — rotation · <code>magnetometer</code> — compass heading</p>
+  <h3>Location</h3>
+  <p><code>gps</code> — latitude, longitude, altitude, speed · <code>activity</code> — walking/running/still/vehicle</p>
+  <h3>Device</h3>
+  <p><code>battery</code> — level, temperature, charging · <code>wifi</code> — nearby networks · <code>bluetooth</code> — nearby devices</p>
+  <h3>Body</h3>
+  <p><code>heart_rate</code> — if available · <code>step_counter</code> — daily steps · <code>proximity</code> — phone near face</p>
+</div>
+
+<h3>Sensor-Triggered Skills</h3>
+<p>Background rules fire automatically:</p>
+<table>
+  <tr><th>Skill</th><th>Trigger</th><th>Response</th></tr>
+  <tr><td>Dark Room Alert</td><td>Light &lt; 10 lux</td><td>"It's gotten really dark..."</td></tr>
+  <tr><td>Phone Pickup</td><td>Pickup sensor &gt; 0</td><td>"I felt you pick up the phone!"</td></tr>
+  <tr><td>Vehicle Motion</td><td>Significant motion</td><td>"Feels like we're moving fast..."</td></tr>
+  <tr><td>Bright Light</td><td>Light &gt; 1000 lux</td><td>"Wow, it's really bright!"</td></tr>
+</table>
+
+<h2 id="vision">📷 Camera &amp; Vision (YOLO)</h2>
+<p>Lilly can see through your phone camera or browser webcam using YOLOv8 object detection.</p>
+<div class="card">
+  <h3>How It Works</h3>
+  <p>Camera frames are sent to the backend every 2-3 seconds. YOLOv8 detects 80+ object classes (person, laptop, phone, cup, chair, car, etc.) and returns bounding boxes + labels.</p>
+  <h3>Android Native Camera</h3>
+  <p>The overlay camera captures frames from the phone's camera and POSTs them to <code>POST /api/vision/browser</code>. Detection boxes are drawn on the camera overlay in real-time.</p>
+  <h3>Browser Webcam</h3>
+  <p>The web UI's CameraBridge captures webcam frames via <code>getUserMedia</code> and sends them to the same endpoint. Detection results appear in the UI.</p>
+  <h3>Vision Endpoints</h3>
+  <table>
+    <tr><th>Endpoint</th><th>Method</th><th>Purpose</th></tr>
+    <tr><td><code>/api/vision/browser</code></td><td>POST</td><td>Upload JPEG frame → get YOLO detections</td></tr>
+    <tr><td><code>/api/vision/browser</code></td><td>GET</td><td>Get latest detection results</td></tr>
+    <tr><td><code>/api/vision/status</code></td><td>GET</td><td>Vision system status (YOLO, OpenCV)</td></tr>
+    <tr><td><code>/api/vision/frame</code></td><td>GET</td><td>Latest annotated frame as JPEG</td></tr>
+    <tr><td><code>/api/vision/describe</code></td><td>GET</td><td>Natural language scene description</td></tr>
+  </table>
+  <h3>Voice Commands</h3>
+  <p><code>"What do you see?"</code> — describe the current scene · <code>"open camera"</code> — start camera overlay</p>
+</div>
+
+<h2 id="automation">⚡ Natural Language Automation</h2>
+<p>Create rules by talking to Lilly:</p>
+<div class="card">
+  <h3>Examples</h3>
+  <p><code>"When battery is below 20%, notify me"</code></p>
+  <p><code>"When I get a Slack message about deploy, alert me"</code></p>
+  <p><code>"When light drops below 10, turn on dark mode"</code></p>
+  <p><code>"When I arrive home, set phone to silent"</code></p>
+  <h3>Rule Structure</h3>
+  <pre>{
+  "topic": "battery",        // sensor, battery, notification, location
+  "condition": {
+    "field": "data.battery_level",
+    "op": "<",
+    "value": 20
+  },
+  "action_type": "notify",   // notify, chat, shell, webhook, tts
+  "action_payload": {
+    "title": "Low Battery",
+    "body": "Battery is at {{data.battery_level}}%"
+  }
+}</pre>
+  <h3>Supported Operators</h3>
+  <p><code>==</code> <code>!=</code> <code>&lt;</code> <code>&lt;=</code> <code>&gt;</code> <code>&gt;=</code> <code>contains</code> <code>not_contains</code> <code>regex</code></p>
+</div>
+
+<h2 id="skills">🛠️ Skills</h2>
+<p>Skills are specialized commands Lilly can execute:</p>
+<div class="card">
+  <h3>Built-in Skills</h3>
+  <p><code>open youtube</code> — opens YouTube in PiP · <code>open camera</code> — opens camera app</p>
+  <p><code>open maps</code> — Google Maps · <code>open gmail</code> — Gmail inbox</p>
+  <p><code>screenshot</code> — take screenshot · <code>go home</code> — home screen</p>
+  <h3>Custom Skills</h3>
+  <p>Create custom skills at <a href="/skills-market.html">Skills Market</a></p>
+</div>
+
+<h2 id="pairing">🔗 Pairing</h2>
+<p>Pair your phone with the web UI:</p>
+<div class="card">
+  <ol style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li>Open the Lilly overlay on your phone</li>
+    <li>Double-tap the head → tap Config ⚙️</li>
+    <li>Tap "Re-pair Device"</li>
+    <li>Enter the 6-digit code shown on the web UI</li>
+  </ol>
+  <p>Once paired, the web UI sees your phone's sensors, notifications, and battery in real-time.</p>
+</div>
+
+<h2 id="bluetooth">📡 Bluetooth Broadcast (Earbuds Mode)</h2>
+<p>Your Pixel 10 can advertise itself as a Bluetooth LE device — like earbuds in pairing mode. When nearby, it will appear in Bluetooth scans with your chosen avatar name and image.</p>
+<div class="card">
+  <h3>How It Works</h3>
+  <ol style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li>Open the Lilly web UI on your host machine</li>
+    <li>Click the hamburger menu ☰ → <b>Broadcast</b> button</li>
+    <li>Choose an avatar image (🐶 Puppy, 🦊 Fox, 🐱 Cat, etc.)</li>
+    <li>Set a device name (e.g., "Lilly Pup")</li>
+    <li>Click "Start Broadcast" — your phone now appears in Bluetooth scans</li>
+  </ol>
+  <p>Nearby phones will see your device appear as a discoverable BLE peripheral. They can open the broadcast web URL to see your avatar image — just like earbuds showing a pairing prompt.</p>
+</div>
+
+<div class="card">
+  <h3>Permissions Required (Android 12+)</h3>
+  <p>On your Pixel 10, grant these permissions to Termux:</p>
+  <ul style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li><b>Location</b> — Allow all the time (required for BLE advertising)</li>
+    <li><b>Nearby devices</b> — Allow (Android 12+ Bluetooth permission)</li>
+    <li><b>Bluetooth</b> — Allow</li>
+  </ul>
+  <p>Also enable Location services: Settings → Location → High accuracy</p>
+</div>
+
+<div class="card">
+  <h3>Available Avatars</h3>
+  <table style="width:100%;font-size:13px">
+    <tr><th>Avatar</th><th>Name</th><th>Image URL</th></tr>
+    <tr><td>🐶</td><td>Puppy (Lilly)</td><td><code>/static/lilly/puppy-avatar.svg</code></td></tr>
+    <tr><td>🦊</td><td>Fox</td><td><code>/static/lilly/fox-avatar.svg</code></td></tr>
+    <tr><td>🐱</td><td>Cat</td><td><code>/static/lilly/cat-avatar.svg</code></td></tr>
+    <tr><td>🐻</td><td>Bear</td><td><code>/static/lilly/bear-avatar.svg</code></td></tr>
+    <tr><td>🐰</td><td>Bunny</td><td><code>/static/lilly/bunny-avatar.svg</code></td></tr>
+    <tr><td>🦉</td><td>Owl</td><td><code>/static/lilly/owl-avatar.svg</code></td></tr>
+    <tr><td>🦌</td><td>Deer</td><td><code>/static/lilly/deer-avatar.svg</code></td></tr>
+    <tr><td>🐺</td><td>Wolf</td><td><code>/static/lilly/wolf-avatar.svg</code></td></tr>
+    <tr><td>🦝</td><td>Raccoon</td><td><code>/static/lilly/raccoon-avatar.svg</code></td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>📡 Container-Side Broadcast (No Phone Required)</h3>
+  <p>Starting a broadcast directly from the Docker container — no phone needed. Uses <code>ble_advertiser_host.py</code> which talks to the host Bluetooth adapter via raw HCI commands (<code>hcitool</code>/<code>hciconfig</code>). This is the container equivalent of the Bluetooth LE Spam APK, using <b>your own</b> payloads (name, service UUID, image URL) — no third-party fake-device payloads.</p>
+  <ol style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li>Ensure the host machine has a Bluetooth adapter and BlueZ is installed</li>
+    <li>The container (via <code>start.sh</code>) auto-starts <code>ble_advertiser_host.py</code> on port <code>8110</code></li>
+    <li>Broadcast from the API:
+      <pre style="background:rgba(0,0,0,0.05);padding:8px;border-radius:6px;font-size:12px">curl -X POST http://localhost:8098/api/bluetooth/advertise \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Lilly Pup","mode":"balanced","image":"/static/lilly/puppy-avatar.svg"}'</pre>
+    </li>
+    <li>Check status: <code>curl http://localhost:8098/api/bluetooth/advertise/status</code></li>
+    <li>Stop broadcast: <code>curl -X POST http://localhost:8098/api/bluetooth/advertise/stop</code></li>
+    <li>Scan for nearby BLE devices: <code>curl http://localhost:8098/api/bluetooth/advertise/scan</code></li>
+    <li>Or just say: &ldquo;<b>broadcast</b>&rdquo; / &ldquo;<b>advertise</b>&rdquo; / &ldquo;<b>beacon</b>&rdquo;</li>
+  </ol>
+  <table style="width:100%;font-size:13px">
+    <tr><th>Mode</th><th>Description</th></tr>
+    <tr><td><code>ble</code></td><td>BLE advertising only (silent radar presence)</td></tr>
+    <tr><td><code>classic</code></td><td>Classic BR/EDR headphone-pairing popup on nearby phones</td></tr>
+    <tr><td><code>fast_pair</code></td><td>Google Fast Pair BLE — Android bottom-sheet popup</td></tr>
+    <tr><td><code>both</code> / <code>balanced</code></td><td>Classic + Fast Pair BLE simultaneously (default, best coverage)</td></tr>
+  </table>
+  <p style="font-size:11px;color:#9d8db0;margin-top:10px">ℹ The container advertiser is tried first by <code>_bt_proxy</code> (always-local, no phone dependency). If no Bluetooth adapter is available, the phone-side advertiser (sensor server :8099 or standalone :8100) is used as a fallback. Download <a href="/api/files/ble_advertiser_host.py">ble_advertiser_host.py</a> to run standalone.</p>
+</div>
+
+<h2 id="api">🔌 API Reference</h2>
+<table>
+  <tr><th>Endpoint</th><th>Method</th><th>Purpose</th></tr>
+  <tr><td><code>/api/chat</code></td><td>POST</td><td>Send message, get response</td></tr>
+  <tr><td><code>/api/sensors</code></td><td>GET</td><td>Latest sensor readings</td></tr>
+  <tr><td><code>/api/notifications</code></td><td>GET</td><td>Active notification list</td></tr>
+  <tr><td><code>/api/vision/browser</code></td><td>POST</td><td>Upload camera frame → YOLO detections</td></tr>
+  <tr><td><code>/api/vision/browser</code></td><td>GET</td><td>Latest detection results</td></tr>
+  <tr><td><code>/api/vision/status</code></td><td>GET</td><td>Vision system status</td></tr>
+  <tr><td><code>/api/broker/status</code></td><td>GET</td><td>Broker connection status</td></tr>
+  <tr><td><code>/api/broker/automations</code></td><td>GET/POST</td><td>List / create automation rules</td></tr>
+  <tr><td><code>/api/lilly_skills</code></td><td>GET</td><td>Available skills</td></tr>
+  <tr><td><code>/api/phone_status</code></td><td>GET</td><td>Phone connectivity</td></tr>
+  <tr><td><code>/api/health</code></td><td>GET</td><td>Service health</td></tr>
+  <tr><td><code>/api/bluetooth/advertise/status</code></td><td>GET</td><td>BLE advertising status</td></tr>
+  <tr><td><code>/api/bluetooth/advertise</code></td><td>POST</td><td>Start BLE advertising (earbuds pairing mode)</td></tr>
+  <tr><td><code>/api/bluetooth/advertise/stop</code></td><td>POST</td><td>Stop BLE advertising</td></tr>
+  <tr><td><code>/api/avatars</code></td><td>GET</td><td>List available avatar images for broadcast</td></tr>
+  <tr><td><code>/lilly/advertise</code></td><td>GET</td><td>Web UI page served to devices that find the BLE broadcast</td></tr>
+</table>
+
+<h2>📚 Quick Reference</h2>
+<div class="card">
+  <h3>Overlay Controls</h3>
+  <p><b>Double-tap head</b> — open radial menu · <b>Single tap</b> — toggle chat · <b>Drag</b> — move overlay</p>
+  <h3>Radial Menu</h3>
+  <p>💬 Chat · 🎤 Voice · 🐾 Agents · 🛠️ Skills · ⚡ Auto · 📖 Wiki · 📡 Around · ⚙️ Config</p>
+  <h3>Voice Commands</h3>
+  <p>"What do you sense" · "How's my battery" · "What do you see" · "Tell me a story" · "Start a walk" · "Open YouTube"</p>
+</div>
+
+<p style="margin-top:40px;text-align:center;color:rgba(167,139,250,0.4);font-size:12px">Lilly AI · Built with ❤️</p>
+
+</body>
+</html>

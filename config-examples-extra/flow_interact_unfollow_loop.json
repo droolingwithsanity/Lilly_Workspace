@@ -1,0 +1,34 @@
+{
+  "_comment": "Multi-step flow: interact, then unfollow, then sleep, then loop.",
+  "name": "flow_interact_unfollow_loop",
+  "platform": "instagram",
+  "package": "com.instagram.android",
+  "steps": [
+    {
+      "step": 1,
+      "config_file": "config-examples/instagram_likes_only.json",
+      "comment": "Phase 1: Likes"
+    },
+    {
+      "step": 2,
+      "config_file": "config-examples-extra/instagram_follow_only.json",
+      "comment": "Phase 2: Follows"
+    },
+    {
+      "step": 3,
+      "config_file": "config-examples/read_and_dismiss_notifications.json",
+      "comment": "Phase 3: Cleanup"
+    }
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "time": "08:00",
+    "loop": true,
+    "loop_delay_minutes": 180,
+    "comment": "Run all 3 steps in sequence, repeat every 3 hours"
+  },
+  "limits": {
+    "max_loops_per_day": 4,
+    "comment": "Max 4 cycles per day"
+  }
+}

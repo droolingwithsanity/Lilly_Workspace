@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Search Results — Lilly AI</title>
+<style>
+  :root{
+    --bg:#f8f6fa; --surface:#fff; --border:#e3dcef;
+    --text:#5d4e6d; --dim:#8a7b9a; --accent:#7b5ea7; --accent2:#8b7a9e;
+    --green:#3a8a6a; --red:#c05555; --hover:#f3edf7;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:auto; min-height:100%}
+  body{
+    font-family:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg); color:var(--text); line-height:1.6;
+  }
+  a{color:var(--accent); text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  /* Header */
+  .site-header{
+    background:linear-gradient(160deg,#efe8f5,#e8eef4 55%,#e6eaf2);
+    border-bottom:1px solid var(--border); padding:18px 0;
+    position:sticky; top:0; z-index:50;
+  }
+  .header-inner{
+    max-width:920px; margin:0 auto; padding:0 18px;
+    display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  }
+  .brand{font-weight:800; font-size:18px; letter-spacing:-.02em; color:var(--accent)}
+  .brand span{font-weight:500; color:var(--dim)}
+  .query-chip{
+    flex:1; min-width:220px; background:var(--surface); border:1px solid var(--border);
+    border-radius:999px; padding:8px 14px; font-size:13px; color:var(--text);
+    display:flex; align-items:center; gap:8px;
+  }
+  .query-chip strong{color:var(--accent)}
+  .count-badge{
+    font-size:11px; color:var(--dim); background:rgba(93,78,109,.08);
+    padding:4px 10px; border-radius:999px; white-space:nowrap;
+  }
+  .back-link{
+    font-size:12px; color:var(--dim); padding:6px 10px; border-radius:8px;
+    border:1px solid var(--border); background:var(--surface);
+  }
+
+  /* Toolbar */
+  .toolbar{
+    max-width:920px; margin:0 auto; padding:12px 18px;
+    display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+  }
+  .btn{
+    padding:8px 14px; border-radius:10px; border:1.5px solid var(--border);
+    background:var(--surface); color:var(--text); font-size:12px; cursor:pointer;
+    transition:.15s; font-weight:500; display:inline-flex; align-items:center; gap:6px;
+  }
+  .btn:hover{background:var(--hover); color:var(--accent)}
+  .btn.primary{
+    background:linear-gradient(140deg,var(--accent),var(--accent2));
+    color:#fff; border:none; box-shadow:0 4px 14px rgba(123,94,167,.25);
+  }
+  .btn.primary:hover{filter:brightness(1.08); text-decoration:none}
+
+  /* Feed */
+  .feed{max-width:920px; margin:0 auto; padding:6px 18px 40px}
+  .item{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    padding:16px 18px; margin-bottom:12px; transition:.15s;
+  }
+  .item:hover{background:var(--hover); transform:translateY(-1px); box-shadow:0 4px 12px rgba(93,78,109,.08)}
+  .item .item-header{
+    display:flex; align-items:flex-start; gap:10px; margin-bottom:6px;
+  }
+  .item .rank{
+    font-size:11px; color:var(--dim); font-weight:700; min-width:22px; padding-top:2px;
+    font-variant-numeric:tabular-nums;
+  }
+  .item .title-line{flex:1; min-width:0}
+  .item h2{
+    font-size:15px; font-weight:700; line-height:1.35; margin:0;
+  }
+  .item h2 a{color:var(--accent); word-break:break-word}
+  .item h2 a:hover{text-decoration:underline}
+  .item .meta-row{
+    display:flex; align-items:center; gap:10px; margin-top:4px;
+    font-size:12px; color:var(--dim); flex-wrap:wrap;
+  }
+  .item .meta-row .domain{color:var(--accent2)}
+  .item .snippet{
+    font-size:13.5px; line-height:1.6; color:var(--text); margin-top:8px;
+  }
+  .item .snippet mark{background:rgba(123,94,167,.12); color:var(--text); padding:0 2px; border-radius:3px}
+  .item .actions{
+    margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;
+  }
+  .item .actions a{
+    font-size:12px; padding:5px 10px; border-radius:8px; border:1px solid var(--border);
+    background:var(--surface); color:var(--text);
+  }
+  .item .actions a:hover{background:var(--hover); color:var(--accent); text-decoration:none}
+
+  .empty-state{
+    max-width:920px; margin:0 auto; padding:40px 18px; text-align:center; color:var(--dim);
+  }
+  .empty-state .big{padding:24px; background:var(--surface); border:1px solid var(--border); border-radius:14px}
+
+  /* Toast */
+  .toast{
+    position:fixed; bottom:18px; right:18px; max-width:340px;
+    background:rgba(93,78,109,.94); color:#fff; padding:10px 14px; border-radius:10px;
+    font-size:12px; line-height:1.5; z-index:999; box-shadow:0 6px 20px rgba(0,0,0,.25);
+    opacity:0; transition:opacity .2s;
+  }
+  .toast.show{opacity:1}
+
+  @media(max-width:640px){
+    .header-inner{padding:0 12px}
+    .feed{padding:6px 12px 36px}
+    .item{padding:14px}
+    .item h2{font-size:14px}
+    .item .snippet{font-size:12.5px}
+    .toolbar{padding:10px 12px}
+  }
+</style>
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="brand">Lilly <span>Search</span></div>
+      <div class="query-chip" id="queryLabel">Search results for <strong>...</strong></div>
+      <div class="count-badge" id="countBadge">0 results</div>
+      <a class="back-link" href="/" title="Back to chat">← Chat</a>
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <button class="btn primary" id="summarizeBtn">✨ Ask Alpha to summarize</button>
+    <button class="btn" id="copyBtn">📋 Copy all text</button>
+    <button class="btn" onclick="window.print()">🖨️ Print / Save PDF</button>
+  </div>
+
+  <main class="feed" id="feed">
+    <div class="empty-state" id="emptyState" style="display:none">
+      <div class="big">Loading results…</div>
+    </div>
+    <div id="results"></div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+  <div id="summaryModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:100;align-items:center;justify-content:center;padding:18px">
+    <div style="background:#fff;border:1px solid var(--border);border-radius:14px;max-width:640px;width:100%;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.25)">
+      <div style="padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+        <div style="font-weight:700;font-size:14px;color:var(--accent)">✨ Alpha Summary</div>
+        <button id="closeSummary" style="background:transparent;border:none;font-size:16px;color:var(--dim);cursor:pointer;padding:4px 8px;border-radius:8px">✕</button>
+      </div>
+      <div id="summaryBody" style="padding:14px 16px;overflow:auto;flex:1;font-size:13.5px;line-height:1.6;color:var(--text)"></div>
+      <div style="padding:10px 16px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn" id="copySummary">📋 Copy</button>
+        <button class="btn primary" id="sendToChat">💬 Send to chat</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+const $=id=>document.getElementById(id);
+let query=''; let results=[]; let rawText='';
+
+function esc(s){
+  if(!s)return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function showToast(msg){
+  const t=$('toast');
+  t.textContent=msg;
+  t.classList.add('show');
+  clearTimeout(t._t);
+  t._t=setTimeout(()=>t.classList.remove('show'),4000);
+}
+
+async function load(){
+  const p=new URLSearchParams(location.search);
+  query=p.get('q')||p.get('query')||'';
+  if(!query){
+    $('emptyState').style.display='';
+    $('emptyState').querySelector('.big').textContent='No search query provided.';
+    return;
+  }
+  $('queryLabel').innerHTML='Results for <strong>'+esc(query)+'</strong>';
+  try{
+    const r=await fetch('/api/search/results?q='+encodeURIComponent(query));
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    results=d.results||[];
+    rawText=d.raw||'';
+    render(results);
+  }catch(e){
+    $('emptyState').style.display='';
+    $('emptyState').querySelector('.big').textContent='Failed to load results. Try again.';
+    showToast('Load failed: '+e.message);
+  }
+}
+
+function render(list){
+  const box=$('results');
+  box.innerHTML='';
+  if(!list.length){
+    $('emptyState').style.display='';
+    $('emptyState').querySelector('.big').textContent='No results found for "'+esc(query)+'"';
+    return;
+  }
+  $('emptyState').style.display='none';
+  list.forEach((r,i)=>{
+    const div=document.createElement('article');
+    div.className='item';
+    const title=esc(r.title||r.url||'Untitled');
+    const url=esc(r.url||'');
+    const snippet=esc(r.snippet||r.description||r.summary||'');
+    const domain=(()=>{try{return new URL(r.url).hostname}catch{return ''}})();
+    const date=(r.date||r.published||'').toString().slice(0,10);
+    const source=(r.source||domain||'').toString();
+    div.innerHTML=
+      '<div class="item-header">'+
+        '<div class="rank">#'+(i+1)+'</div>'+
+        '<div class="title-line">'+
+          '<h2><a href="'+url+'" target="_blank" rel="noopener">'+title+'</a></h2>'+
+          '<div class="meta-row">'+
+            '<span class="domain">'+domain+'</span>'+
+            (date?'<span>'+esc(date)+'</span>':'')+
+            (source?'<span>'+esc(source)+'</span>':'')+
+          '</div>'+
+        '</div>'+
+      '</div>'+
+      (snippet?'<div class="snippet">'+snippet+'</div>':'')+
+      (r.images && r.images.length ? '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">'+r.images.slice(0,4).map(img=>'<a href="'+esc(img)+'" target="_blank" rel="noopener"><img src="'+esc(img)+'" loading="lazy" style="max-width:140px;max-height:110px;border-radius:10px;border:1px solid var(--border);cursor:pointer" onerror="this.style.display='+"'none'"+'"/></a>').join('')+'</div>' : '')+
+      '<div class="actions">'+
+        '<a href="'+url+'" target="_blank" rel="noopener">Open original ↗</a>'+
+        '<a href="javascript:void(0)" data-idx="'+i+'">Copy snippet</a>'+
+      '</div>';
+    box.appendChild(div);
+  });
+
+  box.querySelectorAll('a[data-idx]').forEach(a=>{
+    a.onclick=()=>{
+      const idx=parseInt(a.getAttribute('data-idx'),10);
+      const item=list[idx];
+      const txt=(item.snippet||item.description||item.summary||item.title||'').trim();
+      navigator.clipboard.writeText(txt).then(()=>{
+        const old=a.textContent; a.textContent='✅ Copied';
+        setTimeout(()=>a.textContent=old,1200);
+      }).catch(()=>{});
+    };
+  });
+
+  $('countBadge').textContent=list.length+' result'+(list.length===1?'':'s');
+}
+
+$('summarizeBtn').onclick=async()=>{
+  if(!rawText){ showToast('No content to summarize.'); return; }
+  showToast('Asking Alpha to summarize…');
+  try{
+    const r=await fetch('/api/cmd',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text:'Summarize these search results briefly:\n\n'+rawText.slice(0,4000)})
+    });
+    const d=await r.json();
+    if(d && d.reply){
+      showSummary(d.reply);
+    }else{
+      showToast('No summary received.');
+    }
+  }catch(e){
+    showToast('Summary request failed.');
+  }
+};
+
+function showSummary(text){
+  const modal=document.getElementById('summaryModal');
+  const body=document.getElementById('summaryBody');
+  body.textContent=text;
+  modal.style.display='flex';
+}
+
+document.getElementById('closeSummary').onclick=()=>{
+  document.getElementById('summaryModal').style.display='none';
+};
+
+document.getElementById('copySummary').onclick=()=>{
+  const text=document.getElementById('summaryBody').textContent||'';
+  if(!text)return;
+  navigator.clipboard.writeText(text).then(()=>{
+    const btn=document.getElementById('copySummary'); const old=btn.textContent;
+    btn.textContent='✅ Copied';
+    setTimeout(()=>btn.textContent=old,1200);
+  }).catch(()=>{});
+};
+
+document.getElementById('sendToChat').onclick=()=>{
+  const text=document.getElementById('summaryBody').textContent||'';
+  if(!text)return;
+  // Pre-fill the main chat input if we can find it, otherwise open chat with query
+  const chatInput=window.parent?.document?.getElementById('input');
+  if(chatInput){
+    chatInput.value='Summarize this: '+text;
+    chatInput.focus();
+    document.getElementById('summaryModal').style.display='none';
+    return;
+  }
+  // Fallback: open main page with summary as query param
+  location.href='/?q='+encodeURIComponent(text.slice(0,200));
+};
+
+$('copyBtn').onclick=()=>{
+  if(!rawText){ showToast('Nothing to copy.'); return; }
+  navigator.clipboard.writeText(rawText).then(()=>{
+    const btn=$('copyBtn'); const old=btn.textContent;
+    btn.textContent='✅ Copied all text';
+    setTimeout(()=>btn.textContent=old,1500);
+  }).catch(()=>{ showToast('Copy failed.'); });
+};
+
+load();
+</script>
+</body>
+</html>

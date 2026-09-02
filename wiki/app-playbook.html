@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lilly AI — App Playbook</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
+    background: #f0e6ef;
+    color: #5d4e6d;
+    line-height: 1.6;
+  }
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+  }
+  header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 40px 20px;
+    text-align: center;
+    border-radius: 0 0 20px 20px;
+    margin-bottom: 30px;
+  }
+  header h1 { font-size: 2.5em; margin-bottom: 10px; }
+  header p { font-size: 1.1em; opacity: 0.9; }
+  .nav {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 30px;
+    justify-content: center;
+  }
+  .nav a {
+    background: white;
+    padding: 10px 20px;
+    border-radius: 20px;
+    text-decoration: none;
+    color: #667eea;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    transition: transform 0.2s;
+  }
+  .nav a:hover { transform: translateY(-2px); }
+  .section {
+    background: white;
+    border-radius: 16px;
+    padding: 25px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  }
+  .section h2 {
+    color: #667eea;
+    margin-bottom: 15px;
+    font-size: 1.5em;
+    border-bottom: 2px solid #f0e6ef;
+    padding-bottom: 10px;
+  }
+  .section h3 {
+    color: #764ba2;
+    margin: 20px 0 10px;
+    font-size: 1.2em;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 15px;
+    margin-top: 15px;
+  }
+  .card {
+    background: #f6f2ff;
+    border-radius: 12px;
+    padding: 15px;
+    border-left: 4px solid #667eea;
+  }
+  .card h4 { color: #667eea; margin-bottom: 8px; }
+  .card p { font-size: 0.9em; color: #5d4e6d; }
+  code {
+    background: #eee6ff;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", Monaco, monospace;
+    font-size: 0.9em;
+  }
+  pre {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 15px;
+    border-radius: 10px;
+    overflow-x: auto;
+    font-size: 0.85em;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+  .badge {
+    display: inline-block;
+    background: #667eea;
+    color: white;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.8em;
+    margin-right: 5px;
+  }
+  .badge.green { background: #4ade80; }
+  .badge.orange { background: #fbbf24; }
+  .badge.red { background: #ef4444; }
+  ul { margin-left: 20px; margin-top: 10px; }
+  li { margin-bottom: 8px; }
+  .warning {
+    background: #fff3cd;
+    border-left: 4px solid #fbbf24;
+    padding: 12px 15px;
+    border-radius: 8px;
+    margin: 15px 0;
+  }
+  .success {
+    background: #d4edda;
+    border-left: 4px solid #4ade80;
+    padding: 12px 15px;
+    border-radius: 8px;
+    margin: 15px 0;
+  }
+  footer {
+    text-align: center;
+    padding: 30px;
+    color: #8a7cab;
+    font-size: 0.9em;
+  }
+  a { color: #667eea; }
+</style>
+</head>
+<body>
+<header>
+  <h1><canvas id="lillyAvatar" width="60" height="60" style="vertical-align:middle;margin-right:10px;border-radius:50%"></canvas>Lilly AI — App Playbook</h1>
+  <p>How to install, use, and automate with the overlay app</p>
+</header>
+
+<style>
+  @keyframes lillyBreathe {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-3px); }
+  }
+  #lillyAvatar {
+    animation: lillyBreathe 3s ease-in-out infinite;
+    display: inline-block;
+  }
+</style>
+
+<script>
+(function() {
+  const canvas = document.getElementById('lillyAvatar');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  let frame = 0;
+
+  function drawLilly() {
+    ctx.clearRect(0, 0, W, H);
+    const cx = W / 2, cy = H / 2;
+    const r = Math.min(W, H) * 0.42;
+    const breathe = Math.sin(frame * 0.04) * (r * 0.02);
+    const y = cy + breathe;
+
+    // Body
+    ctx.fillStyle = '#e8e4f0';
+    ctx.beginPath();
+    ctx.arc(cx, y, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Ears
+    const earWig = Math.sin(frame * 0.18) * 0.08;
+    ctx.save();
+    ctx.translate(cx - r * 0.55, y - r * 0.35);
+    ctx.rotate(-0.3 + earWig);
+    ctx.fillStyle = '#d4d0de';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r * 0.22, r * 0.45, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#f0d8e8';
+    ctx.beginPath();
+    ctx.ellipse(0, r * 0.08, r * 0.10, r * 0.28, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.translate(cx + r * 0.55, y - r * 0.35);
+    ctx.rotate(0.3 - earWig);
+    ctx.fillStyle = '#d4d0de';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r * 0.22, r * 0.45, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#f0d8e8';
+    ctx.beginPath();
+    ctx.ellipse(0, r * 0.08, r * 0.10, r * 0.28, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // Muzzle
+    ctx.fillStyle = '#c8c4d2';
+    ctx.beginPath();
+    ctx.ellipse(cx, y + r * 0.25, r * 0.32, r * 0.22, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Nose
+    ctx.fillStyle = '#d4a0b8';
+    ctx.beginPath();
+    ctx.ellipse(cx, y + r * 0.15, r * 0.10, r * 0.07, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyes
+    const blinking = Math.floor(frame / 90) % 14 === 0;
+    const eyeR = r * 0.11;
+    const lx = cx - r * 0.22, rx = cx + r * 0.22, ey = y - r * 0.05;
+
+    if (blinking) {
+      ctx.strokeStyle = 'rgba(60,40,80,0.55)';
+      ctx.lineWidth = r * 0.04;
+      ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(lx - eyeR, ey); ctx.lineTo(lx + eyeR, ey); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(rx - eyeR, ey); ctx.lineTo(rx + eyeR, ey); ctx.stroke();
+    } else {
+      for (const ex of [lx, rx]) {
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.arc(ex, ey, eyeR, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(90,60,120,0.15)';
+        ctx.beginPath(); ctx.arc(ex, ey, eyeR * 0.82, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#3d2e52';
+        ctx.beginPath(); ctx.arc(ex, ey, eyeR * 0.46, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.88)';
+        ctx.beginPath(); ctx.arc(ex - eyeR * 0.12, ey - eyeR * 0.14, eyeR * 0.22, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+
+    // Smile
+    ctx.strokeStyle = 'rgba(120,80,100,0.42)';
+    ctx.lineWidth = r * 0.04;
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.arc(cx - r * 0.10, y + r * 0.28, r * 0.10, 0.1, Math.PI * 0.75); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx + r * 0.10, y + r * 0.28, r * 0.10, Math.PI * 0.25, Math.PI * 0.9); ctx.stroke();
+
+    frame++;
+    requestAnimationFrame(drawLilly);
+  }
+
+  drawLilly();
+})();
+</script>
+
+<div class="container">
+  <div class="nav">
+    <a href="#install">Install</a>
+    <a href="#overlay">Overlay</a>
+    <a href="#macros">Macros</a>
+    <a href="#automation">Automation</a>
+    <a href="#insomniac">Insomniac</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </div>
+
+  <div class="section" id="install">
+    <h2>📲 Installation</h2>
+    
+    <h3>Step 1: Install the APK</h3>
+    <p>Download the overlay app to your Android phone:</p>
+    <ul>
+      <li>Open <code>http://localhost:8098</code> in your phone's browser</li>
+      <li>Tap <strong>☰ Menu → Download</strong></li>
+      <li>Or direct: <code>http://localhost:8098/api/apk/download?type=light</code></li>
+    </ul>
+
+    <h3>Step 2: Grant Permissions</h3>
+    <p>The overlay needs <strong>Draw over other apps</strong> and <strong>Termux Run Command</strong>:</p>
+    <ol>
+      <li>Android <strong>Settings → Apps → Lilly Overlay → Permissions</strong></li>
+      <li>Enable <strong>"Draw over other apps"</strong> / <strong>"Display over other apps"</strong></li>
+      <li><strong>Settings → Apps → Termux → Permissions</strong></li>
+      <li>Enable <strong>"Run command"</strong> / <strong>com.termux.permission.RUN_COMMAND</strong></li>
+    </ol>
+
+    <h3>Step 3: Enable Termux External Apps</h3>
+    <p>In Termux, run:</p>
+    <pre><code>mkdir -p ~/.termux
+grep -qx 'allow-external-apps=true' ~/.termux/termux.properties || echo 'allow-external-apps=true' >> ~/.termux/termux.properties
+# Fully close Termux and reopen it</code></pre>
+
+    <h3>Step 4: Start the Overlay</h3>
+    <p>Open the Lilly Overlay app. You should see the avatar face and chat bubble. If you see a "Enable Termux Shell Tools" button, tap it to verify the connection.</p>
+  </div>
+
+  <div class="section" id="overlay">
+    <h2>📱 Using the Overlay</h2>
+    <p>The overlay is a floating window that stays on top of other apps. It shows Lilly's face, a chat bubble, and control buttons.</p>
+
+    <h3>Buttons</h3>
+    <div class="grid">
+      <div class="card">
+        <h4>🎤 Mic</h4>
+        <p>Tap to speak. Uses browser mic or Android SpeechRecognizer. Tap again to stop.</p>
+      </div>
+      <div class="card">
+        <h4>⏺ Macro</h4>
+        <p>Start/stop recording a sequence of actions. See Macros section below.</p>
+      </div>
+      <div class="card">
+        <h4>📍 Map</h4>
+        <p>Shows your current GPS location on a map.</p>
+      </div>
+      <div class="card">
+        <h4>📡 Radar</h4>
+        <p>Scans for nearby Bluetooth devices (phones, wearables).</p>
+      </div>
+      <div class="card">
+        <h4>➤ Send</h4>
+        <p>Send a text message to Lilly. Type in the input field and tap Send.</p>
+      </div>
+    </div>
+
+    <h3>Chat Input</h3>
+    <p>Type or speak commands. Lilly understands natural language:</p>
+    <ul>
+      <li><strong>"Open YouTube"</strong> — launches app</li>
+      <li><strong>"What's the battery?"</strong> — sensor query</li>
+      <li><strong>"Automate Instagram"</strong> — starts automation setup</li>
+      <li><strong>"Run morning_routine"</strong> — plays a macro</li>
+      <li><strong>"What can you do?"</strong> — lists available skills</li>
+    </ul>
+
+    <h3>Drag to Move</h3>
+    <p>Long-press the avatar to drag the overlay around the screen. Double-tap to minimize/maximize.</p>
+  </div>
+
+  <div class="section" id="macros">
+    <h2>⏺ Macros (Follow Me)</h2>
+    <p>Macros record a sequence of actions and replay them later. Perfect for repetitive tasks.</p>
+
+    <h3>Recording a Macro</h3>
+    <ol>
+      <li>Press <strong>⏺</strong> in the overlay</li>
+      <li>Perform actions: tap apps, speak commands, navigate</li>
+      <li>Each step is numbered automatically</li>
+      <li>Press <strong>⏹</strong> to stop</li>
+      <li>Say <strong>"Save macro as [name]"</strong> to save it</li>
+    </ol>
+
+    <h3>Playing a Macro</h3>
+    <ul>
+      <li><strong>Voice:</strong> "Run [macro name]"</li>
+      <li><strong>Text:</strong> Type "run [macro name]" in chat</li>
+      <li><strong>API:</strong> <code>POST /api/macro/play</code></li>
+    </ul>
+
+    <h3>Managing Macros</h3>
+    <ul>
+      <li><strong>"List macros"</strong> — shows all saved macros with step counts</li>
+      <li><strong>"Delete [name]"</strong> — removes a macro</li>
+      <li>Macros are saved to <code>macros.json</code> and registered in <code>lilly_skills.json</code></li>
+    </ul>
+
+    <div class="warning">
+      <strong>Note:</strong> Macros execute system-level commands (tap, swipe, keyevent). They work across any Instagram APK variant because they don't depend on app internals.
+    </div>
+  </div>
+
+  <div class="section" id="automation">
+    <h2>🤖 Automation Setup</h2>
+    <p>Lilly can have a conversation to build social media automations. Just say <strong>"Automate Instagram"</strong>.</p>
+
+    <h3>Example Conversation</h3>
+    <pre><code>You: Automate Instagram
+Lilly: What actions? Likes, follows, comments, or all three?
+
+You: Likes and follows
+Lilly: How many of each per run?
+
+You: 30 likes, 10 follows
+Lilly: When should I run this?
+
+You: At 6am daily
+Lilly: Done! Created 'instagram_automation' with 41 steps.</code></pre>
+
+    <h3>What Gets Created</h3>
+    <ul>
+      <li><strong>Config file:</strong> <code>config-examples/instagram_automation.json</code></li>
+      <li><strong>Macro:</strong> Saved to <code>macros.json</code></li>
+      <li><strong>Skill:</strong> Registered in <code>lilly_skills.json</code></li>
+      <li><strong>Schedule:</strong> Added to <code>scheduled_tasks.json</code> if you specified a time</li>
+    </ul>
+
+    <h3>Supported Platforms</h3>
+    <div class="grid">
+      <div class="card">
+        <h4>Instagram</h4>
+        <p>com.instagram.android</p>
+      </div>
+      <div class="card">
+        <h4>Instagram Lite</h4>
+        <p>com.instagram.lite</p>
+      </div>
+      <div class="card">
+        <h4>TikTok</h4>
+        <p>com.zhiliaoapp.musically</p>
+      </div>
+      <div class="card">
+        <h4>Twitter / X</h4>
+        <p>com.twitter.android</p>
+      </div>
+      <div class="card">
+        <h4>Facebook</h4>
+        <p>com.facebook.katana</p>
+      </div>
+      <div class="card">
+        <h4>YouTube</h4>
+        <p>com.google.android.youtube</p>
+      </div>
+    </div>
+
+    <h3>Safety Limits</h3>
+    <p>Default limits are conservative to avoid shadowbans:</p>
+    <ul>
+      <li><strong>Likes:</strong> 20 per run</li>
+      <li><strong>Follows:</strong> 5 per run</li>
+      <li><strong>Comments:</strong> 3 per run</li>
+      <li><strong>Delay between actions:</strong> 2-5 seconds (random)</li>
+    </ul>
+  </div>
+
+  <div class="section" id="insomniac">
+    <h2>🔗 Insomniac Integration</h2>
+    <p>Insomniac can trigger Lilly macros via HTTP webhooks.</p>
+
+    <h3>Setup</h3>
+    <ol>
+      <li>In Insomniac, create a new <strong>HTTP Request</strong> action</li>
+      <li>Set method to <strong>POST</strong></li>
+      <li>URL: <code>http://localhost:8098/api/macro/play</code></li>
+      <li>Headers: <code>Content-Type: application/json</code></li>
+      <li>Body: <code>{"name": "instagram_automation"}</code></li>
+      <li>Set your schedule trigger (time, charger, etc.)</li>
+    </ol>
+
+    <h3>Example: Run on Schedule</h3>
+    <pre><code>curl -X POST http://localhost:8098/api/macro/play \
+  -H "Content-Type: application/json" \
+  -d '{"name": "instagram_automation"}'</code></pre>
+
+    <h3>Schedule via Chat</h3>
+    <p>You can also schedule macros directly in the overlay:</p>
+    <ul>
+      <li><strong>"Schedule instagram_automation at 6am daily"</strong></li>
+      <li><strong>"Run morning_routine in 2 hours"</strong></li>
+      <li><strong>"Every 3 hours"</strong></li>
+    </ul>
+  </div>
+
+  <div class="section" id="troubleshooting">
+    <h2>🔧 Troubleshooting</h2>
+
+    <h3>Overlay Not Showing</h3>
+    <ul>
+      <li>Check <strong>Draw over other apps</strong> permission is granted</li>
+      <li>Restart the overlay app</li>
+      <li>Check battery optimization is disabled for the overlay</li>
+    </ul>
+
+    <h3>Commands Don't Work</h3>
+    <p>Grant Termux permission:</p>
+    <ol>
+      <li>Settings → Apps → Termux → Permissions → Enable <strong>"Run command"</strong></li>
+      <li>In Termux: <code>echo 'allow-external-apps=true' >> ~/.termux/termux.properties</code></li>
+      <li>Close and reopen Termux</li>
+      <li>In overlay: tap <strong>"Enable Termux Shell Tools"</strong></li>
+    </ol>
+
+    <h3>Macro Not Executing</h3>
+    <ul>
+      <li>Verify Termux permission is granted</li>
+      <li>Check macro steps are valid Termux commands</li>
+      <li>Test individual commands via chat: "Run ls"</li>
+      <li>Check server logs for errors</li>
+    </ul>
+
+    <h3>Mic Not Working</h3>
+    <p>Use the browser mic button in the UI. Background mic requires SSH setup.</p>
+
+    <h3>TTS Not Speaking</h3>
+    <pre><code>pip install piper-tts
+# Check voices exist at lillyos/voices/*.onnx</code></pre>
+
+    <h3>No Notifications</h3>
+    <pre><code>pkg install termux-api
+# Enable Notification Listener in Android Settings > Apps > Termux</code></pre>
+  </div>
+
+  <div class="section">
+    <h2>📚 More Resources</h2>
+    <div class="grid">
+      <div class="card">
+        <h4>Wiki Home</h4>
+        <p>Full wiki with API reference, skills, and technical details.</p>
+        <a href="/wiki/" target="_blank" style="color:#667eea;font-size:12px">Open Wiki →</a>
+      </div>
+      <div class="card">
+        <h4>PLAYBOOK.md</h4>
+        <p>Architecture, avatars, voice commands, and advanced tips.</p>
+        <a href="/wiki/PLAYBOOK.md" target="_blank" style="color:#667eea;font-size:12px">Open PLAYBOOK →</a>
+      </div>
+      <div class="card">
+        <h4>Skills Guide</h4>
+        <p>Frontend skills reference and expected behavior.</p>
+        <a href="/wiki/skills_guide.md" target="_blank" style="color:#667eea;font-size:12px">Open Skills Guide →</a>
+      </div>
+      <div class="card">
+        <h4>Config Examples</h4>
+        <p>Automation templates for Instagram and other platforms.</p>
+        <a href="/wiki/config-examples-README.md" target="_blank" style="color:#667eea;font-size:12px">View Configs →</a>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <p>Lilly AI — Built with FastAPI, Termux, and a hive mind of 9 avatars.</p>
+    <p style="margin-top: 5px;">App Playbook v6.12.0-macro</p>
+  </footer>
+</div>
+</body>
+</html>

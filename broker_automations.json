@@ -1,0 +1,21 @@
+{
+  "rules": [
+    {
+      "id": "8a9f2e46",
+      "name": "Low battery alert",
+      "enabled": true,
+      "topic": "battery",
+      "condition": {
+        "field": "data.battery_level",
+        "op": "<",
+        "value": 20
+      },
+      "action_type": "notify",
+      "action_payload": {
+        "title": "Low Battery",
+        "body": "Battery is below 20%!"
+      },
+      "cooldown_seconds": 60
+    }
+  ]
+}

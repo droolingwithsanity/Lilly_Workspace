@@ -1,0 +1,74 @@
+{
+  "phone-1": {
+    "_node": {
+      "name": "Primary Phone",
+      "model": "",
+      "role": "primary",
+      "sensor_url": "http://100.126.40.84:8099"
+    },
+    "bluetooth": null,
+    "bluetooth_ts": 1788280237.6436365,
+    "wifi": null,
+    "wifi_ts": 1788280237.6436365,
+    "health": null,
+    "health_ts": 1788280237.6436365,
+    "sensors": null,
+    "sensors_ts": 1788280237.6436365,
+    "battery": null,
+    "battery_ts": 1788280237.6436365,
+    "notifications": null,
+    "notifications_ts": 1788280237.6436365
+  },
+  "host-127.0.0.1-8096": {
+    "bluetooth": {
+      "devices": [],
+      "count": 0,
+      "timestamp": 1788348131.16585
+    },
+    "bluetooth_ts": 1788348131.165851,
+    "wifi": {
+      "networks": [],
+      "count": 0,
+      "timestamp": 1788348131.1658514
+    },
+    "wifi_ts": 1788348131.165852,
+    "_node": {
+      "name": "Host (127.0.0.1)",
+      "model": "",
+      "role": "host",
+      "sensor_url": "http://127.0.0.1:8096"
+    },
+    "health": null,
+    "health_ts": 1788348099.141348,
+    "sensors": null,
+    "sensors_ts": 1788348099.141348,
+    "battery": null,
+    "battery_ts": 1788348099.141348,
+    "notifications": null,
+    "notifications_ts": 1788348099.141348
+  },
+  "phone-100.126.40.84-8099": {
+    "_node": {
+      "name": "Phone 100.126.40.84",
+      "model": "",
+      "role": "node",
+      "sensor_url": "http://100.126.40.84:8099"
+    },
+    "bluetooth": null,
+    "bluetooth_ts": 1788348099.141348,
+    "wifi": {
+      "networks": [],
+      "count": 0,
+      "timestamp": 1788348131.1658566
+    },
+    "wifi_ts": 1788348131.1658568,
+    "health": null,
+    "health_ts": 1788348099.141348,
+    "sensors": null,
+    "sensors_ts": 1788348099.141348,
+    "battery": null,
+    "battery_ts": 1788348099.141348,
+    "notifications": null,
+    "notifications_ts": 1788348099.141348
+  }
+}

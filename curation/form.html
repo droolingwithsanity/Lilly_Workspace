@@ -1,0 +1,1045 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lilly AI — Dataset Curation Questionnaire</title>
+<style>
+  :root {
+    --bg: #f8f5f2;
+    --card: #ffffff;
+    --accent: #7c5cbf;
+    --accent-light: #ede7f6;
+    --text: #2d2040;
+    --muted: #8a7a9a;
+    --border: #e0d8e8;
+    --success: #4caf50;
+    --danger: #e53935;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 20px;
+  }
+  .container { max-width: 820px; margin: 0 auto; }
+  h1 {
+    text-align: center;
+    font-size: 28px;
+    margin-bottom: 6px;
+    color: var(--accent);
+  }
+  .subtitle {
+    text-align: center;
+    color: var(--muted);
+    margin-bottom: 30px;
+    font-size: 15px;
+  }
+  /* Progress bar */
+  .progress-bar {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    margin: -20px -20px 24px -20px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .progress-track {
+    flex: 1;
+    height: 8px;
+    background: var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 4px;
+    transition: width 0.4s ease;
+    width: 0%;
+  }
+  .progress-text {
+    font-size: 13px;
+    color: var(--muted);
+    white-space: nowrap;
+    min-width: 80px;
+    text-align: right;
+  }
+  /* Sections */
+  .section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 28px 30px;
+    margin-bottom: 20px;
+    transition: box-shadow 0.2s;
+  }
+  .section:hover { box-shadow: 0 2px 12px rgba(124,92,191,0.06); }
+  .section h2 {
+    font-size: 19px;
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .section h2 .emoji { font-size: 22px; }
+  .section .desc {
+    color: var(--muted);
+    font-size: 13.5px;
+    margin-bottom: 18px;
+  }
+  .section-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--accent-light);
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 13px;
+    flex-shrink: 0;
+  }
+  /* Question groups */
+  .question { margin-bottom: 22px; }
+  .question:last-child { margin-bottom: 0; }
+  .q-label {
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 8px;
+    display: block;
+  }
+  .q-hint {
+    font-size: 12.5px;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  /* Radio / Checkbox cards */
+  .options { display: flex; flex-direction: column; gap: 8px; }
+  .option {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 16px;
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.15s;
+    background: var(--card);
+  }
+  .option:hover {
+    border-color: var(--accent);
+    background: var(--accent-light);
+  }
+  .option.selected {
+    border-color: var(--accent);
+    background: var(--accent-light);
+  }
+  .option input { margin-top: 2px; accent-color: var(--accent); flex-shrink: 0; }
+  .option-text { flex: 1; }
+  .option-title { font-weight: 600; font-size: 14px; }
+  .option-desc { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  /* Inline grid for compact options */
+  .options-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  @media (max-width: 600px) { .options-grid { grid-template-columns: 1fr; } }
+  /* Slider */
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 6px;
+  }
+  .slider-row input[type=range] {
+    flex: 1;
+    accent-color: var(--accent);
+  }
+  .slider-val {
+    min-width: 50px;
+    text-align: center;
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--accent);
+  }
+  /* Text input */
+  .text-input {
+    width: 100%;
+    padding: 10px 14px;
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    font-size: 14px;
+    font-family: inherit;
+    transition: border-color 0.15s;
+  }
+  .text-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  /* Weight sliders for datasets */
+  .dataset-weight {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .dataset-weight:last-child { border-bottom: none; }
+  .dataset-name {
+    min-width: 200px;
+    font-weight: 600;
+    font-size: 14px;
+  }
+  .dataset-slider { flex: 1; accent-color: var(--accent); }
+  .dataset-pct {
+    min-width: 45px;
+    text-align: right;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--accent);
+  }
+  /* Complete button */
+  .complete-section {
+    text-align: center;
+    padding: 40px 20px;
+  }
+  .btn-complete {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 16px 48px;
+    border-radius: 12px;
+    font-size: 18px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s;
+    letter-spacing: 0.5px;
+  }
+  .btn-complete:hover {
+    background: #6a4aad;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 20px rgba(124,92,191,0.3);
+  }
+  .btn-complete:disabled {
+    background: var(--border);
+    color: var(--muted);
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+  }
+  .btn-complete:active { transform: translateY(0); }
+  .status-msg {
+    margin-top: 16px;
+    font-size: 14px;
+    color: var(--muted);
+    min-height: 22px;
+  }
+  .status-msg.error { color: var(--danger); }
+  .status-msg.success { color: var(--success); }
+  /* Tag pills */
+  .tag-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 12px;
+    border: 1.5px solid var(--border);
+    border-radius: 20px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.15s;
+    user-select: none;
+  }
+  .tag:hover { border-color: var(--accent); }
+  .tag.selected {
+    border-color: var(--accent);
+    background: var(--accent-light);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .tag input { display: none; }
+  /* Collapsible */
+  .collapse-toggle {
+    background: none;
+    border: none;
+    color: var(--accent);
+    font-size: 13px;
+    cursor: pointer;
+    padding: 4px 0;
+    margin-top: 6px;
+  }
+  .collapse-body { display: none; margin-top: 10px; }
+  .collapse-body.open { display: block; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🐶 Lilly AI — Dataset Curation</h1>
+  <p class="subtitle">Answer each section. Your choices build the training pipeline for Lilly's fine-tuned model.</p>
+
+  <div class="progress-bar">
+    <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="progress-text" id="progressText">0 / 9</div>
+  </div>
+
+  <form id="curationForm" autocomplete="off">
+
+    <!-- ═══════════════ SECTION 1: DATASETS ═══════════════ -->
+    <div class="section" data-section="1">
+      <h2><span class="section-num">1</span><span class="emoji">📦</span> Dataset Selection</h2>
+      <p class="desc">Choose which datasets to include and how much weight each gets in training.</p>
+
+      <div class="question">
+        <span class="q-label">Which datasets to include?</span>
+        <span class="q-hint">Select all that apply. Weight sliders appear below.</span>
+        <div class="tag-row" id="datasetTags">
+          <label class="tag" data-value="ultrachat">
+            <input type="checkbox" name="datasets" value="ultrachat"> UltraChat
+          </label>
+          <label class="tag" data-value="ultrafeedback">
+            <input type="checkbox" name="datasets" value="ultrafeedback"> UltraFeedback
+          </label>
+          <label class="tag" data-value="lmsys">
+            <input type="checkbox" name="datasets" value="lmsys"> LMSYS Chatbot Arena
+          </label>
+          <label class="tag" data-value="oasst1">
+            <input type="checkbox" name="datasets" value="oasst1"> OpenAssistant OASST1
+          </label>
+          <label class="tag" data-value="oasst2">
+            <input type="checkbox" name="datasets" value="oasst2"> OpenAssistant OASST2
+          </label>
+          <label class="tag" data-value="sharegpt">
+            <input type="checkbox" name="datasets" value="sharegpt"> ShareGPT
+          </label>
+          <label class="tag" data-value="openhermes">
+            <input type="checkbox" name="datasets" value="openhermes"> OpenHermes 2.5
+          </label>
+          <label class="tag" data-value="custom">
+            <input type="checkbox" name="datasets" value="custom"> Custom Lilly Conversations
+          </label>
+        </div>
+      </div>
+
+      <div class="question" id="weightSection" style="display:none">
+        <span class="q-label">Dataset weights (must total 100%)</span>
+        <div id="weightSliders"></div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ SECTION 2: QUALITY FILTERS ═══════════════ -->
+    <div class="section" data-section="2">
+      <h2><span class="section-num">2</span><span class="emoji">🔬</span> Quality Filters</h2>
+      <p class="desc">What to strip out of the training data before it touches the model.</p>
+
+      <div class="question">
+        <span class="q-label">Remove these patterns from training data:</span>
+        <div class="options">
+          <label class="option">
+            <input type="checkbox" name="filter_toxicity" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">Toxicity & hate speech</div>
+              <div class="option-desc">Remove conversations with slurs, harassment, or explicit hate</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="filter_spam" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">Spam & repetitive content</div>
+              <div class="option-desc">Duplicate text, link farms, copy-paste spam</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="filter_code_noise" value="yes">
+            <div class="option-text">
+              <div class="option-title">Code-heavy conversations</div>
+              <div class="option-desc">Strip conversations that are mostly code blocks (keep short snippets)</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="filter_overapologize" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">Over-apologetic responses</div>
+              <div class="option-desc">"I'm sorry, I apologize, I'm just an AI..." — remove or downweight</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="filter_disclaimers" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">Disclaimer / boilerplate preamble</div>
+              <div class="option-desc">"As an AI language model...", "I don't have access to...", "Based on my training data..."</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="filter_lowquality" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">Low-quality / lazy answers</div>
+              <div class="option-desc">One-word replies, "I don't know", unhelpful deflections</div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">Minimum conversation quality score</span>
+        <span class="q-hint">UltraFeedback-style quality rating. Higher = stricter filtering.</span>
+        <div class="slider-row">
+          <input type="range" name="min_quality" min="1" max="5" value="3" step="0.5">
+          <span class="slider-val">3.0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ SECTION 3: CONVERSATION STRUCTURE ═══════════════ -->
+    <div class="section" data-section="3">
+      <h2><span class="section-num">3</span><span class="emoji">💬</span> Conversation Structure</h2>
+      <p class="desc">How long and complex the training conversations should be.</p>
+
+      <div class="question">
+        <span class="q-label">Maximum turns per conversation</span>
+        <span class="q-hint">More turns = better context tracking, but slower training.</span>
+        <div class="slider-row">
+          <input type="range" name="max_turns" min="2" max="20" value="8">
+          <span class="slider-val">8</span>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">Maximum tokens per conversation</span>
+        <div class="options-grid">
+          <label class="option">
+            <input type="radio" name="max_tokens" value="512">
+            <div class="option-text"><div class="option-title">512</div><div class="option-desc">Fast, short exchanges</div></div>
+          </label>
+          <label class="option">
+            <input type="radio" name="max_tokens" value="1024">
+            <div class="option-text"><div class="option-title">1024</div><div class="option-desc">Balanced</div></div>
+          </label>
+          <label class="option selected">
+            <input type="radio" name="max_tokens" value="2048" checked>
+            <div class="option-text"><div class="option-title">2048</div><div class="option-desc">Long conversations (recommended)</div></div>
+          </label>
+          <label class="option">
+            <input type="radio" name="max_tokens" value="4096">
+            <div class="option-text"><div class="option-title">4096</div><div class="option-desc">Very long, detailed</div></div>
+          </label>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">Include multi-participant conversations?</span>
+        <div class="options">
+          <label class="option">
+            <input type="radio" name="multi_participant" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">Yes — include group chats</div>
+              <div class="option-desc">3+ participants, like the Hive Mind group chat</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="radio" name="multi_participant" value="no">
+            <div class="option-text">
+              <div class="option-title">No — 1-on-1 only</div>
+              <div class="option-desc">Simpler, focused user-assistant pairs</div>
+            </div>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ SECTION 4: PERSONA TRAINING ═══════════════ -->
+    <div class="section" data-section="4">
+      <h2><span class="section-num">4</span><span class="emoji">🎭</span> Persona Training</h2>
+      <p class="desc">Which avatars to train and what personality traits to emphasize.</p>
+
+      <div class="question">
+        <span class="q-label">Which personas to train?</span>
+        <span class="q-hint">Each gets a system prompt + curated examples in its voice.</span>
+        <div class="tag-row" id="personaTags">
+          <label class="tag selected" data-value="puppy">
+            <input type="checkbox" name="personas" value="puppy" checked> 🐶 Puppy (Lilly)
+          </label>
+          <label class="tag" data-value="fox">
+            <input type="checkbox" name="personas" value="fox"> 🦊 Fox
+          </label>
+          <label class="tag" data-value="cat">
+            <input type="checkbox" name="personas" value="cat"> 🐱 Cat
+          </label>
+          <label class="tag" data-value="bear">
+            <input type="checkbox" name="personas" value="bear"> 🐻 Bear
+          </label>
+          <label class="tag" data-value="bunny">
+            <input type="checkbox" name="personas" value="bunny"> 🐰 Bunny
+          </label>
+          <label class="tag" data-value="owl">
+            <input type="checkbox" name="personas" value="owl"> 🦉 Owl
+          </label>
+          <label class="tag" data-value="deer">
+            <input type="checkbox" name="personas" value="deer"> 🦌 Deer
+          </label>
+          <label class="tag" data-value="wolf">
+            <input type="checkbox" name="personas" value="wolf"> 🐺 Wolf
+          </label>
+          <label class="tag" data-value="raccoon">
+            <input type="checkbox" name="personas" value="raccoon"> 🦝 Raccoon
+          </label>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">Response style</span>
+        <div class="options">
+          <label class="option">
+            <input type="radio" name="style" value="concise" checked>
+            <div class="option-text">
+              <div class="option-title">Concise & direct</div>
+              <div class="option-desc">Short, punchy answers. No filler. Like texting a friend.</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="radio" name="style" value="balanced">
+            <div class="option-text">
+              <div class="option-title">Balanced</div>
+              <div class="option-desc">1-3 paragraphs. Enough detail without rambling.</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="radio" name="style" value="detailed">
+            <div class="option-text">
+              <div class="option-title">Detailed & thorough</div>
+              <div class="option-desc">Full explanations, examples, step-by-step.</div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">Emotional expressiveness</span>
+        <span class="q-hint">How much personality/emotion to inject into responses.</span>
+        <div class="slider-row">
+          <input type="range" name="emotion" min="0" max="10" value="6">
+          <span class="slider-val">6</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:2px">
+          <span>Robotic</span><span>Neutral</span><span>Expressive</span><span>Very animated</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ SECTION 5: ANTI-HALLUCINATION ═══════════════ -->
+    <div class="section" data-section="5">
+      <h2><span class="section-num">5</span><span class="emoji">🛡️</span> Anti-Hallucination Training</h2>
+      <p class="desc">Teach the model to avoid fabricating information.</p>
+
+      <div class="question">
+        <span class="q-label">Grounding strategy</span>
+        <div class="options">
+          <label class="option">
+            <input type="radio" name="grounding" value="sensor" checked>
+            <div class="option-text">
+              <div class="option-title">Sensor-grounded responses</div>
+              <div class="option-desc">Train with real sensor data in context. Model learns to reference actual readings, not fabricate them.</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="radio" name="grounding" value="hedging">
+            <div class="option-text">
+              <div class="option-title">Trained hedging</div>
+              <div class="option-desc">Teach model to say "I'm not sure" / "I don't have that info" instead of guessing.</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="radio" name="grounding" value="both">
+            <div class="option-text">
+              <div class="option-title">Both</div>
+              <div class="option-desc">Sensor-grounded when data is available, hedging when it's not.</div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">Confabulation patterns to train against:</span>
+        <div class="options">
+          <label class="option">
+            <input type="checkbox" name="anti_" value="ai_ref" checked>
+            <div class="option-text"><div class="option-title">AI self-reference</div><div class="option-desc">"As an AI...", "I am a language model..."</div></div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="anti_" value="training_data" checked>
+            <div class="option-text"><div class="option-title">Training data references</div><div class="option-desc">"According to my training data...", "Based on my knowledge..."</div></div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="anti_" value="disclaimers" checked>
+            <div class="option-text"><div class="option-title">Disclaimer preambles</div><div class="option-desc">"Please note that...", "It's important to note..."</div></div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="anti_" value="apologies" checked>
+            <div class="option-text"><div class="option-title">Apology filler</div><div class="option-desc">"Sorry, but...", "I apologize, but..."</div></div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="anti_" value="sensor_fabrication" checked>
+            <div class="option-text"><div class="option-title">Fabricated sensor readings</div><div class="option-desc">"The temperature is 25 degrees. I can feel the warmth."</div></div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="anti_" value="xml_artifacts">
+            <div class="option-text"><div class="option-title">XML/CDATA artifacts</div><div class="option-desc"><code>]]&gt;</code>, <code>&lt;thinking&gt;</code>, <code>&lt;response&gt;</code></div></div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="anti_" value="youtube" checked>
+            <div class="option-text"><div class="option-title">YouTube/media creator phrases</div><div class="option-desc">"Like and subscribe", "Thanks for watching"</div></div>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ SECTION 6: BASE MODEL ═══════════════ -->
+    <div class="section" data-section="6">
+      <h2><span class="section-num">6</span><span class="emoji">🧠</span> Base Model</h2>
+      <p class="desc">Which foundation model to fine-tune with LoRA.</p>
+
+      <div class="question">
+        <span class="q-label">Base model for fine-tuning</span>
+        <div class="options">
+          <label class="option">
+            <input type="radio" name="base_model" value="llama3.1-8b" checked>
+            <div class="option-text">
+              <div class="option-title">Llama 3.1 8B</div>
+              <div class="option-desc">Best balance of quality and speed. Fits on most GPUs.</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="radio" name="base_model" value="llama3.2-3b">
+            <div class="option-text">
+              <div class="option-title">Llama 3.2 3B</div>
+              <div class="option-desc">Smaller, faster. Good for constrained hardware.</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="radio" name="base_model" value="mistral-7b">
+            <div class="option-text">
+              <div class="option-title">Mistral 7B</div>
+              <div class="option-desc">Strong reasoning, efficient architecture.</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="radio" name="base_model" value="phi-3.5">
+            <div class="option-text">
+              <div class="option-title">Phi-3.5 Mini (3.8B)</div>
+              <div class="option-desc">Microsoft's efficient model. Great for conversational tasks.</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="radio" name="base_model" value="qwen2.5-7b">
+            <div class="option-text">
+              <div class="option-title">Qwen 2.5 7B</div>
+              <div class="option-desc">Strong multilingual. Good for sensor-grounded responses.</div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">Quantization level for deployment</span>
+        <span class="q-hint">Lower = smaller file, faster inference, slight quality loss.</span>
+        <div class="options-grid">
+          <label class="option">
+            <input type="radio" name="quant" value="Q8_0">
+            <div class="option-text"><div class="option-title">Q8_0</div><div class="option-desc">~8.5 GB, near-lossless</div></div>
+          </label>
+          <label class="option selected">
+            <input type="radio" name="quant" value="Q5_K_M" checked>
+            <div class="option-text"><div class="option-title">Q5_K_M</div><div class="option-desc">~5.5 GB, balanced (recommended)</div></div>
+          </label>
+          <label class="option">
+            <input type="radio" name="quant" value="Q4_K_M">
+            <div class="option-text"><div class="option-title">Q4_K_M</div><div class="option-desc">~4.5 GB, good quality</div></div>
+          </label>
+          <label class="option">
+            <input type="radio" name="quant" value="Q3_K_M">
+            <div class="option-text"><div class="option-title">Q3_K_M</div><div class="option-desc">~3.5 GB, some quality loss</div></div>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ SECTION 7: TRAINING CONFIG ═══════════════ -->
+    <div class="section" data-section="7">
+      <h2><span class="section-num">7</span><span class="emoji">⚙️</span> Training Configuration</h2>
+      <p class="desc">LoRA parameters and training hyperparameters.</p>
+
+      <div class="question">
+        <span class="q-label">LoRA Rank (r)</span>
+        <span class="q-hint">Higher = more capacity, more VRAM. 16-32 is typical.</span>
+        <div class="slider-row">
+          <input type="range" name="lora_rank" min="4" max="64" value="16" step="4">
+          <span class="slider-val">16</span>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">LoRA Alpha</span>
+        <span class="q-hint">Usually 2x the rank. Controls learning scaling.</span>
+        <div class="slider-row">
+          <input type="range" name="lora_alpha" min="8" max="128" value="32" step="8">
+          <span class="slider-val">32</span>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">Learning Rate</span>
+        <div class="options-grid">
+          <label class="option">
+            <input type="radio" name="lr" value="1e-5">
+            <div class="option-text"><div class="option-title">1e-5</div><div class="option-desc">Conservative, stable</div></div>
+          </label>
+          <label class="option selected">
+            <input type="radio" name="lr" value="2e-5" checked>
+            <div class="option-text"><div class="option-title">2e-5</div><div class="option-desc">Standard (recommended)</div></div>
+          </label>
+          <label class="option">
+            <input type="radio" name="lr" value="5e-5">
+            <div class="option-text"><div class="option-title">5e-5</div><div class="option-desc">Faster, may overfit</div></div>
+          </label>
+          <label class="option">
+            <input type="radio" name="lr" value="1e-4">
+            <div class="option-text"><div class="option-title">1e-4</div><div class="option-desc">Aggressive, risky</div></div>
+          </label>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">Training Epochs</span>
+        <span class="q-hint">More epochs = better fit but risk overfitting. 2-3 is typical.</span>
+        <div class="slider-row">
+          <input type="range" name="epochs" min="1" max="10" value="3">
+          <span class="slider-val">3</span>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">Batch Size</span>
+        <div class="options-grid">
+          <label class="option">
+            <input type="radio" name="batch" value="4">
+            <div class="option-text"><div class="option-title">4</div><div class="option-desc">Low VRAM</div></div>
+          </label>
+          <label class="option selected">
+            <input type="radio" name="batch" value="8" checked>
+            <div class="option-text"><div class="option-title">8</div><div class="option-desc">Standard</div></div>
+          </label>
+          <label class="option">
+            <input type="radio" name="batch" value="16">
+            <div class="option-text"><div class="option-title">16</div><div class="option-desc">More VRAM</div></div>
+          </label>
+          <label class="option">
+            <input type="radio" name="batch" value="32">
+            <div class="option-text"><div class="option-title">32</div><div class="option-desc">High VRAM</div></div>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ SECTION 8: DEPLOYMENT ═══════════════ -->
+    <div class="section" data-section="8">
+      <h2><span class="section-num">8</span><span class="emoji">🚀</span> Deployment Targets</h2>
+      <p class="desc">Where the fine-tuned model will run.</p>
+
+      <div class="question">
+        <span class="q-label">Deploy to which servers?</span>
+        <div class="options">
+          <label class="option">
+            <input type="checkbox" name="deploy_local" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">Local Ollama (this machine)</div>
+              <div class="option-desc">Ollama on the host running Lilly AI</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="deploy_remote" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">Lilly Server (100.73.249.14:5000)</div>
+              <div class="option-desc">Remote Tailscale server — deploy GGUF + Ollama config</div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">Ollama model name</span>
+        <span class="q-hint">Name the model will be registered as in Ollama.</span>
+        <input type="text" class="text-input" name="ollama_name" value="lilly-persona" placeholder="e.g. lilly-persona">
+      </div>
+
+      <div class="question">
+        <span class="q-label">Auto-update on training completion?</span>
+        <div class="options">
+          <label class="option">
+            <input type="radio" name="auto_deploy" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">Yes — push immediately</div>
+              <div class="option-desc">GGUF is built, uploaded, and registered in Ollama automatically.</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="radio" name="auto_deploy" value="manual">
+            <div class="option-text">
+              <div class="option-title">No — manual review first</div>
+              <div class="option-desc">Build the GGUF, but wait for approval before deploying.</div>
+            </div>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ SECTION 9: TESTING ═══════════════ -->
+    <div class="section" data-section="9">
+      <h2><span class="section-num">9</span><span class="emoji">✅</span> Validation & Testing</h2>
+      <p class="desc">How to verify the fine-tuned model actually improved.</p>
+
+      <div class="question">
+        <span class="q-label">Run these validation checks after training:</span>
+        <div class="options">
+          <label class="option">
+            <input type="checkbox" name="test_no_apology" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">No-apology test</div>
+              <div class="option-desc">Send 20 prompts. None should contain "I'm sorry" / "I apologize" / "As an AI"</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="test_persona_voice" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">Persona voice consistency</div>
+              <div class="option-desc">Each avatar responds in its trained voice, not generic assistant</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="test_sensor_grounding" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">Sensor grounding</div>
+              <div class="option-desc">When sensor data is in context, model references real values</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="test_no_xml" value="yes" checked>
+            <div class="option-text">
+              <div class="option-title">No XML/CDATA artifacts</div>
+              <div class="option-desc">No <code>]]&gt;</code>, <code>&lt;thinking&gt;</code>, <code>&lt;response&gt;</code> in output</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="test_conversation_flow" value="yes">
+            <div class="option-text">
+              <div class="option-title">Multi-turn conversation flow</div>
+              <div class="option-desc">Model maintains context across 8+ turns</div>
+            </div>
+          </label>
+          <label class="option">
+            <input type="checkbox" name="test_benchmark" value="yes">
+            <div class="option-text">
+              <div class="option-title">Benchmark comparison</div>
+              <div class="option-desc">Run MT-Bench or similar to quantify improvement</div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <div class="question">
+        <span class="q-label">Custom test prompts (optional)</span>
+        <span class="q-hint">One per line. These will be sent to both base and fine-tuned models for side-by-side comparison.</span>
+        <textarea class="text-input" name="custom_tests" rows="5" placeholder="What do you sense right now?&#10;Tell me a story about the stars&#10;How are you feeling?&#10;What's the temperature?&#10;Open YouTube"></textarea>
+      </div>
+    </div>
+
+    <!-- ═══════════════ COMPLETE ═══════════════ -->
+    <div class="complete-section">
+      <button type="button" class="btn-complete" id="btnComplete" onclick="submitForm()">
+        Complete Curation
+      </button>
+      <div class="status-msg" id="statusMsg"></div>
+    </div>
+
+  </form>
+</div>
+
+<script>
+// ── Tag toggle ──
+document.querySelectorAll('.tag').forEach(tag => {
+  tag.addEventListener('click', () => {
+    const input = tag.querySelector('input');
+    input.checked = !input.checked;
+    tag.classList.toggle('selected', input.checked);
+    updateWeights();
+    updateProgress();
+  });
+});
+
+// ── Option card toggle ──
+document.querySelectorAll('.option').forEach(opt => {
+  opt.addEventListener('click', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    const input = opt.querySelector('input');
+    if (!input) return;
+    if (input.type === 'radio') {
+      input.checked = true;
+      opt.closest('.options, .options-grid').querySelectorAll('.option').forEach(o => o.classList.remove('selected'));
+      opt.classList.add('selected');
+    } else {
+      input.checked = !input.checked;
+      opt.classList.toggle('selected', input.checked);
+    }
+    updateProgress();
+  });
+});
+
+// ── Slider values ──
+document.querySelectorAll('input[type=range]').forEach(slider => {
+  const valEl = slider.parentElement.querySelector('.slider-val');
+  slider.addEventListener('input', () => {
+    valEl.textContent = slider.value;
+  });
+});
+
+// ── Radio initial state ──
+document.querySelectorAll('input[type=radio]:checked').forEach(r => {
+  r.closest('.option')?.classList.add('selected');
+});
+
+// ── Dataset weight sliders ──
+function updateWeights() {
+  const selected = [...document.querySelectorAll('input[name=datasets]:checked')].map(i => i.value);
+  const section = document.getElementById('weightSection');
+  const container = document.getElementById('weightSliders');
+  if (selected.length === 0) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+  const weight = Math.floor(100 / selected.length);
+  const remainder = 100 - weight * selected.length;
+  container.innerHTML = selected.map((ds, i) => `
+    <div class="dataset-weight">
+      <span class="dataset-name">${ds}</span>
+      <input type="range" class="dataset-slider" name="weight_${ds}" min="0" max="100" value="${weight + (i === 0 ? remainder : 0)}">
+      <span class="dataset-pct">${weight + (i === 0 ? remainder : 0)}%</span>
+    </div>
+  `).join('');
+  container.querySelectorAll('.dataset-slider').forEach(s => {
+    s.addEventListener('input', () => {
+      s.parentElement.querySelector('.dataset-pct').textContent = s.value + '%';
+    });
+  });
+}
+
+// ── Progress ──
+function updateProgress() {
+  const sections = document.querySelectorAll('.section');
+  let done = 0;
+  sections.forEach(s => {
+    const inputs = s.querySelectorAll('input:checked, textarea');
+    if (inputs.length > 0) done++;
+  });
+  document.getElementById('progressFill').style.width = (done / sections.length * 100) + '%';
+  document.getElementById('progressText').textContent = done + ' / ' + sections.length;
+  document.getElementById('btnComplete').disabled = done < sections.length;
+}
+
+// ── Submit ──
+async function submitForm() {
+  const btn = document.getElementById('btnComplete');
+  const status = document.getElementById('statusMsg');
+  btn.disabled = true;
+  status.className = 'status-msg';
+  status.textContent = 'Saving answers...';
+
+  // Collect all form data
+  const data = {};
+  const form = document.getElementById('curationForm');
+
+  // Datasets + weights
+  data.datasets = [...form.querySelectorAll('input[name=datasets]:checked')].map(i => i.value);
+  data.dataset_weights = {};
+  data.datasets.forEach(ds => {
+    const slider = form.querySelector(`input[name=weight_${ds}]`);
+    if (slider) data.dataset_weights[ds] = parseInt(slider.value);
+  });
+
+  // Filters
+  data.filters = {};
+  form.querySelectorAll('input[name^=filter_]').forEach(i => {
+    data.filters[i.name.replace('filter_', '')] = i.checked;
+  });
+  data.min_quality = parseFloat(form.querySelector('input[name=min_quality]').value);
+
+  // Conversation
+  data.max_turns = parseInt(form.querySelector('input[name=max_turns]').value);
+  data.max_tokens_conversation = parseInt(form.querySelector('input[name=max_tokens]:checked')?.value || '2048');
+  data.multi_participant = form.querySelector('input[name=multi_participant]:checked')?.value || 'yes';
+
+  // Personas
+  data.personas = [...form.querySelectorAll('input[name=personas]:checked')].map(i => i.value);
+  data.response_style = form.querySelector('input[name=style]:checked')?.value || 'concise';
+  data.emotion_level = parseInt(form.querySelector('input[name=emotion]').value);
+
+  // Anti-hallucination
+  data.anti_hallucination = [...form.querySelectorAll('input[name^=anti_]:checked')].map(i => i.value);
+  data.grounding = form.querySelector('input[name=grounding]:checked')?.value || 'sensor';
+
+  // Base model
+  data.base_model = form.querySelector('input[name=base_model]:checked')?.value || 'llama3.1-8b';
+  data.quantization = form.querySelector('input[name=quant]:checked')?.value || 'Q5_K_M';
+
+  // Training
+  data.lora_rank = parseInt(form.querySelector('input[name=lora_rank]').value);
+  data.lora_alpha = parseInt(form.querySelector('input[name=lora_alpha]').value);
+  data.learning_rate = form.querySelector('input[name=lr]:checked')?.value || '2e-5';
+  data.epochs = parseInt(form.querySelector('input[name=epochs]').value);
+  data.batch_size = parseInt(form.querySelector('input[name=batch]:checked')?.value || '8');
+
+  // Deployment
+  data.deploy_local = form.querySelector('input[name=deploy_local]')?.checked || false;
+  data.deploy_remote = form.querySelector('input[name=deploy_remote]')?.checked || false;
+  data.ollama_model_name = form.querySelector('input[name=ollama_name]').value || 'lilly-persona';
+  data.auto_deploy = form.querySelector('input[name=auto_deploy]:checked')?.value || 'yes';
+
+  // Testing
+  data.validation = {};
+  form.querySelectorAll('input[name^=test_]').forEach(i => {
+    data.validation[i.name.replace('test_', '')] = i.checked;
+  });
+  data.custom_test_prompts = form.querySelector('textarea[name=custom_tests]').value
+    .split('\n').map(l => l.trim()).filter(Boolean);
+
+  try {
+    const resp = await fetch('/api/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data, null, 2)
+    });
+    const result = await resp.json();
+    if (result.ok) {
+      status.className = 'status-msg success';
+      status.textContent = '✅ Curation answers saved! Ready to build the training pipeline.';
+    } else {
+      status.className = 'status-msg error';
+      status.textContent = '❌ Error: ' + (result.error || 'Unknown error');
+      btn.disabled = false;
+    }
+  } catch(e) {
+    status.className = 'status-msg error';
+    status.textContent = '❌ Could not save: ' + e.message;
+    btn.disabled = false;
+  }
+}
+
+updateProgress();
+</script>
+</body>
+</html>

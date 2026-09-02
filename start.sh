@@ -110,9 +110,39 @@ echo "  • Open Connector  : :3002"
 echo "  • OpenLive Agent  : :8787"
 echo "  • OpenLive Web UI : :3000"
 echo "  • Lilly Bridge    : :8788"
+echo "  • BLE Host Advert : :8110"
 echo "  • Lilly AI        : :8098"
 echo "==========================================="
 echo ""
+
+# ── BLE Host Advertiser ─────────────────────────────────────────────
+# Runs ble_advertiser_host.py which uses raw HCI commands (hcitool/hciconfig)
+# to broadcast BLE + Classic BR/EDR advertisements — the container-side
+# equivalent of Bluetooth LE Spam, using YOUR own payloads (name, service UUID,
+# image URL, Fast Pair model ID). No phone needed for broadcast.
+#
+# Requires the Docker container to have access to the host Bluetooth adapter:
+#   - In docker-compose.yml: devices: ["/dev/hci0:/dev/hci0"]
+#   - Or run the container with --privileged (less secure)
+# If no BT adapter is available the server still starts (scan/advertise will
+# simply return errors); lilly_ai.py's _bt_proxy silently falls through.
+echo "Starting BLE Host Advertiser on :8110..."
+cd /app
+
+# Ensure Bluetooth adapter is up and ready before handing off to the advertiser.
+# In Docker this requires: devices: ["/dev/hci0:/dev/hci0"] (already in compose).
+HCI_DEV="${BLE_HOST_HCI:-hci0}"
+if command -v hciconfig >/dev/null 2>&1; then
+    hciconfig "$HCI_DEV" up 2>/dev/null || true
+    echo "  HCI adapter: $HCI_DEV (hciconfig up)"
+else
+    echo "  WARNING: hciconfig not found — BLE advertising may not work"
+    echo "  (Install: apt-get install -y bluez)"
+fi
+
+python3 ble_advertiser_host.py --port 8110 --hci "$HCI_DEV" &
+BLE_PID=$!
+echo "BLE Host Advertiser PID: $BLE_PID"
 
 # Start Lilly AI (PID 1 in container — must NOT use exec so it runs in foreground
 # while the background services (Agent, Web, Bridge, OC) continue running).
@@ -123,5 +153,5 @@ AI_PID=$!
 
 # Keep the container alive — wait on the Lilly AI process (PID 1's main job).
 # Signal propagation: Docker sends SIGTERM → our trap → SIGTERM each child.
-trap 'kill $AI_PID $AGENT_PID $WEB_PID $BRIDGE_PID 2>/dev/null; exit 0' TERM INT
+trap 'kill $AI_PID $AGENT_PID $WEB_PID $BRIDGE_PID $BLE_PID 2>/dev/null; exit 0' TERM INT
 wait $AI_PID

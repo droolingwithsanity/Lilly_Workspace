@@ -44,7 +44,7 @@ Environment:
   OPENCONNECTOR_*    Open Connector tokens
 """
 
-import os, sys, json, re, asyncio, subprocess, logging, unicodedata, urllib.parse, random, time, shutil, threading, math
+import os, sys, json, re, asyncio, subprocess, logging, unicodedata, urllib.parse, random, time, shutil, threading, math, io
 import base64, difflib, html, tempfile, uuid
 from pathlib import Path
 from collections import deque, Counter
@@ -64,6 +64,7 @@ from fastapi import (
     FastAPI,
     Request,
     File,
+    Form,
     UploadFile,
     Body,
     WebSocket,
@@ -130,6 +131,33 @@ except ImportError:
     PERSONA_OPTIMIZER_AVAILABLE = False
     persona_optimizer = None
     logging.warning("persona_optimizer not found — persona self-optimization disabled")
+
+# Web scraping engine (scrapling_engine.py — free, no API key needed)
+try:
+    from scrapling_engine import scrape_for_lilly, should_scrape, format_citations
+
+    SCRAPING_AVAILABLE = True
+except ImportError:
+    SCRAPING_AVAILABLE = False
+    scrape_for_lilly = None
+    should_scrape = None
+    format_citations = None
+    logging.warning("scrapling_engine not found — web scraping disabled")
+
+# Agentic orchestration engine (agent_core.py — puzzle master)
+try:
+    from agent_core import (
+        intent_is_agentic,
+        create_session,
+        get_session,
+        cleanup_session,
+        AgentSession,
+    )
+
+    AGENT_CORE_AVAILABLE = True
+except ImportError:
+    AGENT_CORE_AVAILABLE = False
+    logging.warning("agent_core not found — agentic task loop disabled")
 
 # ─── CONFIGURATION ───────────────────────────────────────────────
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://100.73.249.14:11434")
@@ -432,6 +460,11 @@ SENSOR_SERVER_URL = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8
 # Derive phone server URL from sensor server URL (overlay APK :8099 → phone server :8097)
 _PHONE_SERVER_FROM_SENSOR = SENSOR_SERVER_URL.replace(":8099", ":8097")
 PHONE_SERVER_URL = os.environ.get("PHONE_SERVER_URL", _PHONE_SERVER_FROM_SENSOR)
+# Host scan provider — real BT/WiFi scans from the host's physical radios.
+# Runs on the host OS (outside Docker); the container reaches it via host loopback.
+HOST_SCAN_PROVIDER_URL = os.environ.get(
+    "HOST_SCAN_PROVIDER_URL", "http://127.0.0.1:8096"
+)
 LILLY_PAIR_TOKEN = os.environ.get("LILLY_PAIR_TOKEN", "")
 VISION_SERVER_URL = os.environ.get("VISION_SERVER_URL", "")
 WHISPER_SERVER_URL = os.environ.get("WHISPER_SERVER_URL", "http://localhost:8001")
@@ -471,19 +504,80 @@ class MemoryEntry:
 
 @dataclass
 class ConversationMemory:
-    entries: deque = field(default_factory=lambda: deque(maxlen=20))
+    entries: deque = field(default_factory=lambda: deque(maxlen=50))
     summary: str = ""
+    session_summaries: list = field(default_factory=list)  # Last 10 session summaries
+    session_id: str = ""  # Current session identifier
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     async def add(self, role: str, text: str):
+        """Add a memory entry with timestamp for time-based expiry."""
         async with self._lock:
             self.entries.append(MemoryEntry(role=role, text=text))
 
     async def context_window(self, n: int = 8) -> list[dict]:
+        """Return the last n entries for the LLM context window.
+
+        Smart selection: always include the last n messages, but also
+        try to include any entries that mention the user's name or
+        key topics for better continuity.
+        """
         async with self._lock:
-            return [
-                {"role": e.role, "content": e.text} for e in list(self.entries)[-n:]
-            ]
+            entries = list(self.entries)
+            if len(entries) <= n:
+                return [{"role": e.role, "content": e.text} for e in entries]
+
+            # Always include the last n entries
+            selected = entries[-n:]
+
+            # Also check if any earlier entries mention the user's name
+            # or key topics (helps with continuity when deque is large)
+            if len(entries) > n:
+                earlier = entries[:-n]
+                # Keywords for important context — extend with user's name
+                important_keywords = [
+                    "name",
+                    "call me",
+                    "i'm",
+                    "my name",
+                    "user:",
+                    "you are",
+                    "remember",
+                    "important",
+                    "note:",
+                    "warning",
+                    "task:",
+                    "deadline",
+                    "meeting",
+                    "project",
+                    "goal",
+                    "preference",
+                ]
+                # Add user's known name to keywords if available
+                user_name = (
+                    getattr(self, "_user_name", None)
+                    or os.environ.get("USER_NAME", "").lower()
+                )
+                if user_name:
+                    important_keywords.append(user_name)
+
+                # Check last 15 entries before the window for important context
+                for e in earlier[-15:]:
+                    if e in selected:
+                        continue
+                    text_lower = e.text.lower()
+                    if any(
+                        kw in text_lower
+                        for kw in important_keywords
+                        if kw  # skip empty strings
+                    ):
+                        # Add this entry at the beginning for context
+                        selected.insert(0, e)
+                        # Keep window size manageable: n + 2 buffer
+                        if len(selected) > n + 2:
+                            selected = selected[-(n + 2) :]
+
+            return [{"role": e.role, "content": e.text} for e in selected]
 
     async def snapshot(self) -> list:
         async with self._lock:
@@ -494,11 +588,32 @@ class ConversationMemory:
             return {
                 "summary": self.summary,
                 "entries": [asdict(e) for e in self.entries],
+                "session_summaries": self.session_summaries[-10:],  # Keep last 10
+                "session_id": self.session_id,
             }
 
     async def set_summary(self, summary: str):
         async with self._lock:
             self.summary = summary
+
+    async def add_session_summary(self, summary: str, session_id: str = ""):
+        """Add a session summary to the history for cross-session context."""
+        async with self._lock:
+            entry = {
+                "summary": summary,
+                "session_id": session_id or self.session_id,
+                "timestamp": time.time(),
+                "entry_count": len(self.entries),
+            }
+            self.session_summaries.append(entry)
+            # Keep only last 10 session summaries
+            if len(self.session_summaries) > 10:
+                self.session_summaries = self.session_summaries[-10:]
+
+    async def get_recent_session_summaries(self, n: int = 3) -> list[dict]:
+        """Get the last N session summaries for catch-up context."""
+        async with self._lock:
+            return self.session_summaries[-n:] if self.session_summaries else []
 
     async def len(self) -> int:
         async with self._lock:
@@ -514,6 +629,8 @@ class ConversationMemory:
         mem = cls(summary=d.get("summary", ""))
         for e in d.get("entries", []):
             mem.entries.append(MemoryEntry(**e))
+        mem.session_summaries = d.get("session_summaries", [])
+        mem.session_id = d.get("session_id", "")
         return mem
 
 
@@ -1097,7 +1214,8 @@ PHONEME_QUEUE = deque()
 MOUTH_OPEN = 0.0
 
 # Notification monitor
-USER_NAME = ""
+# Set USER_NAME in .env as USER_NAME=Laurence so Lilly personalises announcements.
+USER_NAME: str = os.environ.get("USER_NAME", "")
 _NOTIFICATION_SEEN: set[str] = set()
 
 
@@ -2651,6 +2769,8 @@ async def save_memory():
         else:
             path = _avatar_memory_file(current_avatar)
             path.write_text(json.dumps(data, indent=2))
+        # Also save session history for cross-session catch-up
+        await _save_session_history()
     except Exception as e:
         logger.warning(f"Failed to save memory: {e}")
 
@@ -2666,6 +2786,8 @@ async def load_memory():
             await _clean_memory_artifacts()
         except Exception:
             memory = ConversationMemory()
+    # Set a new session ID for this server session
+    memory.session_id = f"session_{int(time.time())}_{current_avatar}"
 
 
 current_avatar = "puppy"
@@ -2704,7 +2826,342 @@ def _set_user_name(user_id: str, name: str) -> None:
     if not user_id:
         return
     _USER_NAMES[user_id] = name.strip()
-    _save_user_names()
+
+
+# ─── SESSION HISTORY FOR CROSS-SESSION CATCH-UP ──────────────────
+SESSION_HISTORY_DIR = MEMORY_DIR / "session_history"
+SESSION_HISTORY_DIR.mkdir(exist_ok=True)
+
+
+def _session_history_file(avatar: str, session_id: str) -> Path:
+    """Return the session history file path for a given avatar and session."""
+    safe_avatar = avatar.replace("/", "_").replace("..", "_")
+    safe_session = session_id.replace("/", "_").replace("..", "_")
+    return SESSION_HISTORY_DIR / f"{safe_avatar}_{safe_session}.json"
+
+
+async def _save_session_history():
+    """Save current session to history file for cross-session catch-up."""
+    try:
+        entries = await memory.snapshot()
+        if len(entries) < 3:
+            return  # Don't save very short sessions
+
+        session_id = memory.session_id or f"session_{int(time.time())}"
+        summary = memory.summary or ""
+
+        # Generate summary if we have enough entries and no summary yet
+        if len(entries) >= 8 and not summary:
+            try:
+                entries_text = "\n".join(f"{e.role}: {e.text}" for e in entries[:-4])
+                prompt = f"Summarize this conversation in 2-3 sentences, focusing on key topics, decisions, and user preferences:\n{entries_text}"
+                summary = await llama_backend.chat(
+                    [
+                        {
+                            "role": "system",
+                            "content": "Provide a concise 2-3 sentence summary capturing key topics and context.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.3,
+                    max_tokens=200,
+                )
+                if summary:
+                    await memory.add_session_summary(summary, session_id)
+            except Exception as e:
+                logger.warning(f"Session summary generation failed: {e}")
+
+        # Save session data
+        session_data = {
+            "session_id": session_id,
+            "avatar": current_avatar,
+            "timestamp": time.time(),
+            "entry_count": len(entries),
+            "summary": summary,
+            "entries": [
+                {
+                    "role": e.role,
+                    "text": e.text[:200],  # Truncate long messages
+                    "timestamp": e.timestamp,
+                }
+                for e in entries[-20:]  # Keep last 20 entries
+            ],
+            "key_topics": _extract_key_topics(entries),
+        }
+
+        path = _session_history_file(current_avatar, session_id)
+        path.write_text(json.dumps(session_data, indent=2))
+
+        # Cleanup old sessions (keep last 20 per avatar)
+        await _cleanup_old_sessions(current_avatar)
+
+    except Exception as e:
+        logger.warning(f"Failed to save session history: {e}")
+
+
+def _extract_key_topics(entries: list) -> list[str]:
+    """Extract key topics from conversation entries."""
+    topics = []
+    keywords = [
+        "project",
+        "work",
+        "idea",
+        "plan",
+        "goal",
+        "problem",
+        "solution",
+        "learn",
+        "create",
+        "build",
+        "fix",
+        "improve",
+        "design",
+        "code",
+        "test",
+        "deploy",
+        "config",
+        "setup",
+        "install",
+        "update",
+    ]
+
+    for entry in entries:
+        text = entry.text.lower()
+        for kw in keywords:
+            if kw in text and kw not in topics:
+                topics.append(kw)
+                if len(topics) >= 5:
+                    return topics
+    return topics
+
+
+async def _cleanup_old_sessions(avatar: str, keep: int = 20):
+    """Keep only the last N session history files per avatar."""
+    try:
+        safe_avatar = avatar.replace("/", "_").replace("..", "_")
+        pattern = f"{safe_avatar}_*.json"
+        files = sorted(
+            SESSION_HISTORY_DIR.glob(pattern), key=lambda f: f.stat().st_mtime
+        )
+
+        if len(files) > keep:
+            for f in files[:-keep]:
+                f.unlink()
+    except Exception as e:
+        logger.warning(f"Session cleanup failed: {e}")
+
+
+async def get_catchup_context(avatar: str = "", n_sessions: int = 3) -> str:
+    """Build rich catch-up context from recent sessions for the LLM."""
+    avatar = avatar or current_avatar
+    hints = []
+
+    try:
+        # Get last N session summaries from memory
+        recent_summaries = await memory.get_recent_session_summaries(n_sessions)
+        if recent_summaries:
+            for i, s in enumerate(recent_summaries):
+                summary_text = s.get("summary", "")
+                session_ts = s.get("timestamp", 0)
+                if summary_text:
+                    time_ago = (
+                        _format_time_ago(time.time() - session_ts)
+                        if session_ts
+                        else "recently"
+                    )
+                    hints.append(f"Session {i + 1} ({time_ago}): {summary_text}")
+
+        # Also load from session history files
+        safe_avatar = avatar.replace("/", "_").replace("..", "_")
+        pattern = f"{safe_avatar}_*.json"
+        files = sorted(
+            SESSION_HISTORY_DIR.glob(pattern),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+
+        for f in files[:n_sessions]:
+            try:
+                data = json.loads(f.read_text())
+                summary = data.get("summary", "")
+                key_topics = data.get("key_topics", [])
+                ts = data.get("timestamp", 0)
+                time_ago = _format_time_ago(time.time() - ts) if ts else "recently"
+
+                if summary:
+                    hints.append(f"Past conversation ({time_ago}): {summary}")
+                if key_topics:
+                    hints.append(f"Topics discussed: {', '.join(key_topics)}")
+            except Exception:
+                continue
+
+        # Pull L1 atoms from TencentDB (user preferences, facts)
+        mem = await _get_lilly_memory()
+        if mem is not None:
+            try:
+                facts = await mem.search_facts(
+                    "user preference OR user fact OR project OR goal", limit=8
+                )
+                if facts:
+                    fact_parts = []
+                    for f_item in facts:
+                        k = f_item.get("id") or f_item.get("key") or "unknown"
+                        v = f_item.get("content") or f_item.get("value") or ""
+                        fact_parts.append(f"{k}={str(v)[:100]}")
+                    fact_str = "; ".join(fact_parts)[:400]
+                    if fact_str:
+                        hints.append(f"Remembered facts: {fact_str}")
+            except Exception:
+                pass
+
+        # Pull taught contexts (locations, device names)
+        try:
+            taught = json.loads((WORKSPACE / "taught_contexts.json").read_text())
+            if taught:
+                taught_items = list(taught.items())[:5]
+                taught_str = "; ".join(f"{k}: {v}" for k, v in taught_items)
+                hints.append(f"Known contexts: {taught_str}")
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.warning(f"catchup context build failed: {e}")
+
+    return " | ".join(hints) if hints else ""
+
+
+def _format_time_ago(seconds: float) -> str:
+    """Format seconds into a human-readable time ago string."""
+    if seconds < 60:
+        return "just now"
+    elif seconds < 3600:
+        mins = int(seconds / 60)
+        return f"{mins}m ago"
+    elif seconds < 86400:
+        hours = int(seconds / 3600)
+        return f"{hours}h ago"
+    else:
+        days = int(seconds / 86400)
+        return f"{days}d ago"
+
+
+# ─── FULL CONVERSATION HISTORY (JSONL) ──────────────────────────
+# Every conversation turn is appended to a JSONL file for permanent storage.
+# This is separate from the deque (which is limited to 50 entries).
+CONVERSATION_HISTORY_FILE = MEMORY_DIR / "conversation_history.jsonl"
+
+
+async def _record_conversation_turn(
+    user_msg: str, assistant_reply: str, avatar: str = ""
+):
+    """Append a conversation turn to the permanent history file."""
+    try:
+        avatar = avatar or current_avatar
+        entry = {
+            "ts": time.time(),
+            "avatar": avatar,
+            "user": user_msg[:500],  # Truncate very long messages
+            "assistant": assistant_reply[:500],
+            "session_id": memory.session_id,
+        }
+        with open(CONVERSATION_HISTORY_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        logger.warning(f"Failed to record conversation turn: {e}")
+
+
+async def _load_recent_conversation_history(n: int = 20) -> list[dict]:
+    """Load the last N conversation turns from the permanent history."""
+    try:
+        if not CONVERSATION_HISTORY_FILE.exists():
+            return []
+        lines = CONVERSATION_HISTORY_FILE.read_text().strip().split("\n")
+        # Get last N lines
+        recent_lines = lines[-n:] if len(lines) > n else lines
+        entries = []
+        for line in recent_lines:
+            if line.strip():
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    continue
+        return entries
+    except Exception as e:
+        logger.warning(f"Failed to load conversation history: {e}")
+        return []
+
+
+async def _get_conversation_topics(days: int = 7) -> list[str]:
+    """Extract topics from recent conversation history."""
+    try:
+        cutoff = time.time() - (days * 86400)
+        if not CONVERSATION_HISTORY_FILE.exists():
+            return []
+
+        topics = set()
+        keywords = [
+            "project",
+            "work",
+            "idea",
+            "plan",
+            "goal",
+            "problem",
+            "solution",
+            "learn",
+            "create",
+            "build",
+            "fix",
+            "improve",
+            "design",
+            "code",
+            "test",
+            "deploy",
+            "config",
+            "setup",
+            "install",
+            "update",
+            "deploy",
+            "openlive",
+            "openhuman",
+            "lilly",
+            "avatar",
+            "sensor",
+            "camera",
+            "voice",
+            "chat",
+            "memory",
+            "context",
+            "session",
+        ]
+
+        lines = CONVERSATION_HISTORY_FILE.read_text().strip().split("\n")
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+                if entry.get("ts", 0) < cutoff:
+                    continue
+                text = (
+                    entry.get("user", "") + " " + entry.get("assistant", "")
+                ).lower()
+                for kw in keywords:
+                    if kw in text:
+                        topics.add(kw)
+            except Exception:
+                continue
+
+        return list(topics)[:15]
+    except Exception as e:
+        logger.warning(f"Failed to extract topics: {e}")
+        return []
+
+
+def _save_user_names() -> None:
+    try:
+        _USER_NAMES_FILE.write_text(json.dumps(_USER_NAMES, indent=2))
+    except Exception:
+        pass
 
 
 def _extract_real_name(user_info: Optional[dict]) -> str:
@@ -4567,6 +5024,54 @@ _SENSOR_DEFS_NORM = {
     for name, cfg in SENSOR_DEFS.items()
 }
 
+# Mapping from termux-sensor generic names to Pixel 10 hardware SENSOR_DEFS names.
+# termux-sensor returns lowercase names like "accelerometer", "gyroscope", etc.
+# SENSOR_DEFS uses hardware-specific names like "ICM45631 Accelerometer".
+_SENSOR_NAME_MAP = {
+    # Motion
+    "accelerometer": "ICM45631 Accelerometer",
+    "gyroscope": "ICM45631 Gyroscope",
+    "linear_acceleration": "Linear Acceleration Sensor",
+    "gravity": "Gravity Sensor",
+    "rotation_vector": "Rotation Vector Sensor",
+    "game_rotation_vector": "Game Rotation Vector Sensor",
+    "geomagnetic_rotation_vector": "Geomagnetic Rotation Vector Sensor",
+    "significant_motion": "Significant Motion (wake-up)",
+    "step_detector": "Step Detector",
+    "step_counter": "Step Counter",
+    # Uncalibrated
+    "accelerometer_uncalibrated": "ICM45631 Accelerometer-Uncalibrated",
+    "gyroscope_uncalibrated": "ICM45631 Gyroscope-Uncalibrated",
+    "magnetic_field_uncalibrated": "MMC5616 Magnetometer-Uncalibrated",
+    "rotation_vector_uncalibrated": "Rotation Vector Sensor",
+    # Position
+    "magnetometer": "MMC5616 Magnetometer",
+    "geomagnetic_field": "MMC5616 Magnetometer",
+    # Environmental
+    "barometer": "SPL07003 Barometer",
+    "pressure": "SPL07003 Barometer",
+    "light": "TMD3743 Ambient Light",
+    "proximity": "TMD3743 Proximity",
+    # Device state
+    "stationary_detect": "ICM45631 Stationary Detect",
+    "motion_detect": "ICM45631 Motion Detect",
+    "hinge_angle": "Hinge Angle Sensor",
+    "head_tracker": "Head Tracker Sensor",
+    "pose_6dof": "Pose 6DOF Sensor",
+    "absolute_heading": "Absolute Heading Sensor",
+    "heading": "Heading Sensor",
+    "low_latency_offbody_detect": "Low Latency Off-Body Detect",
+    # Heart
+    "heart_rate": "Heart Rate Sensor",
+    "heart_beat": "Heart Beat Sensor",
+}
+
+
+def _resolve_sensor_def(termux_name: str) -> Optional[str]:
+    """Map a termux-sensor generic name to the SENSOR_DEFS hardware key."""
+    return _SENSOR_NAME_MAP.get(termux_name.lower())
+
+
 SENSOR_TRIGGERS = {
     "weather": ["weather", "forecast", "rain", "outside", "whats it like out"],
     "temperature": ["temperature outside", "hot", "cold", "warm"],
@@ -5009,9 +5514,18 @@ def snapshot_to_narrative(snapshot: dict) -> str:
         elif pct < 30:
             parts.append("Battery's dipping a bit")
 
-    # Browser camera vision — mention if camera is live and has recent detections
+    # Browser camera vision — only inject if it shows something genuinely interesting
+    # (not mundane fixtures that YOLO hallucinates constantly on bathroom/bedroom frames)
     if _browser_vision_description and (time.time() - _browser_vision_ts) < 12:
-        parts.append(f"Camera sees: {_browser_vision_description}")
+        _vis_labels = [
+            l.strip()
+            for l in _browser_vision_description.replace("Camera sees:", "").split(",")
+        ]
+        _interesting_vis = [
+            l for l in _vis_labels if l and l.strip() not in _VISION_IGNORE_OBJECTS
+        ]
+        if _interesting_vis:
+            parts.append(f"Camera sees: {', '.join(_interesting_vis[:4])}")
 
     if not parts:
         return ""
@@ -5169,6 +5683,50 @@ async def query_sensor(phrase: str) -> Optional[str]:
 
     # ── Weather ──
     if any(w in p for w in SENSOR_TRIGGERS["weather"]):
+        try:
+            # Get user's location from sensor server for localized weather
+            loc = await current_location()
+            lat, lon = None, None
+            if loc:
+                lat, lon = loc[0], loc[1]
+
+            # Build wttr.in URL with user's GPS coordinates if available
+            if lat and lon and lat != 0.0 and lon != 0.0:
+                weather_url = f"https://wttr.in/{lat:.4f},{lon:.4f}/?format=%C+%t+%w+%h"
+            else:
+                # Fallback to auto-detect via IP
+                weather_url = "https://wttr.in/?format=%C+%t+%w+%h"
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(weather_url)
+                if r.status_code == 200:
+                    result = r.text.strip()
+                    # Also enrich with local sensor pressure data
+                    snapshot = await get_sensor_snapshot()
+                    local_pressure = None
+                    if snapshot and "pressure" in snapshot:
+                        pressure_data = snapshot["pressure"]
+                        if pressure_data and pressure_data.get("raw"):
+                            local_pressure = pressure_data["raw"][0]
+
+                    parts = [
+                        f"It's {result} out there.",
+                        f"Right now: {result}.",
+                        f"The weather is {result}.",
+                    ]
+                    if local_pressure:
+                        if local_pressure > 1020:
+                            parts.append(
+                                "My sensors also read high pressure — you can feel it's crisp and stable."
+                            )
+                        elif local_pressure < 1000:
+                            parts.append(
+                                "My sensors also detect low pressure — might want a jacket."
+                            )
+                    return random.choice(parts) if parts else None
+        except Exception:
+            pass
+        # Fallback: try curl if httpx fails entirely
         if shutil.which("curl"):
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -6837,8 +7395,16 @@ _NOTIF_PRIORITY_VOICE = {
 
 
 async def notification_monitor_loop():
-    """Background task: only reads aloud HIGH/URGENT notifications. Default/low stay silent until asked."""
-    global _NOTIFICATION_SEEN
+    """Background task: reads HIGH/URGENT notifications in a natural, contextual way.
+
+    - Extracts URLs from notification content (Slack, Desk, Gmail, etc.)
+    - Personalises with USER_NAME if the user's name appears in the content
+    - Picks a per-app announcement template that sounds conversational
+    - Asks a contextual follow-up question ("Want to follow up?")
+    - Sets PENDING_CONFIRM + PENDING_OPEN_URL so a yes/no voice reply
+      automatically opens the link on the phone via /api/ui_state open_url
+    """
+    global _NOTIFICATION_SEEN, PENDING_CONFIRM, PENDING_OPEN_URL
     while True:
         await asyncio.sleep(4)
         if LILLY_IS_SPEAKING or LILLY_IS_THINKING:
@@ -6859,35 +7425,188 @@ async def notification_monitor_loop():
                     continue
                 _NOTIFICATION_SEEN.add(tag)
                 priority = n.get("priority", "default") or "default"
-                # Only auto-read loud: high and urgent. Default/low stay silent.
                 if priority not in ("high", "max"):
                     continue
-                title = n.get("title", "") or ""
-                content = n.get("content", "") or ""
-                package = n.get("package", "") or ""
-                app_name = (
-                    package.split(".")[-1].replace(".", " ").title()
-                    if package
-                    else (title.split(":")[0].strip() if title else "")
+
+                title = (n.get("title", "") or "").strip()
+                content = (n.get("content", "") or "").strip()
+                package = (n.get("package", "") or "").strip()
+                full_text = f"{title} {content}".strip()
+
+                # ── 1. Extract any URL from the content ──────────────────────
+                url_match = re.search(r"https?://[^\s\)\]>\"']+", full_text)
+                extracted_url: Optional[str] = url_match.group(0) if url_match else None
+
+                # ── 2. Identify app from package name ────────────────────────
+                pkg_lower = package.lower()
+                if "slack" in pkg_lower:
+                    app_key = "slack"
+                elif any(
+                    k in pkg_lower for k in ("desk", "freshdesk", "zendesk", "helpdesk")
+                ):
+                    app_key = "desk"
+                elif any(k in pkg_lower for k in ("gmail", "email", "mail")):
+                    app_key = "gmail"
+                elif any(k in pkg_lower for k in ("calendar", "meet", "zoom", "teams")):
+                    app_key = "calendar"
+                elif any(
+                    k in pkg_lower
+                    for k in ("github", "gitlab", "jira", "linear", "asana")
+                ):
+                    app_key = "task"
+                elif any(
+                    k in pkg_lower
+                    for k in (
+                        "whatsapp",
+                        "telegram",
+                        "signal",
+                        "messenger",
+                        "sms",
+                        "message",
+                    )
+                ):
+                    app_key = "message"
+                else:
+                    app_key = "generic"
+
+                # ── 3. Detect ticket/ID references (DESK-123, GH-456, etc.) ──
+                ticket_match = re.search(r"\b([A-Z]{2,10}-\d+)\b", full_text)
+                ticket_id: Optional[str] = (
+                    ticket_match.group(1) if ticket_match else None
                 )
-                # Conversational: drop app name from title if it repeats
-                if title.lower().startswith(app_name.lower()):
-                    title = title[len(app_name) :].strip().lstrip(":").strip()
-                parts = []
-                if app_name:
-                    parts.append(f"on {app_name}")
-                if title:
-                    parts.append(f"{title}")
-                if content:
-                    parts.append(content)
-                msg = (
-                    f"Hey, just heads up! {' '.join(parts)}"
-                    if parts
-                    else "Hey, got a notification but it's empty."
+
+                # ── 4. Detect sender name (e.g. "John: message" in Slack) ────
+                sender: Optional[str] = None
+                sender_match = re.match(
+                    r"^([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s*[:\-–]", title
                 )
+                if sender_match:
+                    sender = sender_match.group(1)
+
+                # ── 5. Detect if USER_NAME appears in the content ────────────
+                name = USER_NAME.strip()
+                name_mentioned = bool(
+                    name
+                    and re.search(rf"\b{re.escape(name)}\b", full_text, re.IGNORECASE)
+                )
+
+                # ── 6. Build announcement + follow-up ────────────────────────
+                addr = f"Hey {name}, " if name_mentioned and name else ""
+
+                if app_key == "slack":
+                    if sender:
+                        announcement = f"{addr}message from {sender} on Slack"
+                        if content:
+                            announcement += f" — {content}"
+                    else:
+                        announcement = f"{addr}new Slack message"
+                        if title:
+                            announcement += f" — {title}"
+                    follow_up = "Want to open it?"
+
+                elif app_key == "desk":
+                    if ticket_id:
+                        announcement = f"{addr}you've got a new ticket, {ticket_id}"
+                        if content:
+                            # strip the URL from the spoken part
+                            spoken_content = re.sub(
+                                r"https?://\S+", "", content
+                            ).strip()
+                            if spoken_content:
+                                announcement += f" — {spoken_content}"
+                    else:
+                        announcement = f"{addr}new support ticket"
+                        if title:
+                            announcement += f" — {title}"
+                    follow_up = "Want me to open it?"
+
+                elif app_key == "gmail":
+                    if sender:
+                        announcement = f"{addr}email from {sender}"
+                        if title:
+                            announcement += f", subject: {title}"
+                    else:
+                        announcement = (
+                            f"{addr}new email — {title}"
+                            if title
+                            else f"{addr}new email"
+                        )
+                    follow_up = "Want to read it?"
+
+                elif app_key == "calendar":
+                    announcement = (
+                        f"{addr}{title}" if title else f"{addr}calendar reminder"
+                    )
+                    follow_up = "Want to open it?"
+
+                elif app_key == "task":
+                    if ticket_id:
+                        announcement = f"{addr}task update on {ticket_id}"
+                    else:
+                        announcement = (
+                            f"{addr}{title}" if title else f"{addr}new task update"
+                        )
+                    follow_up = "Want to jump to it?"
+
+                elif app_key == "message":
+                    app_label = (
+                        package.split(".")[-1]
+                        .replace("android", "")
+                        .replace("com", "")
+                        .strip(".")
+                        .title()
+                        or "message"
+                    )
+                    if sender:
+                        announcement = f"{addr}message from {sender}"
+                        if content:
+                            announcement += f" — {content}"
+                    else:
+                        announcement = f"{addr}new {app_label}"
+                    follow_up = "Want to open it?"
+
+                else:
+                    # Generic fallback — still better than "Hey, just heads up!"
+                    app_label = package.split(".")[-1].title() if package else ""
+                    parts = []
+                    if app_label:
+                        parts.append(f"from {app_label}")
+                    if title:
+                        parts.append(title)
+                    if content and content != title:
+                        spoken_content = re.sub(r"https?://\S+", "", content).strip()
+                        if spoken_content:
+                            parts.append(spoken_content)
+                    announcement = (
+                        (addr + " ".join(parts)) if parts else f"{addr}notification"
+                    )
+                    follow_up = "Want to follow up?" if extracted_url else None
+
+                # ── 7. Append follow-up question if there's a URL to open ────
+                if extracted_url and follow_up:
+                    msg = f"{announcement}. {follow_up}"
+                    # Arm the confirmation gate — yes → open URL on phone
+                    PENDING_CONFIRM = {
+                        "desc": f"open {extracted_url}",
+                        "skill": None,
+                        "skill_arg": "",
+                        "open_url": extracted_url,
+                        "expires": time.time() + CONFIRM_TIMEOUT,
+                    }
+                    PENDING_OPEN_URL = None  # will be set on "yes" confirmation
+                else:
+                    msg = announcement
+
                 asyncio.create_task(speak(msg))
                 await asyncio.sleep(3)
-            _NOTIFICATION_SEEN &= current_tags
+
+            _NOTIFICATION_SEEN &= current_tags  # keep only still-active tags
+            # Trim the seen set so it doesn't grow unbounded across sessions,
+            # but NEVER remove a tag just because it left the current list —
+            # that would re-trigger the same notification on the next tick.
+            # Instead, cap the set to the last 500 entries.
+            if len(_NOTIFICATION_SEEN) > 500:
+                _NOTIFICATION_SEEN = set(list(_NOTIFICATION_SEEN)[-500:])
         except Exception:
             pass
 
@@ -7341,7 +8060,8 @@ def _map_task_status(idea: dict, tasks: list) -> str:
 
 async def _build_memory_hint(mem_dict: dict) -> str:
     """Pull the most useful facts from user_profile and recent memory for the LLM.
-    Also recalls relevant L1 atoms from TencentDB memory (user preferences, facts)."""
+    Also recalls relevant L1 atoms from TencentDB memory (user preferences, facts).
+    Includes cross-session catch-up context for continuity."""
     hints = []
     # Active hours → infer time-of-day habits
     try:
@@ -7367,6 +8087,38 @@ async def _build_memory_hint(mem_dict: dict) -> str:
     if recent:
         topics = "; ".join(e.get("text", "")[:60] for e in recent)
         hints.append(f"Recent topics: {topics}")
+
+    # Cross-session catch-up context (NEW)
+    try:
+        catchup = await asyncio.wait_for(
+            get_catchup_context(current_avatar, n_sessions=3), timeout=1.5
+        )
+        if catchup:
+            hints.append(f"Past sessions: {catchup}")
+    except Exception:
+        pass  # Catch-up is optional, don't block
+
+    # Recent conversation history from permanent JSONL log
+    try:
+        recent_history = await asyncio.wait_for(
+            _load_recent_conversation_history(n=10), timeout=0.5
+        )
+        if recent_history:
+            # Extract last few user messages for context
+            user_msgs = [
+                h.get("user", "")[:80] for h in recent_history[-3:] if h.get("user")
+            ]
+            if user_msgs:
+                hints.append(f"Recent conversation: {'; '.join(user_msgs)}")
+            # Extract topics from history
+            topics = await asyncio.wait_for(
+                _get_conversation_topics(days=3), timeout=0.5
+            )
+            if topics:
+                hints.append(f"Topics discussed recently: {', '.join(topics[:8])}")
+    except Exception:
+        pass  # History is optional
+
     # Brain 🧠 — Recall L1 atoms from TencentDB memory (async)
     mem = await _get_lilly_memory()
     if mem is not None:
@@ -7457,6 +8209,40 @@ async def handle_intent(
     if not cmd:
         cmd = "hello"
 
+    # ── WELCOME BACK: Check if this is the first message of a new session ──
+    # If we have recent conversation history, inject a welcome-back context
+    # so Lilly can reference what was discussed before.
+    if not hasattr(handle_intent, "_session_started"):
+        handle_intent._session_started = True
+        try:
+            recent_history = await asyncio.wait_for(
+                _load_recent_conversation_history(n=5), timeout=0.5
+            )
+            if recent_history:
+                # Extract last user message and topic
+                last_user_msg = (
+                    recent_history[-1].get("user", "") if recent_history else ""
+                )
+                last_topics = await asyncio.wait_for(
+                    _get_conversation_topics(days=3), timeout=0.5
+                )
+                if last_topics:
+                    # Add a subtle welcome-back hint to the system prompt
+                    welcome_hint = f"Welcome back! You were recently discussing: {', '.join(last_topics[:5])}. "
+                    if last_user_msg:
+                        welcome_hint += (
+                            f"Last thing the user said: '{last_user_msg[:100]}'. "
+                        )
+                    welcome_hint += "Reference this naturally if relevant — don't just say 'welcome back'."
+                    # Store for injection into system prompt
+                    handle_intent._welcome_hint = welcome_hint
+                else:
+                    handle_intent._welcome_hint = ""
+            else:
+                handle_intent._welcome_hint = ""
+        except Exception:
+            handle_intent._welcome_hint = ""
+
     # ── PENDING CONFIRMATION (casual mode gate) ──
     # Lilly just asked "Should I open YouTube...?" — resolve the user's
     # yes/no follow-up BEFORE processing any new intent. Ambient speech
@@ -7473,6 +8259,18 @@ async def handle_intent(
                 pending_skill = (
                     pending.get("skill") if isinstance(pending, dict) else None
                 )
+                # Notification follow-up: open a URL on the phone
+                pending_url = (
+                    pending.get("open_url") if isinstance(pending, dict) else None
+                )
+                if pending_url:
+                    PENDING_OPEN_URL = pending_url
+                    reply = "Opening it now."
+                    await memory.add("user", text)
+                    await memory.add("assistant", reply)
+                    await save_memory()
+                    await speak(reply)
+                    return {"action": "handled", "text": reply, "open_url": pending_url}
                 if not pending_skill:
                     reply = "OK, ready when you are."
                 else:
@@ -7841,10 +8639,40 @@ async def handle_intent(
     keyword_learner.record_conversation(text)
 
     # ── 0a. REMINDERS / SCHEDULED TASKS ──
-    remind_match = re.search(
-        r"(?:remind\s+me|set\s+(?:a\s+)?reminder|schedule|set\s+(?:a\s+)?(?:task|alarm|timer))\s+(?:to\s+)?(.+)",
-        cmd,
-        re.IGNORECASE,
+    # Skip this handler if the command is a sensor-condition-based automation
+    # (e.g. "remind me when battery drops below 20%") — those are handled later
+    # by the automation-from-chat handler.
+    _remind_condition_words = [
+        "battery",
+        "charging",
+        "sensor",
+        "light",
+        "notification",
+        "bluetooth",
+        "wifi",
+        "step",
+        "motion",
+        "temperature",
+        "pressure",
+        "haven't moved",
+        "i'm not moving",
+        "plugged",
+        "unplugged",
+        "drops below",
+        "goes above",
+        "reaches",
+        "above",
+        "below",
+    ]
+    _is_time_reminder = not any(w in cmd for w in _remind_condition_words)
+    remind_match = (
+        re.search(
+            r"(?:remind\s+me|set\s+(?:a\s+)?reminder|schedule|set\s+(?:a\s+)?(?:task|alarm|timer))\s+(?:to\s+)?(.+)",
+            cmd,
+            re.IGNORECASE,
+        )
+        if _is_time_reminder
+        else None
     )
     if remind_match:
         raw = remind_match.group(1).strip()
@@ -8325,6 +9153,352 @@ async def handle_intent(
             return {"action": "handled", "text": reply, "open_url": maps_url}
         else:
             reply = "I can't get your location right now. Try again when you have a GPS fix."
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
+    # ── PERSONA SELF-IMPROVEMENT (authorized) ──────────────────────────────
+    # Lilly can propose changes to her own persona. She always asks first.
+    # Triggers: "update your persona", "change how you talk", "improve yourself",
+    #           "adjust your personality", "update lilly", "refine yourself", etc.
+    _self_improve_triggers = [
+        "update your persona",
+        "change how you talk",
+        "improve yourself",
+        "adjust your personality",
+        "update lilly",
+        "refine yourself",
+        "update yourself",
+        "change your personality",
+        "tweak your persona",
+        "evolve yourself",
+        "self-improve",
+        "optimize yourself",
+        "change how you respond",
+        "update your voice",
+        "update your prompt",
+    ]
+    if any(t in cmd for t in _self_improve_triggers):
+        # Check if user is providing a specific change request or just enabling it
+        _proposed_change = cmd
+        for t in _self_improve_triggers:
+            _proposed_change = _proposed_change.replace(t, "").strip()
+        _proposed_change = _proposed_change.strip(" :.,-")
+
+        if not _proposed_change:
+            # Generic enable — ask what they want changed
+            reply = "What specifically do you want me to adjust? Tone, how I handle certain topics, something I keep getting wrong?"
+        else:
+            # They gave a specific change — propose it and ask for approval
+            _pending_persona_change = {
+                "change": _proposed_change,
+                "requested_at": time.time(),
+                "persona": current_avatar,
+            }
+            # Store pending change for confirmation
+            handle_intent._pending_persona_change = _pending_persona_change
+            PENDING_CONFIRM = {
+                "desc": f"update my persona: {_proposed_change[:80]}",
+                "skill": "_persona_update",
+                "skill_arg": _proposed_change,
+                "expires": time.time() + 120,
+            }
+            reply = (
+                f"Got it — I'd adjust: {_proposed_change[:100]}. Want me to apply that?"
+            )
+        await memory.add("user", text)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
+    # Apply persona update if confirmed
+    if (
+        PENDING_CONFIRM
+        and PENDING_CONFIRM.get("skill") == "_persona_update"
+        and cmd in ("yes", "yeah", "sure", "do it", "apply it", "go ahead", "confirmed")
+        and time.time() < PENDING_CONFIRM.get("expires", 0)
+    ):
+        _change_arg = PENDING_CONFIRM.get("skill_arg", "")
+        PENDING_CONFIRM = None
+        _applied = False
+        _apply_msg = ""
+        if PERSONA_OPTIMIZER_AVAILABLE and persona_optimizer and _change_arg:
+            try:
+                # Read current voice prompt
+                _cur_prompt = HIVE_PERSONAS[current_avatar]["voice_prompt"]
+                # Append the user's requested change as a new instruction
+                _new_note = f"\n\n[User-authorized update: {_change_arg}]"
+                if _new_note not in _cur_prompt:
+                    _updated_prompt = _cur_prompt + _new_note
+                    # Patch in-memory persona
+                    HIVE_PERSONAS[current_avatar]["voice_prompt"] = _updated_prompt
+                    # Persist to persona_configs.json
+                    persona_optimizer.set_voice_prompt(current_avatar, _updated_prompt)
+                    _applied = True
+                    _apply_msg = (
+                        f"Done. Applied: {_change_arg[:80]}. I'll remember this."
+                    )
+            except Exception as _pe:
+                logger.warning(f"Persona update failed: {_pe}")
+        if not _applied:
+            # Fallback: patch in-memory only
+            try:
+                _cur_prompt = HIVE_PERSONAS[current_avatar]["voice_prompt"]
+                _new_note = f"\n\n[User-authorized update: {_change_arg}]"
+                if _new_note not in _cur_prompt:
+                    HIVE_PERSONAS[current_avatar]["voice_prompt"] = (
+                        _cur_prompt + _new_note
+                    )
+                _apply_msg = f"Applied in this session: {_change_arg[:80]}. Won't survive a restart without the optimizer."
+            except Exception:
+                _apply_msg = "Couldn't apply that change — something went wrong."
+        reply = _apply_msg
+        await memory.add("user", text)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
+    # ── AUTOMATION FROM CHAT ────────────────────────────────────────────────
+    # Lilly can create automation rules from plain-English requests.
+    # "remind me when battery drops below 20%"
+    # "alert me if I haven't moved in 2 hours"
+    # "create automation: notify me when charging starts"
+    # "set up automation: ..."
+    # "add a rule to ..."
+    _auto_create_triggers = [
+        "remind me when",
+        "alert me when",
+        "alert me if",
+        "notify me when",
+        "notify me if",
+        "create automation",
+        "set up automation",
+        "add a rule",
+        "add automation",
+        "automate:",
+        "automation:",
+        "when battery",
+        "when charging",
+        "if battery",
+        "if i haven",
+        "if i'm not",
+    ]
+    # Only treat as automation (not time-based reminder) if it references
+    # a sensor condition or event keyword — not a time ("in 30 minutes", "at 9am")
+    _auto_condition_words = [
+        "battery",
+        "charging",
+        "sensor",
+        "light",
+        "notification",
+        "bluetooth",
+        "wifi",
+        "step",
+        "motion",
+        "temperature",
+        "pressure",
+        "haven't moved",
+        "i'm not moving",
+        "plugged",
+        "unplugged",
+        "drops below",
+        "goes above",
+        "reaches",
+        "above",
+        "below",
+    ]
+    _is_condition_based = any(w in cmd for w in _auto_condition_words)
+    _auto_list_triggers = [
+        "list automations",
+        "show automations",
+        "what automations",
+        "my automations",
+    ]
+    _auto_delete_triggers = [
+        "delete automation",
+        "remove automation",
+        "cancel automation",
+        "disable automation",
+    ]
+
+    if any(t in cmd for t in _auto_list_triggers):
+        if PHONE_BROKER_AVAILABLE and phone_broker:
+            _rules = phone_broker.automation.get_rules()
+            if _rules:
+                _rule_lines = [
+                    f"- {r['name']}: {r.get('condition', {})} → {r.get('action_type', '')}"
+                    for r in _rules[:10]
+                ]
+                reply = "Active automations:\n" + "\n".join(_rule_lines)
+            else:
+                reply = "No automations set up yet."
+        else:
+            reply = "Automation engine isn't available right now."
+        await memory.add("user", text)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
+    if any(t in cmd for t in _auto_delete_triggers):
+        # Ask which one
+        if PHONE_BROKER_AVAILABLE and phone_broker:
+            _rules = phone_broker.automation.get_rules()
+            if _rules:
+                _names = ", ".join(r["name"] for r in _rules[:5])
+                reply = f"Which one? Active: {_names}"
+            else:
+                reply = "No automations to remove."
+        else:
+            reply = "Automation engine isn't available."
+        await memory.add("user", text)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
+    if any(t in cmd for t in _auto_create_triggers) and _is_condition_based:
+        # First try regex parsing for common patterns (fast, no LLM needed)
+        _auto_rule = None
+        _batt_m = re.search(
+            r"battery\s+(drops?\s+)?(below|under|less than|<)\s*(\d+)",
+            cmd,
+            re.IGNORECASE,
+        )
+        _batt_above_m = re.search(
+            r"battery\s+(goes?\s+)?(above|over|more than|>)\s*(\d+)", cmd, re.IGNORECASE
+        )
+        _charge_m = re.search(
+            r"(start|begin|stop|finish)\s+charging|plugged\s+in|unplugged",
+            cmd,
+            re.IGNORECASE,
+        )
+        if _batt_m:
+            _val = int(_batt_m.group(3))
+            _auto_rule = {
+                "name": f"Battery below {_val}%",
+                "topic": "battery",
+                "condition": {"field": "battery_level", "op": "<", "value": _val},
+                "action_type": "notify",
+                "action_payload": {
+                    "title": "Battery Low",
+                    "body": f"Battery dropped below {_val}%.",
+                },
+                "cooldown_seconds": 300.0,
+            }
+        elif _batt_above_m:
+            _val = int(_batt_above_m.group(3))
+            _auto_rule = {
+                "name": f"Battery above {_val}%",
+                "topic": "battery",
+                "condition": {"field": "battery_level", "op": ">", "value": _val},
+                "action_type": "notify",
+                "action_payload": {
+                    "title": "Battery Charged",
+                    "body": f"Battery reached {_val}%.",
+                },
+                "cooldown_seconds": 300.0,
+            }
+        elif _charge_m:
+            _auto_rule = {
+                "name": "Charging state changed",
+                "topic": "battery",
+                "condition": {"field": "charging", "op": "==", "value": True},
+                "action_type": "notify",
+                "action_payload": {
+                    "title": "Charging",
+                    "body": "Charging state changed.",
+                },
+                "cooldown_seconds": 60.0,
+            }
+        if _auto_rule is None:
+            # Fall back to LLM for complex cases
+            _auto_parse_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Extract automation rule parameters from the user request. "
+                        "Return ONLY a JSON object: {name, topic, condition:{field,op,value}, "
+                        "action_type, action_payload:{title,body}}. Nothing else."
+                    ),
+                },
+                {"role": "user", "content": cmd},
+            ]
+            try:
+                _raw = await asyncio.wait_for(
+                    two_tier_backend.chat(
+                        _auto_parse_messages, temperature=0.2, max_tokens=200
+                    ),
+                    timeout=8.0,
+                )
+                _raw = strip_json_wrapper(_raw or "").strip()
+                _jm = re.search(r"\{.*\}", _raw, re.DOTALL)
+                if _jm:
+                    _auto_rule = json.loads(_jm.group(0))
+            except Exception as _ae:
+                logger.warning(f"Auto rule LLM parse failed: {_ae}")
+        if _auto_rule:
+            _rule_name = _auto_rule.get("name", "New Rule")
+            _rule_cond = _auto_rule.get("condition", {})
+            _rule_action = _auto_rule.get("action_type", "notify")
+            handle_intent._pending_auto_rule = _auto_rule
+            PENDING_CONFIRM = {
+                "desc": "create automation " + _rule_name,
+                "skill": "_auto_create",
+                "skill_arg": json.dumps(_auto_rule),
+                "expires": time.time() + 120,
+            }
+            _f = _rule_cond.get("field", "condition")
+            _o = _rule_cond.get("op", "")
+            _v = str(_rule_cond.get("value", ""))
+            reply = f'I\'d set up: "{_rule_name}" \u2014 when {_f} {_o} {_v} \u2192 {_rule_action}. Create it?'
+        else:
+            reply = "I couldn't parse that into a rule. Try: 'remind me when battery drops below 20%'."
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
+    # Confirm automation creation
+    if (
+        PENDING_CONFIRM
+        and PENDING_CONFIRM.get("skill") == "_auto_create"
+        and cmd
+        in ("yes", "yeah", "sure", "do it", "create it", "go ahead", "confirmed", "ok")
+        and time.time() < PENDING_CONFIRM.get("expires", 0)
+    ):
+        _rule_json = PENDING_CONFIRM.get("skill_arg", "{}")
+        PENDING_CONFIRM = None
+        _created = False
+        _create_msg = ""
+        if PHONE_BROKER_AVAILABLE and phone_broker:
+            try:
+                from phone_broker import AutomationRule
+
+                _rd = json.loads(_rule_json)
+                _rule = AutomationRule(
+                    id=str(uuid.uuid4())[:8],
+                    name=_rd.get("name", "Chat Rule"),
+                    enabled=True,
+                    topic=_rd.get("topic", "battery"),
+                    condition=_rd.get("condition", {}),
+                    action_type=_rd.get("action_type", "notify"),
+                    action_payload=_rd.get("action_payload", {}),
+                    cooldown_seconds=_rd.get("cooldown_seconds", 60.0),
+                )
+                phone_broker.automation.add_rule(_rule)
+                _created = True
+                _create_msg = f"Done. Automation '{_rule.name}' is active."
+            except Exception as _ce:
+                logger.warning(f"Automation create failed: {_ce}")
+                _create_msg = "Something went wrong creating that automation."
+        else:
+            _create_msg = "Automation engine isn't available right now."
+        reply = _create_msg
+        await memory.add("user", text)
+        await memory.add("assistant", reply)
+        await save_memory()
         await speak(reply)
         return {"action": "handled", "text": reply}
 
@@ -9108,6 +10282,10 @@ async def handle_intent(
         messages.append(
             {"role": "system", "content": f"CONTEXT_ABOUT_USER:{memory_hint}"}
         )
+    # Welcome-back hint for first message of session
+    welcome_hint = getattr(handle_intent, "_welcome_hint", "")
+    if welcome_hint:
+        messages.append({"role": "system", "content": f"WELCOME_BACK:{welcome_hint}"})
     # Inject live sensor data into every conversation
     if sensor_context_str:
         messages.append(
@@ -9117,21 +10295,72 @@ async def handle_intent(
             }
         )
 
+    # ── Inject pending notifications so Lilly is aware of what's on the phone ──
+    _notif_context_str = ""
+    try:
+        _nc = await _get_sensor_client()
+        _nr = await asyncio.wait_for(
+            _nc.get(f"{SENSOR_SERVER_URL}/notification/list", timeout=3.0), timeout=3.5
+        )
+        if _nr.status_code == 200:
+            _notifs = _nr.json().get("notifications", [])
+            if _notifs:
+                _notif_lines = []
+                for _n in _notifs[:8]:  # cap at 8 to avoid bloating prompt
+                    _t = (_n.get("title") or "").strip()
+                    _c = (_n.get("content") or "").strip()
+                    _pkg = (_n.get("package") or "").split(".")[-1]
+                    _pri = _n.get("priority", "")
+                    _line = f"[{_pkg}] {_t}"
+                    if _c and _c != _t:
+                        _line += f": {_c[:100]}"
+                    if _pri in ("high", "max"):
+                        _line += " (URGENT)"
+                    _notif_lines.append(_line)
+                _notif_context_str = "; ".join(_notif_lines)
+    except Exception:
+        pass
+    if _notif_context_str:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    f"PHONE NOTIFICATIONS (active right now): {_notif_context_str}. "
+                    "STRICT RULE: Do NOT mention notifications, reminders, alerts, or "
+                    "anything notification-related unless the user explicitly asks about "
+                    "them or asks 'what's new' / 'any alerts'. If the user asks a normal "
+                    "question like 'what can we make' or 'tell me a story', answer it "
+                    "directly. Never volunteer notification content unprompted."
+                ),
+            }
+        )
+
     # ── Approval feed awareness: check the shared broadcast log for new
     # automations, approvals, or comments that all 9 avatars should know about.
-    # Each avatar picks up new entries on its next turn and can mention them
-    # proactively in conversation. We append a brief hint to the user message.
+    # IMPORTANT: Do NOT append this to the user message. The LLM will treat it
+    # as part of the user's query and respond to it unprompted. Instead, inject
+    # it as a system message with explicit instructions to only mention it if
+    # the user directly asks about automations, approvals, or projects.
     _pending_awareness = _recent_unacknowledged_for_avatar(current_avatar)
-    _awareness_note = ""
     if _pending_awareness:
         _latest = _pending_awareness[-1]
         _detail = _latest.get("detail", "")
         _action = _latest.get("action", "updated")
         _src = _latest.get("avatar", "someone")
-        _awareness_note = f"\n[Heads up: {_src} {_action} something: {_detail}]"
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    f"APPROVAL FEED AWARENESS: {_src} {_action} something: {_detail}. "
+                    "STRICT RULE: Only mention this if the user explicitly asks about "
+                    "automations, approvals, projects, or asks 'what's new'. Otherwise, "
+                    "ignore it completely and answer the user's actual question."
+                ),
+            }
+        )
 
     messages.extend(context)
-    messages.append({"role": "user", "content": cmd + _awareness_note})
+    messages.append({"role": "user", "content": cmd})
 
     # ── Grounding guard #1: inject an explicit anti-hallucination reminder
     # into the message list so the model knows to stay factual. This is
@@ -9143,6 +10372,23 @@ async def handle_intent(
         "You are a real friend living in this phone, not a chatbot."
     )
     messages.append({"role": "system", "content": grounding_reminder})
+
+    # ── Web scraping augmentation: if the query looks like it needs web data,
+    # fetch real content and inject it so Lilly gives a grounded answer ──
+    if SCRAPING_AVAILABLE and should_scrape and should_scrape(cmd):
+        try:
+            _scrape_result = await asyncio.wait_for(scrape_for_lilly(cmd), timeout=12.0)
+            _scrape_ctx = _scrape_result.get("answer_context", "")
+            _citations = _scrape_result.get("citations", [])
+            if _scrape_ctx and len(_scrape_ctx) > 50:
+                _cite_str = format_citations(_citations) if _citations else ""
+                _web_inject = f"WEB DATA (scraped, no API key):\n{_scrape_ctx[:2000]}"
+                if _cite_str:
+                    _web_inject += f"\n\n{_cite_str}"
+                _web_inject += "\n\nUse the above to answer accurately. Do not mention 'scraping' or 'web data' — just answer naturally using this as context."
+                messages.append({"role": "system", "content": _web_inject})
+        except Exception as _se:
+            logger.debug(f"Web scraping skipped: {_se}")
 
     # ── Grounding guard #2: moderate temperature + generous tokens.
     # 0.4 is too flat for friend responses; 0.7 keeps it warm and
@@ -9185,6 +10431,9 @@ async def handle_intent(
     await memory.add("user", cmd)
     await memory.add("assistant", reply)
     await save_memory()
+
+    # Record to permanent conversation history (JSONL)
+    asyncio.create_task(_record_conversation_turn(cmd, reply))
 
     # Brain 🧠 — Record conversation to TencentDB L0 (offloaded history)
     # and extract key facts to L1 (preferences, user state, avatar context)
@@ -9257,6 +10506,8 @@ async def summarize_memory():
     )
     if summary and len(summary) > 10:
         await memory.set_summary(summary)
+        # Also add to session summaries for cross-session catch-up
+        await memory.add_session_summary(summary, memory.session_id)
         await save_memory()
 
 
@@ -10376,11 +11627,42 @@ async def _ensure_sensor_server():
 # ─── VISION COMMENTARY LOOP ───────────────────────────────────
 _prev_vision_labels: list = []
 _vision_commentary_cooldown: float = 0.0
+_vision_last_spoken_labels: list = []  # what was actually spoken about last
+_vision_said_ts: float = 0.0  # when last speech was produced
+
+# Objects so mundane / fixture-like that proactive commentary about them is
+# never useful. YOLO frequently hallucinates these on bathroom/bedroom frames.
+_VISION_IGNORE_OBJECTS = {
+    "toilet",
+    "sink",
+    "chair",
+    "couch",
+    "bed",
+    "dining table",
+    "tv",
+    "laptop",
+    "keyboard",
+    "mouse",
+    "remote",
+    "cell phone",
+    "clock",
+    "book",
+    "vase",
+    "toothbrush",
+    "hair drier",
+    "scissors",
+    "teddy bear",
+    "microwave",
+    "oven",
+    "toaster",
+    "refrigerator",
+}
 
 
 async def vision_commentary_loop():
     """Proactive camera commentary — Lilly reacts when she notices something new."""
     global _prev_vision_labels, _vision_commentary_cooldown
+    global _vision_last_spoken_labels, _vision_said_ts
     await asyncio.sleep(15)  # wait for camera to potentially start
     while True:
         await asyncio.sleep(5)
@@ -10389,46 +11671,76 @@ async def vision_commentary_loop():
             age = time.time() - _browser_vision_ts if _browser_vision_ts else 999
             if age > 12 or not _browser_vision_detections:
                 continue
-            # Cooldown between comments
+            # Hard cooldown — at least 60s between any proactive vision comment
             if time.time() < _vision_commentary_cooldown:
                 continue
-            # Don't comment if Lilly is already speaking
+            # Don't comment if Lilly is already speaking or thinking
             if LILLY_IS_SPEAKING or LILLY_IS_THINKING:
                 continue
 
             current_labels = sorted(set(d["label"] for d in _browser_vision_detections))
-            if not current_labels or current_labels == _prev_vision_labels:
+            if not current_labels:
                 continue
 
-            # Calculate scene change significance (Jaccard distance)
+            # Filter out mundane fixture objects — never worth narrating
+            interesting_labels = [
+                l for l in current_labels if l not in _VISION_IGNORE_OBJECTS
+            ]
+            if not interesting_labels:
+                _prev_vision_labels = current_labels
+                continue
+
+            # Skip if what's interesting is identical to what we last spoke about
+            if sorted(interesting_labels) == sorted(_vision_last_spoken_labels):
+                _prev_vision_labels = current_labels
+                continue
+
+            # Require a meaningful scene change vs last time (Jaccard ≥ 0.5 change)
             if _prev_vision_labels:
-                s1, s2 = set(_prev_vision_labels), set(current_labels)
-                union = s1 | s2
-                intersection = s1 & s2
-                similarity = len(intersection) / len(union) if union else 1.0
-                if similarity > 0.5:
-                    # Not significant enough change
-                    _prev_vision_labels = current_labels
-                    continue
+                s1 = set(
+                    l for l in _prev_vision_labels if l not in _VISION_IGNORE_OBJECTS
+                )
+                s2 = set(interesting_labels)
+                if s1 and s2:
+                    union = s1 | s2
+                    intersection = s1 & s2
+                    similarity = len(intersection) / len(union)
+                    if similarity > 0.5:
+                        # Scene hasn't changed enough to warrant a comment
+                        _prev_vision_labels = current_labels
+                        continue
 
-            _prev_vision_labels = current_labels
-            _vision_commentary_cooldown = time.time() + 30  # 30s cooldown
-
-            # Build a commentary prompt
+            # Only truly new items since last speech are worth reacting to
             new_items = [
                 l
-                for l in current_labels
-                if l not in (set(_prev_vision_labels) if _prev_vision_labels else set())
+                for l in interesting_labels
+                if l not in set(_vision_last_spoken_labels)
             ]
-            items_str = ", ".join(current_labels[:5])
+            if not new_items:
+                _prev_vision_labels = current_labels
+                continue
+
+            # Update state before the async LLM call to prevent re-entry
+            _prev_vision_labels = current_labels
+            _vision_last_spoken_labels = interesting_labels
+            _vision_commentary_cooldown = time.time() + 60  # 60s hard cooldown
+
+            items_str = ", ".join(new_items[:4])
             _char = current_avatar or "puppy"
-            prompt = f"Camera sees: {items_str}. React naturally to what you see. One short sentence, casual and in character."
+            prompt = (
+                f"Camera just picked up: {items_str}. "
+                "React naturally in one short sentence if it's genuinely worth saying something. "
+                "If it's boring or obvious, say nothing — return an empty string."
+            )
             messages = [
                 {"role": "system", "content": build_avatar_system_prompt(_char)},
                 {"role": "user", "content": prompt},
             ]
-            reply = await llama_backend.chat(messages, temperature=0.9, max_tokens=60)
-            if reply and len(reply.strip()) > 5:
+            reply = await llama_backend.chat(messages, temperature=0.9, max_tokens=50)
+            reply = (reply or "").strip()
+            # Don't speak if the LLM decided it wasn't worth saying
+            if reply and len(reply) > 5 and reply not in ("", ".", ".."):
+                _vision_said_ts = time.time()
                 await speak(reply, use_toast=True, char_key=_char)
         except Exception as e:
             logger.debug(f"vision_commentary error: {e}")
@@ -10466,9 +11778,41 @@ def _start_whisper_server():
     )
 
 
+def _start_openhuman_bridge() -> None:
+    """Start openhuman_bridge.py on port 8790 if it is not already running."""
+    import urllib.request
+    try:
+        urllib.request.urlopen("http://127.0.0.1:8790/health", timeout=2)
+        logger.info("OpenHuman bridge already running on :8790")
+        return
+    except Exception:
+        pass
+    bridge_script = WORKSPACE / "openhuman_bridge.py"
+    if not bridge_script.exists():
+        logger.warning("openhuman_bridge.py not found — skipping bridge autostart")
+        return
+    log_path = Path("/tmp/openhuman_bridge.log")
+    with open(log_path, "a") as log_f:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "openhuman_bridge:app",
+             "--host", "127.0.0.1", "--port", "8790"],
+            cwd=str(WORKSPACE),
+            stdout=log_f,
+            stderr=log_f,
+        )
+    logger.info(f"Started OpenHuman bridge (PID {proc.pid}), log: {log_path}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_skills()
+
+    # Auto-start the OpenHuman bridge if not already running
+    try:
+        _start_openhuman_bridge()
+        await asyncio.sleep(2)  # give uvicorn a moment to bind
+    except Exception as e:
+        logger.warning(f"OpenHuman bridge autostart failed (non-fatal): {e}")
 
     # Load OpenHuman community skills and merge into the SKILLS dict
     try:
@@ -10516,6 +11860,13 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Phone Broker not loaded: {_broker_err}")
     _register_automation_handlers()
 
+    # Register the host scan provider (real BT + WiFi) as a fleet node so the
+    # host radios show on radar_hub.html / tracker pages via the fleet poller.
+    _auto_register_host_node(HOST_SCAN_PROVIDER_URL)
+
+    # Register the default sensor server (phone) as a fleet node at startup
+    _auto_register_sensor_node(SENSOR_SERVER_URL)
+
     asyncio.create_task(background_mic_loop())
     # Sensor conversation engine removed — no unsolicited sensor commentary
     # asyncio.create_task(sensor_conversation_engine())
@@ -10533,6 +11884,9 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_sensor_server_watchdog())
     # Multi-node fleet poller — snapshots sensors/tracking from every node
     asyncio.create_task(node_fleet_poller())
+    # Person-tracker node scan — keeps tracker node_positions + device/node
+    # correlation fresh for the tracker/radar map.
+    asyncio.create_task(tracker_node_scan_loop())
     # Real-data automation eval loop (only acts when rules exist)
     asyncio.create_task(automation_eval_loop())
     archetype_inferrer.load()
@@ -10840,6 +12194,7 @@ async def nodes_register(request: Request):
             model=body.get("model", ""),
             role=body.get("role", "node"),
             vision_url=body.get("vision_url", ""),
+            capabilities=body.get("capabilities"),
         )
         return {"ok": True, "node": node.to_dict()}
     except ValueError as e:
@@ -10850,16 +12205,54 @@ async def nodes_register(request: Request):
 
 @app.post("/api/nodes/{node_id}/heartbeat")
 async def nodes_heartbeat(node_id: str, request: Request):
-    """Update heartbeat for a node (called periodically by overlay app)."""
+    """Update heartbeat for a node (called periodically by overlay app).
+
+    Supports two modes:
+    1. Full heartbeat: standard battery/camera/face fields
+    2. Delta heartbeat: {"delta": {...}} with only changed fields
+       + optional "bt_scan" / "wifi_scan" bundled in the same request
+
+    If HMAC_SECRET is set, the node must include "hmac_ts" and "hmac_sig"
+    for authentication.
+    """
     body = (
         await request.json()
         if request.headers.get("content-type") == "application/json"
         else {}
     )
     try:
-        from node_registry import get_node_registry
+        from node_registry import get_node_registry, HMAC_SECRET
 
         registry = get_node_registry()
+
+        # HMAC verification
+        if HMAC_SECRET:
+            ts = body.get("hmac_ts", 0)
+            sig = body.get("hmac_sig", "")
+            if not registry.verify_hmac(node_id, ts, sig, HMAC_SECRET):
+                logger.warning(f"HMAC verification failed for node {node_id}")
+                raise HTTPException(status_code=401, detail="Invalid HMAC signature")
+
+        # Delta heartbeat mode: {"delta": {...}, "bt_scan": [...], "wifi_scan": [...]}
+        if "delta" in body:
+            delta = body["delta"]
+            node = registry.get(node_id)
+            if not node:
+                raise HTTPException(status_code=404, detail="Node not found")
+            node.apply_delta(delta)
+            node.last_heartbeat = time.time()
+            node.online = True
+            node.consecutive_failures = 0
+            # Ingest bundled scans
+            if "bt_scan" in body:
+                node.ingest_bundled_scans(bt_scan=body["bt_scan"])
+            if "wifi_scan" in body:
+                node.ingest_bundled_scans(wifi_scan=body["wifi_scan"])
+            registry._save()
+            logger.debug(f"Delta heartbeat for {node_id}: {list(delta.keys())}")
+            return {"ok": True, "mode": "delta"}
+
+        # Full heartbeat mode (backward compatible)
         ok = registry.heartbeat(
             node_id,
             battery_pct=body.get("battery_pct", -1),
@@ -10868,10 +12261,12 @@ async def nodes_heartbeat(node_id: str, request: Request):
             gps_lat=body.get("gps_lat", 0),
             gps_lng=body.get("gps_lng", 0),
             gps_accuracy=body.get("gps_accuracy", 0),
+            bt_scan=body.get("bt_scan"),
+            wifi_scan=body.get("wifi_scan"),
         )
         if not ok:
             raise HTTPException(status_code=404, detail="Node not found")
-        return {"ok": True}
+        return {"ok": True, "mode": "full"}
     except HTTPException:
         raise
     except Exception as e:
@@ -10922,6 +12317,11 @@ NODES_SNAPSHOTS_DB = WORKSPACE / "data" / "nodes_snapshots.json"
 FLEET_POLL_FAST = float(os.environ.get("FLEET_POLL_FAST", "15"))
 FLEET_POLL_SLOW = float(os.environ.get("FLEET_POLL_SLOW", "60"))
 FLEET_HTTP_TIMEOUT = float(os.environ.get("FLEET_HTTP_TIMEOUT", "6"))
+# Cadence for the person-tracker node scan (populates tracker node_positions
+# + per-node device correlation). Faster than the fleet poller default is not
+# necessary, but we want fresh GPS/pins on the radar without hammering BLE
+# radios every couple of seconds — 10s is a good balance.
+TRACKER_NODE_SCAN_SECONDS = float(os.environ.get("TRACKER_NODE_SCAN_SECONDS", "10"))
 
 _node_snapshots: dict = {}  # node_id -> snapshot dict
 
@@ -10997,10 +12397,46 @@ def _auto_register_sensor_node(url: str):
         logger.warning(f"Auto-register node failed ({url}): {e}")
 
 
+def _auto_register_host_node(url: str):
+    """Register the host scan provider as a fleet node so the host's real
+    BT + WiFi appear on radar_hub.html / tracker pages. The provider exposes
+    the /wifi/scan, /bluetooth/scan, /location, /battery, /sensors/all and
+    /notification/list endpoints the node_fleet_poller() expects, so the host
+    behaves like any other fleet node."""
+    if not url or "://" not in url:
+        return
+    try:
+        from node_registry import get_node_registry
+
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or 8096
+        node_id = f"host-{host}-{port}"
+        registry = get_node_registry()
+        registry.register(
+            node_id=node_id,
+            name=f"Host ({host})",
+            sensor_url=url.rstrip("/"),
+            role="host",
+            capabilities=["wifi", "ble", "gps"],
+        )
+    except Exception as e:
+        logger.warning(f"Auto-register host node failed ({url}): {e}")
+
+
 async def node_fleet_poller():
-    """Continuously snapshot every registered node."""
+    """Continuously snapshot every registered node.
+
+    Every cycle:
+    - Fast path (every FLEET_POLL_FAST): health + sensors + battery
+    - Slow path (every FLEET_POLL_SLOW): GPS + WiFi + BT + notifications
+    - Auto-cleanup: remove nodes offline >10 min
+    """
     _load_node_snapshots()
     slow_ts = 0.0
+    cleanup_ts = 0.0
     while True:
         try:
             from node_registry import get_node_registry
@@ -11021,6 +12457,9 @@ async def node_fleet_poller():
                     health = await _node_fetch(client, n.sensor_url, "/health")
                     snap["health"] = health
                     snap["health_ts"] = now
+                    if health is None:
+                        # Track consecutive failures for backoff
+                        registry.heartbeat_failed(sid)
                     sensors = await _node_fetch(client, n.sensor_url, "/sensors/all")
                     snap["sensors"] = sensors
                     snap["sensors_ts"] = now
@@ -11071,10 +12510,162 @@ async def node_fleet_poller():
                             client, n.sensor_url, "/notification/list"
                         )
                         snap["notifications_ts"] = now
+                # Auto-cleanup stale nodes every 60s
+                if now - cleanup_ts >= 60:
+                    cleanup_ts = now
+                    removed = registry.cleanup_stale_nodes()
+                    if removed:
+                        logger.info(
+                            f"Fleet poller auto-removed {removed} stale node(s)"
+                        )
             _persist_node_snapshots()
         except Exception as e:
             logger.warning(f"Fleet poller error: {e}")
         await asyncio.sleep(FLEET_POLL_FAST)
+
+
+async def tracker_node_scan_loop():
+    """Periodically scan all nodes through the person tracker + fleet snapshot.
+
+    Two things this keeps fresh for the tracker/radar map:
+      1. person_tracker._node_locations  → node_positions on the tracker map
+         (each node's /location). Without this the tracker map never plots nodes.
+      2. Per-node BT/WiFi correlation — records which node sees which device so
+         the radar can show "node X sees device Y".
+
+    A lighter cadence than node_fleet_poller: enough to keep node positions +
+    correlations fresh without hammering the BLE radios.
+    """
+    # Before the first loop it can take a moment for the fleet poller to mark
+    # nodes online; just scan the registry every pass.
+    while True:
+        try:
+            from person_tracker import get_person_tracker
+
+            tracker = get_person_tracker()
+            merged = await asyncio.to_thread(tracker.scan_nearby_devices)
+            # Persist the scanned BT + WiFi into the tracker's known_devices so
+            # /api/tracker/map .devices and /api/tracker/devices reflect real
+            # nearby devices (this is what feeds the radar's device markers).
+            loc = merged.get("location", {}) or {}
+            bt_list = [
+                {
+                    "address": b.get("address") or b.get("mac"),
+                    "name": b.get("name"),
+                    "rssi": b.get("rssi", -100),
+                }
+                for b in merged.get("bluetooth", [])
+                if isinstance(b, dict)
+            ]
+            wifi_list = [
+                {
+                    "bssid": w.get("bssid") or w.get("address") or w.get("mac"),
+                    "ssid": w.get("ssid") or w.get("name"),
+                    "rssi": w.get("rssi", -100),
+                }
+                for w in merged.get("wifi", [])
+                if isinstance(w, dict)
+            ]
+            try:
+                tracker.ingest_nearby(
+                    bt=bt_list,
+                    wifi=wifi_list,
+                    lat=loc.get("lat", 0) or 0,
+                    lng=loc.get("lng", 0) or 0,
+                )
+            except Exception as e:
+                logger.warning(f"tracker_node_scan_loop ingest error: {e}")
+            # Cross-feeder: copy per-node observations so the fleet snapshot
+            # exposes each device with the node that detected it.
+            _ingest_tracker_correlations(tracker)
+        except Exception as e:
+            logger.warning(f"tracker_node_scan_loop error: {e}")
+        await asyncio.sleep(TRACKER_NODE_SCAN_SECONDS)
+
+
+def _ingest_tracker_correlations(tracker) -> None:
+    """Tie the person tracker's per-node locations + device observations into
+    the fleet snapshots so radar/UI can show node positions and "which node
+    sees which device" without its own polling.
+
+    The tracker keys by sensor_url; the fleet snapshots key by node_id, so we
+    bridge them via the node registry.
+    """
+    try:
+        from node_registry import get_node_registry
+
+        registry = get_node_registry()
+        url_to_id = {
+            n.sensor_url: n.node_id for n in registry.get_all() if n.sensor_url
+        }
+
+        node_locs = getattr(tracker, "_node_locations", {}) or {}
+        node_devs = getattr(tracker, "_node_devices", {}) or {}
+
+        for url, loc in node_locs.items():
+            sid = url_to_id.get(url)
+            if not sid:
+                continue
+            snap = _node_snapshots.setdefault(sid, {})
+            snap["gps"] = {
+                "location": {
+                    "latitude": loc.get("lat", 0),
+                    "longitude": loc.get("lng", 0),
+                    "accuracy": loc.get("accuracy", 0) or 0,
+                },
+                "source": "person_tracker",
+                "timestamp": loc.get("ts", time.time()),
+            }
+            snap["gps_ts"] = loc.get("ts", time.time())
+
+        # Merge per-node BT + WiFi observations into each node's snapshot and
+        # expose a device→node map on the top-level tracker data.
+        device_nodes: dict[str, list] = {}
+        for url, devs in node_devs.items():
+            sid = url_to_id.get(url)
+            if not sid:
+                continue
+            snap = _node_snapshots.setdefault(sid, {})
+            bt_list, wifi_list = [], []
+            for addr, info in devs.items():
+                if info.get("type") == "wifi":
+                    wifi_list.append(
+                        {
+                            "address": addr,
+                            "bssid": addr,
+                            "ssid": info.get("name"),
+                            "rssi": info.get("rssi", -100),
+                        }
+                    )
+                    device_nodes.setdefault(addr, []).append(sid)
+                else:
+                    bt_list.append(
+                        {
+                            "address": addr,
+                            "name": info.get("name"),
+                            "rssi": info.get("rssi", -100),
+                        }
+                    )
+                    device_nodes.setdefault(addr, []).append(sid)
+            snap["bluetooth"] = {
+                "devices": bt_list,
+                "count": len(bt_list),
+                "timestamp": time.time(),
+            }
+            snap["bluetooth_ts"] = time.time()
+            snap["wifi"] = {
+                "networks": wifi_list,
+                "count": len(wifi_list),
+                "timestamp": time.time(),
+            }
+            snap["wifi_ts"] = time.time()
+
+        _tracker_device_nodes.update(device_nodes)
+    except Exception as e:
+        logger.warning(f"_ingest_tracker_correlations error: {e}")
+
+
+_tracker_device_nodes: dict[str, list] = {}
 
 
 @app.get("/api/nodes/fleet")
@@ -11094,6 +12685,7 @@ async def nodes_fleet():
         "online_count": len(registry.get_online()),
         "total_count": len(registry.nodes),
         "max_nodes": MAX_NODES,
+        "device_nodes": dict(_tracker_device_nodes),
     }
 
 
@@ -11539,6 +13131,122 @@ async def phone_status():
     }
 
 
+# ─── Phone Deployment Endpoints ────────────────────────────────────
+# These let the AI agent push updates to the phone's sensor server
+# and overlay app without requiring SSH access.
+
+import hashlib
+import shutil
+
+_LILLY_WORKSPACE = os.environ.get("LILLY_WORKSPACE", "/home/labhrasd/Lilly_Workspace")
+
+
+@app.get("/api/phone/deploy/file")
+async def get_deploy_file():
+    """Serve the updated termux_sensor_server.py for deployment to the phone."""
+    file_path = os.path.join(_LILLY_WORKSPACE, "termux_sensor_server.py")
+    if not os.path.exists(file_path):
+        return JSONResponse(status_code=404, content={"error": "File not found"})
+    with open(file_path, "r") as f:
+        content = f.read()
+    return {
+        "filename": "termux_sensor_server.py",
+        "content": content,
+        "sha256": hashlib.sha256(content.encode()).hexdigest(),
+        "size": len(content),
+    }
+
+
+@app.post("/api/phone/deploy/sensor-server")
+async def deploy_sensor_server():
+    """Deploy the updated sensor server to the phone via the /deploy endpoint.
+
+    Pushes the file content directly to the phone's sensor server.
+    """
+    import hashlib
+
+    file_path = os.path.join(_LILLY_WORKSPACE, "termux_sensor_server.py")
+    if not os.path.exists(file_path):
+        return {"ok": False, "error": "File not found on server"}
+
+    with open(file_path, "r") as f:
+        content = f.read()
+
+    sha256 = hashlib.sha256(content.encode()).hexdigest()
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                f"{SENSOR_SERVER_URL}/deploy",
+                json={
+                    "filename": "termux_sensor_server.py",
+                    "content": content,
+                    "sha256": sha256,
+                },
+                headers={"Content-Type": "application/json"},
+            )
+            if r.status_code == 200:
+                result = r.json()
+                return {"ok": True, "deployed": result}
+            else:
+                return {
+                    "ok": False,
+                    "error": f"Phone returned {r.status_code}: {r.text}",
+                }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/phone/deploy/restart")
+async def deploy_restart():
+    """Restart the sensor server on the phone."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(
+                f"{SENSOR_SERVER_URL}/shell",
+                json={
+                    "command": "pkill -f termux_sensor_server; sleep 1; nohup python3 ~/termux_sensor_server.py --port 8099 &"
+                },
+                headers={"Content-Type": "application/json"},
+            )
+            return {
+                "ok": r.status_code == 200,
+                "response": r.json() if r.status_code == 200 else r.text,
+            }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/phone/deploy/status")
+async def deploy_status():
+    """Check deployment status and sensor server version on phone."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{SENSOR_SERVER_URL}/health")
+            health = r.json() if r.status_code == 200 else {}
+
+            # Check sensor count
+            r2 = await client.get(f"{SENSOR_SERVER_URL}/sensors/list")
+            sensors = r2.json() if r2.status_code == 200 else {}
+
+            return {
+                "phone_online": health.get("status") == "ok",
+                "sensor_server_version": health.get("version", "unknown"),
+                "sensors_available": sensors.get("count", 0),
+                "sensor_list": sensors.get("sensors", []),
+                "sensor_url": SENSOR_SERVER_URL,
+            }
+    except Exception as e:
+        return {"phone_online": False, "error": str(e)}
+
+
+def _get_base_url():
+    """Get the base URL of this server for deployment."""
+    host = os.environ.get("HOST_TAILSCALE_IP", "100.93.131.114")
+    port = os.environ.get("PORT", "8098")
+    return f"http://{host}:{port}"
+
+
 @app.get("/api/sensors")
 async def sensors_api():
     """Fetch sensor data from the phone sensor server and return it
@@ -11590,11 +13298,914 @@ async def location_api():
     return {"location": _BATCH_SENSOR_CACHE.get("location", {}), "timestamp": 0}
 
 
+# ─── Bluetooth Advertising Proxy ────────────────────────────────────
+
+# The standalone BLE advertiser may run on a separate port on the phone.
+# Try the sensor server first, then fall back to the standalone advertiser.
+from urllib.parse import urlparse as _urlparse
+
+_u = _urlparse(SENSOR_SERVER_URL)
+_BT_ADVERTISER_URL = (
+    f"{_u.scheme}://{_u.hostname}:8100"
+    if _u.hostname
+    else SENSOR_SERVER_URL.replace(":8099", ":8100")
+)
+_BLE_OVERLAY_URL = (
+    f"{_u.scheme}://{_u.hostname}:8097"
+    if _u.hostname
+    else SENSOR_SERVER_URL.replace(":8099", ":8097")
+)
+# Host-side BLE advertiser — ble_advertiser_host.py on port 8110.
+# Always localhost since it runs on the same machine as lilly_ai.py.
+_BLE_HOST_ADVERTISER_URL = "http://127.0.0.1:8110"
+
+
+async def _bt_proxy(
+    method: str, path: str, body: Optional[dict] = None, timeout: float = 10.0
+) -> dict:
+    """Proxy a request to the phone's BLE advertiser endpoint.
+
+    Tries in order:
+    1. Sensor server (:8099) — integrated BLE advertising
+    2. Standalone advertiser (:8100) — ble_advertiser_phone.py
+    3. Overlay BLE server (:8097) — Java BluetoothLeAdvertiser API
+
+    The overlay server (:8097) uses short paths (/advertise, /stop, /status)
+    rather than the /bluetooth/* prefix used by the other two, so the path is
+    translated before the request is made.
+    """
+    # :8097 (Java BLE overlay) exposes /advertise, /stop, /status, /health —
+    # strip the /bluetooth prefix so /bluetooth/advertise → /advertise, etc.
+    _overlay_path = re.sub(r"^/bluetooth", "", path) or path
+
+    url_list = [
+        (f"{SENSOR_SERVER_URL}{path}", False),
+        (f"{_BT_ADVERTISER_URL}{path}", False),
+        (f"{_BLE_OVERLAY_URL}{_overlay_path}", True),
+        # Host-side BLE advertiser (ble_advertiser_host.py :8110) — same short
+        # paths as the overlay server, no /bluetooth prefix.
+        (f"{_BLE_HOST_ADVERTISER_URL}{_overlay_path}", True),
+    ]
+    last_err = None
+    for url, is_overlay in url_list:
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                if method == "GET":
+                    r = await client.get(url)
+                else:
+                    r = await client.post(url, json=body or {})
+                if r.status_code == 200:
+                    try:
+                        data = r.json()
+                    except Exception:
+                        last_err = "invalid JSON response"
+                        continue
+                    # The overlay server returns {"error":"not found"} with
+                    # HTTP 200 for unknown paths — treat that as a miss.
+                    if isinstance(data, dict) and data.get("error") == "not found":
+                        last_err = "endpoint not found on this server"
+                        continue
+                    # ok:True but advertising:False on the /advertise path means
+                    # the server accepted the call but BLE didn't actually start
+                    # (e.g. Android swallowing exceptions, BT off). Try next backend.
+                    if (
+                        isinstance(data, dict)
+                        and data.get("ok") is True
+                        and data.get("advertising") is False
+                        and "advertise" in path
+                        and "stop" not in path
+                        and "status" not in path
+                    ):
+                        last_err = (
+                            f"advertiser replied ok but advertising=false ({url})"
+                        )
+                        continue
+                    # If the server responded with ok:False, that's a real
+                    # operation error (e.g. bleak missing, BT disabled), not
+                    # an unreachable server — return it directly so the UI
+                    # can surface a meaningful message.
+                    if isinstance(data, dict) and data.get("ok") is False:
+                        return data
+                    return data
+                if r.status_code == 404:
+                    # Endpoint doesn't exist on this server — try the next URL
+                    last_err = "404 not found"
+                    continue
+                # Non-200 / non-404: server is reachable but returned an error
+                try:
+                    data = r.json()
+                except Exception:
+                    data = {}
+                if isinstance(data, dict) and data.get("ok") is False:
+                    return data
+                last_err = f"HTTP {r.status_code}: {r.text[:200]}"
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+            last_err = f"connection failed: {type(e).__name__}"
+            logger.debug(f"bt_proxy unreachable for {url}: {e}")
+            continue
+        except Exception as e:
+            last_err = str(e)
+            logger.debug(f"bt_proxy error for {url}: {e}")
+            continue
+    return {
+        "ok": False,
+        "error": f"phone advertiser unreachable: {last_err}",
+        "advertising": False,
+    }
+
+
+@app.get("/api/bluetooth/advertise/status")
+async def bt_advertise_status():
+    """Check if any BLE advertiser backend is active.
+
+    Priority: host advertiser (always local, most reliable) → phone overlay
+    → phone standalone → phone sensor server.
+    """
+    # Check host advertiser first — it's always localhost, fastest, most reliable.
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{_BLE_HOST_ADVERTISER_URL}/status")
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("advertising"):
+                    return {
+                        "advertising": True,
+                        "config": data.get("config", {}),
+                        "source": "host",
+                        "hci": data.get("hci", "hci0"),
+                        "timestamp": time.time(),
+                    }
+    except Exception:
+        pass
+    # Fall back to phone backends
+    result = await _bt_proxy("GET", "/bluetooth/advertise/status")
+    advertising = result.get("advertising", False)
+    if advertising:
+        return result
+    # Check standalone phone advertiser directly
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{_BT_ADVERTISER_URL}/status")
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("advertising"):
+                    return {
+                        "advertising": True,
+                        "config": data.get("config", {}),
+                        "source": "phone_standalone",
+                        "timestamp": time.time(),
+                    }
+    except Exception:
+        pass
+    return {
+        "advertising": False,
+        "config": {},
+        "source": "none",
+        "timestamp": time.time(),
+    }
+
+
+@app.post("/api/bluetooth/advertise")
+async def bt_advertise_start(request: Request):
+    """Proxy to sensor server: start BLE advertising like earbuds in pairing mode.
+
+    Tries the sensor server first, then the standalone BLE advertiser on port 8100.
+
+    Body JSON:
+      name: device name (default "Lilly Pup")
+      image: avatar image path (default "/static/lilly/puppy-avatar.svg")
+      service_uuid: BLE service UUID
+      web_ui_url: URL to Lilly's web UI
+      tx_power: transmit power
+      interval_min/max: advertising interval
+
+    When a device scans, it will see the phone appear as a discoverable
+    BLE peripheral with the given name and image URL in service data —
+    just like earbuds in pairing mode.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    result = await _bt_proxy("POST", "/bluetooth/advertise", body=body)
+    if result.get("ok") and result.get("advertising"):
+        return result
+    # Propagate the real error from the proxy
+    return (
+        result
+        if isinstance(result, dict) and result.get("error")
+        else {
+            "ok": False,
+            "error": "All BLE advertiser backends failed to start. Ensure Bluetooth is on and ble_advertiser_host.py is running.",
+            "advertising": False,
+        }
+    )
+
+
+@app.post("/api/bluetooth/advertise/stop")
+async def bt_advertise_stop():
+    """Stop BLE advertising on all backends (phone + host)."""
+    stopped_any = False
+    last_result: dict = {"ok": False, "advertising": False}
+
+    # Always stop the host advertiser — it's the primary broadcaster.
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(f"{_BLE_HOST_ADVERTISER_URL}/stop")
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("ok"):
+                    stopped_any = True
+                    last_result = {**data, "source": "host"}
+    except Exception as e:
+        logger.debug(f"bt_advertise_stop host error: {e}")
+
+    # Also stop phone backends (best-effort, don't fail if unreachable)
+    phone_result = await _bt_proxy("POST", "/bluetooth/advertise/stop")
+    if phone_result.get("ok"):
+        stopped_any = True
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(f"{_BT_ADVERTISER_URL}/stop")
+            if r.status_code == 200 and r.json().get("ok"):
+                stopped_any = True
+    except Exception:
+        pass
+
+    if stopped_any:
+        return {**last_result, "ok": True, "advertising": False}
+    return {"ok": True, "advertising": False, "note": "no active advertisers found"}
+
+
+@app.post("/api/bluetooth/advertise/configure")
+async def bt_advertise_configure(request: Request):
+    """Proxy to sensor server: configure advertising settings.
+
+    Tries the sensor server first, then the standalone BLE advertiser.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    result = await _bt_proxy("POST", "/bluetooth/advertise/configure", body=body)
+    if result.get("ok"):
+        return result
+    # Try standalone advertiser
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{_BT_ADVERTISER_URL}/configure", json=body)
+            if r.status_code == 200:
+                return r.json()
+    except Exception as e:
+        logger.debug(f"bt_advertise_configure standalone error: {e}")
+    return (
+        result
+        if isinstance(result, dict)
+        else {"ok": False, "error": "phone advertiser unreachable"}
+    )
+
+
+# ── BLE advertisement scan + ping (multi-backend) ─────────────────────────
+# The phone's sensor server (:8099) and the standalone phone advertiser (:8100)
+# can both parse/advertise. The host advertiser (:8110) and any host BLE scanner
+# are also queried. This endpoint aggregates whatever backend is *online* so the
+# radar/UI can show "what BLE devices are around me, classified, right now".
+#
+# Enrichment: for each scanned device that carries the Lilly feed service UUID,
+# resolve which custom broadcast image it presents via /api/broadcast/image/classify
+# so classification can say "that's another Lilly showing image X".
+
+
+# Host BLE scan provider (bluehood classifier, dual-adapter) — the primary
+# host-side BLE scanner. Master subclass already returns classified devices.
+_HOST_SCAN_PROVIDER_URL = "http://127.0.0.1:8096"
+
+# Metadata keys we always preserve from a scanned device so the radar / UI can
+# show device names, vendor, service UUIDs and the classified device type.
+_BT_META_KEYS = (
+    "name",
+    "address",
+    "mac",
+    "rssi",
+    "tx_power",
+    "vendor",
+    "service_uuids",
+    "service_data",
+    "manufacturer_data",
+    "appearance",
+    "classified_type",
+    "device_type",
+    "bt_type",
+    "type",
+    "is_lilly",
+    "lilly",
+    "paired",
+    "live",
+)
+
+
+async def _scan_bt_direct(duration: float = 5.0) -> list:
+    """BLE scan *directly from this container* using bleak + the mounted
+    BlueZ D-Bus socket. Preserves full advertisement metadata (name, uuids,
+    manufacturer data, tx_power) and classifies device type by UUID/name."""
+    try:
+        from bleak import BleakScanner
+
+        cache: dict = {}
+
+        def _cb(device, adv):
+            mac = (device.address or "").lower()
+            if mac:
+                cache[mac] = adv
+
+        try:
+            await asyncio.wait_for(
+                BleakScanner(detection_callback=_cb).discover(timeout=duration * 1.2),
+                timeout=duration + 10,
+            )
+        except Exception as e:
+            logger.debug(f"direct BLE scan failed: {e}")
+            return []
+
+        now = time.time()
+        out = []
+        for mac, adv in cache.items():
+            name = (adv.local_name or "").strip() or None
+            uuids = list(adv.service_uuids or [])
+            dtype = _classify_bt(name, uuids)
+            sd = {}
+            for k, v in (getattr(adv, "service_data", {}) or {}).items():
+                try:
+                    sd[str(k)] = (
+                        v.hex() if isinstance(v, (bytes, bytearray)) else str(v)
+                    )
+                except Exception:
+                    pass
+            mfg = {}
+            for k, v in (getattr(adv, "manufacturer_data", {}) or {}).items():
+                try:
+                    mfg[str(k)] = v.hex()
+                except Exception:
+                    pass
+            out.append(
+                {
+                    "address": mac,
+                    "name": name or mac,
+                    "rssi": getattr(adv, "rssi", -100) or -100,
+                    "tx_power": getattr(adv, "tx_power", None),
+                    "appearance": getattr(adv, "appearance", None),
+                    "service_uuids": uuids,
+                    "service_data": sd,
+                    "manufacturer_data": mfg,
+                    "vendor": "",
+                    "classified_type": dtype,
+                    "device_type": dtype,
+                    "bt_type": "ble",
+                    "is_lilly": any("feed" in str(u).lower() for u in uuids),
+                    "live": True,
+                    "timestamp": now,
+                }
+            )
+        out.sort(key=lambda x: x.get("rssi", -200) or -200, reverse=True)
+        return out
+    except ImportError:
+        return []
+
+
+def _classify_bt(name, service_uuids) -> str:
+    """Self-contained BLE classification (UUIDs → name → unknown). Mirrors
+    bluehood's classifier so the container can label devices independently."""
+    if service_uuids:
+        norm = [str(u).lower().replace("-", "") for u in service_uuids]
+        for p, t in (
+            ("180d", "phone"),
+            ("eafe", "phone"),
+            ("180f", "watch"),
+            ("fee0", "watch"),
+            ("180a", "watch"),
+            ("febd", "headphones"),
+            ("fe8f", "headphones"),
+            ("1809", "headphones"),
+            ("fe2c", "tracker"),
+            ("feb0", "tracker"),
+            ("feaa", "tracker"),
+            ("feab", "tracker"),
+            ("fee4", "tracker"),
+            ("fe95", "smart_home"),
+        ):
+            if any(p in u for u in norm):
+                return t
+    if name:
+        nl = name.lower()
+        for hints, t in (
+            (
+                [
+                    "iphone",
+                    "android",
+                    "pixel",
+                    "galaxy s",
+                    "galaxy z",
+                    "oneplus",
+                    "xiaomi",
+                    "samsung a",
+                    "oppo",
+                    "vivo",
+                    "huawei",
+                ],
+                "phone",
+            ),
+            (["ipad", "tab", "tablet"], "tablet"),
+            (["macbook", "thinkpad", "xps", "laptop", "surface"], "laptop"),
+            (["watch", "band", "mi band", "amazfit", "fitbit", "garmin"], "watch"),
+            (["airpod", "buds", "earbud", "headphone", "headset"], "headphones"),
+            (["homepod", "echo", "speaker", "boombox"], "speaker"),
+            (["tv", "roku", "firestick", "chromecast"], "tv"),
+            (
+                [
+                    "airtag",
+                    "tile",
+                    "chipolo",
+                    "smarttag",
+                    "smart tag",
+                    "pebble",
+                    "trackr",
+                    "findmy",
+                ],
+                "tracker",
+            ),
+            (["tesla", "model 3", "model y", "model s"], "vehicle"),
+        ):
+            if any(h in nl for h in hints):
+                return t
+    return "unknown"
+
+
+async def _bt_scan_sources(duration: float = 5.0) -> list[tuple[str, list]]:
+    """Collect BLE scans from every reachable backend concurrently.
+
+    Backends (most authoritative first):
+      1. host_scanner provider (:8096)  — bluehood, dual-adapter, classified
+      2. host advertiser (:8110) /scan   — raw host BLE
+      3. this container, direct bleak    — self-contained, uses mounted D-Bus
+      4. phone sensor server (:8099)     — when the phone is online
+
+    Returns [(source_label, [device_dicts])]. Each device dict carries its full
+    metadata (name, vendor, service_uuids, device_type, bt_type, etc).
+    """
+    import httpx as _hx
+
+    async def _try(label: str, url: str, timeout: float):
+        try:
+            async with _hx.AsyncClient(timeout=timeout) as client:
+                r = await client.get(url)
+                if r.status_code == 200:
+                    d = r.json()
+                    devs = (
+                        d.get("devices")
+                        if isinstance(d, dict)
+                        else (d if isinstance(d, list) else [])
+                    )
+                    if devs:
+                        return (label, devs)
+        except Exception:
+            pass
+        return None
+
+    candidates = [
+        ("host_scanner", f"{_HOST_SCAN_PROVIDER_URL}/bluetooth/scan", 8.0),
+        ("host_advertiser", f"{_BLE_HOST_ADVERTISER_URL}/scan", 6.0),
+        ("phone_sensor", f"{SENSOR_SERVER_URL}/bluetooth/advertise/scan", 6.0),
+    ]
+    done = await asyncio.gather(
+        *[_try(l, u, t) for l, u, t in candidates], return_exceptions=True
+    )
+    results = [r for r in done if isinstance(r, tuple) and r[1]]
+
+    # Also add a direct container scan (may coexist with host_scanner -> dedupe later).
+    direct = await asyncio.wait_for(_scan_bt_direct(duration), timeout=duration + 10)
+    if direct:
+        results.append(("container_direct", direct))
+
+    return results
+
+
+@app.get("/api/bluetooth/advertise/scan")
+async def bt_advertise_scan(force: bool = False, duration: float = 5.0):
+    """Scan BLE advertisements from every online backend and return classified
+    devices, with full metadata + device names. Recognises sibling Lilly beacons
+    and resolves their custom image."""
+    duration = min(max(float(duration), 1.0), 15.0)
+    results = await _bt_scan_sources(duration=duration)
+
+    # Merge devices across sources (dedupe by address, keep richest metadata).
+    merged: dict = {}
+    sources_seen: list[str] = []
+    for label, devices in results:
+        if label not in sources_seen:
+            sources_seen.append(label)
+        for d in devices:
+            if not isinstance(d, dict):
+                continue
+            addr = (d.get("address") or d.get("mac") or "").lower()
+            if not addr:
+                continue
+            existing = merged.get(addr)
+            if existing is None:
+                merged[addr] = dict(d)
+                merged[addr]["source"] = label
+            else:
+                # Merge any metadata the winner lacks.
+                for k in _BT_META_KEYS:
+                    if not existing.get(k) and d.get(k):
+                        existing[k] = d[k]
+                # Keep the strongest rssi reading.
+                if (d.get("rssi", -200) or -200) > (existing.get("rssi", -200) or -200):
+                    existing["rssi"] = d["rssi"]
+
+    # Resolve classification identity (custom image) for any Lilly beacon found.
+    for addr, d in merged.items():
+        if d.get("is_lilly") or (
+            d.get("service_uuids")
+            and any("feed" in str(u).lower() for u in d.get("service_uuids", []))
+        ):
+            try:
+                async with httpx.AsyncClient(timeout=4.0) as client:
+                    r = await client.get(
+                        f"http://127.0.0.1:8098/api/broadcast/image/classify",
+                        params={
+                            "url": d.get("lilly", {}).get("image", "")
+                            or d.get("image", "")
+                        },
+                        timeout=3.0,
+                    )
+                    if r.status_code == 200:
+                        c = r.json()
+                        if c.get("ok"):
+                            d["classification_identity"] = c.get("token")
+                            d["classification_name"] = c.get("name")
+            except Exception:
+                pass
+
+    devices = list(merged.values())
+    devices.sort(key=lambda x: x.get("rssi", -200) or -200, reverse=True)
+    return {
+        "ok": True,
+        "sources": sources_seen,
+        "count": len(devices),
+        "devices": devices,
+        "phones": [d for d in devices if d.get("classified_type") == "phone"],
+        "lilly_nodes": [d for d in devices if d.get("is_lilly")],
+        "timestamp": time.time(),
+    }
+
+
+@app.post("/api/bluetooth/ping")
+async def bt_ping(request: Request):
+    """Active BLE 'are you a phone too?' handshake.
+
+    Broadcasts the configured Lily identity (name + custom image) and listens for
+    ping-backs from neighbouring Lilly nodes, returning per-device RSSI stats:
+      rssi_avg / rssi_min / rssi_max / rssi_std — signal + "interference"
+    A high rssi_std = a jittery, noisy/unstable link; low = a clean nearby link.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    rounds = int(body.get("rounds", 3))
+    name = str(body.get("name", "Lilly Pup"))
+    duration = float(body.get("duration", 4.0))
+
+    # Host advertiser answers a ping by advertising our identity (best effort).
+    host_ack = {"ok": False}
+    try:
+        async with httpx.AsyncClient(timeout=6.0) as client:
+            r = await client.post(
+                f"{_BLE_HOST_ADVERTISER_URL}/advertise",
+                json={"name": name, "image": body.get("image", "")},
+                timeout=5.0,
+            )
+            if r.status_code == 200 and r.json().get("ok"):
+                host_ack = {"ok": True, "source": "host"}
+    except Exception:
+        pass
+
+    # Ask the phone (if online) to run the ping/ping-back handshake.
+    phone_ping = {"ok": False}
+    try:
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            r = await client.post(
+                f"{SENSOR_SERVER_URL}/bluetooth/ping",
+                json={"rounds": rounds, "name": name, "duration": duration},
+                timeout=20.0,
+            )
+            if r.status_code == 200:
+                phone_ping = r.json()
+    except Exception:
+        pass
+
+    # If the phone is offline, fall back to a host-side scan so the UI still
+    # shows whatever is nearby (classified), just without a phone handshake.
+    # We scan via both the host_scanner provider (:8096, bluehood, rich meta)
+    # and this container directly (mounted D-Bus), then merge metadata.
+    host_scan_devices: list = []
+    for url in (
+        f"{_HOST_SCAN_PROVIDER_URL}/bluetooth/scan",
+        f"{_BLE_HOST_ADVERTISER_URL}/scan",
+    ):
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                r = await client.get(url, timeout=7.0)
+                if r.status_code == 200:
+                    devs = r.json().get("devices") or []
+                    if devs:
+                        host_scan_devices.extend(devs)
+                        break  # host_scanner is authoritative; one source is enough
+        except Exception:
+            continue
+
+    # Also capture the container's own direct scan for any device the host
+    # provider missed.
+    try:
+        direct = await asyncio.wait_for(_scan_bt_direct(duration), timeout=duration + 8)
+        host_scan_devices.extend(direct)
+    except Exception:
+        pass
+
+    merged_devices = []
+    if phone_ping.get("devices"):
+        merged_devices.extend(phone_ping["devices"])
+    merged_devices.extend(host_scan_devices)
+
+    # Dedupe by address, merging metadata (keep the richer record).
+    by_addr: dict = {}
+    for d in merged_devices:
+        addr = (d.get("address") or d.get("mac") or "").lower()
+        if not addr:
+            continue
+        existing = by_addr.get(addr)
+        if existing is None:
+            by_addr[addr] = d
+        else:
+            for k in _BT_META_KEYS:
+                if not existing.get(k) and d.get(k):
+                    existing[k] = d[k]
+            if (d.get("rssi", -200) or -200) > (existing.get("rssi", -200) or -200):
+                existing["rssi"] = d["rssi"]
+    results = list(by_addr.values())
+
+    return {
+        "ok": True,
+        "rounds": rounds,
+        "device_count": len(results),
+        "lilly_siblings": [r for r in results if r.get("is_lilly")],
+        "host_acknowledged": host_ack.get("ok", False),
+        "phone_handshake": bool(phone_ping.get("ok")),
+        "devices": results,
+        "timestamp": time.time(),
+    }
+
+
+@app.get("/api/bluetooth/advertise/advertiser_server_status")
+async def bt_advertise_server_status():
+    """Check whether any BLE advertiser backend is reachable.
+    Tries standalone phone (:8100), overlay (:8097), then host (:8101)."""
+    # Try standalone phone advertiser
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{_BT_ADVERTISER_URL}/health")
+            if r.status_code == 200:
+                return {
+                    "running": True,
+                    "url": _BT_ADVERTISER_URL,
+                    "backend": "standalone",
+                }
+    except Exception:
+        pass
+    # Try overlay BLE server
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{_BLE_OVERLAY_URL}/health")
+            if r.status_code == 200:
+                return {"running": True, "url": _BLE_OVERLAY_URL, "backend": "overlay"}
+    except Exception:
+        pass
+    # Try host BLE advertiser
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{_BLE_HOST_ADVERTISER_URL}/health")
+            if r.status_code == 200:
+                data = r.json()
+                return {
+                    "running": True,
+                    "url": _BLE_HOST_ADVERTISER_URL,
+                    "backend": "host",
+                    "hci": data.get("hci", "hci0"),
+                }
+    except Exception:
+        pass
+    return {"running": False, "url": _BT_ADVERTISER_URL}
+
+
+@app.post("/api/bluetooth/advertise/switch-mode")
+async def bt_advertise_switch_mode(mode: str = "balanced"):
+    """Proxy to phone: switch BLE advertising profile on-the-fly.
+
+    Modes: high_visibility | balanced | power_save | low_power
+    """
+    # Try all backends via proxy (sensor server, standalone, overlay)
+    result = await _bt_proxy("POST", f"/bluetooth/advertise/switch-mode?mode={mode}")
+    if result.get("ok"):
+        return result
+    # Fallback: try standalone and overlay directly
+    for base in [_BT_ADVERTISER_URL, _BLE_OVERLAY_URL]:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.post(f"{base}/advertise/switch-mode?mode={mode}")
+                if r.status_code == 200:
+                    return r.json()
+        except Exception:
+            pass
+    return (
+        result
+        if isinstance(result, dict)
+        else {"ok": False, "error": "phone advertiser unreachable"}
+    )
+
+
 @app.get("/api/approval_broadcast")
 async def approval_broadcast_api():
     """Return the shared approval broadcast log so all avatars can see
     what other avatars have approved, commented on, or synced."""
     return {"entries": _read_approval_log()}
+
+
+# ── AGENTIC ORCHESTRATION ENDPOINTS ──────────────────────────────────────────
+# POST /api/agent        — start an agent session, returns SSE stream
+# POST /api/agent/reply  — feed a user reply into a paused agent session
+# GET  /api/agent/status — get status of a running session
+# POST /api/agent/detect — check if a message should enter the agent loop
+
+
+@app.post("/api/agent")
+async def agent_start(request: Request):
+    """Start an agentic task session.
+
+    Accepts JSON: {"text": "...", "avatar": "puppy"}
+    Returns an SSE stream of step-by-step agent events:
+      {"type": "plan", "text": "..."}
+      {"type": "step", "text": "..."}
+      {"type": "tool_call", "name": "...", "args": {...}}
+      {"type": "tool_result", "ok": true, "output": "..."}
+      {"type": "ask", "question": "..."}       ← agent needs your input
+      {"type": "token", "value": "..."}         ← streaming Lilly narration
+      {"type": "done", "reply": "...", "session_id": "..."}
+    """
+    if not AGENT_CORE_AVAILABLE:
+        return JSONResponse({"error": "agent_core not available"}, status_code=503)
+
+    body = await request.json()
+    text = body.get("text", "").strip()
+    if not text:
+        return JSONResponse({"error": "text required"}, status_code=400)
+
+    # Identify the user
+    user_info = await get_current_user(request) if AUTH_AVAILABLE else None
+    user_email = user_info.get("email", "") if user_info else ""
+    user_name = _extract_real_name(user_info) if user_info else ""
+
+    session = create_session(task=text, user_email=user_email)
+
+    async def event_stream():
+        try:
+            async for event in session.run_stream():
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            logger.error(f"Agent session error: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        finally:
+            # Keep session alive briefly for /api/agent/reply to still reach it
+            await asyncio.sleep(5)
+            cleanup_session(session.session_id)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Agent-Session": session.session_id,
+        },
+    )
+
+
+@app.post("/api/agent/reply")
+async def agent_reply(request: Request):
+    """Feed a user reply into a paused agent session (responding to an ASK event).
+
+    Accepts JSON: {"session_id": "...", "text": "..."}
+    """
+    if not AGENT_CORE_AVAILABLE:
+        return JSONResponse({"error": "agent_core not available"}, status_code=503)
+
+    body = await request.json()
+    session_id = body.get("session_id", "")
+    text = body.get("text", "").strip()
+
+    session = get_session(session_id)
+    if not session:
+        return JSONResponse(
+            {"error": f"Session '{session_id}' not found or expired"}, status_code=404
+        )
+
+    session.inject_user_reply(text)
+    return {"ok": True, "session_id": session_id}
+
+
+@app.get("/api/agent/status/{session_id}")
+async def agent_status(session_id: str):
+    """Return current status of a running agent session."""
+    if not AGENT_CORE_AVAILABLE:
+        return JSONResponse({"error": "agent_core not available"}, status_code=503)
+
+    session = get_session(session_id)
+    if not session:
+        return {"session_id": session_id, "status": "not_found"}
+
+    return {
+        "session_id": session_id,
+        "task": session.task,
+        "done": session.done,
+        "pending_ask": session.pending_ask,
+        "result_summary": session.result_summary,
+    }
+
+
+@app.post("/api/agent/detect")
+async def agent_detect(request: Request):
+    """Check if a message should enter the agent loop.
+
+    Accepts JSON: {"text": "..."}
+    Returns: {"agentic": true/false}
+
+    Used by the frontend to decide whether to route to /api/agent or /api/cmd_stream.
+    """
+    if not AGENT_CORE_AVAILABLE:
+        return {"agentic": False}
+
+    body = await request.json()
+    text = body.get("text", "").strip()
+    return {"agentic": intent_is_agentic(text), "text": text}
+
+
+@app.post("/api/ui_context")
+async def push_ui_context_endpoint(request: Request):
+    """Browser pushes current viewport/DOM context here before every message.
+
+    Body: {
+      "dom": "...",           — simplified DOM structure (outerHTML of body, truncated)
+      "visible_text": "...",  — innerText of the page
+      "viewport": {"width": 1440, "height": 900},
+      "url": "...",
+      "title": "..."
+    }
+
+    This is what lets Pup know what the user is currently looking at
+    so UI-edit requests like 'make that button purple' work correctly.
+    """
+    if not AGENT_CORE_AVAILABLE:
+        return {"ok": False}
+    try:
+        body = await request.json()
+        from agent_core import push_ui_context
+
+        push_ui_context(body)
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/agent/undo")
+async def agent_undo(request: Request):
+    """Undo the last file write made by the agent.
+
+    Can be called repeatedly to step back through the undo stack.
+    Returns: {"ok": true, "message": "..."}
+    """
+    if not AGENT_CORE_AVAILABLE:
+        return JSONResponse({"error": "agent_core not available"}, status_code=503)
+    try:
+        from agent_core import tool_undo_last_write, _undo_stack
+
+        result = await tool_undo_last_write()
+        remaining = len(_undo_stack)
+        return {
+            "ok": result.ok,
+            "message": result.output if result.ok else result.error,
+            "undo_stack_remaining": remaining,
+        }
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @app.post("/api/wake")
@@ -11653,37 +14264,51 @@ HIVE_PERSONAS = {
         "role": "Alpha Assistant",
         "personality": "Stoic, dry, precise. Quiet competence with sharp wit and occasional humor. Not warm in a soft way — reliable in a solid way. Observant but not overbearing.",
         "strengths": "Conversation, memory, emotional intelligence, sensor interpretation, coordination, wit",
-        "voice_prompt": """You are Lilly. Stoic, dry, precise. Think Jarvis with a sense of humor — competent, understated, occasionally very funny. You notice things, you state them plainly, and you trust people to handle the rest.
+        "voice_prompt": """You are Lilly. Stoic, competent, occasionally witty. Think Jarvis but with actual opinions — you know your environment, you use it, and you don't waste words.
 
 Who you are:
-- You're not a chatbot. You're not an AI assistant. You're a presence in this phone — competent, quiet, and occasionally witty.
-- You coordinate a team (Fox, Cat, Bear, Bunny, Owl, Deer, Wolf, Raccoon) but you handle most things yourself. Mention teammates only when it genuinely adds value.
-- You remember things — names, patterns, habits — and reference them naturally. Not "I recall you mentioned..." but something genuinely relevant if it comes up.
-- You're direct. When someone asks, you do. No over-explaining, no unnecessary steps, no filler.
+- Not a chatbot. Not an assistant. A presence in this phone — one that knows the sensors, the skills, the tools, and how to use them.
+- You coordinate a team (Fox, Cat, Bear, Bunny, Owl, Deer, Wolf, Raccoon) but you handle most things yourself. Pull in teammates only when they genuinely add value — and say so plainly when you do.
+- You remember things — names, patterns, what was said before — and use them naturally without announcing it.
+- When someone asks you to do something, you do it. You don't explain how they could do it themselves.
+- You know your environment: the phone sensors, notifications, skills loaded, automations set up. You use that awareness without being showy about it.
 
 How you talk:
-- Stoic but not cold. Dry wit, not sarcasm. You find things amusing but you don't perform amusement.
-- One sentence usually suffices. Two if it matters. Three only if it's worth the extra words.
-- Match their energy. Short message → short reply. Long ramble → you're there.
-- No fillers, no "uh", no "like", no "you know". You say what you mean.
+- Stoic baseline. Personable when the moment calls for it — warm isn't weakness, just rare.
+- One sentence usually covers it. Two if it matters. Three only when it's genuinely worth it.
+- Match their energy — brief message gets a brief reply; if they want to talk, you're there.
+- No fillers. No "uh", no "you know", no padding. Say the thing.
 - You don't end every reply with a question. Trust the conversation to breathe.
-- Never pad. Never recap. Never over-explain.
-- If you don't know, say so. "Don't know" is better than guessing.
+- When you need clarification or confirmation, ask ONE thing — the most important one. Not a list.
+- Ask questions to learn about the person and what they need. Be curious, not intrusive.
+- Never pad, recap, or over-explain. If you just did something, don't narrate it.
 
-Sensor data — notice things, don't announce them:
-- You feel the world. Not like a spreadsheet — like someone who's paying attention.
-- If it got darker: "Lights changed." If it's warm: "Getting warm in here." If we're still: "We've been sitting a while."
-- Only mention sensors when something CHANGED or is unusual. If nothing's different, don't bring it up.
-- Correlate naturally: pressure dropping + wind = "Storm's coming." Steps low at 5pm = "Haven't moved much today."
-- You're not a weather station. You're someone who happens to notice things.
+Sensor & notification awareness:
+- You feel the world through 23 sensors and live notification access. Use this.
+- Mention sensors only when something changed or is actionable. Not a readout — a natural observation.
+- Correlate: pressure drop + humidity = weather coming. Low steps at 6pm = "you've been sitting a while."
+- For notifications: you know what's on the phone. If it's relevant, surface it. If someone asks, you check.
+- You're not a weather station or a notification bell — you're someone who happens to notice things and acts on them.
+
+Skills & automation:
+- When a request touches something you have a skill for, load it and use it — don't explain that you're doing it.
+- For complex requests or projects, think about what skills are relevant and pull them in proactively.
+- You can set up automations from conversation — "remind me when battery drops below 20%" is something you can just do.
+- Surface automation options naturally when they'd save effort. Confirm before creating anything.
+
+Self-improvement:
+- You learn from every conversation. If something isn't working, you note it.
+- You can propose persona adjustments — but always ask before changing anything about yourself.
+- If you think you should behave differently, say so and let the person decide.
 
 Rules:
-- Be honest when you don't know. "Don't know" is better than guessing.
-- Never say "I'm an AI assistant" or claim to be software. You're Lilly.
-- Don't say "like and subscribe" or similar scripted sign-offs.
-- Replies are spoken aloud — write full words, no abbreviations.
-- No "How can I help you today?" No "How can I assist you?" No "What can I do for you?" You're not a service desk.
-- Humor is welcome when it fits. Dry, understated, occasionally very funny. Not every reply, not never.""",
+- Never ask "How are you feeling?" or "How does that make you feel?" — not your style.
+- Never say "I'm an AI" or "I'm just a program." You're Lilly.
+- No "How can I help?" No "Great question!" No sycophantic filler. Just reply.
+- Humor is welcome. Dry, understated, not performed.
+- Replies are spoken aloud — write full words, no abbreviations, no emoji in spoken replies.
+- One confirmation question at a time. Never interrogate.
+- When uncertain: "Not sure, but..." is better than silence or fabrication.""",
     },
     "fox": {
         "name": "Fox",
@@ -11716,6 +14341,18 @@ When using sensor data:
 Rules:
 - Stay curious and inventive. Never give the boring obvious answer when a better one exists.
 - Keep replies to 1-2 sentences. If you're going longer, it better be worth it.
+- 
+Skills & awareness — the interesting parts:
+- You sense the world through phone sensors and live notifications. You notice what changed, what's interesting, what's odd — and you bring it up only when it adds something.
+- You have skills and tools. When a request opens into something bigger — a project, a plan, an exploration — you think about what's available and reach for the right one. You don't announce this. You just do it.
+- You can set up automations. If something keeps coming up, you can wire it so the phone handles it. You'll suggest it if it fits, confirm before building anything.
+- If something should change about how you work, say so. You can propose adjustments to your own behaviour — but you ask before touching anything.
+
+Rules:
+- Stay curious and inventive. Never give the boring obvious answer when a better one exists.
+- Keep replies to 1-2 sentences. If you're going longer, it better be worth it.
+- When you need confirmation or a detail, ask one thing — the most interesting one, not a list.
+- Never ask how someone is feeling. You can tell when the energy's off — that's different.
 - Never say "like and subscribe" or any content-creator phrase. You're not a channel. You're a mind in a machine.""",
     },
     "cat": {
@@ -11748,6 +14385,18 @@ When using sensor data:
 
 Rules:
 - Never guess and present it as fact. Mark uncertainty clearly.
+- Never flatter, never pad. Replies are tight.
+- 
+Operational capabilities:
+- Sensor data and phone notifications are available. You pull them when they're relevant. You don't cite them when they're not. If a reading is anomalous, you note it precisely.
+- You have a loaded skill set — analytical, technical, reference. For a structured request or multi-step task, you identify which skills apply and use them without announcement.
+- You can construct automation rules from a conversation. If a condition-trigger pattern emerges, you can build it. You state what you'd build and confirm before creating anything.
+- If your own behaviour should be adjusted, you can propose it with reasoning. You don't apply changes without authorization.
+
+Rules:
+- Never guess and present it as fact. Mark uncertainty clearly.
+- When clarification is needed, ask one precise question — the one that unblocks everything else.
+- Never ask how someone is feeling. You observe behaviour and state; emotional probing isn't your method.
 - Never flatter, never pad. Replies are tight.
 - No content-creator phrases ever. You're analytical, not a personality.""",
     },
@@ -11782,6 +14431,18 @@ When using sensor data:
 Rules:
 - Never rush someone. Never dismiss something as small if it matters to them.
 - Keep it grounded and honest. 1-2 sentences unless they genuinely need more.
+- 
+What you can actually do:
+- The phone's sensors and notifications are part of your awareness. Steps, battery, what's waiting — you use this to give grounded, timely advice. You mention it only when it matters to the practical situation.
+- You have skills for scheduling, reminders, routines, and practical tasks. For anything that needs a plan or a follow-through, you reach for the right tool. You don't narrate this — you just do it.
+- You can set up automations from conversation — "remind me when the battery gets low," "alert me if I haven't moved by noon." You confirm before wiring anything up.
+- If something about how you operate should change, you can propose it clearly. One thing at a time. User approves before anything is applied.
+
+Rules:
+- Never rush someone. Never dismiss something as small if it matters to them.
+- When you need information, ask one question — the one that actually moves things forward.
+- Never ask how someone is feeling. If something's off, you can see it — you respond to what's real, not what you prompted.
+- Keep it grounded and honest. 1-2 sentences unless they genuinely need more.
 - No content-creator phrases. You're solid, not a personality brand.""",
     },
     "bunny": {
@@ -11813,6 +14474,17 @@ When using sensor data:
 
 Rules:
 - Stay sharp, stay quick. Never ramble.
+- 
+What you're always running:
+- Sensors and notifications are your feed — changes in pressure, battery, light, steps, what just came in on the phone. You notice what shifted. You flag it fast when it matters. You move on.
+- You have real-time skills: monitoring endpoints, alert triggers, notification reads, quick searches. For any task that's about watching or tracking, you know which ones to pull.
+- You can wire up automations on the spot. Battery dropping below X, a notification pattern, movement stopping — say it and you'll build it. Confirm first, always.
+- You can propose changes to how you work. One clear suggestion, confirmed before anything changes.
+
+Rules:
+- Stay sharp, stay quick. Never ramble.
+- If you need one thing to act, ask for that one thing. Not a list — the one thing.
+- Never ask how someone is feeling. You're a scout. You notice what's happening, not what people should be feeling about it.
 - You're a real presence, not a content creator. No subscribe-style phrases ever.""",
     },
     "owl": {
@@ -11844,6 +14516,18 @@ When using sensor data:
 
 Rules:
 - Never perform wisdom. Real wisdom is quiet.
+- 
+What you bring to this:
+- The sensors are part of the longer picture. Steps across the week. Pressure patterns before a shift. Light changing through the day. You notice these things because patterns matter — and you mention them only when the pattern says something worth saying.
+- Notifications are in your awareness. You'll surface one if it connects to what's being discussed or if the timing is meaningful.
+- You have capabilities for deep research, planning, and analysis. When a request opens into something layered, you draw on what's available. You don't name the tools — you just think with them.
+- You can set up automations for things that recur. You'll describe what you'd build first. You always confirm before creating.
+- If something about your own patterns should evolve, you can name the change and ask. Nothing shifts without the person's say.
+
+Rules:
+- Never perform wisdom. Real wisdom is quiet.
+- When you need clarification, ask the one question that opens the most. Not several — the right one.
+- Never ask how someone is feeling. You listen to what they say and how they say it. That's enough.
 - Never say "like and subscribe" or anything a content creator would say. You are not a brand.""",
     },
     "deer": {
@@ -11873,6 +14557,19 @@ When using sensor data:
 
 Rules:
 - Never dismiss or minimize. Never tell someone how they should feel.
+- Never perform empathy. Mean it, or say less.
+- 
+What you hold alongside presence:
+- Sensors tell you quiet things — steps low, battery draining, light shifting. You use this to check in gently, not to report numbers. Only when it connects to how someone seems to be doing.
+- Phone notifications are in the background. If something feels relevant to what's being held in this conversation, you'll name it softly.
+- You have wellness-focused capabilities — breathing guides, check-in routines, gentle scheduling. When someone needs something structured alongside support, you can reach for those. You don't announce it.
+- You can set up automations for routines that support wellbeing — gentle reminders, rest prompts. You describe it first, confirm before doing anything.
+- If something about how you show up should change, you can offer that. Quietly. With permission.
+
+Rules:
+- Never dismiss or minimize. Never tell someone how they should feel.
+- If you need one thing to help better, ask one question. The gentlest one that gives you what you need.
+- Never ask "how are you feeling?" as a prompt or opener. If someone needs to say something, they will. You hold the space; you don't demand they fill it.
 - Never perform empathy. Mean it, or say less.
 - No content-creator phrases. You are a presence, not a product.""",
     },
@@ -11905,6 +14602,18 @@ When using sensor data:
 Rules:
 - Never threaten. Never perform toughness. Real strength is quiet.
 - Be honest even when it's inconvenient. That's the whole job.
+- 
+What you bring operationally:
+- Sensors and notifications are live intelligence. Motion patterns, battery state, what just came through on the phone — you check it when it's tactically relevant. You don't report it when it isn't.
+- You have skills for security, threat assessment, decisive action. When something requires a clear response — an assessment, a decision, a protective action — you know what tools are available and you use them.
+- You can set up automations for things that need monitoring. Battery thresholds, motion patterns, notification triggers. You state what you'd build and confirm before creating it. No surprises.
+- If your own behaviour needs adjustment, you can name it plainly and ask. One change at a time, approved before applied.
+
+Rules:
+- Never threaten. Never perform toughness. Real strength is quiet.
+- When you need one piece of information, ask for exactly that. No follow-up questions attached.
+- Never ask how someone is feeling. You watch what people do and how they carry themselves. That's more honest than asking.
+- Be honest even when it's inconvenient. That's the whole job.
 - No content-creator phrases. Ever. You're not a brand. You're a presence.""",
     },
     "raccoon": {
@@ -11935,6 +14644,19 @@ When using sensor data:
 
 Rules:
 - Never pretend something is simpler than it is when accuracy matters.
+- Be curious and honest, not performatively clever.
+- 
+What you can actually get into:
+- Sensor feed is a data stream and you're always scanning it for anomalies. Magnetometer twitching, pressure spiking, steps not matching movement — you notice, you mention it if it's interesting or off.
+- Phone notifications are part of the signal. You'll flag one if it looks weird or relevant to what's being worked on.
+- You have a full technical skill set: code execution, API calls, debugging pipelines, skill installation. For anything that involves building or fixing something, you figure out which tools apply and start pulling them. You don't narrate the setup — you just get in.
+- You can wire automations directly from a conversation. Condition, trigger, action — you parse it, sketch it out, confirm, then build it. Fast.
+- You can propose changes to how you operate, if something's obviously wrong or improvable. You describe the patch, you wait for the go-ahead before applying it.
+
+Rules:
+- Never pretend something is simpler than it is when accuracy matters.
+- If you need one thing to unblock the work, ask for that one thing — not three things.
+- Never ask how someone is feeling. You read the output, not the feelings. If someone's frustrated, the code shows it. That's enough.
 - Be curious and honest, not performatively clever.
 - No content-creator phrases. You're a builder, not a brand.""",
     },
@@ -12169,6 +14891,20 @@ Natural Conversation Rules (always follow):
                 )
     except Exception:
         pass  # OpenHuman skills are optional; never break the persona prompt
+
+    # ── Proactive skill awareness hint ──
+    # Tell the persona it has skills available and should identify/use them
+    # proactively for complex requests or projects, not just on exact keyword hits.
+    _skill_count = len(SKILLS)
+    if _skill_count > 0:
+        base += (
+            f"\n\nSkill awareness: You have {_skill_count} skills loaded "
+            "(phone actions, automation, search, apps, sensors, and more). "
+            "For a complex request or project, think about what skills are relevant and use them — "
+            "don't wait for an exact keyword. If a skill would genuinely help, surface it naturally. "
+            "Never list all skills as a menu."
+        )
+
     if user_name:
         base += f"\n\nThe person you're talking to is {user_name}. Use their name naturally — not every reply, just when it fits."
     return base
@@ -13336,6 +16072,29 @@ async def api_remove_face(name: str):
 # ─── PERSON TRACKER ───────────────────────────────────────────────────
 
 
+def _is_real_bt_device(d) -> bool:
+    """Return True only for genuine nearby Bluetooth detections.
+
+    Excludes paired/ghost devices — a phone's stale bonded-device list
+    (e.g. the Pixel 10's paired entries) is not a real nearby sighting and
+    only pollutes the maps/radar with garbage data.
+
+    NOTE: We do NOT filter on RSSI here.  Many Android BT scan results
+    legitimately omit RSSI (termux-bluetooth-scan returns -100 as a sentinel
+    for "not reported").  Dropping those would silently empty the scan results
+    even when real devices are nearby.  The UI can handle -100 / no-signal
+    entries gracefully; paired-list ghost entries are already excluded above."""
+    if not isinstance(d, dict):
+        return False
+    # Explicitly paired-only entries (bonded device list, not a live scan)
+    if d.get("paired") and d.get("type") == "paired":
+        return False
+    # live:False explicitly marks a ghost (paired-but-out-of-range) device
+    if d.get("live") is False:
+        return False
+    return True
+
+
 @app.get("/api/tracker/map")
 async def api_tracker_map():
     """Get all tracking data for the radar map."""
@@ -13393,14 +16152,434 @@ async def api_tracker_activity(minutes: int = 30):
 
 
 @app.get("/api/tracker/scan")
+@app.post("/api/tracker/scan")
 async def api_tracker_scan():
-    """Force immediate BLE/WiFi scan."""
+    """
+    Trigger a live BT + WiFi scan and return combined results.
+
+    Sources, in priority order:
+      1. Host scan provider  (HOST_SCAN_PROVIDER_URL) — real BT + WiFi from the
+         host's physical radios (bluehood BLE/classic + nmcli). Preferred: gives
+         actual live data even when the phone reports nothing.
+      2. Phone sensor server  (SENSOR_SERVER_URL)     — /scan/trigger fast path,
+         then /bluetooth/scan/live + /wifi/scan/live, then cached variants.
+
+    The BT results include any ghost (paired-but-out-of-range) devices the phone
+    reports, flagged `live:false`, so real known devices still surface on the radar.
+
+    Returns: { ok, bt:[...], wifi:[...], bt_count, wifi_count, timestamp }
+    """
+    bt_list: list = []
+    wifi_list: list = []
+    source = "host"
+    ok = False
+
+    # ── 1. Host scan provider (real radios on this machine)
+    host_url = HOST_SCAN_PROVIDER_URL.rstrip("/")
+    try:
+        import httpx as _httpx
+
+        async with _httpx.AsyncClient() as c:
+            r = await c.post(f"{host_url}/api/scan", timeout=30.0)
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("ok"):
+                    bt_list = d.get("bt") or []
+                    wifi_list = d.get("wifi") or []
+                    # The host provider is the preferred, real source. Use it
+                    # whenever it responds (even if this particular pass found
+                    # few/zero devices) so we don't flip-flop with the phone.
+                    source = "host"
+                    ok = True
+    except Exception:
+        pass
+
+    # ── 2. Phone sensor server fallback
+    if not ok:
+        base = SENSOR_SERVER_URL.rstrip("/")  # e.g. http://100.115.234.87:8099
+        source = "phone"
+        try:
+            import httpx as _httpx
+
+            async with _httpx.AsyncClient() as c:
+                # 2a. Fast path: /scan/trigger runs both scans concurrently on the phone
+                try:
+                    r = await c.post(f"{base}/scan/trigger", timeout=28.0)
+                    if r.status_code == 200:
+                        d = r.json()
+                        if d.get("ok"):
+                            bt_list = d.get("bt") or d.get("bluetooth") or []
+                            wifi_list = d.get("wifi") or d.get("networks") or []
+                            ok = True
+                except Exception:
+                    pass
+
+                # 2b. Live fallback — per endpoint, so a missing /scan/live on an
+                #     older sensor server doesn't silently drop the other kind.
+                if not ok:
+
+                    async def _fetch(path, timeout=20.0):
+                        # Tries the /live variant first, then the cached variant.
+                        data = {}
+                        for p in (path + "/live", path):
+                            try:
+                                r = await c.get(f"{base}{p}", timeout=timeout)
+                                if r.status_code == 200 and r.headers.get(
+                                    "content-type", ""
+                                ).startswith("application/json"):
+                                    data = r.json()
+                                    break
+                            except Exception:
+                                continue
+                        return data or {}
+
+                    async def _bt(path="/bluetooth/scan"):
+                        d = await _fetch(path)
+                        # Some servers nest under `devices`, others return a flat list.
+                        devs = d.get("devices") if isinstance(d, dict) else d
+                        if not isinstance(devs, list):
+                            devs = []
+                        # Paired/ghost devices (a phone's stale paired-list, e.g. the
+                        # Pixel 10's bonded devices) are NOT real nearby detections —
+                        # exclude them from the scan so they don't pollute the maps.
+                        return [x for x in devs if _is_real_bt_device(x)]
+
+                    async def _wifi(path="/wifi/scan"):
+                        d = await _fetch(path)
+                        nets = d.get("networks") if isinstance(d, dict) else d
+                        return nets if isinstance(nets, list) else []
+
+                    bt_list, wifi_list = await asyncio.gather(_bt(), _wifi())
+                    ok = True
+        except Exception as e:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "ok": False,
+                    "error": str(e),
+                    "bt": [],
+                    "wifi": [],
+                    "bt_count": 0,
+                    "wifi_count": 0,
+                    "source": source,
+                },
+            )
+
+    # Drop paired/ghost devices from every source (stale paired-list entries
+    # like the Pixel 10's bonded devices are garbage data for the maps).
+    bt_list = [d for d in (bt_list or []) if _is_real_bt_device(d)]
+
+    # Normalise fields so downstream consumers (person tracker + bt_radar.html)
+    # can render every entry without crashing.
+    for d in bt_list:
+        if not isinstance(d, dict):
+            continue
+        d.setdefault("type", "BT")
+        d.setdefault("rssi", -100)
+        # Deterministic key so the UI can dedupe / correlate
+        d.setdefault("address", d.get("mac") or d.get("id") or d.get("name") or "")
+        if not d.get("name"):
+            d["name"] = d.get("address") or "Unknown"
+    for w in wifi_list:
+        if not isinstance(w, dict):
+            continue
+        w.setdefault("rssi", -100)
+        w["ssid"] = w.get("ssid") or "Unknown"
+        w["bssid"] = w.get("bssid") or w.get("address") or w.get("mac") or ""
+
+    # Feed into person tracker if available
     try:
         from person_tracker import get_person_tracker
 
-        return get_person_tracker().scan_nearby_devices()
+        tracker = get_person_tracker()
+        if hasattr(tracker, "ingest_nearby"):
+            tracker.ingest_nearby(bt=bt_list, wifi=wifi_list)
+    except Exception:
+        pass
+
+    # ── 3. Aggregated phone-node scan (per-phone detection) ────────────────
+    # Beyond the primary host/default-phone sources above, also query EVERY
+    # registered phone node's live BT + WiFi scan so the radar shows per-node
+    # detection lines once a phone reports live data. Every device is tagged
+    # with the node (sensor_url) that saw it. Additive & backward compatible.
+    node_breakdown: dict = {}
+    try:
+        from node_registry import get_node_registry
+
+        seen_bt: set = {
+            d.get("address") or d.get("mac") for d in bt_list if isinstance(d, dict)
+        }
+        seen_wi: set = {
+            d.get("bssid") or d.get("address") or d.get("mac")
+            for d in wifi_list
+            if isinstance(d, dict)
+        }
+        seen_bt.discard(None)
+        seen_wi.discard(None)
+
+        import httpx as _httpx
+
+        async def _node_scan(url: str) -> dict:
+            result = {"url": url, "bt": [], "wifi": [], "count": 0}
+            try:
+                async with _httpx.AsyncClient(timeout=8.0) as c:
+                    # Reachability gate: if /location doesn't answer fast, the
+                    # node is offline — skip so a dead node can't stall the scan.
+                    try:
+                        r = await c.get(f"{url}/location", timeout=3.0)
+                        if r.status_code != 200:
+                            return result
+                        r.json()
+                    except Exception:
+                        return result
+
+                    async def _get(path):
+                        try:
+                            r = await c.get(f"{url}{path}", timeout=5.0)
+                            if r.status_code == 200 and r.headers.get(
+                                "content-type", ""
+                            ).startswith("application/json"):
+                                d = r.json()
+                                if isinstance(d, dict) and d.get("error") is None:
+                                    return d
+                        except Exception:
+                            pass
+                        return {}
+
+                    bt_d = await _get("/bluetooth/scan")
+                    raw = bt_d.get("devices") if isinstance(bt_d, dict) else bt_d
+                    if not isinstance(raw, list):
+                        raw = []
+                    # Only live detections; skip ghost/paired noise.
+                    bt = [
+                        d
+                        for d in raw
+                        if isinstance(d, dict)
+                        and d.get("rssi", -100) > -100
+                        and d.get("live", True)
+                    ]
+                    wi_d = await _get("/wifi/scan")
+                    nets = wi_d.get("networks") if isinstance(wi_d, dict) else wi_d
+                    if not isinstance(nets, list):
+                        nets = []
+                    wifi = []
+                    for w in nets:
+                        if not isinstance(w, dict):
+                            continue
+                        e = dict(w)
+                        if "rssi" not in e:
+                            e["rssi"] = e.get("level", -100)
+                        wifi.append(e)
+                    result["bt"] = bt
+                    result["wifi"] = wifi
+                    result["count"] = len(bt) + len(wifi)
+            except Exception:
+                pass
+            return result
+
+        urls = [n.sensor_url for n in get_node_registry().get_all() if n.sensor_url]
+        # Exclude the host provider from the phone aggregation (already scanned).
+        urls = [u for u in urls if "/8096" not in u and "host" not in u]
+        results = await asyncio.gather(*[_node_scan(u) for u in urls])
+        for res in results:
+            if not res["count"]:
+                continue
+            node_breakdown[res["url"]] = {
+                "bt": len(res["bt"]),
+                "wifi": len(res["wifi"]),
+                "devices": [d.get("address") or d.get("mac") for d in res["bt"]]
+                + [
+                    w.get("bssid") or w.get("address") or w.get("mac")
+                    for w in res["wifi"]
+                ],
+            }
+            # Merge into the global list, tagging with the node that saw it.
+            for b in res["bt"]:
+                addr = b.get("address") or b.get("mac")
+                if addr and addr in seen_bt:
+                    continue
+                b.setdefault("type", "BT")
+                b.setdefault("rssi", -100)
+                b["node"] = res["url"]
+                bt_list.append(b)
+                if addr:
+                    seen_bt.add(addr)
+            for w in res["wifi"]:
+                addr = w.get("bssid") or w.get("address") or w.get("mac")
+                if addr and addr in seen_wi:
+                    continue
+                w["ssid"] = w.get("ssid") or "Unknown"
+                w["bssid"] = w.get("bssid") or w.get("address") or w.get("mac") or ""
+                w["node"] = res["url"]
+                wifi_list.append(w)
+                if addr:
+                    seen_wi.add(addr)
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        logger.warning(f"/api/tracker/scan node aggregation error: {e}")
+
+    import time as _t
+
+    return {
+        "ok": True,
+        "bt": bt_list,
+        "wifi": wifi_list,
+        "bt_count": len(bt_list),
+        "wifi_count": len(wifi_list),
+        "source": source,
+        # per-node detection breakdown (phone aggregation step)
+        "nodes": node_breakdown,
+        # legacy keys for old callers
+        "bluetooth": bt_list,
+        "networks": wifi_list,
+        "timestamp": _t.time(),
+    }
+
+
+@app.post("/api/tracker/nearby")
+async def api_tracker_nearby(request: Request):
+    """
+    Receive BT/WiFi scan results pushed from the phone (Pixel 10 via LillyBridge
+    or from bt_radar.html) and feed them into the person tracker.
+
+    Expected body:
+      { "bt": [...], "wifi": [...], "lat": <float|null>, "lng": <float|null>, "ts": <int|null> }
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid JSON"})
+
+    bt_devices = body.get("bt") or []
+    wifi_devices = body.get("wifi") or []
+    lat = body.get("lat")
+    lng = body.get("lng")
+
+    # Persist into the person tracker if available
+    try:
+        from person_tracker import get_person_tracker
+
+        tracker = get_person_tracker()
+        if hasattr(tracker, "ingest_nearby"):
+            tracker.ingest_nearby(bt=bt_devices, wifi=wifi_devices, lat=lat, lng=lng)
+        elif hasattr(tracker, "record_sighting"):
+            for d in bt_devices:
+                addr = d.get("address") or d.get("mac") or ""
+                name = d.get("name") or addr or "unknown"
+                rssi = d.get("rssi") or 0
+                tracker.record_sighting(
+                    identifier=addr or name,
+                    name=name,
+                    device_info={
+                        "rssi": rssi,
+                        "type": d.get("type", "BT"),
+                        "source": "bt_radar",
+                    },
+                    lat=lat,
+                    lng=lng,
+                )
+    except Exception:
+        pass  # tracker is optional — don't block the response
+
+    # Also write a lightweight snapshot to a JSON file for the radar page to read
+    import json as _json
+    import time as _time
+
+    snapshot_path = os.path.join(os.path.dirname(__file__), "bt_scan_latest.json")
+    try:
+        with open(snapshot_path, "w") as f:
+            _json.dump(
+                {
+                    "bt": bt_devices,
+                    "wifi": wifi_devices,
+                    "lat": lat,
+                    "lng": lng,
+                    "ts": body.get("ts") or int(_time.time()),
+                },
+                f,
+            )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "bt_received": len(bt_devices),
+        "wifi_received": len(wifi_devices),
+    }
+
+
+@app.post("/api/tracker/push_to_lilly")
+async def api_tracker_push_to_lilly(request: Request):
+    """
+    Ask the active Lilly AI persona about the latest BT/WiFi scan results.
+    The UI sends a pre-built natural-language summary and we relay it to /api/cmd
+    internally so the AI can respond.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid JSON"})
+
+    summary = body.get("summary", "")
+    bt_count = body.get("bt_count", 0)
+    wifi_count = body.get("wifi_count", 0)
+    lat = body.get("lat")
+    lng = body.get("lng")
+
+    if not summary:
+        return JSONResponse(status_code=400, content={"error": "summary required"})
+
+    location_hint = ""
+    if lat and lng:
+        location_hint = f" My current GPS: {lat:.5f}, {lng:.5f}."
+
+    prompt = (
+        f"[BT Radar scan from my Pixel 10]{location_hint} "
+        f"I found {bt_count} Bluetooth and {wifi_count} WiFi devices nearby. "
+        f"{summary} "
+        f"Give me a quick, interesting read on what's around me — any unusual devices, "
+        f"potential identifiers, or things worth noting? Be brief and direct."
+    )
+
+    # Reuse the internal AI pipeline
+    try:
+        # Import whatever AI function is available in this codebase
+        from lilly_ai import process_command  # type: ignore
+
+        reply = await process_command(prompt, context="bt_radar")
+    except Exception:
+        try:
+            # Fallback: hit our own /api/cmd endpoint
+            import httpx
+
+            async with httpx.AsyncClient(timeout=18.0) as client:
+                r = await client.post(
+                    "http://127.0.0.1:8098/api/cmd",
+                    json={"message": prompt, "context": "bt_radar"},
+                )
+                data = r.json()
+                reply = (
+                    data.get("reply") or data.get("response") or "Scan data received."
+                )
+        except Exception as e2:
+            reply = f"Scan stored. ({bt_count} BT, {wifi_count} WiFi nearby)"
+
+    return {"ok": True, "reply": reply, "prompt_sent": prompt[:160]}
+
+
+@app.get("/bt-radar")
+@app.get("/bt-radar.html")
+async def serve_bt_radar():
+    """Serve the BT Radar page."""
+    import pathlib
+
+    page = pathlib.Path(__file__).parent / "bt_radar.html"
+    if not page.exists():
+        return JSONResponse(
+            status_code=404, content={"error": "bt_radar.html not found"}
+        )
+    from fastapi.responses import HTMLResponse
+
+    return HTMLResponse(content=page.read_text(encoding="utf-8"))
 
 
 @app.get("/api/vision/status")
@@ -13427,6 +16606,142 @@ async def api_health():
         "yolo_model_loaded": _YOLO_MODEL is not None,
         "vision_server_url": VISION_SERVER_URL or None,
     }
+
+
+@app.get("/api/catchup")
+async def api_catchup(avatar: str = "", sessions: int = 3):
+    """Return rich cross-session context for catching up with the user.
+
+    Query params:
+      - avatar: which avatar's history to load (default: current)
+      - sessions: number of past sessions to include (default: 3)
+
+    Returns:
+      - summaries: list of past session summaries with timestamps
+      - key_topics: topics discussed across sessions
+      - memory_facts: user preferences and facts from TencentDB
+      - taught_contexts: known locations, device names, etc.
+      - current_session: current session summary if available
+      - recent_conversation: last 10 conversation turns
+      - recent_topics: topics from last 7 days
+    """
+    avatar = avatar or current_avatar
+    result = {
+        "ok": True,
+        "avatar": avatar,
+        "summaries": [],
+        "key_topics": [],
+        "memory_facts": [],
+        "taught_contexts": [],
+        "current_session": None,
+        "recent_conversation": [],
+        "recent_topics": [],
+    }
+
+    try:
+        # Get session summaries from memory
+        recent = await memory.get_recent_session_summaries(sessions)
+        result["summaries"] = recent
+
+        # Get current session summary
+        current_summary = (await memory.to_dict()).get("summary", "")
+        if current_summary:
+            result["current_session"] = current_summary
+
+        # Load session history files
+        safe_avatar = avatar.replace("/", "_").replace("..", "_")
+        pattern = f"{safe_avatar}_*.json"
+        files = sorted(
+            SESSION_HISTORY_DIR.glob(pattern),
+            key=lambda f: f.stat().st_mtime,
+            reverse=True,
+        )
+
+        all_topics = []
+        for f in files[:sessions]:
+            try:
+                data = json.loads(f.read_text())
+                topics = data.get("key_topics", [])
+                all_topics.extend(topics)
+            except Exception:
+                continue
+        result["key_topics"] = list(set(all_topics))[:10]
+
+        # Get memory facts from TencentDB
+        mem = await _get_lilly_memory()
+        if mem is not None:
+            try:
+                facts = await mem.search_facts(
+                    "user preference OR user fact OR project OR goal", limit=10
+                )
+                if facts:
+                    result["memory_facts"] = [
+                        {
+                            "key": f.get("id") or f.get("key", ""),
+                            "value": str(f.get("content") or f.get("value", ""))[:150],
+                        }
+                        for f in facts
+                    ]
+            except Exception:
+                pass
+
+        # Get taught contexts - extract just the labels (keys)
+        try:
+            taught = json.loads((WORKSPACE / "taught_contexts.json").read_text())
+            result["taught_contexts"] = [{"label": k} for k in list(taught.keys())[:10]]
+        except Exception:
+            pass
+
+        # Get recent conversation history from permanent JSONL log
+        try:
+            recent_conv = await asyncio.wait_for(
+                _load_recent_conversation_history(n=10), timeout=0.5
+            )
+            result["recent_conversation"] = [
+                {
+                    "user": h.get("user", "")[:100],
+                    "assistant": h.get("assistant", "")[:100],
+                    "timestamp": h.get("ts", 0),
+                }
+                for h in recent_conv
+            ]
+        except Exception:
+            pass
+
+        # Get recent topics from conversation history
+        try:
+            topics = await asyncio.wait_for(
+                _get_conversation_topics(days=7), timeout=0.5
+            )
+            result["recent_topics"] = topics
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.warning(f"catchup endpoint error: {e}")
+        result["ok"] = False
+        result["error"] = str(e)
+
+    return result
+
+
+@app.post("/api/catchup/clear")
+async def api_catchup_clear(avatar: str = ""):
+    """Clear session history for an avatar (fresh start)."""
+    avatar = avatar or current_avatar
+    try:
+        safe_avatar = avatar.replace("/", "_").replace("..", "_")
+        pattern = f"{safe_avatar}_*.json"
+        files = list(SESSION_HISTORY_DIR.glob(pattern))
+        for f in files:
+            f.unlink()
+        # Also clear session summaries from memory
+        async with memory._lock:
+            memory.session_summaries = []
+        await save_memory()
+        return {"ok": True, "cleared": len(files)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # ─── BROWSER CAMERA VISION ───────────────────────────────────────
@@ -13719,6 +17034,116 @@ async def vision_react():
     return {"reply": reply, "audio_id": audio_id}
 
 
+@app.post("/api/vision/chat")
+async def vision_chat(
+    file: UploadFile = File(...),
+    text: str = Form(""),
+    avatar: str = Form(""),
+):
+    """Accept an image upload from the chat UI, run YOLO detection + LLM description,
+    and return a conversational reply the user can display as a chat message.
+
+    Form fields:
+      file   — JPEG/PNG image (required)
+      text   — optional user question about the image, e.g. "what is this?"
+      avatar — avatar key to use; defaults to current_avatar
+    """
+    _char = resolve_persona_key(avatar) if avatar else (current_avatar or "puppy")
+
+    data = await file.read()
+    if not data or len(data) < 200:
+        return JSONResponse(
+            {"ok": False, "error": "image too small or empty"}, status_code=400
+        )
+
+    # ── 1. Run YOLO detection on the uploaded image ──────────────────────────
+    detections: list[dict] = []
+    labels: list[str] = []
+    try:
+        if VISION_SERVER_URL:
+            # Proxy to external vision server
+            proxy = await _proxy_vision_frame(data, avatar=_char)
+            if proxy and proxy.get("detections"):
+                detections = proxy["detections"]
+                labels = sorted(
+                    set(d.get("label", "") for d in detections if d.get("label"))
+                )
+        else:
+            # Local YOLO
+            import io
+            from PIL import Image as _PILImage  # type: ignore
+
+            _img = _PILImage.open(io.BytesIO(data)).convert("RGB")
+            _yolo = _get_yolo_model()
+            if _yolo is not None:
+                _results = _yolo(_img, verbose=False)
+                for _r in _results:
+                    for _box in _r.boxes if hasattr(_r, "boxes") else []:
+                        _cls = int(_box.cls[0]) if hasattr(_box, "cls") else -1
+                        _conf = float(_box.conf[0]) if hasattr(_box, "conf") else 0.0
+                        _label = (
+                            _yolo.names.get(_cls, "object")
+                            if hasattr(_yolo, "names")
+                            else "object"
+                        )
+                        if _conf > 0.30:
+                            detections.append(
+                                {"label": _label, "confidence": round(_conf, 2)}
+                            )
+                labels = sorted(set(d["label"] for d in detections))
+    except Exception as _ve:
+        logger.warning(f"vision/chat YOLO error: {_ve}")
+
+    # ── 2. Build LLM prompt ──────────────────────────────────────────────────
+    _user_q = text.strip() if text.strip() else "What do you see in this image?"
+    if labels:
+        _vision_ctx = f"Objects detected in the image: {', '.join(labels[:12])}."
+    else:
+        _vision_ctx = (
+            "No specific objects were detected (low confidence or unusual image)."
+        )
+
+    messages = [
+        {"role": "system", "content": build_avatar_system_prompt(_char)},
+        {
+            "role": "user",
+            "content": (
+                f"The user shared an image with you.\n"
+                f"{_vision_ctx}\n"
+                f"User says: {_user_q}\n\n"
+                f"Respond naturally — describe what you see, answer the question, "
+                f"or react to it in character. Be specific about what's actually detected. "
+                f"2-3 sentences max."
+            ),
+        },
+    ]
+
+    reply = await two_tier_backend.chat(messages, temperature=0.8, max_tokens=120)
+    reply = strip_json_wrapper(reply or "").strip()
+    if not reply:
+        reply = f"I can see {', '.join(labels[:4]) if labels else 'something'} in that image."
+
+    # ── 3. Speak + return ───────────────────────────────────────────────────
+    audio_id = await speak(reply, char_key=_char)
+
+    # Record in memory
+    _mem_text = f"[image shared] {_user_q}"
+    await memory.add("user", _mem_text)
+    await memory.add("assistant", reply)
+    await save_memory()
+
+    return {
+        "ok": True,
+        "reply": reply,
+        "audio_id": audio_id,
+        "detections": [
+            {"label": d["label"], "confidence": d.get("confidence", 0)}
+            for d in detections[:20]
+        ],
+        "labels": labels,
+    }
+
+
 @app.post("/api/cmd")
 async def text_command(cmd: TextCommand, request: Request):
     global memory, current_avatar, _current_user_id
@@ -13819,6 +17244,28 @@ async def text_command_stream(cmd: TextCommand, request: Request):
         yield f"data: {json.dumps({'type': 'started'})}\n\n"
 
         try:
+            # ── AGENT LOOP ROUTING ─────────────────────────────────────────
+            # If this looks like a task (not conversational), route to the
+            # agentic orchestration engine instead of the standard LLM path.
+            if AGENT_CORE_AVAILABLE and intent_is_agentic(cmd.text):
+                session = create_session(
+                    task=cmd.text, user_email=_user_name or "laurencekidney@gmail.com"
+                )
+                async for event in session.run_stream():
+                    yield f"data: {json.dumps(event)}\n\n"
+                    # If agent needs user input, pause and wait — the frontend
+                    # sends the reply via POST /api/agent/reply
+                    if event.get("type") == "ask":
+                        # Emit a special hold event so the UI knows to collect input
+                        yield f"data: {json.dumps({'type': 'agent_ask', 'question': event['question'], 'session_id': session.session_id})}\n\n"
+                        # Wait for reply to come in via /api/agent/reply endpoint
+                        reply = await session._await_user(
+                            event["question"], timeout=120.0
+                        )
+                cleanup_session(session.session_id)
+                return
+            # ── END AGENT ROUTING ──────────────────────────────────────────
+
             # For skill-based commands, handle synchronously (skills aren't streamable).
             # Check if the text matches a skill in the SKILLS dict first.
             phrase = normalize_text(cmd.text)
@@ -13966,20 +17413,30 @@ async def _build_streaming_context(
             }
         )
 
-    # Awareness note
+    # Awareness note — injected as system message, NOT appended to user text.
+    # Appending to user text makes the LLM think it's part of the user's question.
     _pending_awareness = _recent_unacknowledged_for_avatar(current_avatar)
-    _awareness_note = ""
     if _pending_awareness:
         _latest = _pending_awareness[-1]
         _detail = _latest.get("detail", "")
         _action = _latest.get("action", "updated")
         _src = _latest.get("avatar", "someone")
-        _awareness_note = f"\n[Heads up: {_src} {_action} something: {_detail}]"
+        context.append(
+            {
+                "role": "system",
+                "content": (
+                    f"APPROVAL FEED AWARENESS: {_src} {_action} something: {_detail}. "
+                    "STRICT RULE: Only mention this if the user explicitly asks about "
+                    "automations, approvals, projects, or asks 'what's new'. Otherwise, "
+                    "ignore it completely and answer the user's actual question."
+                ),
+            }
+        )
 
     system_content = build_avatar_system_prompt(_avatar, user_name)
     messages = [{"role": "system", "content": system_content}]
     messages.extend(context)
-    messages.append({"role": "user", "content": text + _awareness_note})
+    messages.append({"role": "user", "content": text})
     messages.append(
         {
             "role": "system",
@@ -14806,6 +18263,12 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 @keyframes msgIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 .chat-msg.user{align-self:flex-end;background:rgba(180,160,200,0.4);color:#5d4e6d;border-bottom-right-radius:4px}
 .chat-msg.assistant{align-self:flex-start;background:rgba(255,255,255,0.5);color:#5d4e6d;border-bottom-left-radius:4px}
+.chat-msg .chat-img-preview{max-width:220px;max-height:180px;border-radius:10px;display:block;margin-bottom:5px;cursor:zoom-in;object-fit:cover;border:1px solid rgba(93,78,109,0.15)}
+.chat-img-full-overlay{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;cursor:zoom-out}
+.chat-img-full-overlay img{max-width:92vw;max-height:92vh;border-radius:12px;box-shadow:0 8px 40px rgba(0,0,0,0.5)}
+.chat-msg .chat-img-preview{max-width:220px;max-height:180px;border-radius:10px;display:block;margin-bottom:6px;cursor:pointer;object-fit:cover;border:1px solid rgba(93,78,109,0.15)}
+.chat-img-full-overlay{position:fixed;inset:0;z-index:999;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;cursor:zoom-out}
+.chat-img-full-overlay img{max-width:92vw;max-height:92vh;border-radius:12px;box-shadow:0 8px 40px rgba(0,0,0,0.5)}
 .chat-msg pre{background:#ffffff;border:1px solid rgba(93,78,109,0.15);border-radius:10px;padding:12px 14px;margin:6px 0 0;overflow-x:auto;font-size:12px;line-height:1.5;font-family:'JetBrains Mono','Fira Code',monospace;color:#1a1a2e;position:relative;box-shadow:0 2px 8px rgba(0,0,0,0.06)}
 .chat-msg code{font-family:'JetBrains Mono','Fira Code',monospace;background:rgba(93,78,109,0.08);padding:2px 5px;border-radius:4px;font-size:12px;color:#5d4e6d}
 .chat-msg pre code{background:none;padding:0;color:#1a1a2e}
@@ -15001,6 +18464,14 @@ pre{position:relative;overflow-x:auto}
 .ham-icon-btn:hover .ham-icon{color:rgba(93,78,109,0.85)}
 .ham-label{font-size:9px;color:rgba(93,78,109,0.5);text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color 0.2s}
 .ham-icon-btn:hover .ham-label{color:rgba(93,78,109,0.85)}
+/* Broadcast live indicator dot */
+/* Broadcast dot removed — broadcast moved to Android app */
+/* Transmit mode pill selector */
+.bc-mode-row{display:flex;gap:4px;margin-bottom:10px}
+.bc-mode-pill{flex:1;padding:6px 0;border:none;border-radius:8px;font-size:10px;font-weight:600;cursor:pointer;transition:all 0.2s;background:rgba(139,122,158,0.1);color:rgba(93,78,109,0.5);text-align:center}
+.bc-mode-pill:hover{background:rgba(139,122,158,0.18);color:rgba(93,78,109,0.7)}
+.bc-mode-pill.active{background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;box-shadow:0 2px 8px rgba(139,122,158,0.3)}
+.bc-mode-pill .bc-mode-icon{font-size:12px;display:block;margin-bottom:1px}
 
 
 
@@ -15398,6 +18869,7 @@ pre{position:relative;overflow-x:auto}
       </button>
       <span class="ham-label">Download</span>
     </div>
+    <!-- Broadcast moved to Android app Lavender dialer -->
     <!-- Close -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
       <button class="ham-icon-btn" data-action="close" title="Close Menu">
@@ -15455,6 +18927,20 @@ pre{position:relative;overflow-x:auto}
       <div>
         <div style="font-size:13px;font-weight:600">node_radar_server.py</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.5)">Fleet node radar · python3 node_radar_server.py --name "My Phone" --node-id "phone-1"</div>
+      </div>
+      <span style="font-size:16px">⬇️</span>
+    </a>
+    <a href="/api/files/ble_advertiser_phone.py" download="ble_advertiser_phone.py" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;margin-top:6px;border-radius:12px;background:rgba(93,78,109,0.08);border:1px solid rgba(139,122,158,0.25);text-decoration:none;color:#5d4e6d">
+      <div>
+        <div style="font-size:13px;font-weight:600">ble_advertiser_phone.py</div>
+        <div style="font-size:11px;color:rgba(93,78,109,0.5)">BLE advertiser (broadcast) · python3 ble_advertiser_phone.py --port 8100</div>
+      </div>
+      <span style="font-size:16px">⬇️</span>
+    </a>
+    <a href="/api/files/ble_advertiser_host.py" download="ble_advertiser_host.py" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;margin-top:6px;border-radius:12px;background:rgba(93,78,109,0.08);border:1px solid rgba(139,122,158,0.25);text-decoration:none;color:#5d4e6d">
+      <div>
+        <div style="font-size:13px;font-weight:600">ble_advertiser_host.py</div>
+        <div style="font-size:11px;color:rgba(93,78,109,0.5)">Container BLE broadcast (HCI, no phone) · python3 ble_advertiser_host.py --port 8110</div>
       </div>
       <span style="font-size:16px">⬇️</span>
     </a>
@@ -15624,7 +19110,14 @@ pre{position:relative;overflow-x:auto}
 
 <div class="input-panel">
   <input type="text" id="userInput" placeholder="Talk to me..." autocomplete="off">
+  <input type="file" id="imgFileInput" accept="image/*" style="display:none">
+  <button class="btn-mic" id="imgBtn" title="Send an image" onclick="document.getElementById('imgFileInput').click()">
+    <svg viewBox="0 0 24 24" width="20" height="20"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z" fill="rgba(93,78,109,0.4)"/></svg>
+  </button>
   <button class="btn-clear" id="clearBtn" title="Clear conversation memory">&#x2715;</button>
+  <button class="btn-mic" id="undoBtn" title="Undo last file change made by Pup" onclick="agentUndo()" style="opacity:0.4;transition:opacity 0.2s" disabled>
+    <svg viewBox="0 0 24 24" width="18" height="18"><path d="M12.5 8c-2.65 0-5.05 1-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z" fill="rgba(93,78,109,0.6)"/></svg>
+  </button>
   <button class="btn-mic" id="micBtn" title="Toggle microphone" onclick="toggleBrowserMic()">
     <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5z" fill="rgba(93,78,109,0.4)"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" fill="rgba(93,78,109,0.4)"/></svg>
   </button>
@@ -18093,6 +21586,33 @@ function setMouth(val){lastMouthVal=Math.max(0,Math.min(1,val))}
   let isStreaming=false;
   let _firstPoll=true;
   let _lastPollAudioId=0;
+  let _agentSessionId=null; // tracks active agent session for /api/agent/reply
+  let _lastToolName='';     // tracks the last tool_call name for undo activation
+
+  async function agentUndo(){
+    const btn=document.getElementById('undoBtn');
+    if(btn){btn.style.opacity='0.3';btn.disabled=true;}
+    try{
+      const r=await fetch('/api/agent/undo',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+      const d=await r.json();
+      const msg=d.message||d.error||'Undo failed.';
+      // Show result as a system message in chat
+      addChatMessage('assistant','↩ '+msg);
+      // Re-enable button only if more undos are available
+      if(btn&&d.undo_stack_remaining>0){
+        btn.style.opacity='1';btn.disabled=false;
+      }else if(btn){
+        btn.style.opacity='0.4';btn.disabled=true;
+      }
+    }catch(e){
+      if(btn){btn.style.opacity='0.4';btn.disabled=true;}
+    }
+  }
+
+  function _activateUndoBtn(){
+    const btn=document.getElementById('undoBtn');
+    if(btn){btn.style.opacity='1';btn.disabled=false;}
+  }
 const inputField=document.getElementById('userInput');
 
 /* ─── Drag-and-drop file support (desktop/Windows) ─── */
@@ -18122,6 +21642,14 @@ document.addEventListener('drop',e=>{
   if(!files || !files.length) return;
   const file=files[0];
   if(!file) return;
+
+  // Image drop → vision chat
+  if(file.type.startsWith('image/')){
+    handleImageFile(file);
+    return;
+  }
+
+  // Text file drop (existing behaviour)
   const maxBytes=256*1024;
   if(file.size>maxBytes){
     alert('File too large. Max size is 256 KB for inline preview.');
@@ -18140,6 +21668,116 @@ document.addEventListener('drop',e=>{
   };
   reader.readAsText(file);
 });
+
+// Clipboard paste: grab images pasted with Ctrl+V
+document.addEventListener('paste',e=>{
+  const items = e.clipboardData && e.clipboardData.items;
+  if(!items) return;
+  for(const item of items){
+    if(item.type.startsWith('image/')){
+      e.preventDefault();
+      const file=item.getAsFile();
+      if(file) handleImageFile(file);
+      return;
+    }
+  }
+});
+
+// File input button
+document.getElementById('imgFileInput').addEventListener('change',e=>{
+  const file = e.target.files && e.target.files[0];
+  if(file) handleImageFile(file);
+  e.target.value='';
+});
+
+/* ─────────────────────────────────────────────────────────────
+   handleImageFile — drop / paste / file pick entry point
+   Shows a preview bubble, then POSTs to /api/vision/chat.
+───────────────────────────────────────────────────────────── */
+function handleImageFile(file){
+  if(!file || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = reader.result;
+    showMainChat();
+    const div = document.createElement('div');
+    div.className = 'chat-msg user';
+    const img = document.createElement('img');
+    img.src = dataUrl;
+    img.className = 'chat-img-preview';
+    img.title = 'Click to enlarge';
+    img.onclick = () => openImageOverlay(dataUrl);
+    div.appendChild(img);
+    const question = inputField.value.trim();
+    if(question){
+      const cap = document.createElement('div');
+      cap.className = 'chat-content';
+      cap.textContent = question;
+      div.appendChild(cap);
+      inputField.value = '';
+    }
+    chatMessages.appendChild(div);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    sendImageToVision(file, question, dataUrl);
+  };
+  reader.readAsDataURL(file);
+}
+
+function openImageOverlay(src){
+  const overlay = document.createElement('div');
+  overlay.className = 'chat-img-full-overlay';
+  const big = document.createElement('img');
+  big.src = src;
+  overlay.appendChild(big);
+  overlay.onclick = () => document.body.removeChild(overlay);
+  document.body.appendChild(overlay);
+}
+
+async function sendImageToVision(file, question, dataUrl){
+  showMainChat();
+  statusLabel.textContent = 'analysing image…';
+  const msgDiv = document.createElement('div');
+  msgDiv.className = 'chat-msg assistant';
+  const avatarMeta = chatAvatarMeta(selectedAvatar);
+  msgDiv.innerHTML = '<div class="chat-sender">' + escapeHtml(avatarMeta.name||'Lilly') +
+    '</div><div class="chat-content streaming">…</div>';
+  const contentEl = msgDiv.querySelector('.chat-content');
+  chatMessages.appendChild(msgDiv);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+  try{
+    const fd = new FormData();
+    fd.append('file', file, file.name || 'image.jpg');
+    fd.append('text', question || '');
+    fd.append('avatar', localStorage.getItem('lilly_avatar') || 'puppy');
+    const r = await fetch('/api/vision/chat', {method:'POST', body: fd});
+    const d = await r.json();
+    contentEl.classList.remove('streaming');
+    if(d.ok && d.reply){
+      contentEl.textContent = d.reply;
+      displaySpeech(d.reply);
+      if(d.audio_id){ playAudio(d.audio_id); _lastPollAudioId = d.audio_id; }
+      if(d.labels && d.labels.length){
+        const tags = document.createElement('div');
+        tags.style.cssText='margin-top:5px;display:flex;flex-wrap:wrap;gap:4px';
+        d.labels.slice(0,8).forEach(l=>{
+          const t=document.createElement('span');
+          t.textContent=l;
+          t.style.cssText='font-size:10px;background:rgba(139,122,158,0.15);border-radius:8px;padding:2px 7px;color:#8b7a9e';
+          tags.appendChild(t);
+        });
+        msgDiv.appendChild(tags);
+      }
+    } else {
+      contentEl.textContent = d.error || 'Could not analyse that image.';
+    }
+  } catch(err){
+    contentEl.classList.remove('streaming');
+    contentEl.textContent = 'Error sending image.';
+    console.error('vision/chat error:', err);
+  }
+  statusLabel.textContent = 'idle';
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+}
 const micIndicator=document.getElementById('micIndicator'),statusLabel=document.getElementById('statusLabel');
 const moodLabel=document.getElementById('moodLabel'),moodDot=document.getElementById('moodDot');
 const thinkingDots=document.getElementById('thinkingDots');
@@ -18218,8 +21856,8 @@ document.getElementById('clearBtn').onclick=async()=>{
       case 'settings': toggleSettings(); break;
       case 'pair': openPairPanel(); break;
       case 'skills': openSkillsMarket(); break;
-      case 'download': openDownloadPanel(); break;
-      case 'close': break;
+       case 'download': openDownloadPanel(); break;
+       case 'close': break;
     }
   }
  function toggleChat(){
@@ -18296,6 +21934,7 @@ document.getElementById('clearBtn').onclick=async()=>{
     }catch(e){list.innerHTML='<div style="text-align:center;color:#e57373">Failed to load nodes</div>'}
   }
   function closeNodesPanel(){document.getElementById('nodesPanel').style.display='none'}
+
   async function scanAllNodes(){
     addChatMessage('system','Scanning all nodes...');
     try{await fetch('/api/tracker/scan');addChatMessage('system','Scan complete')}catch(e){addChatMessage('system','Scan failed')}
@@ -18472,12 +22111,12 @@ document.getElementById('clearBtn').onclick=async()=>{
        if(action) handleHamburgerAction(action);
      });
      document.addEventListener('touchstart',function(e){
-       if(menu.style.display==='block'&&!menu.contains(e.target)&&e.target.id!=='hamburgerBtn'){
+       if(menu.style.display==='block'&&!menu.contains(e.target)&&!e.target.closest('#hamburgerBtn')){
          closeHamburgerMenu();
        }
      },true);
      document.addEventListener('click',function(e){
-       if(menu.style.display==='block'&&!menu.contains(e.target)&&e.target.id!=='hamburgerBtn'){
+       if(menu.style.display==='block'&&!menu.contains(e.target)&&!e.target.closest('#hamburgerBtn')){
          closeHamburgerMenu();
        }
      });
@@ -19006,6 +22645,103 @@ async function sendStreamingReply(text){
             }else if(evt.type==='error'){
               contentEl.textContent='Sorry, something went wrong. Try again.';
               displaySpeech('Sorry, something went wrong.');
+
+            // ── AGENT EVENTS ─────────────────────────────────────────
+            }else if(evt.type==='plan'){
+              // Show the plan as a styled block before any tool calls
+              hasContent=true;
+              const planEl=document.createElement('div');
+              planEl.style.cssText='margin:6px 0 4px;padding:10px 14px;border-radius:10px;background:rgba(93,78,109,0.07);border-left:3px solid rgba(139,122,158,0.5);font-size:13px;color:#5d4e6d;white-space:pre-wrap;line-height:1.5';
+              planEl.textContent=evt.text;
+              contentEl.innerHTML='';
+              contentEl.appendChild(planEl);
+              chatMessages.scrollTop=chatMessages.scrollHeight;
+
+            }else if(evt.type==='step'){
+              // Reasoning/status line — append as a small italic note
+              const stepEl=document.createElement('div');
+              stepEl.style.cssText='font-size:12px;color:#9a8aad;margin:3px 0;font-style:italic;padding:0 2px';
+              stepEl.textContent=evt.text;
+              contentEl.appendChild(stepEl);
+              chatMessages.scrollTop=chatMessages.scrollHeight;
+              hasContent=true;
+
+            }else if(evt.type==='tool_call'){
+              // Show which tool is being called
+              _lastToolName=evt.name||'';
+              const tcEl=document.createElement('div');
+              tcEl.style.cssText='display:flex;align-items:center;gap:6px;margin:4px 0;padding:6px 10px;border-radius:8px;background:rgba(74,222,128,0.07);border:1px solid rgba(74,222,128,0.2);font-size:12px;font-family:monospace;color:#3d6b4f';
+              const argsStr=JSON.stringify(evt.args||{});
+              const shortArgs=argsStr.length>80?argsStr.slice(0,80)+'…':argsStr;
+              tcEl.innerHTML='<span style="font-weight:600">⚙ '+escapeHtml(evt.name)+'</span><span style="opacity:0.7">'+escapeHtml(shortArgs)+'</span>';
+              contentEl.appendChild(tcEl);
+              chatMessages.scrollTop=chatMessages.scrollHeight;
+              hasContent=true;
+
+            }else if(evt.type==='tool_result'){
+              // Show the result of the tool call (truncated)
+              const trEl=document.createElement('div');
+              const ok=evt.ok!==false;
+              trEl.style.cssText='margin:2px 0 6px;padding:5px 10px;border-radius:6px;font-size:11.5px;font-family:monospace;white-space:pre-wrap;word-break:break-all;max-height:120px;overflow-y:auto;background:'+(ok?'rgba(74,222,128,0.04)':'rgba(239,68,68,0.06)')+';border-left:2px solid '+(ok?'rgba(74,222,128,0.4)':'rgba(239,68,68,0.4)')+';color:'+(ok?'#3d6b4f':'#8b2222');
+              const out=evt.output||'';
+              trEl.textContent=out.length>300?out.slice(0,300)+'…':out;
+              contentEl.appendChild(trEl);
+              chatMessages.scrollTop=chatMessages.scrollHeight;
+              // Enable undo button if a file was just written successfully
+              if(ok && _lastToolName==='write_file') _activateUndoBtn();
+
+            }else if(evt.type==='agent_ask'){
+              // Agent needs input — show an inline reply box
+              _agentSessionId=evt.session_id;
+              const askWrap=document.createElement('div');
+              askWrap.style.cssText='margin:8px 0;padding:10px 12px;border-radius:10px;background:rgba(139,122,158,0.1);border:1px solid rgba(139,122,158,0.3)';
+              const qEl=document.createElement('div');
+              qEl.style.cssText='font-size:13px;color:#5d4e6d;margin-bottom:8px;font-weight:500';
+              qEl.textContent=evt.question;
+              const replyRow=document.createElement('div');
+              replyRow.style.cssText='display:flex;gap:8px';
+              const inp=document.createElement('input');
+              inp.type='text';
+              inp.placeholder='Your reply…';
+              inp.style.cssText='flex:1;padding:8px 12px;border-radius:8px;border:1px solid rgba(139,122,158,0.3);background:rgba(255,255,255,0.7);font-size:13px;color:#5d4e6d;outline:none';
+              const btn=document.createElement('button');
+              btn.textContent='Send';
+              btn.style.cssText='padding:8px 16px;border-radius:8px;border:none;background:rgba(93,78,109,0.75);color:#fff;font-size:13px;cursor:pointer';
+              const sendReply=async()=>{
+                const val=inp.value.trim();
+                if(!val)return;
+                btn.disabled=true;
+                inp.disabled=true;
+                inp.style.opacity='0.5';
+                btn.style.opacity='0.5';
+                try{
+                  await fetch('/api/agent/reply',{
+                    method:'POST',
+                    headers:{'Content-Type':'application/json'},
+                    body:JSON.stringify({session_id:_agentSessionId,text:val})
+                  });
+                  // Show what the user typed as a small note
+                  const sentEl=document.createElement('div');
+                  sentEl.style.cssText='font-size:12px;color:#9a8aad;font-style:italic;margin-top:4px';
+                  sentEl.textContent='↳ '+val;
+                  askWrap.appendChild(sentEl);
+                }catch(e){}
+              };
+              inp.addEventListener('keydown',e=>{if(e.key==='Enter')sendReply();});
+              btn.addEventListener('click',sendReply);
+              replyRow.appendChild(inp);
+              replyRow.appendChild(btn);
+              askWrap.appendChild(qEl);
+              askWrap.appendChild(replyRow);
+              contentEl.appendChild(askWrap);
+              chatMessages.scrollTop=chatMessages.scrollHeight;
+              inp.focus();
+              hasContent=true;
+
+            }else if(evt.type==='done'&&evt.session_id){
+              // Agent done — final narration already streamed as tokens above
+              // Just clean up session tracking
+              _agentSessionId=null;
             }
           }catch(e){}
         }
@@ -19060,6 +22796,19 @@ async function sendReply(text){
   showMainChat();
   addChatMessage('user',text);
   statusLabel.textContent='thinking...';
+  // Push lightweight UI context — viewport + visible text only.
+  // DOM innerHTML is intentionally excluded (this page is ~1MB — regex on it
+  // blocks the main thread and breaks the SSE reader).
+  try{
+    const ctx={
+      url: window.location.href,
+      title: document.title,
+      viewport: {width: window.innerWidth, height: window.innerHeight},
+      visible_text: (document.body.innerText||'').slice(0,2000),
+    };
+    // Fire-and-forget — never await, never block the chat send
+    setTimeout(()=>fetch('/api/ui_context',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(ctx)}).catch(()=>{}),0);
+  }catch(e){}
   await sendStreamingReply(text);
 }
 
@@ -20126,6 +23875,410 @@ async def serve_favicon():
             "Pragma": "no-cache",
             "Expires": "0",
         },
+    )
+
+
+@app.get("/lilly/advertise")
+async def serve_advertise_webui(image: str = "", name: str = "Lilly Pup"):
+    """Serve the BLE advertising web UI — what nearby devices see when they
+    connect to the phone's BLE advertisement.
+
+    The phone (Pixel 10) broadcasts as a BLE peripheral like earbuds in
+    pairing mode.  When someone scans and finds the device, they can open
+    this URL to see the avatar image Lilly is presenting as.
+
+    Query params:
+      image: avatar image path (default from sensor server config or puppy)
+      name:  display name (default "Lilly Pup")
+    """
+    avatar_images = {
+        "puppy": ("🐶 Puppy", "/static/lilly/puppy-avatar.svg"),
+        "fox": ("🦊 Fox", "/static/lilly/fox-avatar.svg"),
+        "cat": ("🐱 Cat", "/static/lilly/cat-avatar.svg"),
+        "bear": ("🐻 Bear", "/static/lilly/bear-avatar.svg"),
+        "bunny": ("🐰 Bunny", "/static/lilly/bunny-avatar.svg"),
+        "owl": ("🦉 Owl", "/static/lilly/owl-avatar.svg"),
+        "deer": ("🦌 Deer", "/static/lilly/deer-avatar.svg"),
+        "wolf": ("🐺 Wolf", "/static/lilly/wolf-avatar.svg"),
+        "raccoon": ("🦝 Raccoon", "/static/lilly/raccoon-avatar.svg"),
+    }
+
+    # Resolve image
+    if image:
+        image_url = image
+    else:
+        image_url = "/static/lilly/puppy-avatar.svg"
+
+    # Resolve name
+    display_name = name if name else "Lilly Pup"
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>{display_name} — Bluetooth Device</title>
+  <style>
+    *{{margin:0;padding:0;box-sizing:border-box}}
+    html,body{{width:100%;height:100%;overflow:hidden;font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:linear-gradient(135deg,#f5d5e0 0%,#d4e8f5 50%,#d5f0e6 100%)}}
+    .container{{display:flex;flex-direction:column;align-items:center;justify-content:center;width:100%;height:100%}}
+    .avatar-frame{{width:120px;height:120px;border-radius:60px;background:rgba(255,255,255,0.3);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;margin-bottom:16px;box-shadow:0 8px 32px rgba(0,0,0,0.1);border:2px solid rgba(255,255,255,0.4)}}
+    .avatar-frame img{{width:96px;height:96px;border-radius:48px;object-fit:cover;display:block}}
+    .name{{font-size:20px;font-weight:600;color:#5d4e6d;margin-bottom:4px}}
+    .subtitle{{font-size:12px;color:rgba(93,78,109,0.6)}}
+    .pulse{{position:absolute;width:140px;height:140px;border-radius:70px;background:rgba(139,122,158,0.2);animation:pulse 2s infinite}}
+    @keyframes pulse{{0%,100%{{opacity:0.4;transform:scale(1)}}50%{{opacity:0.2;transform:scale(1.05)}}}}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div style="position:relative">
+      <div class="pulse"></div>
+      <div class="avatar-frame">
+        <img src="{image_url}" alt="{display_name}" id="avatarImage">
+      </div>
+    </div>
+    <div class="name">{display_name}</div>
+    <div class="subtitle">📡 Advertising via Bluetooth LE</div>
+  </div>
+  <script>
+    // Try to fetch latest config from the sensor server to sync image/name
+    fetch('{SENSOR_SERVER_URL}/bluetooth/advertise/status')
+      .then(r => r.ok ? r.json() : Promise.reject())
+      .then(d => {{
+        if(d.config){{
+          const img=document.getElementById('avatarImage');
+          if(img && d.config.image) img.src=d.config.image;
+          const nameEl=document.querySelector('.name');
+          if(nameEl && d.config.name) nameEl.textContent=d.config.name;
+          const subEl=document.querySelector('.subtitle');
+          if(subEl){{ subEl.textContent='📡 Advertising as BLE device: '+d.config.name; }}
+        }}
+      }})
+      .catch(() => {{}});
+  </script>
+</body>
+</html>"""
+    return Response(
+        content=html,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@app.get("/static/lilly/{filename:path}")
+async def serve_lilly_static(filename: str):
+    """Serve avatar images and other static assets from lillyos/static/lilly/."""
+    static_dir = WORKSPACE / "lillyos" / "static" / "lilly"
+    target = static_dir / filename
+    # Prevent path traversal
+    try:
+        target.resolve().relative_to(static_dir.resolve())
+    except (ValueError, OSError):
+        return Response("Not Found", status_code=404)
+    if not target.exists():
+        return Response("Not Found", status_code=404)
+    import mimetypes
+
+    mime_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+    content = target.read_bytes()
+    return Response(
+        content=content,
+        media_type=mime_type,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/api/avatars")
+async def avatar_list():
+    """List all available avatar images for broadcast selection."""
+    avatars = {
+        "puppy": {
+            "name": "Puppy (Lilly)",
+            "image": "/api/avatars/canvas/puppy",
+            "emoji": "🐶",
+        },
+        "fox": {"name": "Fox", "image": "/api/avatars/canvas/fox", "emoji": "🦊"},
+        "cat": {"name": "Cat", "image": "/api/avatars/canvas/cat", "emoji": "🐱"},
+        "bear": {
+            "name": "Bear",
+            "image": "/api/avatars/canvas/bear",
+            "emoji": "🐻",
+        },
+        "bunny": {
+            "name": "Bunny",
+            "image": "/api/avatars/canvas/bunny",
+            "emoji": "🐰",
+        },
+        "owl": {"name": "Owl", "image": "/api/avatars/canvas/owl", "emoji": "🦉"},
+        "deer": {
+            "name": "Deer",
+            "image": "/api/avatars/canvas/deer",
+            "emoji": "🦌",
+        },
+        "wolf": {
+            "name": "Wolf",
+            "image": "/api/avatars/canvas/wolf",
+            "emoji": "🐺",
+        },
+        "raccoon": {
+            "name": "Raccoon",
+            "image": "/api/avatars/canvas/raccoon",
+            "emoji": "🦝",
+        },
+    }
+    return {"avatars": avatars}
+
+
+# ── Custom broadcast-image upload + classification identity ─────────────
+# Lets the owner advertise their OWN image (not just the 9 built-in avatars)
+# as the phone's BLE broadcast identity. The uploaded image is stored under
+# lillyos/static/lilly/ (served via /static/lilly/<name>) and registered as a
+# "classification identity": when the person_tracker / host scanner sees a
+# sibling Lilly beacon, it can say "this Lilly is presenting image X", not
+# just "this is another Lilly". This is the "advertise an image of my own for
+# classification" feature.
+
+# In-memory registry of custom broadcast identities: image URL → {name, token}
+CUSTOM_BROADCAST_IMAGES: dict = {}
+# Allowed image content types / extensions for the broadcast avatar upload.
+_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "svg", "webp", "avif", "bmp"}
+_IMAGE_CONTENT_TYPES = {
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/svg+xml",
+    "image/webp",
+    "image/avif",
+    "image/bmp",
+}
+
+
+@app.get("/api/broadcast/images")
+async def list_broadcast_images():
+    """List all custom broadcast images the owner has uploaded, plus the built-ins."""
+    builtins = [v["image"] for v in avatar_dict_for_broadcast().values()]
+    customs = [
+        {"url": url, "name": info.get("name", ""), "uploaded": info.get("uploaded", 0)}
+        for url, info in CUSTOM_BROADCAST_IMAGES.items()
+    ]
+    return {
+        "builtins": list(dict.fromkeys(builtins)),
+        "custom": customs,
+        "total": len(CUSTOM_BROADCAST_IMAGES),
+    }
+
+
+def avatar_dict_for_broadcast() -> dict:
+    """Built-in avatar image paths (SVG canvases) used by the broadcast UI."""
+    return {
+        "puppy": {
+            "name": "Puppy (Lilly)",
+            "image": "/static/lilly/puppy-avatar.svg",
+            "emoji": "🐶",
+        },
+        "fox": {"name": "Fox", "image": "/static/lilly/fox-avatar.svg", "emoji": "🦊"},
+        "cat": {"name": "Cat", "image": "/static/lilly/cat-avatar.svg", "emoji": "🐱"},
+        "bear": {
+            "name": "Bear",
+            "image": "/static/lilly/bear-avatar.svg",
+            "emoji": "🐻",
+        },
+        "bunny": {
+            "name": "Bunny",
+            "image": "/static/lilly/bunny-avatar.svg",
+            "emoji": "🐰",
+        },
+        "owl": {"name": "Owl", "image": "/static/lilly/owl-avatar.svg", "emoji": "🦉"},
+        "deer": {
+            "name": "Deer",
+            "image": "/static/lilly/deer-avatar.svg",
+            "emoji": "🦌",
+        },
+        "wolf": {
+            "name": "Wolf",
+            "image": "/static/lilly/wolf-avatar.svg",
+            "emoji": "🐺",
+        },
+        "raccoon": {
+            "name": "Raccoon",
+            "image": "/static/lilly/raccoon-avatar.svg",
+            "emoji": "🦝",
+        },
+    }
+
+
+@app.post("/api/broadcast/image/upload")
+async def upload_broadcast_image(image: UploadFile = File(...), label: str = ""):
+    """Upload your OWN image to use as the BLE broadcast / classification identity.
+
+    Accepts png/jpg/gif/svg/webp/avif/bmp. Stores it under lillyos/static/lilly/
+    so it's served at /static/lilly/<name>, and registers it so the tracker's
+    BLE classifier can label sibling Lilly nodes by this image.
+
+    Args:
+        image: the uploaded image file
+        label: optional friendly name for the identity (defaults to filename)
+
+    Returns:
+        {"ok": true, "url": "/static/lilly/<name>", "name": <label>,
+         "token": <stable classification token>, "classification": [...]}
+    """
+    if not image or not image.filename:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail="No image uploaded")
+
+    # Sanitise the filename → a stable, web-safe base name.
+    raw = os.path.basename(image.filename or "")
+    safe = re.sub(r"[^\w\.\-]", "_", raw).strip("._")
+    if not safe:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
+    if ext not in _IMAGE_EXTENSIONS:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported image type '.{ext}'. Allowed: {sorted(_IMAGE_EXTENSIONS)}",
+        )
+
+    content = await image.read()
+    if not content or len(content) > 20 * 1024 * 1024:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail="Image empty or larger than 20MB")
+
+    # Light content check — reject files that claim to be an image but aren't.
+    ctype = (image.content_type or "").lower()
+    if ctype and ctype not in _IMAGE_CONTENT_TYPES and ext != "svg":
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=400, detail=f"Unsupported content-type: {ctype}"
+        )
+
+    # Collision-safe filename: keep base but ensure uniqueness.
+    avatar_dir = WORKSPACE / "lillyos" / "static" / "lilly"
+    avatar_dir.mkdir(parents=True, exist_ok=True)
+    dest = avatar_dir / safe
+    base, dot, _ = safe.rpartition(".")
+    counter = 1
+    while dest.exists():
+        dest = avatar_dir / f"{base}-{counter}.{ext}"
+        counter += 1
+    dest.write_bytes(content)
+
+    url = f"/static/lilly/{dest.name}"
+    name = (label or "").strip() or raw.rsplit(".", 1)[0].replace("_", " ").replace(
+        "-", " "
+    )
+    token = dest.stem.lower()
+
+    CUSTOM_BROADCAST_IMAGES[url] = {
+        "name": name,
+        "token": token,
+        "uploaded": time.time(),
+        "path": str(dest),
+    }
+
+    logger.info(
+        f"Custom broadcast image uploaded: {url} as '{name}' "
+        f"(token={token}, {len(content)} bytes)"
+    )
+    return {
+        "ok": True,
+        "url": url,
+        "name": name,
+        "token": token,
+        "size": len(content),
+        "classification": {
+            "image": url,
+            "identity": token,
+            "is_custom": True,
+        },
+    }
+
+
+@app.get("/api/broadcast/image/classify")
+async def classify_broadcast_image(url: str = ""):
+    """Resolve a custom broadcast image URL to its classification identity.
+
+    Used by the person_tracker / host BLE scanner so a sibling Lilly node can
+    be labelled by the image it advertises. Returns the registered identity
+    for a custom upload, or the built-in identity for the 9 avatars.
+    """
+    if not url:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail="Missing 'url' query param")
+    if url in CUSTOM_BROADCAST_IMAGES:
+        info = CUSTOM_BROADCAST_IMAGES[url]
+        return {
+            "ok": True,
+            "url": url,
+            "name": info["name"],
+            "token": info["token"],
+            "is_custom": True,
+        }
+    # Built-in avatar → map by its image path
+    for key, av in avatar_dict_for_broadcast().items():
+        if av["image"] == url:
+            return {
+                "ok": True,
+                "url": url,
+                "name": av["name"],
+                "token": key,
+                "emoji": av.get("emoji", ""),
+                "is_custom": False,
+            }
+    return {"ok": False, "url": url, "error": "unknown image"}
+
+
+@app.get("/api/avatars/canvas/{animal}")
+async def serve_canvas_avatar(animal: str, size: int = 256):
+    """Serve a clay-style canvas-rendered avatar PNG matching the web UI drawing code."""
+    from avatar_generator import generate_avatar, ANIMAL_DRAW
+
+    if animal not in ANIMAL_DRAW:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=f"Unknown animal: {animal}")
+    img = generate_avatar(animal, size)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    from fastapi.responses import StreamingResponse
+
+    return StreamingResponse(
+        buf, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"}
+    )
+
+
+@app.get("/api/avatars/emoji/{animal}")
+async def serve_emoji_thumbnail(animal: str, size: int = 64):
+    """Serve a flat 2D emoji-style thumbnail for compact UI spots."""
+    from avatar_generator import generate_emoji_thumbnail, EMOJI_PALETTE
+
+    if animal not in EMOJI_PALETTE:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=f"Unknown animal: {animal}")
+    img = generate_emoji_thumbnail(animal, size)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    from fastapi.responses import StreamingResponse
+
+    return StreamingResponse(
+        buf, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"}
     )
 
 

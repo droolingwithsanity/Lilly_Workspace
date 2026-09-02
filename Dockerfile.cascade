@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements_cascade.txt .
+RUN pip install --no-cache-dir -r requirements_cascade.txt
+
+# Copy the application
+COPY model_cascade.py .
+
+# Expose port
+EXPOSE 8099
+
+# Run the application
+CMD ["uvicorn", "model_cascade:app", "--host", "0.0.0.0", "--port", "8099"]

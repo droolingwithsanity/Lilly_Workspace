@@ -1,0 +1,19 @@
+{
+  "_comment": "Simple scraper: fetch a webpage and extract links/text using Scrapling.",
+  "name": "simple_web_scrape",
+  "platform": "web",
+  "package": "scrapling",
+  "actions": [
+    {"type": "browser_action", "url": "https://news.ycombinator.com", "selector": ".titleline > a", "comment": "Scrape HN front page titles"},
+    {"type": "delay", "seconds": 2},
+    {"type": "shell", "command": "echo Scrape complete", "comment": "Log completion"}
+  ],
+  "schedule": {
+    "repeat": "hourly",
+    "comment": "Refresh every hour"
+  },
+  "limits": {
+    "max_scrapes_per_run": 1,
+    "delay_between_actions": [1, 2]
+  }
+}

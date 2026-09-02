@@ -90,3 +90,14 @@ hitomi-lilly-integration/android/app/build/
 
 # Deployed demo projects (repo-to-project skill)
 projects/
+
+# API tokens / key material
+.mc_api_token
+Lilly_Workspace.encrypted
+Lilly_Workspace.encrypted.pub
+
+# Archives and large model/runtime data
+_archive_2026-09-01/
+*.gguf
+figranium-server/data/
+lilly-overlay-app/app/.build/

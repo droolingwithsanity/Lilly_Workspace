@@ -1,0 +1,5 @@
+fastapi>=0.100
+uvicorn>=0.23
+bleak>=0.21
+aiohttp>=3.8
+mac-vendor-lookup>=0.8

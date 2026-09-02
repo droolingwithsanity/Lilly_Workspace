@@ -1,0 +1,36 @@
+{
+  "_comment": "Advanced Instagram automation: likes, follows, stories, comments with working-hours filter.",
+  "name": "instagram_story_watch",
+  "platform": "instagram",
+  "package": "com.instagram.android",
+  "actions": [
+    {"type": "open_app", "comment": "Open Instagram"},
+    {"type": "wait", "seconds": 3},
+    {"type": "tap", "x": 100, "y": 200, "comment": "Tap story ring"},
+    {"type": "wait", "seconds": 4, "comment": "Watch story"},
+    {"type": "tap", "x": 540, "y": 96, "comment": "Tap next story"},
+    {"type": "wait", "seconds": 4},
+    {"type": "like", "count": 3, "comment": "Like posts from story"},
+    {"type": "follow", "count": 2, "comment": "Follow account from story"}
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "time": "11:00",
+    "comment": "Run during midday break"
+  },
+  "limits": {
+    "max_likes_per_run": 10,
+    "max_follows_per_run": 5,
+    "delay_between_actions": [2, 5],
+    "max_stories_per_run": 20,
+    "comment": "Watch max 20 stories per session"
+  },
+  "conditions": {
+    "working_hours_only": true,
+    "working_hours_start": "09:00",
+    "working_hours_end": "17:00",
+    "skip_if_seen_recently": true,
+    "reinteract_after_hours": 24,
+    "comment": "Only run during work hours, don't re-interact within 24h"
+  }
+}

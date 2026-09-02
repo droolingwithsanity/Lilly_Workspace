@@ -1,0 +1,58 @@
+{
+  "datasets": [
+    "ultrachat",
+    "lmsys",
+    "custom"
+  ],
+  "dataset_weights": {
+    "ultrachat": 34,
+    "lmsys": 33,
+    "custom": 33
+  },
+  "filters": {
+    "toxicity": true,
+    "spam": true,
+    "code_noise": true,
+    "overapologize": true,
+    "disclaimers": true,
+    "lowquality": true
+  },
+  "min_quality": 4,
+  "max_turns": 8,
+  "max_tokens_conversation": 2048,
+  "multi_participant": "yes",
+  "personas": [
+    "puppy"
+  ],
+  "response_style": "detailed",
+  "emotion_level": 7,
+  "anti_hallucination": [
+    "ai_ref",
+    "training_data",
+    "disclaimers",
+    "apologies",
+    "sensor_fabrication",
+    "youtube"
+  ],
+  "grounding": "both",
+  "base_model": "llama3.2-3b",
+  "quantization": "Q5_K_M",
+  "lora_rank": 36,
+  "lora_alpha": 88,
+  "learning_rate": "2e-5",
+  "epochs": 3,
+  "batch_size": 8,
+  "deploy_local": true,
+  "deploy_remote": true,
+  "ollama_model_name": "lilly-persona",
+  "auto_deploy": "yes",
+  "validation": {
+    "no_apology": true,
+    "persona_voice": true,
+    "sensor_grounding": true,
+    "no_xml": true,
+    "conversation_flow": true,
+    "benchmark": false
+  },
+  "custom_test_prompts": []
+}

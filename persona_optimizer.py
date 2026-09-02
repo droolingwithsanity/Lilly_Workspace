@@ -366,6 +366,38 @@ class PersonaOptimizer:
             return self._hive_personas[persona].get("voice_prompt", "")
         return None
 
+    def set_voice_prompt(self, persona: str, new_prompt: str) -> bool:
+        """Persist a user-authorized voice prompt update for a persona.
+
+        Updates both the in-memory config and persona_configs.json so the
+        change survives a server restart.  Also stamps an evolution_history
+        entry so the change is auditable.
+
+        Returns True on success, False if persistence failed.
+        """
+        cfg = self._get_config(persona)
+        old_prompt = cfg.current_voice_prompt or cfg.base_voice_prompt or ""
+        cfg.current_voice_prompt = new_prompt
+        cfg.version += 1
+        cfg.last_optimised = time.time()
+        cfg.evolution_history.append(
+            {
+                "version": cfg.version,
+                "ts": cfg.last_optimised,
+                "source": "user_authorized",
+                "change_summary": f"User-authorized update (len {len(old_prompt)} → {len(new_prompt)})",
+            }
+        )
+        # Also patch the live HIVE_PERSONAS dict so the change is immediate
+        if self._hive_personas and persona in self._hive_personas:
+            self._hive_personas[persona]["voice_prompt"] = new_prompt
+        try:
+            self._persist()
+            return True
+        except Exception as e:
+            logger.warning(f"set_voice_prompt: failed to persist for '{persona}': {e}")
+            return False
+
     def avg_score_for(self, persona: str) -> float:
         """Return the recent composite score for a persona (0.0 if no data)."""
         return self._get_config(persona).avg_score_recent

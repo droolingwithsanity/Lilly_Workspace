@@ -1,0 +1,21 @@
+{
+  "_comment": "Quick camera capture: open camera, wait for autofocus, take photo.",
+  "name": "quick_camera_photo",
+  "platform": "camera",
+  "package": "com.android.camera",
+  "actions": [
+    {"type": "open_app", "app": "camera", "comment": "Open camera app"},
+    {"type": "wait", "seconds": 2, "comment": "Wait for autofocus"},
+    {"type": "tap", "x": 540, "y": 900, "comment": "Tap shutter button"},
+    {"type": "wait", "seconds": 1},
+    {"type": "press_key", "key": "HOME", "comment": "Return home"}
+  ],
+  "schedule": {
+    "repeat": "once",
+    "comment": "Run once when triggered"
+  },
+  "limits": {
+    "max_runs_per_day": 10,
+    "delay_between_actions": [1, 2]
+  }
+}

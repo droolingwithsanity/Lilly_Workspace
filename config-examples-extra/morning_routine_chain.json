@@ -1,0 +1,26 @@
+{
+  "_comment": "Multi-step morning routine: checks weather, reads news, opens calendar.",
+  "name": "morning_routine_chain",
+  "platform": "multi",
+  "package": "multi",
+  "actions": [
+    {"type": "open_app", "app": "browser", "comment": "Open browser for weather"},
+    {"type": "wait", "seconds": 2},
+    {"type": "shell", "command": "termux-open-url https://weather.com", "comment": "Check weather"},
+    {"type": "wait", "seconds": 5, "comment": "Read weather"},
+    {"type": "press_key", "key": "BACK", "comment": "Back to home"},
+    {"type": "open_app", "app": "news", "comment": "Open news app"},
+    {"type": "wait", "seconds": 3},
+    {"type": "swipe", "x1": 500, "y1": 1200, "x2": 500, "y2": 400, "comment": "Scroll headlines"},
+    {"type": "open_app", "app": "calendar", "comment": "Open calendar for today"}
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "time": "07:00",
+    "comment": "Full morning routine chain"
+  },
+  "limits": {
+    "max_runs_per_day": 1,
+    "delay_between_actions": [2, 4]
+  }
+}

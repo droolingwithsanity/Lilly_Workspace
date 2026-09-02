@@ -1,0 +1,40 @@
+{
+  "_comment": "Advanced Instagram with filters: skip business accounts, only interact with real users.",
+  "name": "instagram_with_filters",
+  "platform": "instagram",
+  "package": "com.instagram.android",
+  "actions": [
+    {"type": "open_app", "comment": "Open Instagram"},
+    {"type": "wait", "seconds": 3},
+    {"type": "search", "query": "#portrait", "comment": "Search hashtag"},
+    {"type": "tap", "x": 540, "y": 300, "comment": "Open top post"},
+    {"type": "like", "count": 1, "comment": "Like post"},
+    {"type": "tap", "x": 540, "y": 200, "comment": "Open profile"},
+    {"type": "follow", "count": 1, "comment": "Follow if not business"}
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "times": ["10:00", "15:00", "20:00"],
+    "comment": "Three sessions per day"
+  },
+  "limits": {
+    "max_likes_per_run": 12,
+    "max_follows_per_run": 4,
+    "delay_between_actions": [3, 7],
+    "comment": "Slow engagement with delays"
+  },
+  "conditions": {
+    "filters": {
+      "skip_business": true,
+      "min_followers": 100,
+      "max_followers": 50000,
+      "min_posts": 5,
+      "skip_already_following": true
+    },
+    "working_hours_only": true,
+    "working_hours_start": "09:00",
+    "working_hours_end": "21:00",
+    "max_follows_per_day": 12,
+    "comment": "Only interact with real users, 3x daily cap"
+  }
+}

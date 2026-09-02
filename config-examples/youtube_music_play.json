@@ -1,0 +1,22 @@
+{
+  "_comment": "Open YouTube Music and start playing liked songs playlist.",
+  "name": "youtube_music_play",
+  "platform": "youtube_music",
+  "package": "com.google.android.apps.youtube.music",
+  "actions": [
+    {"type": "open_app", "comment": "Open YouTube Music"},
+    {"type": "wait", "seconds": 4, "comment": "Wait for app load"},
+    {"type": "tap", "x": 540, "y": 400, "comment": "Tap Library"},
+    {"type": "tap", "x": 540, "y": 600, "comment": "Tap Liked Songs"},
+    {"type": "tap", "x": 540, "y": 900, "comment": "Tap Play shuffle"}
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "time": "07:00",
+    "comment": "Morning music routine"
+  },
+  "limits": {
+    "max_runs_per_day": 1,
+    "delay_between_actions": [2, 3]
+  }
+}

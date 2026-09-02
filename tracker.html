@@ -37,7 +37,10 @@
   <div id="map"></div>
 
 <script>
-let map, famMarkers={}, trailLines={}, nodeMarkers={};
+let map, famMarkers={}, trailLines={}, nodeMarkers={}, deviceMarkers={};
+function deviceType(d){ const t=(d.type||d.device_type||'').toLowerCase(); return t==='ble'||t==='classic'||t==='bt'||t==='bluetooth'?'bt':(t||'bt'); }
+function devColor(addr){ return deviceType(addr)==='bt'?'#4fc3f7':'#aed581'; }
+function esc2(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function init(){
   map=L.map('map',{zoomControl:false}).setView([45,-75],13);
   L.control.zoom({position:'topright'}).addTo(map);
@@ -46,8 +49,112 @@ function init(){
 }
 async function rescan(){
   document.getElementById('fleet').innerText='Scanning…';
-  try{ await fetch('/api/tracker/scan'); }catch(e){}
+
+  // If running inside the Lilly overlay WebView, use the native scanner bridge.
+  // Otherwise fall back to the server-side API endpoint.
+  if(window.LillyBridge && typeof LillyBridge.scanNearby === 'function'){
+    LillyBridge.scanNearby('_onNativeScan');
+  } else {
+    // Server-side scan endpoint returns {ok, bt:[...], wifi:[...], ...} from the
+    // host scan provider (real BT + WiFi) or the phone sensor server.
+    try{
+      const r = await fetch('/api/tracker/scan', {method:'POST'});
+      if(r.ok){
+        const data = await r.json();
+        renderNearbyPanel({wifi: data.wifi || data.networks || [], bt: data.bt || data.bluetooth || []});
+        const total = (data.bt||[]).length + (data.wifi||[]).length;
+        document.getElementById('fleet').innerText = total ?
+          ('Scan: '+(data.bt||[]).length+' BT + '+(data.wifi||[]).length+' WiFi') :
+          'No devices found';
+        // Push to server so the map/tracker can use the results too
+        try{
+          await fetch('/api/tracker/nearby', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({bt: data.bt||data.bluetooth||[], wifi: data.wifi||data.networks||[]})
+          });
+        }catch(e){}
+      } else {
+        document.getElementById('fleet').innerText='Scan failed ('+r.status+')';
+      }
+    }catch(e){
+      document.getElementById('fleet').innerText='Scan error';
+    }
+    load();
+  }
+}
+
+// Called by LillyBridge after the native scan completes.
+// jsonStr: '{"wifi":[...],"bt":[...]}'
+function _onNativeScan(jsonStr){
+  try{
+    const data = JSON.parse(jsonStr);
+    renderNearbyPanel(data);
+    document.getElementById('fleet').innerText='Scan done';
+    // Also push results to server so the map can use them
+    fetch('/api/tracker/nearby', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: jsonStr
+    }).catch(()=>{});
+  } catch(e){
+    document.getElementById('fleet').innerText='Scan error';
+    console.error('_onNativeScan parse error', e);
+  }
   load();
+}
+
+function renderNearbyPanel(data){
+  const wifi = data.wifi || [];
+  const bt   = data.bt   || [];
+  let html = '<div style="color:#9f7bd6;font-weight:700;margin-bottom:6px">📶 WiFi ('+wifi.length+')</div>';
+  if(wifi.length === 0){
+    html += '<div style="color:#888;font-size:.72rem">No networks found</div>';
+  } else {
+    wifi.sort((a,b)=>(b.rssi||0)-(a.rssi||0));
+    wifi.slice(0,10).forEach(w=>{
+      const bars = rssiToBars(w.rssi);
+      html += '<div class="card" style="margin-bottom:4px">'
+            + '<span class="nm">'+esc(w.ssid||'(hidden)')+'</span>'
+            + '<span class="tb">'+bars+' '+w.rssi+'dBm</span>'
+            + '<div style="color:#aaa;font-size:.66rem;margin-top:2px">'+esc(w.bssid)+'</div>'
+            + '</div>';
+    });
+  }
+  html += '<div style="color:#9f7bd6;font-weight:700;margin:8px 0 6px">🔵 Bluetooth ('+bt.length+')</div>';
+  if(bt.length === 0){
+    html += '<div style="color:#888;font-size:.72rem">No devices found</div>';
+  } else {
+    bt.sort((a,b)=>(b.rssi||0)-(a.rssi||0));
+    bt.slice(0,10).forEach(d=>{
+      const typeEmoji = {phone:'📱',watch:'⌚',tracker:'🏷️',headset:'🎧',headphones:'🎧',
+        speaker:'🔊',laptop:'💻',computer:'🖥️',car_audio:'🚗',peripheral:'🖱️',
+        wearable:'⌚',health:'💊',toy:'🧸'}[d.device_type||d.classified_type]||'🔵';
+      html += '<div class="card" style="margin-bottom:4px">'
+            + '<span class="nm">'+typeEmoji+' '+esc(d.name||'Unknown')+'</span>'
+            + '<span class="tb">'+(d.bt_type||d.type||'bt')+'</span>'
+            + '<span class="tb" style="background:#333">'+d.rssi+'dBm</span>'
+            + (d.vendor?'<span class="tb" style="background:#2a2050;color:#b39ddb">'+esc(d.vendor)+'</span>':'')
+            + '<div style="color:#aaa;font-size:.66rem;margin-top:2px">'+esc(d.address)+'</div>'
+            + '</div>';
+    });
+  }
+  let panel = document.getElementById('nearbyPanel');
+  if(!panel){
+    panel = document.createElement('div');
+    panel.id = 'nearbyPanel';
+    panel.style.cssText = 'margin-top:10px;border-top:1px solid #444;padding-top:8px';
+    const side = document.getElementById('side');
+    if(side) side.appendChild(panel);
+  }
+  panel.innerHTML = html;
+}
+
+function rssiToBars(rssi){
+  if(rssi >= -50) return '▂▄▆█';
+  if(rssi >= -65) return '▂▄▆_';
+  if(rssi >= -75) return '▂▄__';
+  return '▂___';
 }
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 async function load(){
@@ -93,6 +200,84 @@ async function load(){
     Object.keys(famMarkers).forEach(p=>{ if(!seen.includes(p)){ famMarkers[p].remove(); delete famMarkers[p]; } });
     document.getElementById('feed').innerHTML=html;
   }
+  // BT / WiFi device pins — each known device now has a GPS coordinate derived
+  // from WiFi geolocation (MLS) or WiFi-anchored BT positioning.
+  // geo_source values: "mls" (WiFi AP resolved by MLS), "wifi_mls" (BT anchored
+  // to MLS-resolved WiFi), "gps_rssi" (BT anchored to phone GPS + RSSI offset),
+  // "rssi" (fallback RSSI scatter around current GPS).
+  const devs=d.devices||[];
+  const liveKeys=new Set(devs.map(x=>x.address));
+  devs.forEach(dev=>{
+    if(!dev.lat&&!dev.lng) return;
+    const key=dev.address;
+    const dt=deviceType(dev);
+    const col=devColor(dev);
+    const srcIcon = {'wloc':'📍','mls':'📍','wifi_wloc':'🔵','wifi_mls':'🔵',
+                     'wifi_trilat':'🎯','gps_rssi':'📡','rssi':'〰️'}[dev.geo_source] || '〰️';
+    const srcLabel = {'wloc':'Apple WLOC','mls':'WiFi/MLS','wifi_wloc':'BT→Apple WLOC',
+                      'wifi_mls':'BT→WiFi/MLS','wifi_trilat':'BT Trilateration',
+                      'gps_rssi':'GPS+RSSI','rssi':'RSSI est.'}[dev.geo_source] || dev.geo_source||'?';
+    // Bluehood-enriched metadata labels
+    const typeEmoji = {phone:'📱',watch:'⌚',tracker:'🏷️',headset:'🎧',headphones:'🎧',
+      speaker:'🔊',laptop:'💻',computer:'🖥️',tablet:'📲',car_audio:'🚗',
+      peripheral:'🖱️',wearable:'⌚',health:'💊',toy:'🧸'}[dev.classified_type]||'🔵';
+    const devLabel = dev.classified_type
+      ? (typeEmoji+' '+dev.classified_type+(dev.bt_subtype?' ('+dev.bt_subtype+')':''))
+      : (dt==='bt'?'📡 BT '+(dev.bt_subtype||''):'📶 WiFi');
+    const popupHtml =
+      '<b>'+esc2(dev.name||dev.address)+'</b><br>'
+      +'<span style="color:#aaa;font-size:.75em">'+esc2(dev.address)+'</span>'
+      +(dev.vendor?'<br><span style="color:#9f7bd6;font-size:.78em">'+esc2(dev.vendor)+'</span>':'')
+      +'<br><span style="color:'+col+'">'+devLabel+'</span> · '+dev.rssi+'dBm'
+      +'<br>'+srcIcon+' <span style="color:#aaa;font-size:.78em">'+srcLabel+'</span>'
+      +(dev.accuracy ? ' <span style="color:#888;font-size:.75em">±'+dev.accuracy+'m</span>' : '')
+      +(dev.person&&dev.person!=='nearby'?'<br><small style="color:#ccc">'+esc2(dev.person)+'</small>':'');
+
+    if(deviceMarkers[key]){
+      deviceMarkers[key].marker.setLatLng([dev.lat,dev.lng]).setStyle({color:'#fff',fillColor:col});
+      deviceMarkers[key].marker.getPopup().setContent(popupHtml);
+      // Update accuracy ring
+      if(deviceMarkers[key].ring){
+        if(dev.accuracy && dev.accuracy > 5){
+          deviceMarkers[key].ring.setLatLng([dev.lat,dev.lng]).setRadius(dev.accuracy);
+        } else {
+          deviceMarkers[key].ring.remove();
+          deviceMarkers[key].ring = null;
+        }
+      } else if(dev.accuracy && dev.accuracy > 5){
+        deviceMarkers[key].ring = L.circle([dev.lat,dev.lng],{
+          radius: dev.accuracy,
+          color: col,
+          weight: 1,
+          opacity: 0.4,
+          fillColor: col,
+          fillOpacity: 0.06
+        }).addTo(map);
+      }
+    } else {
+      const marker = L.circleMarker([dev.lat,dev.lng],{radius:6,color:'#fff',weight:1.5,fillColor:col,fillOpacity:.85})
+        .addTo(map).bindPopup(popupHtml);
+      let ring = null;
+      if(dev.accuracy && dev.accuracy > 5){
+        ring = L.circle([dev.lat,dev.lng],{
+          radius: dev.accuracy,
+          color: col,
+          weight: 1,
+          opacity: 0.4,
+          fillColor: col,
+          fillOpacity: 0.06
+        }).addTo(map);
+      }
+      deviceMarkers[key] = {marker, ring};
+    }
+  });
+  Object.keys(deviceMarkers).forEach(k=>{
+    if(!liveKeys.has(k)){
+      if(deviceMarkers[k].marker) deviceMarkers[k].marker.remove();
+      if(deviceMarkers[k].ring)   deviceMarkers[k].ring.remove();
+      delete deviceMarkers[k];
+    }
+  });
 }
 function hash(s){let h=0;for(let i=0;i<s.length;i++)h=s.charCodeAt(i)+((h<<5)-h);return 'hsl('+(Math.abs(h)%360)+',60%,62%)';}
 init();

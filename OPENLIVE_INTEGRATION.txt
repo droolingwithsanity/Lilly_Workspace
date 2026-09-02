@@ -1,0 +1,228 @@
+================================================================================
+                    OPENLIVE + LILLY AI INTEGRATION GUIDE
+================================================================================
+
+Architecture Overview
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Docker Network (host mode)                           │
+│                                                                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐       │
+│  │  Lilly AI    │  │  OpenLive   │  │  OpenLive   │  │  Lilly      │       │
+│  │  :8098       │  │  Agent      │  │  Web        │  │  Bridge     │       │
+│  │  (Python)    │  │  :8787      │  │  :3000      │  │  :8788      │       │
+│  └──────┬───────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘       │
+│         │                 │                │                │               │
+│         │                 │                │                │               │
+│         └────────┬────────┘                │                │               │
+│                  ▼                         │                │               │
+│           WebSocket/HTTP                   │                │               │
+│           (voice loop)                     │                │               │
+│                                            │                │               │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────┴──────┐                         │
+│  │  Ollama     │  │  Autensa    │  │  Termux     │                         │
+│  │  :11434     │  │  :4000      │  │  Sensors    │                         │
+│  │  (GPU)      │  │  (Automation)│  │  :8099      │                         │
+│  └─────────────┘  └─────────────┘  └─────────────┘                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+WHAT'S NEW
+================================================================================
+
+Three new services added to docker-compose.full.yml:
+
+1. OPENLIVE AGENT (:8787)
+   - Voice activity detection (VAD)
+   - Speech-to-text (STT) via Whisper
+   - Text-to-speech (TTS) via Kokoro
+   - Barge-in (interrupt AI mid-sentence)
+   - Camera/screen capture for vision
+
+2. OPENLIVE WEB (:3000)
+   - Browser-based voice UI
+   - Real-time transcription display
+   - Camera feed display
+   - Chat history
+
+3. LILLY BRIDGE (:8788)
+   - Connects OpenLive to Lilly AI
+   - Forwards voice transcripts to Lilly
+   - Injects sensor data into context
+   - Maintains Lilly's personality
+
+================================================================================
+HOW IT WORKS
+================================================================================
+
+Voice Conversation Flow:
+
+  1. User speaks into microphone
+  2. OpenLive Agent detects voice (VAD)
+  3. Whisper transcribes speech to text
+  4. Smart-Turn detects end of speech
+  5. Text sent to Lilly Bridge (:8788)
+  6. Bridge forwards to Lilly AI (:8098)
+  7. Lilly AI processes with personality/memory
+  8. Response sent back through Bridge
+  9. OpenLive TTS voices the response
+  10. User hears Lilly speak
+
+Camera Vision Flow:
+
+  1. User enables camera in OpenLive UI
+  2. Camera frames captured every 2 seconds
+  3. Frames sent with voice transcript
+  4. Bridge includes vision context in request
+  5. Lilly AI describes what it sees
+  6. Response voiced back to user
+
+================================================================================
+QUICK START
+================================================================================
+
+Step 1: Build and start all services
+
+  cd /home/labhrasd/Lilly_Workspace
+  docker compose -f docker-compose.full.yml up -d --build
+
+Step 2: Wait for services to be healthy
+
+  docker compose -f docker-compose.full.yml ps
+
+Step 3: Open OpenLive Web UI
+
+  http://localhost:3000
+
+Step 4: Configure OpenLive
+
+  1. Click Settings (gear icon)
+  2. Select Provider: "Lilly AI"
+  3. Select Model: "qwen2.5:7b"
+  4. Click "Connect"
+
+Step 5: Start talking
+
+  1. Click microphone button
+  2. Say "Hey Lilly"
+  3. Ask anything
+  4. Watch the avatar respond
+
+================================================================================
+CONFIGURATION
+================================================================================
+
+Environment Variables (in .env):
+
+  # OpenLive Agent
+  OPENLIVE_AGENT_SECRET=lilly-openlive-secret-2026
+
+  # Ollama (already configured)
+  OLLAMA_URL=http://127.0.0.1:11434
+
+  # Lilly AI (already configured)
+  SENSOR_SERVER_URL=http://100.115.234.87:8099
+
+  # Bridge
+  LILLY_AI_URL=http://127.0.0.1:8098
+  LILLY_SENSOR_URL=http://100.115.234.87:8099
+
+================================================================================
+FILES CREATED
+================================================================================
+
+OpenLive Integration:
+
+  /home/labhrasd/Lilly_Workspace/openlive/
+  ├── Dockerfile.agent          # Agent service container
+  ├── Dockerfile.web            # Web UI container
+  ├── .env                      # OpenLive config
+  └── services/bridge/
+      ├── Dockerfile            # Bridge service container
+      ├── package.json          # Bridge dependencies
+      └── src/server.ts         # Bridge server code
+
+Modified Files:
+
+  docker-compose.full.yml       # Added OpenLive services
+  openlive/packages/harness/src/registry.ts  # Added "lilly" provider
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Issue: OpenLive Agent won't start
+  Fix:
+    # Check logs
+    docker compose -f docker-compose.full.yml logs openlive-agent
+
+    # Verify Ollama is running
+    curl http://127.0.0.1:11434/api/tags
+
+Issue: Web UI shows "Connection refused"
+  Fix:
+    # Check agent is running
+    curl http://localhost:8787/health
+
+    # Check bridge is running
+    curl http://localhost:8788/health
+
+Issue: Voice not working
+  Fix:
+    # Ensure browser has microphone permission
+    # Check WebGPU is enabled (chrome://gpu)
+    # Try Chrome or Edge (best WebGPU support)
+
+Issue: Camera not working
+  Fix:
+    # Ensure browser has camera permission
+    # Check camera is not in use by another app
+    # Try different browser
+
+Issue: Lilly AI not responding
+  Fix:
+    # Check Lilly AI is running
+    curl http://localhost:8098/api/health
+
+    # Check Bridge is connected
+    curl http://localhost:8788/health
+
+================================================================================
+AVAILABLE COMMANDS
+================================================================================
+
+Start everything:
+  docker compose -f docker-compose.full.yml up -d --build
+
+Stop everything:
+  docker compose -f docker-compose.full.yml down
+
+View logs:
+  docker compose -f docker-compose.full.yml logs -f
+
+View specific service:
+  docker compose -f docker-compose.full.yml logs -f openlive-agent
+  docker compose -f docker-compose.full.yml logs -f openlive-web
+  docker compose -f docker-compose.full.yml logs -f lilly-bridge
+
+Restart a service:
+  docker compose -f docker-compose.full.yml restart openlive-agent
+
+Check health:
+  curl http://localhost:8787/health  # Agent
+  curl http://localhost:3000          # Web UI
+  curl http://localhost:8788/health  # Bridge
+  curl http://localhost:8098/api/health  # Lilly AI
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Test voice conversation
+2. Test camera vision
+3. Add more Ollama models
+4. Customize Lilly's voice personality
+5. Integrate with Termux sensors
+6. Add skill triggers from voice commands
+
+================================================================================

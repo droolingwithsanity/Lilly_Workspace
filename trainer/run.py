@@ -167,7 +167,9 @@ def main():
         logger.info("Skipping download")
 
     logger.info("Preparing training data...")
-    dataset = prepare_training_data(raw, personas_to_use=personas)
+    dataset = prepare_training_data(
+        raw, personas_to_use=personas, max_samples=config.max_train_samples
+    )
 
     logger.info("Starting training...")
     final_path = train(dataset, config, resume_from=args.resume_from)

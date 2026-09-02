@@ -1,0 +1,47 @@
+{
+  "_comment": "Basic Instagram automation config. Use this as a template for scheduling social media actions.",
+  "name": "instagram_likes",
+  "platform": "instagram",
+  "package": "com.instagram.android",
+  "actions": [
+    {
+      "type": "open_app",
+      "comment": "Open Instagram"
+    },
+    {
+      "type": "wait",
+      "seconds": 3,
+      "comment": "Wait for app to load"
+    },
+    {
+      "type": "tap",
+      "x": 500,
+      "y": 800,
+      "comment": "Tap home feed"
+    },
+    {
+      "type": "swipe",
+      "x1": 500,
+      "y1": 1200,
+      "x2": 500,
+      "y2": 400,
+      "comment": "Scroll up to next post"
+    },
+    {
+      "type": "like",
+      "count": 10,
+      "comment": "Like 10 posts"
+    }
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "time": "06:00",
+    "comment": "Run every day at 6 AM"
+  },
+  "limits": {
+    "max_likes_per_run": 20,
+    "max_follows_per_run": 5,
+    "max_comments_per_run": 3,
+    "comment": "Safety limits to avoid Instagram shadowban"
+  }
+}

@@ -1,0 +1,635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lilly AI — Wiki & Playbook</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, 'Segoe UI', system-ui, sans-serif;
+    background: #f0e6ef;
+    color: #5d4e6d;
+    line-height: 1.6;
+  }
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+  }
+  header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 40px 20px;
+    text-align: center;
+    border-radius: 0 0 20px 20px;
+    margin-bottom: 30px;
+  }
+  header h1 { font-size: 2.5em; margin-bottom: 10px; }
+  header p { font-size: 1.1em; opacity: 0.9; }
+  .nav {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 30px;
+    justify-content: center;
+  }
+  .nav a {
+    background: white;
+    padding: 10px 20px;
+    border-radius: 20px;
+    text-decoration: none;
+    color: #667eea;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    transition: transform 0.2s;
+  }
+  .nav a:hover { transform: translateY(-2px); }
+  .section {
+    background: white;
+    border-radius: 16px;
+    padding: 25px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+  }
+  .section h2 {
+    color: #667eea;
+    margin-bottom: 15px;
+    font-size: 1.5em;
+    border-bottom: 2px solid #f0e6ef;
+    padding-bottom: 10px;
+  }
+  .section h3 {
+    color: #764ba2;
+    margin: 20px 0 10px;
+    font-size: 1.2em;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 15px;
+    margin-top: 15px;
+  }
+  .card {
+    background: #f6f2ff;
+    border-radius: 12px;
+    padding: 15px;
+    border-left: 4px solid #667eea;
+  }
+  .card h4 { color: #667eea; margin-bottom: 8px; }
+  .card p { font-size: 0.9em; color: #5d4e6d; }
+  code {
+    background: #eee6ff;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", Monaco, monospace;
+    font-size: 0.9em;
+  }
+  pre {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 15px;
+    border-radius: 10px;
+    overflow-x: auto;
+    font-size: 0.85em;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+  .badge {
+    display: inline-block;
+    background: #667eea;
+    color: white;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 0.8em;
+    margin-right: 5px;
+  }
+  .badge.green { background: #4ade80; }
+  .badge.orange { background: #fbbf24; }
+  .badge.red { background: #ef4444; }
+  ul { margin-left: 20px; margin-top: 10px; }
+  li { margin-bottom: 8px; }
+  .warning {
+    background: #fff3cd;
+    border-left: 4px solid #fbbf24;
+    padding: 12px 15px;
+    border-radius: 8px;
+    margin: 15px 0;
+  }
+  .success {
+    background: #d4edda;
+    border-left: 4px solid #4ade80;
+    padding: 12px 15px;
+    border-radius: 8px;
+    margin: 15px 0;
+  }
+  footer {
+    text-align: center;
+    padding: 30px;
+    color: #8a7cab;
+    font-size: 0.9em;
+  }
+  a { color: #667eea; }
+</style>
+</head>
+<body>
+<header>
+  <h1><canvas id="lillyAvatar" width="60" height="60" style="vertical-align:middle;margin-right:10px;border-radius:50%"></canvas>Lilly AI — Wiki & Playbook</h1>
+  <p>Your complete guide to the overlay, skills, macros, and automation</p>
+</header>
+
+<style>
+  @keyframes lillyBreathe {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-3px); }
+  }
+  #lillyAvatar {
+    animation: lillyBreathe 3s ease-in-out infinite;
+    display: inline-block;
+  }
+</style>
+
+<script>
+(function() {
+  const canvas = document.getElementById('lillyAvatar');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  let frame = 0;
+
+  function drawLilly() {
+    ctx.clearRect(0, 0, W, H);
+    const cx = W / 2, cy = H / 2;
+    const r = Math.min(W, H) * 0.42;
+    const breathe = Math.sin(frame * 0.04) * (r * 0.02);
+    const y = cy + breathe;
+
+    // Body
+    ctx.fillStyle = '#e8e4f0';
+    ctx.beginPath();
+    ctx.arc(cx, y, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Ears
+    const earWig = Math.sin(frame * 0.18) * 0.08;
+    ctx.save();
+    ctx.translate(cx - r * 0.55, y - r * 0.35);
+    ctx.rotate(-0.3 + earWig);
+    ctx.fillStyle = '#d4d0de';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r * 0.22, r * 0.45, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#f0d8e8';
+    ctx.beginPath();
+    ctx.ellipse(0, r * 0.08, r * 0.10, r * 0.28, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.save();
+    ctx.translate(cx + r * 0.55, y - r * 0.35);
+    ctx.rotate(0.3 - earWig);
+    ctx.fillStyle = '#d4d0de';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r * 0.22, r * 0.45, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#f0d8e8';
+    ctx.beginPath();
+    ctx.ellipse(0, r * 0.08, r * 0.10, r * 0.28, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // Muzzle
+    ctx.fillStyle = '#c8c4d2';
+    ctx.beginPath();
+    ctx.ellipse(cx, y + r * 0.25, r * 0.32, r * 0.22, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Nose
+    ctx.fillStyle = '#d4a0b8';
+    ctx.beginPath();
+    ctx.ellipse(cx, y + r * 0.15, r * 0.10, r * 0.07, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Eyes
+    const blinking = Math.floor(frame / 90) % 14 === 0;
+    const eyeR = r * 0.11;
+    const lx = cx - r * 0.22, rx = cx + r * 0.22, ey = y - r * 0.05;
+
+    if (blinking) {
+      ctx.strokeStyle = 'rgba(60,40,80,0.55)';
+      ctx.lineWidth = r * 0.04;
+      ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(lx - eyeR, ey); ctx.lineTo(lx + eyeR, ey); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(rx - eyeR, ey); ctx.lineTo(rx + eyeR, ey); ctx.stroke();
+    } else {
+      for (const ex of [lx, rx]) {
+        ctx.fillStyle = '#fff';
+        ctx.beginPath(); ctx.arc(ex, ey, eyeR, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(90,60,120,0.15)';
+        ctx.beginPath(); ctx.arc(ex, ey, eyeR * 0.82, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#3d2e52';
+        ctx.beginPath(); ctx.arc(ex, ey, eyeR * 0.46, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.88)';
+        ctx.beginPath(); ctx.arc(ex - eyeR * 0.12, ey - eyeR * 0.14, eyeR * 0.22, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+
+    // Smile
+    ctx.strokeStyle = 'rgba(120,80,100,0.42)';
+    ctx.lineWidth = r * 0.04;
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.arc(cx - r * 0.10, y + r * 0.28, r * 0.10, 0.1, Math.PI * 0.75); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx + r * 0.10, y + r * 0.28, r * 0.10, Math.PI * 0.25, Math.PI * 0.9); ctx.stroke();
+
+    frame++;
+    requestAnimationFrame(drawLilly);
+  }
+
+  drawLilly();
+})();
+</script>
+
+<div class="container">
+  <div class="nav">
+    <a href="#quickstart">Quick Start</a>
+    <a href="#overlay">Overlay UI</a>
+    <a href="#skills">Skills</a>
+    <a href="#macros">Macros</a>
+    <a href="#automation">Automation</a>
+    <a href="#api">API</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+    <a href="/wiki/app-playbook.html" target="_blank" style="background:#fbbf24;color:#333">📱 App Playbook</a>
+  </div>
+
+  <div class="section" id="quickstart">
+    <h2>🚀 Quick Start</h2>
+    <p>Lilly runs as a web server on port <code>8098</code>. Your phone connects to it over HTTP.</p>
+    
+    <h3>1. Server Setup</h3>
+    <pre><code>pip install -r requirements.txt
+python lilly_ai.py</code></pre>
+
+    <h3>2. Phone Setup (Termux)</h3>
+    <pre><code>pkg install termux-api python -y
+pip install fastapi uvicorn httpx
+python termux_sensor_server.py --port 8099</code></pre>
+
+    <h3>3. Open the UI</h3>
+    <p>Navigate to <code>http://localhost:8098</code> in any browser. The overlay floats on your phone.</p>
+
+    <div class="success">
+      <strong>No SSH required for most features.</strong> Voice, chat, skills, and sensors all work over plain HTTP.
+    </div>
+  </div>
+
+  <div class="section" id="overlay">
+    <h2>📱 Overlay App</h2>
+    <p>The overlay is a floating WebView that shows Lilly's face, chat, and controls.</p>
+
+    <h3>Buttons</h3>
+    <div class="grid">
+      <div class="card">
+        <h4>🎤 Mic</h4>
+        <p>Toggle voice input. Uses browser mic or Android SpeechRecognizer.</p>
+      </div>
+      <div class="card">
+        <h4>⏺ Macro</h4>
+        <p>Record a sequence of actions. Press to start/stop recording.</p>
+      </div>
+      <div class="card">
+        <h4>📍 Map</h4>
+        <p>Show current GPS location on a map.</p>
+      </div>
+      <div class="card">
+        <h4>📡 Radar</h4>
+        <p>Scan for nearby Bluetooth devices (phones, wearables).</p>
+      </div>
+    </div>
+
+    <h3>Radial Menu (Long-Press)</h3>
+    <p>Long-press the bubble to open the radial menu with 4 actions:</p>
+    <div class="grid">
+      <div class="card">
+        <h4>💬 Chat (0°)</h4>
+        <p>Open the chat messenger panel.</p>
+      </div>
+      <div class="card">
+        <h4>📖 Wiki (90°)</h4>
+        <p>Open the knowledge base wiki panel.</p>
+      </div>
+      <div class="card">
+        <h4>🧒 Kid Mode (180°)</h4>
+        <p>Toggle Socratic learning mode — avatar asks guiding questions instead of giving answers.</p>
+      </div>
+      <div class="card">
+        <h4>⚙️ Settings (270°)</h4>
+        <p>Open overlay settings.</p>
+      </div>
+    </div>
+
+    <h3>Chat Input</h3>
+    <p>Type or speak commands. Lilly understands natural language:</p>
+    <ul>
+      <li><strong>"Open YouTube"</strong> — launches app</li>
+      <li><strong>"What's the battery?"</strong> — sensor query</li>
+      <li><strong>"Automate Instagram"</strong> — starts automation setup</li>
+      <li><strong>"Run morning_routine"</strong> — plays a macro</li>
+      <li><strong>"Open Wiki"</strong> — opens the knowledge base panel</li>
+      <li><strong>"Kid mode on"</strong> — toggles Socratic learning mode</li>
+    </ul>
+
+    <h3>Camera Vision & Stop Sign Detection</h3>
+    <p>The overlay camera sends JPEG frames to the backend for real-time object detection:</p>
+    <div class="grid">
+      <div class="card">
+        <h4>YOLOv8n (Primary)</h4>
+        <p>Ultralytics YOLO detects 80 COCO object classes (person, car, phone, etc). Runs on the vision server at port 8095.</p>
+      </div>
+      <div class="card">
+        <h4>Stop Sign Detector (Haar Cascade)</h4>
+        <p>OpenCV Haar Cascade classifier detects stop signs alongside YOLO. Fires an Android notification when a stop sign is spotted (15s cooldown to prevent spam).</p>
+      </div>
+    </div>
+    <div class="warning">
+      <strong>Vision pipeline:</strong> Camera → JPEG → <code>/api/vision/browser</code> → YOLO server + Haar Cascade → detections merged into avatar sensor context. Ask "what do you see?" to hear what the camera detects.
+    </div>
+  </div>
+
+  <div class="section" id="skills">
+    <h2>🛠️ Skills System</h2>
+    <p>Skills are JSON-defined actions Lilly can perform. She has 136+ built-in skills.</p>
+
+    <h3>Skill Types</h3>
+    <div class="grid">
+      <div class="card">
+        <h4>intent_launch</h4>
+        <p>Open an app or website via Android Intent.</p>
+      </div>
+      <div class="card">
+        <h4>shell_command</h4>
+        <p>Run a shell command on the phone via Termux.</p>
+      </div>
+      <div class="card">
+        <h4>prompt_argument</h4>
+        <p>Open a URL with the user's text as a query parameter.</p>
+      </div>
+      <div class="card">
+        <h4>macro</h4>
+        <p>Play back a recorded sequence of actions.</p>
+      </div>
+    </div>
+
+    <h3>How Skills Work</h3>
+    <p>When you say something like <em>"Open Netflix"</em>:</p>
+    <ol>
+      <li>Speech is transcribed (Whisper or browser mic)</li>
+      <li>Text is normalized and matched against skill aliases</li>
+      <li>Best match is selected and executed via Termux/Intent</li>
+      <li>Lilly speaks a canned reply or generates one via LLM</li>
+    </ol>
+
+    <h3>Adding Custom Skills</h3>
+    <p>Edit <code>lilly_skills.json</code>:</p>
+    <pre><code>{
+  "my_action": {
+    "action_type": "shell_command",
+    "command": "sh",
+    "args": ["-c", "echo hello"],
+    "label": "My Action",
+    "aliases": ["do thing", "run thing"]
+  }
+}</code></pre>
+  </div>
+
+  <div class="section" id="macros">
+    <h2>⏺ Macros (Follow Me)</h2>
+    <p>Macros record a sequence of actions and replay them later. Perfect for repetitive tasks.</p>
+
+    <h3>Recording a Macro</h3>
+    <ol>
+      <li>Press <strong>⏺</strong> in the overlay</li>
+      <li>Perform actions: tap apps, speak commands, navigate</li>
+      <li>Press <strong>⏹</strong> to stop</li>
+      <li>Say <strong>"Save macro as [name]"</strong></li>
+    </ol>
+
+    <h3>Playing a Macro</h3>
+    <ul>
+      <li><strong>Voice:</strong> "Run [macro name]"</li>
+      <li><strong>Text:</strong> Type "run [macro name]" in chat</li>
+      <li><strong>API:</strong> <code>POST /api/macro/play</code></li>
+    </ul>
+
+    <h3>Macro Storage</h3>
+    <p>Macros are saved to <code>macros.json</code> and registered as skills in <code>lilly_skills.json</code>.</p>
+
+    <div class="warning">
+      <strong>Note:</strong> Macros execute system-level commands (tap, swipe, keyevent). They work across any Instagram APK variant because they don't depend on app internals.
+    </div>
+  </div>
+
+  <div class="section" id="automation">
+    <h2>🤖 Automation</h2>
+    <p>Lilly can have a conversation to build social media automations. Just say <strong>"Automate Instagram"</strong>.</p>
+
+    <h3>Example Conversation</h3>
+    <pre><code>You: Automate Instagram
+Lilly: What actions? Likes, follows, comments, or all three?
+
+You: Likes and follows
+Lilly: How many of each per run?
+
+You: 30 likes, 10 follows
+Lilly: When should I run this?
+
+You: At 6am daily
+Lilly: Done! Created 'instagram_automation' with 41 steps.</code></pre>
+
+    <h3>Config Files</h3>
+    <p>Automations are saved to <code>config-examples/</code> as JSON:</p>
+    <ul>
+      <li><code>config-examples/instagram_automation.json</code> — basic template</li>
+      <li><code>config-examples-extra/instagram_growth_advanced.json</code> — advanced</li>
+    </ul>
+
+    <h3>Scheduling</h3>
+    <p>Use natural language:</p>
+    <ul>
+      <li><strong>"Schedule X at 6am daily"</strong></li>
+      <li><strong>"Run X in 2 hours"</strong></li>
+      <li><strong>"Every 3 hours"</strong></li>
+    </ul>
+
+    <h3>Insomniac Integration</h3>
+    <p>Insomniac can trigger Lilly via HTTP:</p>
+    <pre><code>POST http://<your-ip>:8098/api/macro/play
+Content-Type: application/json
+
+{"name": "instagram_automation"}</code></pre>
+  </div>
+
+  <div class="section" id="api">
+    <h2>🔌 API Reference</h2>
+
+    <h3>Core Endpoints</h3>
+    <table style="width:100%; border-collapse: collapse; margin-top: 10px;">
+      <tr style="background: #f9f9fb;">
+        <th style="padding: 10px; text-align: left; border-bottom: 2px solid #eee;">Method</th>
+        <th style="padding: 10px; text-align: left; border-bottom: 2px solid #eee;">Endpoint</th>
+        <th style="padding: 10px; text-align: left; border-bottom: 2px solid #eee;">Purpose</th>
+      </tr>
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>POST</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>/api/chat</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">Send message, get response</td>
+      </tr>
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>GET</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>/api/sensors</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">Latest sensor readings</td>
+      </tr>
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>POST</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>/api/macro/play</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">Execute macro</td>
+      </tr>
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>POST</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>/api/macro/save</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">Save macro as skill</td>
+      </tr>
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>POST</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>/api/macro/schedule</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">Schedule macro</td>
+      </tr>
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>GET</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>/api/lilly_skills</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">List all skills</td>
+      </tr>
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>POST</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>/api/vision/browser</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">Ingest camera frame (JPEG multipart)</td>
+      </tr>
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>GET</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>/api/vision/browser</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">Latest camera detections (YOLO + stop sign)</td>
+      </tr>
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>GET</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>/api/child_mode</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">Get kid mode status</td>
+      </tr>
+      <tr>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>POST</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;"><code>/api/child_mode</code></td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">Toggle kid mode</td>
+      </tr>
+    </table>
+
+    <h3>Example: List Macros</h3>
+    <pre><code>curl http://localhost:8098/api/macro/list</code></pre>
+
+    <h3>Example: Play Macro</h3>
+    <pre><code>curl -X POST http://localhost:8098/api/macro/play \
+  -H "Content-Type: application/json" \
+  -d '{"name": "instagram_automation"}'</code></pre>
+  </div>
+
+  <div class="section" id="troubleshooting">
+    <h2>🔧 Troubleshooting</h2>
+
+    <h3>Commands Don't Work</h3>
+    <p>Grant Termux permission:</p>
+    <ol>
+      <li>Settings → Apps → Termux → Permissions → Enable <strong>"Run command"</strong></li>
+      <li>In Termux: <code>echo 'allow-external-apps=true' >> ~/.termux/termux.properties</code></li>
+      <li>Close and reopen Termux</li>
+    </ol>
+
+    <h3>No Notifications</h3>
+    <pre><code>pkg install termux-api
+# Enable Notification Listener in Android Settings</code></pre>
+
+    <h3>Mic Not Working</h3>
+    <p>Use the browser mic button in the UI. Background mic requires SSH.</p>
+
+    <h3>TTS Not Speaking</h3>
+    <pre><code>pip install piper-tts
+# Check voices exist at lillyos/voices/*.onnx</code></pre>
+  </div>
+
+  <div class="section">
+    <h2>📚 More Resources</h2>
+    <div class="grid">
+      <div class="card">
+        <h4>📖 PLAYBOOK.md</h4>
+        <p>Full playbook with architecture, avatars, voice commands, overlay controls, macros, and troubleshooting.</p>
+        <a href="/wiki/PLAYBOOK.md" target="_blank" style="color:#667eea;font-size:12px">Open PLAYBOOK.md →</a>
+      </div>
+      <div class="card">
+        <h4>🎯 Skills Guide</h4>
+        <p>Frontend skills reference — categories, expected behavior, known issues, and troubleshooting.</p>
+        <a href="/wiki/skills_guide.md" target="_blank" style="color:#667eea;font-size:12px">Open Skills Guide →</a>
+      </div>
+      <div class="card">
+        <h4>🤖 Automation Configs</h4>
+        <p>Templates for Instagram and social media automations. Edit these to customize likes, follows, comments, and schedules.</p>
+        <a href="/wiki/config-examples-README.md" target="_blank" style="color:#667eea;font-size:12px">View Config Guide →</a>
+      </div>
+      <div class="card">
+        <h4>💬 Chat Routing Flow</h4>
+        <p>Technical deep-dive into how messages flow from voice/text input through the LLM and back to the UI.</p>
+        <a href="/wiki/CHAT_ROUTING_FLOW.md" target="_blank" style="color:#667eea;font-size:12px">View Routing Flow →</a>
+      </div>
+      <div class="card">
+        <h4>📝 CHANGELOG_v6.0.md</h4>
+        <p>Version history and changes for the v6.x branch of the overlay and AI server.</p>
+        <a href="/wiki/CHANGELOG_v6.0.md" target="_blank" style="color:#667eea;font-size:12px">View Changelog →</a>
+      </div>
+      <div class="card">
+        <h4>📄 README.md</h4>
+        <p>Main project README with setup instructions, environment variables, and deployment notes.</p>
+        <a href="/wiki/README.md" target="_blank" style="color:#667eea;font-size:12px">Open README →</a>
+      </div>
+    </div>
+
+    <h3 style="margin-top:25px">Key Directories</h3>
+    <div class="grid">
+      <div class="card">
+        <h4>config-examples/</h4>
+        <p>Ready-to-use automation templates: <code>instagram_automation.json</code>, <code>instagram_growth_advanced.json</code></p>
+      </div>
+      <div class="card">
+        <h4>config-examples-extra/</h4>
+        <p>Advanced automation configs with dual schedules, comment rotation, and random delays.</p>
+      </div>
+      <div class="card">
+        <h4>macros.json</h4>
+        <p>Auto-generated storage for recorded macros. Each entry has steps, timestamps, and use counts.</p>
+      </div>
+      <div class="card">
+        <h4>scheduled_tasks.json</h4>
+        <p>Task scheduler storage for reminders and timed macro executions.</p>
+      </div>
+      <div class="card">
+        <h4>lilly_skills.json</h4>
+        <p>136+ skill definitions. Macros appear here automatically when saved.</p>
+      </div>
+      <div class="card">
+        <h4>automations/</h4>
+        <p>Named automation workflows created by the "Follow & Learn" skill. JSON format with shell, API, and browser steps.</p>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <p>Lilly AI — Built with FastAPI, Termux, and a hive mind of 9 avatars.</p>
+    <p style="margin-top: 5px;">Wiki version: v7.3.1-overlay</p>
+  </footer>
+</div>
+</body>
+</html>

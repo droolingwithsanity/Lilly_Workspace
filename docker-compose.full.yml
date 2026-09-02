@@ -7,6 +7,9 @@ services:
     build: .
     container_name: lilly-ai
     network_mode: host
+    # Bluetooth adapter passthrough for container-side BLE broadcast
+    devices:
+      - "/dev/hci0:/dev/hci0"
     volumes:
       - .:/app
       - /home/labhrasd/.ssh:/root/.ssh:ro
@@ -57,6 +60,11 @@ services:
       - LILLY_AI_URL=${LILLY_AI_URL:-http://127.0.0.1:8098}
       # OpenHuman skill registry bridge (runs inside same container on :8790)
       - OPENHUMAN_BRIDGE_URL=${OPENHUMAN_BRIDGE_URL:-http://127.0.0.1:8790}
+      # BLE host advertiser HCI device (default: hci0)
+      - BLE_HOST_HCI=${BLE_HOST_HCI:-hci0}
+      # Public URL embedded in BLE advertisement — must be reachable by
+      # nearby devices (NOT the Tailscale intranet IP).
+      - BLE_WEB_UI_URL=${BLE_WEB_UI_URL:-https://droolingwithsanity.ca}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

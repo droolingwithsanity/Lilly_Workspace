@@ -3,6 +3,12 @@ services:
     build: .
     container_name: lilly-ai
     network_mode: host
+    # Bluetooth adapter passthrough for container-side BLE broadcast
+    # (ble_advertiser_host.py on :8110). Only mapped if the device exists.
+    # If /dev/hci0 is absent (e.g. no BT adapter), Docker will fail to start —
+    # run ble_advertiser_host.py directly on the host in that case.
+    # devices:
+    #   - "/dev/hci0:/dev/hci0"
     volumes:
       - .:/app
       - /home/labhrasd/.ssh:/root/.ssh:ro
@@ -18,10 +24,12 @@ services:
       - .env.openconnector
     environment:
       - PORT=8098
-      - OLLAMA_URL=${OLLAMA_URL:-http://127.0.0.1:11434}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+      - OLLAMA_URL=${OLLAMA_URL:-http://172.20.0.1:11434}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://172.20.0.1:11434}
       - PREFER_BACKEND=${PREFER_BACKEND:-ollama}
       - SENSOR_SERVER_URL=${SENSOR_SERVER_URL:-http://100.115.234.87:8099}
+      # Fleet node cap — raised for addition of Raspberry Pi recon node(s)
+      - LILLY_MAX_NODES=${LILLY_MAX_NODES:-6}
       - TERMUX_SSH_HOST=${TERMUX_SSH_HOST}
       - TERMUX_SSH_PORT=${TERMUX_SSH_PORT:-8022}
       - TERMUX_SSH_USER=${TERMUX_SSH_USER}
@@ -49,6 +57,11 @@ services:
       - OPENLIVE_AGENT_SECRET=${OPENLIVE_AGENT_SECRET:-lilly-openlive-secret-2026}
       # Vision server — proxy YOLO inference to dedicated container
       - VISION_SERVER_URL=${VISION_SERVER_URL:-http://127.0.0.1:8198}
+      # BLE host advertiser HCI device (default: hci0)
+      - BLE_HOST_HCI=${BLE_HOST_HCI:-hci0}
+      # Public URL embedded in BLE advertisement — must be reachable by
+      # nearby devices (NOT the Tailscale intranet IP).
+      - BLE_WEB_UI_URL=${BLE_WEB_UI_URL:-https://droolingwithsanity.ca}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

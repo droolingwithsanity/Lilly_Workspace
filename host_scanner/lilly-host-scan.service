@@ -1,0 +1,17 @@
+[Unit]
+Description=Lilly Host Scan Provider (real BT + WiFi scans from host radios)
+After=network-online.target bluetooth.service
+Wants=network-online.target bluetooth.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/labhrasd/Lilly_Workspace/host_scanner
+ExecStart=/usr/bin/python3 /home/labhrasd/Lilly_Workspace/host_scanner/provider.py --host 127.0.0.1 --port 8096
+Restart=always
+RestartSec=5
+# Environment="HOST_BT_SCAN_SECONDS=5"
+# Environment="HOST_WIFI_SCAN_SECONDS=15"
+# Environment="HOST_SCAN_CACHE_SECONDS=5"
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,27 @@
+{
+  "_comment": "TikTok engagement: likes and follows on For You page with safety limits.",
+  "name": "tiktok_engage",
+  "platform": "tiktok",
+  "package": "com.zhiliaoapp.musically",
+  "actions": [
+    {"type": "open_app", "comment": "Open TikTok"},
+    {"type": "wait", "seconds": 4, "comment": "Wait for For You page"},
+    {"type": "tap", "x": 540, "y": 700, "comment": "Double-tap to like"},
+    {"type": "wait", "seconds": 2},
+    {"type": "swipe", "x1": 200, "y1": 600, "x2": 800, "y2": 600, "comment": "Swipe to next video"},
+    {"type": "tap", "x": 540, "y": 700, "comment": "Double-tap to like"},
+    {"type": "wait", "seconds": 2},
+    {"type": "tap", "x": 680, "y": 700, "comment": "Tap follow if interesting"}
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "time": "18:00",
+    "comment": "Evening TikTok session"
+  },
+  "limits": {
+    "max_likes_per_run": 15,
+    "max_follows_per_run": 3,
+    "delay_between_actions": [3, 6],
+    "comment": "Very conservative to avoid TikTok shadowban"
+  }
+}

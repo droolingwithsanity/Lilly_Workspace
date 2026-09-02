@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lilly AI — Skill Catalog</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: linear-gradient(135deg, #f5f0fa 0%, #e8dff5 100%);
+    color: #3d3550;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+  header {
+    text-align: center;
+    margin-bottom: 32px;
+  }
+  header h1 {
+    font-size: 2rem;
+    color: #5d4e6d;
+    margin-bottom: 8px;
+  }
+  header p { color: #7a6b8a; font-size: 0.95rem; }
+
+  .tabs {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+  }
+  .tab {
+    padding: 10px 20px;
+    border-radius: 20px;
+    border: 1px solid #c4b5d4;
+    background: rgba(255,255,255,0.6);
+    color: #5d4e6d;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: all 0.2s;
+  }
+  .tab:hover { background: rgba(255,255,255,0.9); }
+  .tab.active {
+    background: #8b7a9e;
+    color: #fff;
+    border-color: #8b7a9e;
+  }
+
+  .section { display: none; }
+  .section.active { display: block; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 16px;
+  }
+
+  .card {
+    background: rgba(255,255,255,0.65);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.7);
+    border-radius: 16px;
+    padding: 18px;
+    transition: transform 0.15s, box-shadow 0.15s;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(139,122,158,0.12);
+  }
+  .card-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #c4b5d4, #a78bfa);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+    color: #fff;
+    flex-shrink: 0;
+  }
+  .card-title {
+    font-weight: 600;
+    color: #4a3f5c;
+    font-size: 0.95rem;
+    line-height: 1.3;
+  }
+  .card-meta {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .badge {
+    font-size: 0.7rem;
+    padding: 3px 8px;
+    border-radius: 10px;
+    background: #e8dff5;
+    color: #6b5b7a;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-weight: 600;
+  }
+  .badge.installed { background: #d4f4e0; color: #2d6a4f; }
+  .badge.available { background: #fff3cd; color: #856404; }
+  .badge.connected { background: #d0e8ff; color: #004085; }
+  .badge.missing { background: #f8d7da; color: #721c24; }
+
+  .card-desc {
+    font-size: 0.82rem;
+    color: #6b5b7a;
+    line-height: 1.5;
+    flex-grow: 1;
+  }
+  .card-usage {
+    font-size: 0.78rem;
+    color: #5d4e6d;
+    background: rgba(255,255,255,0.5);
+    padding: 8px;
+    border-radius: 8px;
+    border-left: 3px solid #8b7a9e;
+  }
+  .card-usage code {
+    background: rgba(139,122,158,0.1);
+    padding: 2px 5px;
+    border-radius: 4px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 0.75rem;
+  }
+  .card-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: auto;
+    flex-wrap: wrap;
+  }
+  .btn {
+    padding: 7px 14px;
+    border-radius: 8px;
+    border: none;
+    font-size: 0.8rem;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 0.15s;
+  }
+  .btn-primary {
+    background: #8b7a9e;
+    color: #fff;
+  }
+  .btn-primary:hover { background: #7a6a8d; }
+  .btn-outline {
+    background: transparent;
+    border: 1px solid #c4b5d4;
+    color: #5d4e6d;
+  }
+  .btn-outline:hover { background: rgba(255,255,255,0.5); }
+  .btn-teach {
+    background: #e8dff5;
+    color: #5d4e6d;
+    border: 1px solid #c4b5d4;
+  }
+  .btn-teach:hover { background: #d4c5e8; }
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .status-bar {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  .status-item {
+    background: rgba(255,255,255,0.7);
+    padding: 10px 16px;
+    border-radius: 12px;
+    font-size: 0.85rem;
+    color: #5d4e6d;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .dot.green { background: #28a745; }
+  .dot.yellow { background: #ffc107; }
+  .dot.red { background: #dc3545; }
+
+  .empty {
+    text-align: center;
+    padding: 40px;
+    color: #7a6b8a;
+    font-size: 0.95rem;
+  }
+
+  .search-bar {
+    width: 100%;
+    max-width: 500px;
+    margin: 0 auto 20px;
+    display: block;
+    padding: 10px 16px;
+    border-radius: 20px;
+    border: 1px solid #c4b5d4;
+    background: rgba(255,255,255,0.7);
+    font-size: 0.9rem;
+    outline: none;
+  }
+  .search-bar:focus { border-color: #8b7a9e; }
+
+  @media (max-width: 600px) {
+    .grid { grid-template-columns: 1fr; }
+    header h1 { font-size: 1.5rem; }
+  }
+
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-8px); }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>🐾 Lilly AI — Skill Catalog</h1>
+    <p>Installed phone skills, available community skills, and connected services</p>
+  </header>
+
+  <div class="status-bar" id="statusBar">
+    <div class="status-item"><span class="dot yellow" id="dotApi"></span> <span id="statusApi">Checking APIs...</span></div>
+    <div class="status-item"><span class="dot yellow" id="dotBridge"></span> <span id="statusBridge">OpenHuman Bridge</span></div>
+    <div class="status-item"><span class="dot yellow" id="dotGoogle"></span> <span id="statusGoogle">Google Workspace</span></div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="installed" onclick="showTab('installed')">📱 Installed Skills</button>
+    <button class="tab" data-tab="community" onclick="showTab('community')">🌐 Community Skills</button>
+    <button class="tab" data-tab="services" onclick="showTab('services')">🔌 Services</button>
+  </div>
+
+  <input type="text" class="search-bar" id="searchBar" placeholder="Search skills..." oninput="filterCards()">
+
+  <!-- INSTALLED SKILLS -->
+  <div class="section active" id="section-installed">
+    <div class="grid" id="installedGrid"></div>
+  </div>
+
+  <!-- COMMUNITY SKILLS -->
+  <div class="section" id="section-community">
+    <div class="grid" id="communityGrid"></div>
+  </div>
+
+  <!-- SERVICES -->
+  <div class="section" id="section-services">
+    <div class="grid" id="servicesGrid"></div>
+  </div>
+</div>
+
+  <!-- TUTORIAL MODAL -->
+  <div id="tutorialModal" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,0.6); backdrop-filter:blur(4px); align-items:center; justify-content:center;">
+    <div style="background:linear-gradient(135deg, #f5f0fa 0%, #e8dff5 100%); border-radius:20px; border:1px solid rgba(255,255,255,0.7); max-width:480px; width:92%; max-height:90vh; overflow-y:auto; padding:24px; position:relative; box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+      <button onclick="closeTutorial()" style="position:absolute; top:12px; right:16px; background:none; border:none; font-size:1.4rem; cursor:pointer; color:#5d4e6d;">✕</button>
+      
+      <div id="tutorialHeader" style="text-align:center; margin-bottom:20px;">
+        <div id="tutorialIcon" style="width:64px; height:64px; border-radius:16px; background:linear-gradient(135deg, #c4b5d4, #a78bfa); display:flex; align-items:center; justify-content:center; font-size:2rem; margin:0 auto 12px; color:#fff;">🧠</div>
+        <h2 id="tutorialTitle" style="color:#4a3f5c; font-size:1.3rem; margin-bottom:4px;">Skill Tutorial</h2>
+        <p id="tutorialDesc" style="color:#7a6b8a; font-size:0.85rem;">Follow along to learn how to use this skill</p>
+      </div>
+
+      <!-- Phone mockup -->
+      <div style="background:#1a1a2e; border-radius:24px; padding:12px; margin:0 auto 20px; max-width:280px; border:3px solid #333;">
+        <div style="background:#16213e; border-radius:16px; padding:16px; min-height:320px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
+          <div id="stepVisual" style="font-size:3.5rem; margin-bottom:12px; animation: float 2s ease-in-out infinite;">🎤</div>
+          <div id="stepType" style="font-size:0.7rem; text-transform:uppercase; letter-spacing:1px; color:#8b7a9e; margin-bottom:8px;">VOICE</div>
+          <div id="stepTitle" style="color:#fff; font-size:1rem; font-weight:600; margin-bottom:8px;">Speak the command</div>
+          <div id="stepDesc" style="color:#a0a0b0; font-size:0.8rem; line-height:1.5;">Say the trigger phrase to activate this skill</div>
+          <div id="stepTip" style="display:none; color:#7ec8e3; font-size:0.75rem; margin-top:10px; font-style:italic;">💡 Tip: Try variations of the command</div>
+        </div>
+      </div>
+
+      <!-- Progress bar -->
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:16px;">
+        <div id="progressBar" style="flex:1; height:6px; background:rgba(139,122,158,0.2); border-radius:3px; overflow:hidden;">
+          <div id="progressFill" style="width:0%; height:100%; background:linear-gradient(90deg, #8b7a9e, #a78bfa); border-radius:3px; transition:width 0.3s;"></div>
+        </div>
+        <span id="stepCounter" style="color:#7a6b8a; font-size:0.8rem; font-weight:500;">1 / 4</span>
+      </div>
+
+      <!-- Controls -->
+      <div style="display:flex; gap:10px; justify-content:center; align-items:center;">
+        <button onclick="prevStep()" class="btn btn-outline" style="padding:10px 18px; border-radius:20px;">⏮</button>
+        <button id="playBtn" onclick="togglePlay()" class="btn btn-primary" style="padding:10px 24px; border-radius:20px; font-size:1rem;">▶️ Play</button>
+        <button onclick="nextStep()" class="btn btn-outline" style="padding:10px 18px; border-radius:20px;">⏭</button>
+      </div>
+      <div style="text-align:center; margin-top:10px;">
+        <label style="color:#7a6b8a; font-size:0.75rem; cursor:pointer;">
+          <input type="checkbox" id="autoPlayCheck" checked onchange="autoPlay=this.checked"> Auto-play steps
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  let currentTutorial = null;
+  let currentStep = 0;
+  let isPlaying = false;
+  let playTimer = null;
+  let autoPlay = true;
+
+  const VISUALS = {
+    mic: { icon: '🎤', label: 'VOICE' },
+    brain: { icon: '🧠', label: 'PROCESSING' },
+    youtube: { icon: '▶️', label: 'OPENING' },
+    gmail: { icon: '📧', label: 'OPENING' },
+    maps: { icon: '🗺️', label: 'OPENING' },
+    camera: { icon: '📸', label: 'OPENING' },
+    music: { icon: '🎵', label: 'OPENING' },
+    search: { icon: '🔍', label: 'SEARCHING' },
+    notifications: { icon: '🔔', label: 'READING' },
+    battery: { icon: '🔋', label: 'SENSOR' },
+    bluetooth: { icon: '📡', label: 'SCANNING' },
+    location: { icon: '📍', label: 'GPS' },
+    sensor: { icon: '📡', label: 'SENSOR' },
+    screen: { icon: '📱', label: 'READY' },
+    photos: { icon: '🖼️', label: 'OPENING' },
+    settings: { icon: '⚙️', label: 'OPENING' },
+    calculator: { icon: '🧮', label: 'OPENING' },
+    terminal: { icon: '🖥️', label: 'CONNECTED' },
+    network: { icon: '🌐', label: 'CONNECTING' },
+    wifi: { icon: '📶', label: 'CHECKING' },
+    weather: { icon: '🌤️', label: 'REPORT' },
+    netflix: { icon: '🎬', label: 'OPENING' },
+    spotify: { icon: '🎧', label: 'OPENING' },
+    volume: { icon: '🔊', label: 'ADJUSTING' },
+    light: { icon: '💡', label: 'SENSOR' },
+    pip: { icon: '📌', label: 'PIP MODE' }
+  };
+
+  function openTutorial(skillId) {
+    const skillLabel = skillId.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    fetch(`/api/skill_tutorial/${encodeURIComponent(skillId)}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(tutorial => {
+        if (!tutorial) {
+          alert(`No tutorial available for "${skillLabel}" yet.`);
+          return;
+        }
+        currentTutorial = tutorial;
+        currentStep = 0;
+        document.getElementById('tutorialTitle').textContent = tutorial.title || skillLabel;
+        document.getElementById('tutorialDesc').textContent = tutorial.description || '';
+        document.getElementById('tutorialIcon').textContent = tutorial.icon || '🧠';
+        document.getElementById('tutorialModal').style.display = 'flex';
+        renderStep();
+      })
+      .catch(() => alert('Could not load tutorial. Is Lilly AI running?'));
+  }
+
+  function closeTutorial() {
+    stopPlay();
+    document.getElementById('tutorialModal').style.display = 'none';
+    currentTutorial = null;
+  }
+
+  function renderStep() {
+    if (!currentTutorial || currentStep >= currentTutorial.steps.length) {
+      if (currentTutorial && currentStep >= currentTutorial.steps.length) {
+        currentStep = currentTutorial.steps.length - 1;
+      }
+      return;
+    }
+    const step = currentTutorial.steps[currentStep];
+    const vis = VISUALS[step.visual] || { icon: '📋', label: step.type.toUpperCase() };
+    
+    document.getElementById('stepVisual').textContent = vis.icon;
+    document.getElementById('stepType').textContent = vis.label;
+    document.getElementById('stepTitle').textContent = step.title;
+    document.getElementById('stepDesc').textContent = step.description;
+    document.getElementById('stepCounter').textContent = `${currentStep + 1} / ${currentTutorial.steps.length}`;
+    document.getElementById('progressFill').style.width = `${((currentStep + 1) / currentTutorial.steps.length) * 100}%`;
+    
+    const tipEl = document.getElementById('stepTip');
+    if (step.tip) {
+      tipEl.style.display = 'block';
+      tipEl.textContent = `💡 ${step.tip}`;
+    } else {
+      tipEl.style.display = 'none';
+    }
+
+    if (isPlaying && autoPlay) {
+      clearTimeout(playTimer);
+      playTimer = setTimeout(() => {
+        if (currentStep < currentTutorial.steps.length - 1) {
+          nextStep();
+        } else {
+          stopPlay();
+        }
+      }, step.duration || 3000);
+    }
+  }
+
+  function nextStep() {
+    if (!currentTutorial) return;
+    if (currentStep < currentTutorial.steps.length - 1) {
+      currentStep++;
+      renderStep();
+    } else if (isPlaying) {
+      stopPlay();
+    }
+  }
+
+  function prevStep() {
+    if (!currentTutorial) return;
+    if (currentStep > 0) {
+      currentStep--;
+      renderStep();
+    }
+  }
+
+  function togglePlay() {
+    if (isPlaying) {
+      stopPlay();
+    } else {
+      startPlay();
+    }
+  }
+
+  function startPlay() {
+    if (!currentTutorial) return;
+    if (currentStep >= currentTutorial.steps.length - 1) {
+      currentStep = 0;
+      renderStep();
+    }
+    isPlaying = true;
+    document.getElementById('playBtn').textContent = '⏸ Pause';
+    renderStep();
+  }
+
+  function stopPlay() {
+    isPlaying = false;
+    clearTimeout(playTimer);
+    document.getElementById('playBtn').textContent = '▶️ Play';
+  }
+
+  document.addEventListener('keydown', e => {
+    const modal = document.getElementById('tutorialModal');
+    if (modal.style.display !== 'flex') return;
+    if (e.key === 'ArrowRight') nextStep();
+    if (e.key === 'ArrowLeft') prevStep();
+    if (e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); togglePlay(); }
+    if (e.key === 'Escape') closeTutorial();
+  });
+
+  // Update cardHtml to include Teach Me button
+  function cardHtml(skill, installed = true, usage = '') {
+    const label = skill.label || skill.name || skill.id || 'Unknown';
+    const desc = skill.description || skill.canned_reply || 'No description available.';
+    const action = skill.action_type || skill.source || 'skill';
+    const icon = getIcon(label, action);
+    const usageBlock = usage ? `<div class="card-usage"><strong>How to use:</strong> <code>${usage}</code></div>` : '';
+    const aliases = skill.aliases || [];
+    const aliasStr = aliases.slice(0, 4).map(a => `<span class="badge">${a}</span>`).join(' ');
+    const skillId = skill.id || label;
+
+    return `
+      <div class="card" data-search="${(label + ' ' + desc + ' ' + aliases.join(' ')).toLowerCase()}">
+        <div class="card-header">
+          <div class="icon">${icon}</div>
+          <div class="card-title">${label}</div>
+        </div>
+        <div class="card-meta">${badgeHtml(action, installed)} ${aliasStr}</div>
+        <div class="card-desc">${desc}</div>
+        ${usageBlock}
+        <div class="card-actions">
+          ${installed
+            ? `<button class="btn btn-primary" onclick="testSkill('${skillId}')">Test</button>
+               <button class="btn btn-teach" onclick="openTutorial('${skillId}')">Teach Me</button>`
+            : `<button class="btn btn-outline" onclick="installSkill('${skillId}')">Install</button>`}
+        </div>
+      </div>
+    `;
+  }
+
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-8px); }
+  }
+  </script>
+const API_BASE = window.location.origin;
+const BRIDGE_BASE = 'http://localhost:8790';
+
+const ICONS = {
+  youtube: '▶️', settings: '⚙️', search: '🔍', calculator: '🧮',
+  calendar: '📅', maps: '🗺️', camera: '📸', music: '🎵',
+  gmail: '📧', netflix: '🎬', spotify: '🎧', chrome: '🌐',
+  photos: '🖼️', files: '📁', contacts: '👤', messages: '💬',
+  phone: '📞', clock: '⏰', translate: '🌍', keep: '📝',
+  docs: '📄', sheets: '📊', slides: '📽️', drive: '💾',
+  ssh: '🖥️', apt: '📦', process: '⚡', disk: '💿',
+  ping: '📡', ad: '⏭️', media: '🎛️', nav: '🧭',
+  tab: '↔️', voice: '🎤', app: '📱', termux: '🐢',
+  sensor: '📡', battery: '🔋', wifi: '📶', bluetooth: '📡',
+  clipboard: '📋', notification: '🔔', vibrate: '📳', torch: '🔦',
+  ringer: '🔊', screenshot: '📷', contact: '👥', sms: '💬',
+  call: '📞', osint: '🕵️', skill: '🧠', location: '📍',
+  weather: '🌤️', default: '🔧'
+};
+
+function getIcon(label, action_type) {
+  const key = (label || '').toLowerCase().split(' ')[0];
+  if (ICONS[key]) return ICONS[key];
+  const map = {
+    intent_launch: '🚀', shell_command: '⌨️', termux: '🐢',
+    keyevent: '🎛️', info: 'ℹ️', voice_dictation: '🎤',
+    context_launch: '🔗', am: '📱', prompt_argument: '💬'
+  };
+  return map[action_type] || ICONS.default;
+}
+
+function badgeHtml(action_type, installed) {
+  if (installed) {
+    return `<span class="badge installed">Installed</span>`;
+  }
+  const labels = {
+    intent_launch: 'App', shell_command: 'Command', termux: 'Sensor',
+    keyevent: 'Control', info: 'Info', voice_dictation: 'Voice',
+    context_launch: 'Context', am: 'App', prompt_argument: 'Search'
+  };
+  const label = labels[action_type] || 'Skill';
+  return `<span class="badge available">${label}</span>`;
+}
+
+function showTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.section').forEach(s => s.classList.toggle('active', s.id === `section-${tab}`));
+}
+
+function filterCards() {
+  const q = document.getElementById('searchBar').value.toLowerCase();
+  document.querySelectorAll('.card').forEach(card => {
+    const text = card.dataset.search || '';
+    card.style.display = text.includes(q) ? '' : 'none';
+  });
+}
+
+async function loadInstalledSkills() {
+  const grid = document.getElementById('installedGrid');
+  try {
+    const r = await fetch('/api/lilly_skills');
+    const data = await r.json();
+    const skills = data.skills || [];
+    if (!skills.length) { grid.innerHTML = '<div class="empty">No installed skills found.</div>'; return; }
+    grid.innerHTML = skills.map(s => cardHtml(s, true)).join('');
+  } catch (e) {
+    grid.innerHTML = '<div class="empty">Could not load installed skills. Is Lilly AI running on port 8098?</div>';
+  }
+}
+
+async function loadCommunitySkills() {
+  const grid = document.getElementById('communityGrid');
+  try {
+    const r = await fetch(`/api/openhuman/catalog?limit=200`);
+    const data = await r.json();
+    const entries = data.entries || [];
+    if (!entries.length) { grid.innerHTML = '<div class="empty">No community skills available.</div>'; return; }
+    grid.innerHTML = entries.map(e => {
+      const usage = e.commands && e.commands.length ? e.commands[0] : '';
+      return cardHtml({
+        id: e.id,
+        name: e.name,
+        label: e.name,
+        description: e.description || e.summary || 'Community skill from OpenHuman catalog.',
+        action_type: 'openhuman',
+        aliases: e.tags || [],
+        source: e.source,
+        category: e.category
+      }, false, usage);
+    }).join('');
+  } catch (e) {
+    grid.innerHTML = '<div class="empty">Could not load community skills. Is Lilly AI running on port 8098?</div>';
+  }
+}
+
+async function loadServices() {
+  const grid = document.getElementById('servicesGrid');
+  let googleStatus = 'unknown';
+  let googleScopes = [];
+
+  try {
+    const r = await fetch('/api/google/connect_info');
+    const data = await r.json();
+    googleStatus = data.connected ? 'connected' : 'disconnected';
+    googleScopes = data.scopes || [];
+  } catch (e) {
+    googleStatus = 'error';
+  }
+
+  const services = [
+    {
+      id: 'google-workspace',
+      label: 'Google Workspace',
+      description: 'Gmail, Calendar, and Drive integration via Google OAuth. Read emails, check calendar events, and manage Drive files.',
+      action_type: 'service',
+      aliases: ['gmail', 'calendar', 'drive', 'google'],
+      source: 'openconnector',
+      installed: googleStatus === 'connected',
+      usage: googleStatus === 'connected'
+        ? 'Say "check my email" or "what\'s on my calendar"'
+        : 'Connect via Auth0 Google SSO with gmail.readonly + calendar.readonly scopes'
+    },
+    {
+      id: 'openhuman-bridge',
+      label: 'OpenHuman Bridge',
+      description: 'Community skill registry. Browse, install, and manage AI workflow skills from the Hermes catalog.',
+      action_type: 'service',
+      aliases: ['openhuman', 'catalog', 'community'],
+      source: 'bridge',
+      installed: true,
+      usage: 'Browse at /api/openhuman/catalog or install via /v1/skills/install'
+    },
+    {
+      id: 'whisper-stt',
+      label: 'Whisper STT',
+      description: 'Local speech-to-text using faster-whisper-server. Powers the browser microphone and voice input.',
+      action_type: 'service',
+      aliases: ['whisper', 'stt', 'speech', 'voice'],
+      source: 'local',
+      installed: true,
+      usage: 'Click the mic button in the web UI or enable background mic'
+    },
+    {
+      id: 'piper-tts',
+      label: 'Piper TTS',
+      description: 'Text-to-speech with 9 avatar voice profiles. Generates speech audio for Lilly\'s replies.',
+      action_type: 'service',
+      aliases: ['tts', 'speech', 'voice', 'piper'],
+      source: 'local',
+      installed: true,
+      usage: 'Automatically plays when Lilly replies with text'
+    },
+    {
+      id: 'ollama',
+      label: 'Ollama LLM',
+      description: 'Local LLM backend running qwen2.5:7b. Powers all AI conversation, reasoning, and skill execution.',
+      action_type: 'service',
+      aliases: ['ollama', 'llm', 'ai', 'model'],
+      source: 'local',
+      installed: true,
+      usage: 'Automatic — all chat and skill reasoning flows through Ollama'
+    },
+    {
+      id: 'termux-sensors',
+      label: 'Termux Sensor Server',
+      description: 'HTTP server on the Android phone exposing 23 sensors, notifications, battery, GPS, Bluetooth, and shell commands.',
+      action_type: 'service',
+      aliases: ['sensor', 'termux', 'phone', 'android'],
+      source: 'phone',
+      installed: true,
+      usage: 'Say "what do you sense" or "what\'s the battery"'
+    }
+  ];
+
+  grid.innerHTML = services.map(s => cardHtml(s, s.installed, s.usage)).join('');
+}
+
+function testSkill(id) {
+  alert(`To test "${id}", say or type its trigger phrase in the chat window.`);
+}
+
+function installSkill(id) {
+  alert(`To install "${id}", use the OpenHuman bridge API:\nPOST /v1/skills/install with {"entry_id": "${id}"}`);
+}
+
+async function checkStatus() {
+  // Check Lilly AI API
+  try {
+    const r = await fetch('/api/health');
+    const data = await r.json();
+    document.getElementById('dotApi').className = 'dot green';
+    document.getElementById('statusApi').textContent = 'Lilly AI (8098)';
+  } catch (e) {
+    document.getElementById('dotApi').className = 'dot red';
+    document.getElementById('statusApi').textContent = 'Lilly AI offline';
+  }
+
+  // Check OpenHuman bridge
+  try {
+    const r = await fetch(`${BRIDGE_BASE}/health`);
+    const data = await r.json();
+    document.getElementById('dotBridge').className = 'dot green';
+    document.getElementById('statusBridge').textContent = 'OpenHuman Bridge (8790)';
+  } catch (e) {
+    document.getElementById('dotBridge').className = 'dot red';
+    document.getElementById('statusBridge').textContent = 'Bridge offline';
+  }
+
+  // Check Google Workspace
+  try {
+    const r = await fetch('/api/google/connect_info');
+    const data = await r.json();
+    if (data.connected) {
+      document.getElementById('dotGoogle').className = 'dot green';
+      document.getElementById('statusGoogle').textContent = `Google Workspace (${data.user || 'connected'})`;
+    } else {
+      document.getElementById('dotGoogle').className = 'dot yellow';
+      document.getElementById('statusGoogle').textContent = 'Google Workspace (not connected)';
+    }
+  } catch (e) {
+    document.getElementById('dotGoogle').className = 'dot red';
+    document.getElementById('statusGoogle').textContent = 'Google Workspace (error)';
+  }
+}
+
+async function init() {
+  await checkStatus();
+  await loadInstalledSkills();
+  await loadCommunitySkills();
+  await loadServices();
+}
+
+init();
+</script>
+</body>
+</html>

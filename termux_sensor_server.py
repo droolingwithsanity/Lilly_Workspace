@@ -166,21 +166,66 @@ async def _run_sh(cmd_str: str, timeout: float = 5.0) -> str:
 
 
 async def read_all_sensors() -> dict:
-    """Read all sensors in a single termux-sensor call (non-blocking)."""
+    """Read all sensors in a single termux-sensor call (non-blocking).
+
+    First reads all sensors via -a flag, then explicitly reads known Pixel 10
+    sensors that may not appear in the batch read.
+    """
+    # Batch read all available sensors
     out = await _run_sh("termux-sensor -a -n 1", timeout=15.0)
-    if not out:
-        return {}
-    try:
-        data = json.loads(out)
-        result = {}
-        for name, info in data.items():
-            if isinstance(info, dict):
-                result[name] = info.get("values", [])
-            else:
-                result[name] = info
-        return result
-    except json.JSONDecodeError:
-        return {}
+    result = {}
+    if out:
+        try:
+            data = json.loads(out)
+            for name, info in data.items():
+                if isinstance(info, dict):
+                    result[name] = info.get("values", [])
+                else:
+                    result[name] = info
+        except json.JSONDecodeError:
+            pass
+
+    # Explicitly read Pixel 10 sensors that may not appear in batch read
+    # These are common Pixel 10 / Android 17 sensors
+    PIXEL_10_SENSORS = [
+        "game_rotation_vector",
+        "geomagnetic_rotation_vector",
+        "geomagnetic_field",
+        "significant_motion",
+        "step_detector",
+        "heart_rate",
+        "pose_6dof",
+        "stationary_detect",
+        "motion_detect",
+        "absolute_heading",
+        "heading",
+        "low_latency_offbody_detect",
+        "hinge_angle",
+        "head_tracker",
+        "accelerometer_uncalibrated",
+        "gyroscope_uncalibrated",
+        "magnetic_field_uncalibrated",
+        "rotation_vector_uncalibrated",
+    ]
+
+    # Read sensors not already captured
+    missing = [s for s in PIXEL_10_SENSORS if s not in result]
+    if missing:
+        # Read in batches of 4 to avoid overwhelming termux-sensor
+        for i in range(0, len(missing), 4):
+            batch = missing[i : i + 4]
+            for sensor_name in batch:
+                try:
+                    val = await read_sensor(sensor_name)
+                    if val is not None:
+                        result[sensor_name] = val
+                except Exception:
+                    pass
+            # Small delay between batches
+            if i + 4 < len(missing):
+                await asyncio.sleep(0.5)
+
+    return result
 
 
 async def read_sensor(name: str) -> Optional[list]:
@@ -370,6 +415,115 @@ async def sensor_server_version():
     }
 
 
+@app.post("/deploy")
+async def deploy_update(request: Request):
+    """Receive an updated file and save it.
+
+    Body: {"filename": "termux_sensor_server.py", "content": "...", "sha256": "..."}
+
+    This allows the AI server to push updates to the phone without SSH.
+    Only accepts files in the home directory for security.
+    """
+    if PAIR_TOKEN:
+        token = request.headers.get("X-Pair-Token", "")
+        if token != PAIR_TOKEN:
+            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+
+    try:
+        body = await request.json()
+        filename = body.get("filename", "")
+        content = body.get("content", "")
+        expected_sha = body.get("sha256", "")
+
+        if not filename or not content:
+            return JSONResponse(
+                status_code=400, content={"error": "filename and content required"}
+            )
+
+        # Security: only allow specific files to be updated
+        ALLOWED_FILES = {
+            "termux_sensor_server.py",
+            "lilly_skills.json",
+            "sensor_skills.json",
+        }
+        if filename not in ALLOWED_FILES:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": f"File '{filename}' not in allowed list: {ALLOWED_FILES}"
+                },
+            )
+
+        # Verify SHA256 if provided
+        import hashlib
+
+        actual_sha = hashlib.sha256(content.encode()).hexdigest()
+        if expected_sha and actual_sha != expected_sha:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "SHA256 mismatch",
+                    "expected": expected_sha,
+                    "actual": actual_sha,
+                },
+            )
+
+        # Save to home directory
+        import os
+
+        home = os.path.expanduser("~")
+        filepath = os.path.join(home, filename)
+
+        # Backup existing file
+        if os.path.exists(filepath):
+            backup = f"{filepath}.bak"
+            os.rename(filepath, backup)
+
+        with open(filepath, "w") as f:
+            f.write(content)
+
+        logger.info(
+            f"Deployed update: {filename} ({len(content)} bytes, sha256={actual_sha[:16]}...)"
+        )
+
+        return {
+            "ok": True,
+            "filename": filename,
+            "size": len(content),
+            "sha256": actual_sha,
+            "path": filepath,
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/restart")
+async def restart_server(request: Request):
+    """Restart the sensor server (self-update after deploy)."""
+    if PAIR_TOKEN:
+        token = request.headers.get("X-Pair-Token", "")
+        if token != PAIR_TOKEN:
+            return JSONResponse(status_code=401, content={"error": "unauthorized"})
+
+    import subprocess
+    import sys
+
+    logger.info("Restarting sensor server...")
+
+    # Schedule restart after response is sent
+    async def _do_restart():
+        await asyncio.sleep(1.0)
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "--port", str(PORT)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os._exit(0)
+
+    asyncio.create_task(_do_restart())
+    return {"ok": True, "message": "Restarting..."}
+
+
 @app.get("/health")
 async def health():
     return {
@@ -384,10 +538,28 @@ async def health():
 
 @app.get("/sensors/all")
 async def get_all_sensors():
+    """Return all sensor data with dynamic availability detection."""
+    # Build available dict from actual sensor list + current readings
+    available = {}
+    for sensor_name in LIST_AVAILABLE:
+        # Check if sensor has data in latest readings
+        sensor_key = sensor_name.lower().replace(" ", "_").replace("-", "_")
+        has_data = sensor_key in LATEST_SENSORS or sensor_name in LATEST_SENSORS
+        available[sensor_name] = has_data
+    # Also check for sensors in LATEST_SENSORS not in LIST_AVAILABLE
+    for sensor_name in LATEST_SENSORS:
+        if sensor_name not in available and sensor_name != "source":
+            available[sensor_name] = True
     return {
         "sensors": LATEST_SENSORS,
+        "available": available,
         "timestamp": LAST_UPDATE,
         "count": len(LATEST_SENSORS),
+        "device": "Pixel 10",
+        "model": "Pixel 10",
+        "manufacturer": "Google",
+        "android_version": "17",
+        "sdk_int": 37,
     }
 
 
@@ -517,24 +689,31 @@ async def scan_bluetooth_devices() -> list:
 
     # Try termux-bluetooth-scan (requires BLUETOOTH_SCAN permission)
     out = await _run_cmd("termux-bluetooth-scan", timeout=15.0)
+    scan_succeeded = False
     if out:
         try:
             scan_data = json.loads(out)
             if isinstance(scan_data, list):
+                scan_succeeded = True
                 for dev in scan_data:
+                    rssi = dev.get("rssi", -100)
+                    # Only mark as live if the active scan returned a real signal
+                    live = rssi > -100
                     devices.append(
                         {
                             "name": dev.get("name", "Unknown"),
                             "address": dev.get("address", ""),
-                            "rssi": dev.get("rssi", -100),
+                            "rssi": rssi,
                             "paired": False,
                             "type": "scan",
+                            "live": live,
                         }
                     )
         except json.JSONDecodeError:
             pass
 
-    # Also get paired devices
+    # Also get paired devices — these are ghost entries (bonded but not in range).
+    # Mark them live:False so the tracker knows not to use them for location correlation.
     out_paired = await _run_cmd("termux-bluetooth-paired", timeout=5.0)
     if out_paired:
         try:
@@ -544,6 +723,7 @@ async def scan_bluetooth_devices() -> list:
                 for dev in paired_data:
                     addr = dev.get("address", "")
                     if addr not in paired_addresses:
+                        # Paired-only device: not seen in active scan — always ghost
                         devices.append(
                             {
                                 "name": dev.get("name", "Unknown"),
@@ -551,10 +731,12 @@ async def scan_bluetooth_devices() -> list:
                                 "rssi": dev.get("rssi", -100),
                                 "paired": True,
                                 "type": "paired",
+                                "live": False,
                             }
                         )
                     else:
-                        # Mark as paired if found in scan results too
+                        # Found in both scan and paired list — mark as paired,
+                        # but keep the live flag set by the scan result above
                         for d in devices:
                             if d["address"] == addr:
                                 d["paired"] = True
@@ -578,11 +760,21 @@ async def scan_bluetooth_devices() -> list:
 
 @app.get("/bluetooth/scan")
 async def get_bluetooth_scan():
-    """Scan for nearby Bluetooth devices."""
-    devices = await scan_bluetooth_devices()
+    """Scan for nearby Bluetooth devices.
+
+    Response shape:
+      devices      — live detections only (rssi > -100, active scan hit)
+      ghost_devices — paired-only, not currently in range (live: false)
+      count        — number of live devices
+    """
+    all_devices = await scan_bluetooth_devices()
+    live = [d for d in all_devices if d.get("live", False)]
+    ghosts = [d for d in all_devices if not d.get("live", False)]
     return {
-        "devices": devices,
-        "count": len(devices),
+        "devices": live,
+        "count": len(live),
+        "ghost_devices": ghosts,
+        "ghost_count": len(ghosts),
         "timestamp": time.time(),
     }
 
@@ -592,11 +784,289 @@ async def get_bluetooth_scan_live():
     """Force a fresh Bluetooth scan."""
     global LAST_BT_SCAN
     LAST_BT_SCAN = 0.0  # Reset cache to force fresh scan
-    devices = await scan_bluetooth_devices()
+    all_devices = await scan_bluetooth_devices()
+    live = [d for d in all_devices if d.get("live", False)]
+    ghosts = [d for d in all_devices if not d.get("live", False)]
     return {
-        "devices": devices,
-        "count": len(devices),
+        "devices": live,
+        "count": len(live),
+        "ghost_devices": ghosts,
+        "ghost_count": len(ghosts),
         "timestamp": time.time(),
+    }
+
+
+# ─── BLUETOOTH ADVERTISING ──────────────────────────────────────────
+# Uses bleak to advertise as a BLE peripheral — like earbuds in pairing mode.
+# The phone broadcasts a name, service data, and a URL to Lilly's web UI
+# where Lilly presents as an image/avatar.
+
+_BT_ADVERTISING = False
+_BT_ADVERTISER = None
+_BT_ADVERTISER_TASK: Optional[asyncio.Task] = None
+
+# Default advertising configuration — can be customized via POST endpoint.
+_BT_ADVERTISE_CONFIG = {
+    "name": "Lilly Pup",
+    "image": "/static/lilly/puppy-avatar.svg",  # avatar image shown on web UI
+    "service_uuid": "0000feed-0000-1000-8000-00805f9b34fb",
+    "service_data_key": "6942",  # short key for sensor data
+    "web_ui_url": "http://100.93.131.114:8098/lilly/advertise",  # host: lilly_ai.py
+    "appearance": 0x0000,  # generic
+    "tx_power": -6,
+    "include_name": True,
+    "interval_min": 0x0020,  # 20ms
+    "interval_max": 0x0040,  # 40ms
+}
+
+
+async def _run_advertiser_loop(
+    name: str,
+    service_uuid: str,
+    service_data_key: str,
+    web_ui_url: str,
+    image: str,
+    interval_min: int,
+    interval_max: int,
+) -> None:
+    """Background loop that keeps the BLE advertiser alive.
+
+    bleak's BleakAdvertiser on Android can be finicky — advertising may
+    stop unexpectedly.  This loop restarts it if needed.
+    """
+    global _BT_ADVERTISER, _BT_ADVERTISING
+
+    while _BT_ADVERTISING:
+        try:
+            from bleak import BleakAdvertiser
+
+            if _BT_ADVERTISER is None:
+                _BT_ADVERTISER = BleakAdvertiser()
+
+            # Encode the URL and image path into the service data (truncated to
+            # fit 31-byte advertising packet limit; the full UI is served via web).
+            url_suffix = web_ui_url.split("/")[-1] if "/" in web_ui_url else web_ui_url
+            img_suffix = image.split("/")[-1] if "/" in image else image
+            payload = f"{service_data_key}:{url_suffix}:{img_suffix}"
+
+            await _BT_ADVERTISER.start(
+                name=name,
+                service_uuids=[service_uuid],
+                service_data={service_uuid: payload.encode()},
+                timeout=0,  # indefinite
+            )
+            logger.info(f"BLE advertising started as '{name}' with image {img_suffix}")
+
+            # Keep the advertiser alive until stopped
+            while _BT_ADVERTISING:
+                await asyncio.sleep(1.0)
+
+        except ImportError:
+            logger.error("bleak not installed on Termux. Run: pip install bleak")
+            _BT_ADVERTISING = False
+            break
+        except Exception as e:
+            logger.error(f"BLE advertiser error: {e}")
+            _BT_ADVERTISING = False
+            if _BT_ADVERTISER:
+                try:
+                    await _BT_ADVERTISER.stop()
+                except Exception:
+                    pass
+                _BT_ADVERTISER = None
+            await asyncio.sleep(2.0)
+
+
+@app.get("/bluetooth/advertise/status")
+async def get_advertise_status():
+    """Check whether the phone is currently advertising as a BLE device."""
+    return {
+        "advertising": _BT_ADVERTISING,
+        "config": _BT_ADVERTISE_CONFIG,
+        "timestamp": time.time(),
+    }
+
+
+@app.post("/bluetooth/advertise")
+async def start_advertising(
+    name: str = "",
+    image: str = "",
+    service_uuid: str = "",
+    web_ui_url: str = "",
+    tx_power: int = -6,
+    interval_min: int = 0x0020,
+    interval_max: int = 0x0040,
+):
+    """Start advertising as a BLE peripheral — like earbuds in pairing mode.
+
+    The phone broadcasts a name, service UUID, and a URL to Lilly's web UI
+    where Lilly presents as an image/avatar.  Nearby phones will see the
+    device appear in their Bluetooth scan with the configured name and
+    can connect or read the service data to discover the web UI URL.
+
+    When a device pairs, it will see the advertised name and image,
+    appearing as a discoverable device in pairing mode — just like
+    earbuds do when you open the case.
+
+    Args:
+        name: Device name to advertise (default: "Lilly Pup")
+        image: Avatar image path/URL to present (default: puppy-avatar.png)
+        service_uuid: BLE service UUID (default: 0000feed-...)
+        web_ui_url: URL to Lilly's web UI (default: http://host:8098/lilly/advertise)
+        tx_power: Transmit power level
+        interval_min/max: Advertising interval in BLE units
+
+    Returns:
+        {"ok": true, "name": "...", "advertising": true, ...}
+    """
+    global _BT_ADVERTISING, _BT_ADVERTISER, _BT_ADVERTISER_TASK
+    global _BT_ADVERTISE_CONFIG
+
+    # Pre-flight: verify bleak is installed before committing to advertising.
+    # Otherwise the background loop silently fails and the host thinks it
+    # started when it didn't — leading to "phone advertiser unreachable".
+    try:
+        import bleak  # noqa: F401
+    except ImportError:
+        return {
+            "ok": False,
+            "error": "bleak not installed on Termux — run: pip install bleak",
+            "advertising": False,
+            "requires": "bleak",
+        }
+
+    if _BT_ADVERTISING:
+        return {
+            "ok": True,
+            "already_advertising": True,
+            "name": _BT_ADVERTISE_CONFIG["name"],
+            "image": _BT_ADVERTISE_CONFIG["image"],
+            "message": "Already advertising",
+        }
+
+    # Update config
+    if name:
+        _BT_ADVERTISE_CONFIG["name"] = name
+    if image:
+        _BT_ADVERTISE_CONFIG["image"] = image
+    if service_uuid:
+        _BT_ADVERTISE_CONFIG["service_uuid"] = service_uuid
+    if web_ui_url:
+        _BT_ADVERTISE_CONFIG["web_ui_url"] = web_ui_url
+    _BT_ADVERTISE_CONFIG["tx_power"] = tx_power
+    _BT_ADVERTISE_CONFIG["interval_min"] = interval_min
+    _BT_ADVERTISE_CONFIG["interval_max"] = interval_max
+
+    cfg = _BT_ADVERTISE_CONFIG
+    _BT_ADVERTISING = True
+    _BT_ADVERTISER = None
+
+    # Start the advertiser loop in the background
+    _BT_ADVERTISER_TASK = asyncio.create_task(
+        _run_advertiser_loop(
+            name=cfg["name"],
+            service_uuid=cfg["service_uuid"],
+            service_data_key=cfg["service_data_key"],
+            web_ui_url=cfg["web_ui_url"],
+            image=cfg["image"],
+            interval_min=cfg["interval_min"],
+            interval_max=cfg["interval_max"],
+        )
+    )
+
+    return {
+        "ok": True,
+        "name": cfg["name"],
+        "image": cfg["image"],
+        "service_uuid": cfg["service_uuid"],
+        "web_ui_url": cfg["web_ui_url"],
+        "advertising": True,
+        "message": f"Started advertising as '{cfg['name']}'",
+        "timestamp": time.time(),
+        "pairing_mode": True,  # appears as a discoverable device in pairing mode
+    }
+
+
+@app.post("/bluetooth/advertise/stop")
+async def stop_advertising():
+    """Stop BLE advertising and return to discoverable/scannable mode only."""
+    global _BT_ADVERTISING, _BT_ADVERTISER, _BT_ADVERTISER_TASK
+
+    if not _BT_ADVERTISING and _BT_ADVERTISER_TASK is None:
+        return {
+            "ok": True,
+            "was_advertising": False,
+            "advertising": False,
+            "message": "Was not advertising",
+        }
+
+    _BT_ADVERTISING = False
+
+    if _BT_ADVERTISER_TASK:
+        _BT_ADVERTISER_TASK.cancel()
+        try:
+            await _BT_ADVERTISER_TASK
+        except asyncio.CancelledError:
+            pass
+        _BT_ADVERTISER_TASK = None
+
+    if _BT_ADVERTISER:
+        try:
+            await _BT_ADVERTISER.stop()
+        except Exception:
+            pass
+        _BT_ADVERTISER = None
+
+    return {
+        "ok": True,
+        "was_advertising": True,
+        "advertising": False,
+        "message": "Stopped BLE advertising",
+        "timestamp": time.time(),
+    }
+
+
+@app.get("/bluetooth/advertise/config")
+async def get_advertise_config():
+    """Get the current advertising configuration."""
+    return _BT_ADVERTISE_CONFIG
+
+
+@app.post("/bluetooth/advertise/configure")
+async def configure_advertising(
+    name: str = "",
+    image: str = "",
+    service_uuid: str = "",
+    service_data_key: str = "",
+    web_ui_url: str = "",
+    appearance: int = 0,
+    tx_power: int = -6,
+    interval_min: int = 0x0020,
+    interval_max: int = 0x0040,
+):
+    """Update the advertising configuration without starting/stopping."""
+    global _BT_ADVERTISE_CONFIG
+
+    updates = {
+        "name": name,
+        "image": image,
+        "service_uuid": service_uuid,
+        "service_data_key": service_data_key,
+        "web_ui_url": web_ui_url,
+        "appearance": appearance,
+        "tx_power": tx_power,
+        "interval_min": interval_min,
+        "interval_max": interval_max,
+    }
+    # Only update non-empty values
+    for k, v in updates.items():
+        if v != "" and v != 0:
+            _BT_ADVERTISE_CONFIG[k] = v
+
+    return {
+        "ok": True,
+        "config": _BT_ADVERTISE_CONFIG,
+        "message": "Configuration updated",
     }
 
 
@@ -683,6 +1153,53 @@ async def get_wifi_scan_live():
     return {
         "networks": networks,
         "count": len(networks),
+        "timestamp": time.time(),
+    }
+
+
+@app.post("/scan/trigger")
+async def trigger_scan():
+    """
+    Force an immediate BT + WiFi scan concurrently and return combined results.
+    Called by lilly_ai.py /api/tracker/scan — the canonical scan entry point.
+    Returns: { ok, bt: [...], wifi: [...], bt_count, wifi_count, timestamp }
+    """
+    global LAST_BT_SCAN, LAST_WIFI_SCAN
+    # Reset caches so the scan functions fetch fresh data
+    LAST_BT_SCAN = 0.0
+    LAST_WIFI_SCAN = 0.0
+
+    bt_devices: list = []
+    wifi_networks: list = []
+
+    async def _bt():
+        try:
+            devices = await scan_bluetooth_devices()
+            return [d for d in devices if d.get("live", False)]
+        except Exception:
+            return []
+
+    async def _wifi():
+        try:
+            return await scan_wifi_networks()
+        except Exception:
+            return []
+
+    bt_devices, wifi_networks = await asyncio.gather(_bt(), _wifi())
+
+    # Normalise field names so bt_radar.html renders without errors
+    for d in bt_devices:
+        d.setdefault("type", "BT")
+        d.setdefault("rssi", -100)
+    for w in wifi_networks:
+        w.setdefault("rssi", -100)
+
+    return {
+        "ok": True,
+        "bt": bt_devices,
+        "wifi": wifi_networks,
+        "bt_count": len(bt_devices),
+        "wifi_count": len(wifi_networks),
         "timestamp": time.time(),
     }
 

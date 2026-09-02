@@ -145,6 +145,70 @@ cp trained_persona_model/<name> ../lillyos/models/
 - Rotate SSH keys periodically
 - Monitor access logs
 
+## Device Awareness
+
+The AI agent should proactively check device status when users ask about their phone.
+
+### Quick Phone Check Commands
+```bash
+# Check if phone sensor server is reachable
+curl -s --connect-timeout 5 http://100.115.234.87:8099/health
+
+# Check broker status (connected phones + web UIs)
+curl -s http://localhost:8098/api/broker/status
+
+# Check node registry (all registered devices)
+curl -s http://localhost:8098/api/nodes
+
+# Full fleet view with sensor data
+curl -s http://localhost:8098/api/nodes/fleet
+
+# Phone status endpoint
+curl -s http://localhost:8098/api/phone_status
+```
+
+### Device Context
+- **Primary phone**: Pixel 10, Tailscale IP `100.115.234.87`
+- **Sensor server**: Port `8099` on the phone
+- **Pairing**: 6-digit code via `/api/pair/initiate` → `/api/pair/confirm`
+- **Connected devices**: Check `/api/broker/status` for real-time phone + web UI connections
+- **Registered nodes**: Check `/api/nodes` for persistent device registry
+
+When a user asks "is my phone online?", query `http://localhost:8098/api/phone_status` or `http://100.115.234.87:8099/health` and report the result.
+
+### Paired App Capabilities
+When the overlay app is paired and connected via WebSocket, the AI has access to:
+
+| Capability | How to Use |
+|------------|------------|
+| **Camera + YOLO** | "what do you see" → POST `/api/vision/browser` with frame |
+| **Live Sensors** | Real-time via WebSocket `sensor` topic |
+| **Notifications** | Forwarded via `notification` topic |
+| **App Launch** | Phone executes `termux-open-url` or `am start` |
+| **TTS** | Android TTS engine or Piper TTS on server |
+| **STT** | Browser mic or Android SpeechRecognizer |
+| **Bluetooth Scan** | Nearby devices via `bluetooth` topic |
+| **WiFi Scan** | Nearby networks via `wifi` topic |
+| **Location** | GPS via `location` topic |
+| **Battery** | Via `battery` topic |
+| **Shell Commands** | Via `/shell` endpoint (termux-* commands) |
+
+### Phone Deployment
+The AI can patch the phone's sensor server without SSH:
+```bash
+# Check phone deployment status
+curl -s http://localhost:8098/api/phone/deploy/status
+
+# Get updated sensor server file
+curl -s http://localhost:8098/api/phone/deploy/file | python3 -c "import sys,json; print(json.load(sys.stdin)['sha256'])"
+
+# Deploy updated sensor server to phone (via shell bridge)
+curl -s -X POST http://localhost:8098/api/phone/deploy/sensor-server
+
+# Restart sensor server on phone
+curl -s -X POST http://localhost:8098/api/phone/deploy/restart
+```
+
 ## Troubleshooting
 
 ### Common Issues

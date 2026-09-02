@@ -1,0 +1,23 @@
+{
+  "_comment": "Basic likes-only automation for Instagram. Opens app, scrolls feed, likes posts.",
+  "name": "instagram_likes_only",
+  "platform": "instagram",
+  "package": "com.instagram.android",
+  "actions": [
+    {"type": "open_app", "comment": "Open Instagram"},
+    {"type": "wait", "seconds": 3, "comment": "Wait for feed to load"},
+    {"type": "tap", "x": 500, "y": 800, "comment": "Tap home feed if needed"},
+    {"type": "swipe", "x1": 500, "y1": 1200, "x2": 500, "y2": 400, "comment": "Scroll to first post"},
+    {"type": "like", "count": 10, "comment": "Like 10 posts"}
+  ],
+  "schedule": {
+    "repeat": "daily",
+    "time": "09:00",
+    "comment": "Run once daily at 9 AM"
+  },
+  "limits": {
+    "max_likes_per_run": 20,
+    "delay_between_actions": [2, 4],
+    "comment": "Conservative limits to avoid shadowban"
+  }
+}

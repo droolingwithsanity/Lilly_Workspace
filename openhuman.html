@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>OpenHuman Skill Store</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;
+  --border:#2a2a3a;--text:#e0e0e8;--text2:#8888a0;
+  --accent:#7c6cf0;--accent2:#a78bfa;--accent-dim:rgba(124,108,240,0.15);
+  --ok:#22c55e;--err:#ef4444;
+  --radius:12px;--font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--font)}
+body{display:flex;flex-direction:column}
+.header{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;z-index:10}
+.header-left{display:flex;align-items:center;gap:10px}
+.logo{width:32px;height:32px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:16px}
+.title{font-size:15px;font-weight:600;letter-spacing:0.3px}
+.sub{font-size:11px;color:var(--text2);margin-top:1px}
+.header-right{display:flex;align-items:center;gap:10px}
+.status-pill{font-size:10px;padding:4px 10px;border-radius:20px;background:var(--accent-dim);color:var(--accent2);font-weight:500;letter-spacing:0.5px;text-transform:uppercase;white-space:nowrap}
+.status-pill.ok{background:rgba(34,197,94,0.15);color:var(--ok)}
+.status-pill.err{background:rgba(239,68,68,0.15);color:var(--err)}
+.toolbar{display:flex;gap:10px;padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0}
+.search{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 16px;color:var(--text);font-size:14px;outline:none}
+.btn{background:var(--accent);border:none;border-radius:var(--radius);padding:0 18px;color:#fff;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap}
+.btn:active{opacity:0.85}
+.list{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:10px}
+.list::-webkit-scrollbar{width:4px}
+.list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.empty{color:var(--text2);text-align:center;margin-top:40px;font-size:13px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;cursor:pointer;transition:border-color .15s}
+.card:active{border-color:var(--accent2)}
+.card-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.card-name{font-size:14px;font-weight:600}
+.card-id{font-size:11px;color:var(--text2);margin-top:2px}
+.card-desc{font-size:13px;color:var(--text);margin-top:8px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.tag{font-size:10px;padding:3px 8px;border-radius:20px;background:var(--accent-dim);color:var(--accent2)}
+.modal-back{position:fixed;inset:0;background:rgba(0,0,0,0.6);display:none;align-items:center;justify-content:center;z-index:50;padding:20px}
+.modal-back.show{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:16px;max-width:480px;width:100%;max-height:80vh;overflow-y:auto;padding:20px}
+.modal h2{font-size:16px;margin-bottom:4px}
+.modal .m-id{font-size:11px;color:var(--text2);margin-bottom:12px}
+.modal .m-desc{font-size:13px;line-height:1.6;color:var(--text)}
+.modal .m-row{font-size:12px;color:var(--text2);margin-top:10px}
+.modal .m-row b{color:var(--text)}
+.modal-close{display:block;margin-top:18px;width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:11px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:10px 18px;font-size:13px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:60;max-width:90vw}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <div class="logo">🧩</div>
+    <div>
+      <div class="title">OpenHuman Skill Store</div>
+      <div class="sub" id="subLine">browsing community skills</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="status-pill" id="statusPill">connecting</div>
+  </div>
+</div>
+
+<div class="toolbar">
+  <input type="text" id="search" class="search" placeholder="search skills by name, tag or description...">
+  <button class="btn" id="syncBtn">sync</button>
+</div>
+
+<div class="list" id="list"></div>
+
+<div class="modal-back" id="modalBack">
+  <div class="modal" id="modal"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const SERVER = location.origin;
+const $ = id => document.getElementById(id);
+const listEl = $('list');
+const statusEl = $('statusPill');
+const subEl = $('subLine');
+let catalog = [];
+let installed = {};
+
+function setStatus(s, ok){
+  statusEl.textContent = s;
+  statusEl.className = 'status-pill' + (ok ? ' ok' : s === 'err' ? ' err' : '');
+}
+
+function toast(msg){
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function esc(s){
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+async function loadStatus(){
+  try{
+    const r = await fetch(SERVER + '/api/openhuman/status', {cache:'no-store'});
+    if(!r.ok) throw new Error('status ' + r.status);
+    const j = await r.json();
+    const reachable = j.bridge_reachable === true;
+    setStatus(reachable ? 'bridge online' : 'bridge offline', reachable);
+    if(j.openhuman_bridge_url) subEl.textContent = j.openhuman_bridge_url;
+  }catch(e){
+    setStatus('server unreachable', false);
+  }
+}
+
+async function loadInstalled(){
+  try{
+    const r = await fetch(SERVER + '/api/openhuman/skills', {cache:'no-store'});
+    if(!r.ok) return;
+    const j = await r.json();
+    installed = {};
+    (j.skills || []).forEach(s => {
+      const key = (s.skill_id || s.id || s.name || '').toString().toLowerCase();
+      if(key) installed[key] = s;
+    });
+  }catch(e){}
+}
+
+async function loadCatalog(){
+  listEl.innerHTML = '<div class="empty">loading skills...</div>';
+  try{
+    const r = await fetch(SERVER + '/api/openhuman/catalog', {cache:'no-store'});
+    if(!r.ok) throw new Error('catalog ' + r.status);
+    const j = await r.json();
+    catalog = j.entries || [];
+    renderList();
+  }catch(e){
+    listEl.innerHTML = '<div class="empty">could not load the catalog. is the openhuman bridge running on the server?</div>';
+  }
+}
+
+function renderList(){
+  const q = $('search').value.trim().toLowerCase();
+  const filtered = q
+    ? catalog.filter(e => {
+        const blob = (e.name + ' ' + e.id + ' ' + (e.description||'') + ' ' + (e.tags||[]).join(' ')).toLowerCase();
+        return blob.indexOf(q) !== -1;
+      })
+    : catalog;
+  if(!filtered.length){
+    listEl.innerHTML = '<div class="empty">' + (catalog.length ? 'no skills match your search' : 'the catalog is empty. tap sync to fetch it.') + '</div>';
+    return;
+  }
+  listEl.innerHTML = filtered.map(e => {
+    const tags = (e.tags || []).slice(0,6);
+    return '<div class="card" onclick="openDetail(\'' + esc(e.id) + '\')">'
+      + '<div class="card-top"><div class="card-name">' + esc(e.name || e.id) + '</div>'
+      + '<div class="status-pill' + (isInstalled(e) ? ' ok">installed' : '">catalog') + '</div></div>'
+      + '<div class="card-id">' + esc(e.id) + '</div>'
+      + '<div class="card-desc">' + esc(e.description || '') + '</div>'
+      + (tags.length ? '<div class="tags">' + tags.map(t => '<span class="tag">' + esc(t) + '</span>').join('') + '</div>' : '')
+      + '</div>';
+  }).join('');
+}
+
+function isInstalled(e){
+  const key = (e.id || '').toString().toLowerCase();
+  const name = (e.name || '').toString().toLowerCase();
+  return !!installed[key] || !!installed[name];
+}
+
+async function openDetail(id){
+  const modal = $('modal');
+  modal.innerHTML = '<h2>loading...</h2>';
+  $('modalBack').classList.add('show');
+  try{
+    const r = await fetch(SERVER + '/api/openhuman/skills/' + encodeURIComponent(id), {cache:'no-store'});
+    let skill = null;
+    if(r.ok){
+      const j = await r.json();
+      skill = j.skill || j.entry || null;
+    }else{
+      skill = catalog.find(e => e.id === id) || null;
+    }
+    if(!skill){
+      modal.innerHTML = '<h2>not found</h2><p class="m-desc" style="margin-top:8px">this skill is not in the catalog.</p>'
+        + '<button class="modal-close" onclick="closeModal()">close</button>';
+      return;
+    }
+    const tags = (skill.tags || []).join(', ') || '—';
+    const steps = skill.commands ? Object.keys(skill.commands).length : (skill.actions ? skill.actions.length : 0);
+    modal.innerHTML = '<h2>' + esc(skill.name || skill.id) + '</h2>'
+      + '<div class="m-id">' + esc(skill.id || '') + '</div>'
+      + '<div class="m-desc">' + esc(skill.description || 'no description') + '</div>'
+      + '<div class="m-row"><b>tags:</b> ' + esc(tags) + '</div>'
+      + (steps ? '<div class="m-row"><b>commands:</b> ' + steps + '</div>' : '')
+      + '<button class="modal-close" onclick="closeModal()">close</button>';
+  }catch(e){
+    modal.innerHTML = '<h2>error</h2><p class="m-desc" style="margin-top:8px">could not load skill details.</p>'
+      + '<button class="modal-close" onclick="closeModal()">close</button>';
+  }
+}
+
+function closeModal(){ $('modalBack').classList.remove('show'); }
+
+async function sync(){
+  const b = $('syncBtn');
+  b.disabled = true;
+  b.textContent = 'syncing...';
+  try{
+    const r = await fetch(SERVER + '/api/openhuman/refresh', {method:'POST', cache:'no-store'});
+    if(!r.ok) throw new Error('refresh ' + r.status);
+    const j = await r.json();
+    toast('synced ' + (j.skills_merged || 0) + ' skills');
+  }catch(e){
+    toast('sync failed');
+  }
+  b.disabled = false;
+  b.textContent = 'sync';
+  await loadInstalled();
+  await loadCatalog();
+  loadStatus();
+}
+
+$('search').addEventListener('input', renderList);
+$('syncBtn').addEventListener('click', sync);
+$('modalBack').addEventListener('click', e => { if(e.target === $('modalBack')) closeModal(); });
+
+loadStatus();
+loadInstalled();
+loadCatalog();
+</script>
+</body>
+</html>
