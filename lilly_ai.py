@@ -7709,6 +7709,136 @@ def _notif_followup_message(entry: dict) -> str:
     )
 
 
+# ─── AUTOMATION CLARIFY (if-this-then-that with a clarity step) ──────────
+# Flow: user speaks an action with a condition ("if battery drops below 20,
+# then notify me") → rule is extracted → if anything is ambiguous Lilly asks
+# ONE targeted clarity question → the user's answer is merged in → the rule
+# is implemented. No more half-parsed rules silently created wrong.
+PENDING_AUTOMATION: Optional[dict] = None
+_AUTOMATION_KNOWN_FIELDS = {
+    "battery_level", "charging", "battery_temperature",
+    "light", "lux", "steps", "step_count", "motion", "acceleration",
+    "proximity", "temperature", "pressure", "wifi", "bluetooth",
+    "notification", "notification.title", "notification.content",
+    "title", "content", "package", "rssi", "speed", "location",
+}
+_AUTOMATION_KNOWN_ACTIONS = {"notify", "chat", "shell", "webhook", "tts"}
+_AUTOMATION_VALUE_OPS = {"<", ">", "<=", ">="}
+
+
+def _automation_clarify_question(rule: dict) -> Optional[str]:
+    """Return ONE targeted clarity question if an extracted automation rule is
+    ambiguous or incomplete, else None (clear enough to implement)."""
+    if not isinstance(rule, dict):
+        return (
+            "I didn't catch an if-this-then-that in that — "
+            "what's the trigger, and what should I do when it happens?"
+        )
+    cond = rule.get("condition") or {}
+    field = str(cond.get("field") or "").strip().lower()
+    op = str(cond.get("op") or "").strip()
+    value = cond.get("value")
+    action = str(rule.get("action_type") or "").strip().lower()
+
+    if not field:
+        return (
+            "What's the trigger — battery, movement, light, "
+            "a notification, or something else?"
+        )
+    if not any(k in field for k in _AUTOMATION_KNOWN_FIELDS):
+        return (
+            f"I don't have a sense for '{field}' — did you mean battery, "
+            "motion, light, or a notification?"
+        )
+    if op in _AUTOMATION_VALUE_OPS and value in (None, ""):
+        return "What threshold should I use — below or above what number?"
+    if not action:
+        return (
+            "And when that happens, what should I do — notify you, "
+            "say something out loud, or run something?"
+        )
+    if action not in _AUTOMATION_KNOWN_ACTIONS:
+        return (
+            f"When you say '{action}' — should I notify you on the phone, "
+            "speak, or run a command?"
+        )
+    return None
+
+
+async def _automation_merge_answer(pend: dict, answer: str) -> Optional[dict]:
+    """Merge the user's clarity-question answer into the partial rule.
+
+    The LLM combines original request + question + answer into one clean rule
+    JSON; falls back to the partial rule on any failure.
+    """
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Combine the user's original automation request, the clarifying "
+                "question, and their answer into ONE automation rule. "
+                "Return ONLY a JSON object: {name, topic, "
+                "condition:{field,op,value}, action_type, "
+                "action_payload:{title,body}}. Nothing else."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Original request: {pend.get('original_cmd', '')}\n"
+                f"Clarifying question: {pend.get('question', '')}\n"
+                f"User's answer: {answer}"
+            ),
+        },
+    ]
+    try:
+        raw = await asyncio.wait_for(
+            two_tier_backend.chat(messages, temperature=0.2, max_tokens=220),
+            timeout=8.0,
+        )
+        raw = strip_json_wrapper(raw or "").strip()
+        jm = re.search(r"\{.*\}", raw, re.DOTALL)
+        if jm:
+            merged = json.loads(jm.group(0))
+            if isinstance(merged, dict):
+                return merged
+    except Exception as e:
+        logger.warning(f"Automation clarify merge failed: {e}")
+    return pend.get("rule")
+
+
+async def _create_automation_from_confirm(rule_json: str) -> str:
+    """Create a phone_broker AutomationRule from a confirmed rule JSON blob."""
+    if not (PHONE_BROKER_AVAILABLE and phone_broker):
+        return "Automation engine isn't available right now."
+    try:
+        from phone_broker import AutomationRule
+
+        rd = json.loads(rule_json or "{}")
+        rule = AutomationRule(
+            id=str(uuid.uuid4())[:8],
+            name=rd.get("name", "Chat Rule"),
+            enabled=True,
+            topic=rd.get("topic", "battery"),
+            condition=rd.get("condition", {}),
+            action_type=rd.get("action_type", "notify"),
+            action_payload=rd.get("action_payload", {}),
+            cooldown_seconds=rd.get("cooldown_seconds", 60.0),
+        )
+        phone_broker.automation.add_rule(rule)
+        cond = rule.condition or {}
+        f = cond.get("field", "condition")
+        o = cond.get("op", "")
+        v = cond.get("value", "")
+        return (
+            f"Done. Automation '{rule.name}' is active — "
+            f"if {f} {o} {v}, then {rule.action_type}."
+        )
+    except Exception as e:
+        logger.warning(f"Automation create failed: {e}")
+        return "Something went wrong creating that automation."
+
+
 async def notification_monitor_loop():
     """Background task: reads HIGH/URGENT notifications in a natural, contextual way.
 
@@ -8620,6 +8750,7 @@ async def handle_intent(
         PENDING_LOOK_AT
     global CONVERSATION_MODE, CONVERSATION_LAST_ACTIVITY
     global PENDING_OPEN_URL, _current_user_id
+    global PENDING_AUTOMATION
 
     # Resolve the effective user name for this request
     effective_name = user_name or _get_user_name(_current_user_id)
@@ -8747,6 +8878,16 @@ async def handle_intent(
                     await save_memory()
                     await speak(reply)
                     return {"action": "handled", "text": reply}
+                # Automation confirm: create the rule instead of a skill run
+                if pending_skill == "_auto_create":
+                    reply = await _create_automation_from_confirm(
+                        pending.get("skill_arg", "")
+                    )
+                    await memory.add("user", text)
+                    await memory.add("assistant", reply)
+                    await save_memory()
+                    await speak(reply)
+                    return {"action": "handled", "text": reply}
                 if not pending_skill:
                     reply = "OK, ready when you are."
                 else:
@@ -8775,6 +8916,53 @@ async def handle_intent(
             # A different utterance: treat it as a fresh intent, drop the
             # stale pending action (it expires anyway after CONFIRM_TIMEOUT).
             PENDING_CONFIRM = None
+
+    # ── AUTOMATION CLARIFY: the user answered Lilly's clarity question ──
+    # Their reply merges into the partial rule, then progresses to the final
+    # create-it confirmation (one more question only if still ambiguous).
+    if PENDING_AUTOMATION is not None:
+        if time.time() > PENDING_AUTOMATION.get("expires", 0):
+            PENDING_AUTOMATION = None
+        else:
+            pend = PENDING_AUTOMATION
+            PENDING_AUTOMATION = None
+            merged = await _automation_merge_answer(pend, cmd)
+            follow_up_q = _automation_clarify_question(merged) if merged else None
+            if follow_up_q and pend.get("clarifications", 0) < 1:
+                PENDING_AUTOMATION = {
+                    "rule": merged or pend.get("rule"),
+                    "original_cmd": pend.get("original_cmd", ""),
+                    "question": follow_up_q,
+                    "clarifications": pend.get("clarifications", 0) + 1,
+                    "expires": time.time() + 300,
+                }
+                reply = follow_up_q
+            elif merged:
+                _rc = merged.get("condition", {}) or {}
+                _f = _rc.get("field", "condition")
+                _o = _rc.get("op", "")
+                _v = str(_rc.get("value", ""))
+                PENDING_CONFIRM = {
+                    "desc": "create automation " + merged.get("name", "New Rule"),
+                    "skill": "_auto_create",
+                    "skill_arg": json.dumps(merged),
+                    "expires": time.time() + 120,
+                }
+                reply = (
+                    f"Got it — so: '{merged.get('name', 'New Rule')}' "
+                    f"— if {_f} {_o} {_v}, then "
+                    f"{merged.get('action_type', 'notify')}. Create it?"
+                )
+            else:
+                reply = (
+                    "I still couldn't shape that into a rule. "
+                    "Try: 'if battery drops below 20, then notify me'."
+                )
+            await memory.add("user", text)
+            await memory.add("assistant", reply)
+            await save_memory()
+            await speak(reply)
+            return {"action": "handled", "text": reply}
 
     # ── APPROVAL BROADCAST: commands from the OpenLive approval feed
     # are relayed to ALL 9 avatars so they become aware of automations,
@@ -9838,7 +10026,14 @@ async def handle_intent(
         await speak(reply)
         return {"action": "handled", "text": reply}
 
-    if any(t in cmd for t in _auto_create_triggers) and _is_condition_based:
+    _if_then = (
+        _is_condition_based
+        and " then " in f" {cmd} "
+        and (cmd.startswith("if ") or " if " in f" {cmd} " or "whenever" in cmd)
+    )
+    if (
+        any(t in cmd for t in _auto_create_triggers) or _if_then
+    ) and _is_condition_based:
         # First try regex parsing for common patterns (fast, no LLM needed)
         _auto_rule = None
         _batt_m = re.search(
@@ -9918,6 +10113,24 @@ async def handle_intent(
                     _auto_rule = json.loads(_jm.group(0))
             except Exception as _ae:
                 logger.warning(f"Auto rule LLM parse failed: {_ae}")
+        # Clarity step: if the extracted rule is ambiguous, ask ONE targeted
+        # question first — the answer merges in, then we progress to create.
+        _clarify_q = _automation_clarify_question(_auto_rule) if _auto_rule else None
+        if _clarify_q:
+            PENDING_AUTOMATION = {
+                "rule": _auto_rule,
+                "original_cmd": cmd,
+                "question": _clarify_q,
+                "clarifications": 0,
+                "expires": time.time() + 300,
+            }
+            reply = _clarify_q
+            await memory.add("user", text)
+            await memory.add("assistant", reply)
+            await save_memory()
+            await speak(reply)
+            return {"action": "handled", "text": reply}
+
         if _auto_rule:
             _rule_name = _auto_rule.get("name", "New Rule")
             _rule_cond = _auto_rule.get("condition", {})
@@ -9950,32 +10163,7 @@ async def handle_intent(
     ):
         _rule_json = PENDING_CONFIRM.get("skill_arg", "{}")
         PENDING_CONFIRM = None
-        _created = False
-        _create_msg = ""
-        if PHONE_BROKER_AVAILABLE and phone_broker:
-            try:
-                from phone_broker import AutomationRule
-
-                _rd = json.loads(_rule_json)
-                _rule = AutomationRule(
-                    id=str(uuid.uuid4())[:8],
-                    name=_rd.get("name", "Chat Rule"),
-                    enabled=True,
-                    topic=_rd.get("topic", "battery"),
-                    condition=_rd.get("condition", {}),
-                    action_type=_rd.get("action_type", "notify"),
-                    action_payload=_rd.get("action_payload", {}),
-                    cooldown_seconds=_rd.get("cooldown_seconds", 60.0),
-                )
-                phone_broker.automation.add_rule(_rule)
-                _created = True
-                _create_msg = f"Done. Automation '{_rule.name}' is active."
-            except Exception as _ce:
-                logger.warning(f"Automation create failed: {_ce}")
-                _create_msg = "Something went wrong creating that automation."
-        else:
-            _create_msg = "Automation engine isn't available right now."
-        reply = _create_msg
+        reply = await _create_automation_from_confirm(_rule_json)
         await memory.add("user", text)
         await memory.add("assistant", reply)
         await save_memory()
