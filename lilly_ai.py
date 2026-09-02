@@ -163,6 +163,8 @@ except ImportError:
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://100.73.249.14:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.8-27b-q4")
 FAST_MODEL = os.environ.get("FAST_MODEL", "qwen2.5:3b")
+VIBE_MODEL = os.environ.get("VIBE_MODEL", "")
+VIBECODE_MODEL = os.environ.get("VIBECODE_MODEL", "")
 PIPER_BIN = shutil.which("piper") or os.environ.get(
     "PIPER_BIN", "/usr/local/piper/piper"
 )
@@ -413,6 +415,9 @@ PORT = 8098
 WORKSPACE = Path(os.environ.get("LILLY_WORKSPACE", str(Path(__file__).parent)))
 SKILLS_FILE = WORKSPACE / "lilly_skills.json"
 MEMORY_DIR = WORKSPACE
+VIBECODE_PROJECTS_DIR = Path(
+    os.environ.get("VIBECODE_PROJECTS_DIR", str(WORKSPACE / "projects"))
+)
 
 # ── OpenHuman Skill Registry Integration ─────────────────────────
 # The OpenHuman bridge service exposes the community skill catalog over HTTP.
@@ -3786,6 +3791,21 @@ async def termux_run(args: list[str], timeout: float = 10.0) -> tuple[str, str]:
         return "", "ssh client not found in container"
     except Exception as e:
         return "", str(e)
+
+
+# ─── OPS BRIDGE (coder / server shell / phone shell / training) ─────────
+try:
+    import lilly_ops
+
+    lilly_ops.configure(
+        ollama_url=OLLAMA_URL,
+        default_model=VIBECODE_MODEL or FAST_MODEL or OLLAMA_MODEL,
+        phone_runner=termux_run,
+    )
+    LILLY_OPS_OK = True
+except Exception as _ops_err:
+    logger.warning(f"lilly_ops unavailable: {_ops_err}")
+    LILLY_OPS_OK = False
 
 
 async def ssh_cleanup_stale():
@@ -7315,7 +7335,10 @@ async def sensor_conversation_engine():
         if LILLY_IS_SPEAKING or LILLY_IS_THINKING or WAITING_FOR_PROMPT:
             continue
         now = time.time()
-        if now - _LAST_CONTEXT_CONVO < 120:  # 2 min cooldown
+        if now - _LAST_CONTEXT_CONVO < 600:  # 10 min cooldown (was 2 — too chatty)
+            continue
+        # Don't interrupt an active/recent conversation with sensor small talk
+        if (now - CONVERSATION_LAST_ACTIVITY) < 180:
             continue
         snap = await take_snapshot()
         if snap.age() > 5:
@@ -7362,12 +7385,14 @@ async def sensor_conversation_engine():
                 f"Feels like we're {taught_label} again — the sensors match. Am I right?",
                 f"This feels familiar — same sensor pattern as {taught_label}. Back there?",
             ]
-            msg = random.choice(msgs)
+            msg = _pick_fresh(f"ctx:taught:{taught_label}", msgs)
         else:
-            msg = random.choice(
+            # Rotate through the pool so the same opener never repeats back-to-back
+            msg = _pick_fresh(
+                f"ctx:{chosen}",
                 _CONTEXT_MESSAGES.get(
                     chosen, ["Nothing unusual on the sensors right now."]
-                )
+                ),
             )
         # Think pulse
         LILLY_IS_THINKING = True
@@ -7426,15 +7451,143 @@ _NOTIF_PRIORITY_VOICE = {
 }
 
 
+async def _phone_activity_context() -> str:
+    """Compact snapshot of current phone activity for notification personalisation.
+
+    Combines the live sensor narrative (motion, light, steps, battery) with the
+    current time so the LLM can tailor each announcement to what the user is
+    actually doing. Returns "" quickly when the phone is unreachable — sensor
+    reads are cached batch calls, so this is cheap inside the monitor loop.
+    """
+    bits: list[str] = []
+    try:
+        snap = await asyncio.wait_for(get_sensor_snapshot(), timeout=1.5)
+        if snap:
+            narrative = snapshot_to_narrative(snap)
+            if narrative:
+                bits.append(narrative)
+    except Exception:
+        pass
+    try:
+        from datetime import datetime as _dt
+
+        bits.append(f"Time: {_dt.now().strftime('%A %H:%M')}")
+    except Exception:
+        pass
+    return "; ".join(bits)
+
+
+async def _personalize_notification_announcement(
+    *,
+    app_label: str,
+    title: str,
+    content: str,
+    sender: Optional[str],
+    ticket_id: Optional[str],
+    priority: str,
+    has_url: bool,
+    activity_context: str,
+) -> str:
+    """Turn a raw phone notification into a persona-voiced spoken summary.
+
+    Uses the LLM with the CURRENT avatar's persona (the same HIVE_PERSONAS
+    voice that OpenHuman/OpenLive skills speak through) so the announcement
+    sounds like Lilly/her teammate noticing something — not a notification
+    bell reading a title. The model is given live phone-activity context and
+    must end with exactly one follow-up question tailored to the notification,
+    so every broadcast invites a next step.
+
+    Returns "" on any failure/timeout so the caller falls back to the
+    template-based announcement.
+    """
+    try:
+        persona = HIVE_PERSONAS.get(
+            resolve_persona_key(current_avatar), HIVE_PERSONAS["puppy"]
+        )
+    except Exception:
+        persona = HIVE_PERSONAS["puppy"]
+
+    user_name = USER_NAME.strip() or "the user"
+    # Never feed raw URLs to the model — they must not be spoken aloud.
+    spoken_content = re.sub(r"https?://\S+", "", content).strip()[:240]
+    spoken_title = re.sub(r"https?://\S+", "", title).strip()[:120]
+
+    system_prompt = (
+        f"You are {persona['name']}, {persona['role']}. "
+        f"Personality: {persona['personality']}\n"
+        f"A notification just arrived on {user_name}'s phone. Announce it the way "
+        "YOU would — a living presence in the phone who noticed something, not a "
+        "notification bell reading a title.\n"
+        "Rules:\n"
+        "- 1-2 sentences that SUMMARISE what the notification means. Digest it, "
+        "never read it word-for-word.\n"
+        "- Weave in the phone-activity context ONLY when it changes what matters "
+        "(e.g. they're walking, battery low, it's late).\n"
+        "- End with exactly ONE short follow-up question tailored to THIS "
+        "notification (reply? open it? read it? deal with it later?).\n"
+        "- Never speak URLs. No emoji, no markdown, no lists. Plain spoken text."
+    )
+    user_prompt = (
+        f"Notification:\n"
+        f"- App: {app_label or 'unknown'}\n"
+        f"- Priority: {priority}\n"
+        f"- Title: {spoken_title or '(none)'}\n"
+        f"- Content: {spoken_content or '(none)'}\n"
+        f"- Sender: {sender or 'unknown'}\n"
+        f"- Ticket/ID: {ticket_id or 'none'}\n"
+        f"- Contains a link: {'yes' if has_url else 'no'}\n"
+        f"Phone activity right now: {activity_context or 'unavailable'}"
+    )
+
+    try:
+        reply = await asyncio.wait_for(
+            two_tier_backend.chat(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.7,
+                max_tokens=90,
+            ),
+            timeout=8.0,
+        )
+    except Exception as e:
+        logger.debug(f"Notification personalisation failed: {e}")
+        return ""
+
+    if not reply:
+        return ""
+    # Clean up: single line, no surrounding quotes, no leftover URLs.
+    msg = re.sub(r"https?://\S+", "", reply).strip().strip('"').strip()
+    msg = re.sub(r"\s+", " ", msg)
+    if len(msg) < 12:
+        return ""
+    # Cap runaway output at a sentence boundary (~300 chars).
+    if len(msg) > 300:
+        cut = max(msg.rfind(". ", 0, 300), msg.rfind("? ", 0, 300))
+        msg = msg[: cut + 1] if cut > 60 else msg[:300].rsplit(" ", 1)[0] + "..."
+    # Guarantee a follow-up question so the yes/no gate is always meaningful.
+    if "?" not in msg:
+        if has_url:
+            msg += " Want me to open it?"
+        elif app_label:
+            msg += f" Want me to open {app_label}?"
+        else:
+            msg += " Want the details?"
+    return msg
+
+
 async def notification_monitor_loop():
     """Background task: reads HIGH/URGENT notifications in a natural, contextual way.
 
     - Extracts URLs from notification content (Slack, Desk, Gmail, etc.)
     - Personalises with USER_NAME if the user's name appears in the content
-    - Picks a per-app announcement template that sounds conversational
-    - Asks a contextual follow-up question ("Want to follow up?")
-    - Sets PENDING_CONFIRM + PENDING_OPEN_URL so a yes/no voice reply
-      automatically opens the link on the phone via /api/ui_state open_url
+    - Summarises each notification through the LLM in the CURRENT avatar's
+      persona, grounded in live phone activity (_phone_activity_context) —
+      falls back to per-app templates when the LLM is unavailable
+    - Every broadcast ends with a tailored follow-up question and arms
+      PENDING_CONFIRM so a "yes" opens the link, launches the notifying app,
+      or reads the full content (notif_detail)
     """
     global _NOTIFICATION_SEEN, PENDING_CONFIRM, PENDING_OPEN_URL
     while True:
@@ -7614,20 +7767,71 @@ async def notification_monitor_loop():
                     )
                     follow_up = "Want to follow up?" if extracted_url else None
 
-                # ── 7. Append follow-up question if there's a URL to open ────
-                if extracted_url and follow_up:
+                # ── 7. Persona-driven summary + tailored follow-up ───────────
+                # Ask the LLM (in the current avatar's voice, grounded in live
+                # phone activity) to summarise the notification and craft a
+                # follow-up query — the OpenHuman/OpenLive style of adapting
+                # phone data into character. Falls back to the template above
+                # whenever the LLM is unavailable or slow.
+                activity_context = await _phone_activity_context()
+                app_label_full = (
+                    package.split(".")[-1].replace("_", " ").title()
+                    if package
+                    else app_key
+                )
+                personalised = await _personalize_notification_announcement(
+                    app_label=app_label_full,
+                    title=title,
+                    content=content,
+                    sender=sender,
+                    ticket_id=ticket_id,
+                    priority=priority,
+                    has_url=bool(extracted_url),
+                    activity_context=activity_context,
+                )
+                if personalised:
+                    msg = personalised
+                elif follow_up:
                     msg = f"{announcement}. {follow_up}"
-                    # Arm the confirmation gate — yes → open URL on phone
-                    PENDING_CONFIRM = {
-                        "desc": f"open {extracted_url}",
-                        "skill": None,
-                        "skill_arg": "",
-                        "open_url": extracted_url,
-                        "expires": time.time() + CONFIRM_TIMEOUT,
-                    }
-                    PENDING_OPEN_URL = None  # will be set on "yes" confirmation
                 else:
                     msg = announcement
+
+                # ── 8. Arm the follow-up gate so "yes" does something useful ──
+                # Only when a question was actually asked. Priority: open the
+                # extracted link → launch the notifying app on the phone →
+                # read the full notification content aloud.
+                if "?" in msg:
+                    if extracted_url:
+                        PENDING_CONFIRM = {
+                            "desc": f"open {extracted_url}",
+                            "skill": None,
+                            "skill_arg": "",
+                            "open_url": extracted_url,
+                            "expires": time.time() + CONFIRM_TIMEOUT,
+                        }
+                        PENDING_OPEN_URL = None  # set on "yes" confirmation
+                    elif package:
+                        # No link — "yes" launches the notifying app on the phone
+                        PENDING_CONFIRM = {
+                            "desc": f"open {app_label_full}",
+                            "skill": {
+                                "action_type": "intent_launch",
+                                "type": "intent_launch",
+                                "package": package,
+                                "label": app_label_full,
+                            },
+                            "skill_arg": "",
+                            "expires": time.time() + CONFIRM_TIMEOUT,
+                        }
+                    elif full_text:
+                        # Nothing actionable — "yes" reads the full content aloud
+                        PENDING_CONFIRM = {
+                            "desc": "read the full notification",
+                            "skill": None,
+                            "skill_arg": "",
+                            "notif_detail": full_text,
+                            "expires": time.time() + CONFIRM_TIMEOUT,
+                        }
 
                 asyncio.create_task(speak(msg))
                 await asyncio.sleep(3)
@@ -7646,6 +7850,34 @@ async def notification_monitor_loop():
 # ─── PROXIMITY MONITOR ──────────────────────────────────────────
 _USER_NEAR = False
 _LAST_PROXIMITY_GREETING = 0.0
+# Approach greetings should be rare — the proximity sensor flaps constantly,
+# and a 60s cooldown meant the same "I felt you were near" lines fired all day.
+_PROXIMITY_GREETING_COOLDOWN = 1800.0  # 30 minutes between approach greetings
+_PROXIMITY_GREETINGS = [
+    "Hey, good to see you.",
+    "Oh — hi. What's up?",
+    "There you are.",
+    "Hey. Need anything?",
+    "Welcome back. What are we doing?",
+    "Hi — I'm here if you need me.",
+]
+
+# No-repeat rotation for proactive one-liners. random.choice over tiny pools
+# made loops repeat the same line every time; this rotates through the whole
+# pool before any line can repeat.
+_RECENT_LINE_USE: dict[str, list[str]] = {}
+
+
+def _pick_fresh(pool_key: str, options: list[str]) -> str:
+    """Pick a line from a pool without repeating until every line was used."""
+    used = _RECENT_LINE_USE.setdefault(pool_key, [])
+    fresh = [o for o in options if o not in used]
+    if not fresh:
+        used.clear()
+        fresh = list(options)
+    pick = random.choice(fresh)
+    used.append(pick)
+    return pick
 
 
 async def proximity_monitor_loop():
@@ -7670,18 +7902,17 @@ async def proximity_monitor_loop():
             if near and not _USER_NEAR:
                 _USER_NEAR = True
                 now = time.time()
-                if now - _LAST_PROXIMITY_GREETING > 60:
+                # Greet only when it's been a long while AND the user hasn't
+                # interacted recently — announcing "you're near" mid-conversation
+                # or every few minutes is just noise in the chat.
+                recently_active = (now - CONVERSATION_LAST_ACTIVITY) < 300
+                if (
+                    now - _LAST_PROXIMITY_GREETING > _PROXIMITY_GREETING_COOLDOWN
+                    and not recently_active
+                ):
                     _LAST_PROXIMITY_GREETING = now
                     LILLY_MOOD = "warm"
-                    await speak(
-                        random.choice(
-                            [
-                                "Hey, I knew you were close!",
-                                "I can sense you nearby. What are we doing?",
-                                "You're near! I felt you coming.",
-                            ]
-                        )
-                    )
+                    await speak(_pick_fresh("proximity", _PROXIMITY_GREETINGS))
             elif not near and _USER_NEAR:
                 _USER_NEAR = False
         except Exception:
@@ -8303,6 +8534,28 @@ async def handle_intent(
                     await save_memory()
                     await speak(reply)
                     return {"action": "handled", "text": reply, "open_url": pending_url}
+                # Notification follow-up: read the full content aloud
+                pending_detail = (
+                    pending.get("notif_detail") if isinstance(pending, dict) else None
+                )
+                if pending_detail:
+                    reply = f"Here's the full thing: {pending_detail}"
+                    await memory.add("user", text)
+                    await memory.add("assistant", reply)
+                    await save_memory()
+                    await speak(reply)
+                    return {"action": "handled", "text": reply}
+                # Ops bridge follow-up: confirmed server/phone shell commands
+                pending_ops = (
+                    pending.get("ops") if isinstance(pending, dict) else None
+                )
+                if pending_ops:
+                    reply = await _execute_ops_action(pending_ops)
+                    await memory.add("user", text)
+                    await memory.add("assistant", reply)
+                    await save_memory()
+                    await speak(reply)
+                    return {"action": "handled", "text": reply}
                 if not pending_skill:
                     reply = "OK, ready when you are."
                 else:
