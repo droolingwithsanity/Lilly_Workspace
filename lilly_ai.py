@@ -2081,6 +2081,11 @@ def _strip_nlp_noise(rest: str) -> str:
         before = rest
         rest = re.sub(r"^\s*(?:and|or|then|to|please)\s+", " ", rest)
         rest = re.sub(
+            r"^\s*(?:(?:can|could|will|would)\s+you|let'?s|let\s+us)\s+",
+            " ",
+            rest,
+        )
+        rest = re.sub(
             r"^(?:i\s+(?:want\s+to|wanna|would\s+love\s+to|need\s+to|"
             r"would\s+like\s+to)\s+|i\s+|would\s+you\s+)?"
             r"(?:watch|listen\s+to|open|play|start|launch|put\s+on|use|"
@@ -2125,6 +2130,25 @@ def _search_variant(skill: dict) -> Optional[dict]:
     return None
 
 
+# Intent verbs that signal the user wants an app action, not just a
+# conversational mention of the app ("do you watch youtube?" is chat,
+# "watch true crime on youtube" is an intent).
+_NLP_INTENT_VERBS = (
+    r"(?:watch|listen|open|play|start|launch|put|use|show|search|"
+    r"find|look|go|navigate|turn|run|stream|queue|browse)"
+)
+# The verb must be in imperative position: at the start of the phrase,
+# optionally behind politeness/request prefixes. This rejects question
+# forms like "do you watch youtube" or "how do i watch youtube".
+_NLP_INTENT_START = re.compile(
+    r"^\s*(?:please\s+|hey\s+\w+\s*)?"
+    r"(?:(?:i\s+(?:(?:want|need|would\s+like|would\s+love)\s+to|wanna|gonna))\s+|"
+    r"(?:can|could|will|would)\s+you\s+(?:please\s+)?|let'?s\s+)?"
+    + _NLP_INTENT_VERBS
+    + r"\b"
+)
+
+
 def parse_nlp_intent(phrase: str) -> tuple[Optional[dict], str]:
     """Extract (app_skill, query) from a natural-language utterance.
 
@@ -2135,15 +2159,23 @@ def parse_nlp_intent(phrase: str) -> tuple[Optional[dict], str]:
       "watch true crime on youtube"                   -> youtube + "true crime"
       "search youtube for true crime"                 -> youtube + "true crime"
 
-    Returns (None, "") if no app intent is found.
+    Requires an intent verb in the phrase — a bare conversational mention
+    of an app ("do you like youtube") returns (None, "") so it falls
+    through to normal chat instead of launching/confirming an app action.
     """
     phrase = normalize_text(phrase)
     lex = _app_lexicon()
     if not lex:
         return None, ""
+    # Gate: no imperative-position action verb → not an app intent,
+    # just conversation ("do you watch youtube" stays chat).
+    if not _NLP_INTENT_START.search(phrase):
+        return None, ""
     found = []
     for word, skill in lex.items():
-        if word in phrase:
+        # Word-boundary match so "youtube" doesn't match substrings and
+        # multi-word aliases ("youtube music") still work.
+        if re.search(r"\b" + re.escape(word) + r"\b", phrase):
             found.append((len(word), word, skill))
     if not found:
         return None, ""
