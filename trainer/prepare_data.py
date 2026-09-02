@@ -204,12 +204,30 @@ def prepare_cornell(dataset, persona_id: str, persona_info: dict) -> List[str]:
     return samples
 
 
+def prepare_fineweb(ds: Dataset, persona_id: str, persona_info: dict) -> List[str]:
+    """FineWeb raw web text — persona-agnostic knowledge absorption.
+
+    Not conversation-formatted on purpose: tagged <|knowledge|> so the model
+    treats it as reference material, not dialogue to imitate. Same text for
+    every persona (dedup keeps the dataset balanced).
+    """
+    if persona_id != list(PERSONA_BACKGROUNDS.keys())[0]:
+        return []  # add once, not per-persona
+    out = []
+    for ex in ds:
+        text = str(ex.get("text", "")).strip()
+        if text:
+            out.append(f"<|knowledge|>\n{text}")
+    return out
+
+
 DATASET_PREPARERS = {
     "persona_chat": prepare_personachat,
     "dailydialog": prepare_dailydialog,
     "blended_skill_talk": prepare_blended_skill_talk,
     "empathetic_dialogues": prepare_empathetic_dialogues,
     "cornell_movie": prepare_cornell,
+    "fineweb": prepare_fineweb,
 }
 
 

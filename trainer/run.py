@@ -62,6 +62,13 @@ def main():
         "--skip-download", action="store_true", help="Skip dataset download"
     )
     parser.add_argument(
+        "--fineweb-samples",
+        type=int,
+        default=0,
+        help="Stream N FineWeb sample-10BT docs for general knowledge "
+        "(raw web text, capped at 2048 chars each; 0 = off)",
+    )
+    parser.add_argument(
         "--inference",
         action="store_true",
         help="Run interactive inference with trained model",
@@ -162,7 +169,9 @@ def main():
 
     raw = {}
     if not args.skip_download:
-        raw = download_all_datasets(config.dataset_cache_dir)
+        raw = download_all_datasets(
+            config.dataset_cache_dir, fineweb_samples=args.fineweb_samples
+        )
     else:
         logger.info("Skipping download")
 

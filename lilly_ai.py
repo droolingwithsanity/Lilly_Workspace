@@ -10606,6 +10606,12 @@ async def handle_intent(
         "calendar events",
         "my schedule",
         "what's next",
+        "my day",
+        "what does my day look like",
+        "how's my day",
+        "how does my day look",
+        "my plans today",
+        "what's my day",
     ]
 
     if AUTH_AVAILABLE and any(t in cmd for t in gmail_triggers):
