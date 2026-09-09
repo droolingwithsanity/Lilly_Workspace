@@ -1114,5 +1114,31 @@ def create_session(task: str, user_email: str = "") -> AgentSession:
     return session
 
 
+async def execute_task(task: str, user_email: str = "") -> str:
+    """Run a coding agent task to completion. Returns the result summary.
+
+    This is a convenience wrapper around AgentSession.run_stream() that
+    collects all events and returns the final result string.
+    """
+    session = create_session(task=task, user_email=user_email)
+    result_parts = []
+    try:
+        async for event in session.run_stream():
+            etype = event.get("type", "")
+            if etype == "done":
+                result_parts.append(event.get("reply", ""))
+            elif etype == "error":
+                result_parts.append(f"ERROR: {event.get('message', '')}")
+            elif etype == "tool_result":
+                output = event.get("output", "")
+                if output:
+                    result_parts.append(output[:500])
+    except Exception as e:
+        result_parts.append(f"Agent error: {e}")
+    finally:
+        cleanup_session(session.session_id)
+    return "\n".join(result_parts) if result_parts else "(no output)"
+
+
 def cleanup_session(session_id: str) -> None:
     _active_sessions.pop(session_id, None)

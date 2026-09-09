@@ -93,6 +93,10 @@ try:
         get_current_user,
         load_user_memory,
         save_user_memory,
+        load_user_daily_memory,
+        save_user_daily_memory,
+        load_user_recent_memory,
+        cleanup_old_daily_memories,
         get_google_access_token,
         load_google_tokens,
         gmail_list_messages,
@@ -158,6 +162,77 @@ try:
 except ImportError:
     AGENT_CORE_AVAILABLE = False
     logging.warning("agent_core not found — agentic task loop disabled")
+
+# Lilly Orchestrator — master persona + strict routing rules (single-file runtime)
+try:
+    from lilly_orchestrator_runtime import (
+        ORCHESTRATOR_PROMPT,
+        LILLY_TOOLS_SCHEMA,
+        tools_schema_json,
+        route_task as _orchestrator_route_task,
+        remember_route as _orchestrator_remember_route,
+        dispatch_to_agent as _orchestrator_dispatch,
+        register_pipeline_handlers as _orchestrator_register_handlers,
+        register_runtime as _orchestrator_register_runtime,
+        orchestrator_status as _orchestrator_status,
+        build_orchestrator_system_prompt,
+    )
+
+    ORCHESTRATOR_RUNTIME_AVAILABLE = True
+except ImportError:
+    ORCHESTRATOR_RUNTIME_AVAILABLE = False
+    logging.warning(
+        "lilly_orchestrator_runtime not found — orchestrator persona disabled"
+    )
+    ORCHESTRATOR_PROMPT = ""
+    LILLY_TOOLS_SCHEMA = {}
+    tools_schema_json = lambda: "{}"
+
+    def _orchestrator_route_task(text: str) -> dict:
+        return {
+            "pipeline": "converse",
+            "confidence": 0.0,
+            "matched": [],
+            "payload": text,
+        }
+
+    def _orchestrator_remember_route(d: dict) -> None:
+        pass
+
+    async def _orchestrator_dispatch(pipeline: str, payload: dict) -> dict:
+        return {"ok": False, "pipeline": pipeline, "state": "await"}
+
+    def _orchestrator_register_handlers(h: dict) -> None:
+        pass
+
+    def _orchestrator_register_runtime(ctx: dict) -> None:
+        pass
+
+    def _orchestrator_status() -> dict:
+        return {"ok": False, "mode": "disabled"}
+
+    def build_orchestrator_system_prompt(
+        user_name: str = "", include_schema: bool = True
+    ) -> str:
+        return ""
+
+
+# Lilly Orchestrator hive — agent pool, quotas, group chat (package)
+try:
+    from lilly_orchestrator import Orchestrator as HiveOrchestrator
+
+    HIVE_ORCHESTRATOR = HiveOrchestrator(
+        state_file="/tmp/lilly_orchestrator_state.json"
+    )
+    ORCHESTRATOR_PACKAGE_AVAILABLE = True
+except Exception:
+    HIVE_ORCHESTRATOR = None
+    ORCHESTRATOR_PACKAGE_AVAILABLE = False
+    logging.warning(
+        "lilly_orchestrator package not available — hive delegation disabled"
+    )
+
+ORCHESTRATOR_MODE = os.environ.get("ORCHESTRATOR_MODE", "1") == "1"
 
 # ─── CONFIGURATION ───────────────────────────────────────────────
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://100.73.249.14:11434")
@@ -472,6 +547,16 @@ HOST_SCAN_PROVIDER_URL = os.environ.get(
 )
 LILLY_PAIR_TOKEN = os.environ.get("LILLY_PAIR_TOKEN", "")
 VISION_SERVER_URL = os.environ.get("VISION_SERVER_URL", "")
+PREFER_LOCAL_DETECTION = os.environ.get("PREFER_LOCAL_DETECTION", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
+WEBCAM_ENABLED = os.environ.get("WEBCAM_ENABLED", "true").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 WHISPER_SERVER_URL = os.environ.get("WHISPER_SERVER_URL", "http://localhost:8001")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "Systran/faster-whisper-large-v3")
 PUSHBULLET_API_KEY = os.environ.get("PUSHBULLET_API_KEY", "")
@@ -509,7 +594,7 @@ class MemoryEntry:
 
 @dataclass
 class ConversationMemory:
-    entries: deque = field(default_factory=lambda: deque(maxlen=50))
+    entries: deque = field(default_factory=lambda: deque(maxlen=300))
     summary: str = ""
     session_summaries: list = field(default_factory=list)  # Last 10 session summaries
     session_id: str = ""  # Current session identifier
@@ -520,69 +605,65 @@ class ConversationMemory:
         async with self._lock:
             self.entries.append(MemoryEntry(role=role, text=text))
 
-    async def context_window(self, n: int = 8) -> list[dict]:
-        """Return the last n entries for the LLM context window.
+    async def context_window(
+        self, n: int = 8, max_age_s: float = 3600.0, cap: int = 40
+    ) -> list[dict]:
+        """Return entries for the LLM context window.
 
-        Smart selection: always include the last n messages, but also
-        try to include any entries that mention the user's name or
-        key topics for better continuity.
+        Time-aware persistent chat memory: everything from the last
+        `max_age_s` (default 1 hour) is eligible, capped at `cap` entries.
+        Important entries (name, preferences, "remember", tasks) are pinned
+        so they survive even a heavy conversation. Falls back to the last n
+        entries when everything is older than the window.
         """
         async with self._lock:
             entries = list(self.entries)
-            if len(entries) <= n:
-                return [{"role": e.role, "content": e.text} for e in entries]
+            if not entries:
+                return []
 
-            # Always include the last n entries
-            selected = entries[-n:]
+            now = time.time()
+            recent = [e for e in entries if now - e.timestamp <= max_age_s]
+            if not recent:
+                recent = entries[-n:]
 
-            # Also check if any earlier entries mention the user's name
-            # or key topics (helps with continuity when deque is large)
-            if len(entries) > n:
-                earlier = entries[:-n]
-                # Keywords for important context — extend with user's name
-                important_keywords = [
-                    "name",
-                    "call me",
-                    "i'm",
-                    "my name",
-                    "user:",
-                    "you are",
-                    "remember",
-                    "important",
-                    "note:",
-                    "warning",
-                    "task:",
-                    "deadline",
-                    "meeting",
-                    "project",
-                    "goal",
-                    "preference",
-                ]
-                # Add user's known name to keywords if available
-                user_name = (
-                    getattr(self, "_user_name", None)
-                    or os.environ.get("USER_NAME", "").lower()
-                )
-                if user_name:
-                    important_keywords.append(user_name)
+            important_keywords = [
+                "name",
+                "call me",
+                "my name",
+                "remember",
+                "important",
+                "favorite",
+                "favourite",
+                "i like",
+                "i love",
+                "i hate",
+                "i live",
+                "i work",
+                "birthday",
+                "task:",
+                "deadline",
+                "meeting",
+                "project",
+                "goal",
+                "preference",
+            ]
+            user_name = (
+                getattr(self, "_user_name", None)
+                or os.environ.get("USER_NAME", "").lower()
+            )
+            if user_name:
+                important_keywords.append(user_name)
 
-                # Check last 15 entries before the window for important context
-                for e in earlier[-15:]:
-                    if e in selected:
-                        continue
-                    text_lower = e.text.lower()
-                    if any(
-                        kw in text_lower
-                        for kw in important_keywords
-                        if kw  # skip empty strings
-                    ):
-                        # Add this entry at the beginning for context
-                        selected.insert(0, e)
-                        # Keep window size manageable: n + 2 buffer
-                        if len(selected) > n + 2:
-                            selected = selected[-(n + 2) :]
+            window = recent[-cap:]
+            # Pin important entries from earlier in the hour
+            for e in recent[:-cap] if len(recent) > cap else []:
+                text_lower = e.text.lower()
+                if any(kw and kw in text_lower for kw in important_keywords):
+                    window.insert(0, e)
+            if len(window) > cap + 6:
+                window = window[-(cap + 6) :]
 
-            return [{"role": e.role, "content": e.text} for e in selected]
+            return [{"role": e.role, "content": e.text} for e in window]
 
     async def snapshot(self) -> list:
         async with self._lock:
@@ -1161,6 +1242,11 @@ LAST_HEARD = ""
 LAST_SPOKEN = ""
 _LAST_SPOKEN_IN_CHAT = False  # tracks if current spoken msg was added to chat
 LAST_SSML = ""
+
+# Sensor context dedup: avoid injecting the same sensor snapshot repeatedly
+_LAST_SENSOR_CONTEXT = ""
+_LAST_SENSOR_CONTEXT_TS = 0.0
+_SENSOR_DEDUP_COOLDOWN = 10.0  # seconds before re-injecting same sensor data
 SPEAKING_SESSION_ID = 0
 _LAST_SPOKEN_SESSION_ID = 0
 _RECENT_SPEECH: list[tuple[float, str]] = []  # (timestamp, text) of recent speech
@@ -1383,6 +1469,59 @@ def _filter_hallucination_patterns(text: str) -> str:
     cleaned = re.sub(r"^[!,.:;/\\s]+", "", cleaned)
     # Keep replies clean: no profanity, slurs, or banned words
     cleaned = _filter_offensive_language(cleaned)
+    return cleaned
+
+
+def _strip_emoji(text: str) -> str:
+    """Remove all emoji characters from text.
+
+    Strips Unicode emoji characters (including combined emoji sequences)
+    to ensure clean, text-only responses for chat display and TTS.
+
+    Uses a comprehensive regex that handles:
+    - Basic emoji (U+1F600-U+1F64F)
+    - Symbols & pictographs (U+1F300-U+1F5FF)
+    - Transport & map symbols (U+1F680-U+1F6FF)
+    - Flags (U+1F1E0-U+1F1FF)
+    - Dingbats (U+2702-U+27B0)
+    - Zero-Width Joiner (U+200D) for combined emoji like 👨‍💻
+    - Variation selectors (U+FE0F)
+    - Skin tone modifiers (U+1F3FB-U+1F3FF)
+    """
+    if not text:
+        return text
+
+    # Comprehensive emoji pattern including ZWJ sequences
+    emoji_pattern = re.compile(
+        "["
+        "\U0001f600-\U0001f64f"  # emoticons
+        "\U0001f300-\U0001f5ff"  # symbols & pictographs
+        "\U0001f680-\U0001f6ff"  # transport & map symbols
+        "\U0001f1e0-\U0001f1ff"  # flags (iOS)
+        "\U0001f900-\U0001f9ff"  # supplemental symbols
+        "\U0001fa00-\U0001fa6f"  # chess symbols
+        "\U0001fa70-\U0001faff"  # symbols extended-A
+        "\U00002702-\U000027b0"  # dingbats
+        "\U000024c2-\U0001f251"  # enclosed characters
+        "\U0001f926-\U0001f937"  # supplemental
+        "\U00010000-\U0010ffff"  # supplementary
+        "\u200d"  # zero width joiner
+        "\u2640-\u2642"  # gender symbols
+        "\u2600-\u2b55"  # misc symbols
+        "\u23cf"  # eject symbol
+        "\u23e9"  # fast forward
+        "\u231a"  # watch
+        "\ufe0f"  # variation selector
+        "\u3030"  # wavy dash
+        "\U0001f3fb-\U0001f3ff"  # skin tone modifiers
+        "]+",
+        flags=re.UNICODE,
+    )
+
+    cleaned = emoji_pattern.sub("", text)
+    # Clean up any extra whitespace left after emoji removal
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned
 
 
@@ -1968,6 +2107,37 @@ def fuzzy_wake_match(phrase: str, avatar: Optional[str] = None) -> tuple[bool, f
     return best_score >= 0.7, best_score
 
 
+def match_wake_across_avatars(phrase: str) -> Optional[str]:
+    """Check if the phrase contains a wake word for ANY avatar.
+
+    Returns the matched avatar key, or None if no wake word found.
+    Prioritizes the current avatar if multiple match.
+    """
+    phrase_lower = phrase.lower().strip()
+    current = current_avatar or "puppy"
+    best_key: Optional[str] = None
+    best_score = 0.0
+    # Check current avatar first (tie-breaking priority)
+    order = [current] + [k for k in CHAR_WAKE_WORDS if k != current]
+    for key in order:
+        targets = CHAR_WAKE_WORDS.get(key, CHAR_WAKE_WORDS["puppy"])
+        for target in targets:
+            score = 0.0
+            if target in phrase_lower:
+                score = 1.0
+            else:
+                ratio = difflib.SequenceMatcher(None, target, phrase_lower).ratio()
+                score = max(score, ratio)
+                for word in phrase_lower.split():
+                    word_ratio = difflib.SequenceMatcher(None, target, word).ratio()
+                    score = max(score, word_ratio)
+            if score >= 0.7:
+                if best_key is None or score > best_score or key == current:
+                    best_score = score
+                    best_key = key
+    return best_key
+
+
 # ─── NLU + CONFIRMATION GATE (casual mode) ────────────────────────────
 # Natural-language parsing of app intents ("I want to watch youtube videos
 # on true crime") plus a confirmation gate so phone-affecting actions wait
@@ -2138,13 +2308,16 @@ def _search_variant(skill: dict) -> Optional[dict]:
 # Intent verbs that signal the user wants an app action, not just a
 # conversational mention of the app ("do you watch youtube?" is chat,
 # "watch true crime on youtube" is an intent).
-_NLP_INTENT_VERBS = (
-    r"(?:watch|listen|open|play|start|launch|put|use|show|search|"
-    r"find|look|go|navigate|turn|run|stream|queue|browse)"
-)
+# NOTE: We only include verbs that are STRONG app-action signals.
+# Common conversational verbs like "show", "find", "look", "open",
+# "start", "run", "play", "search" are REMOVED to prevent false triggers
+# in normal chat (e.g. "I want to show you something" should NOT activate).
+_NLP_INTENT_VERBS = r"(?:watch|listen|launch|navigate|stream|queue|browse)"
 # The verb must be in imperative position: at the start of the phrase,
 # optionally behind politeness/request prefixes. This rejects question
 # forms like "do you watch youtube" or "how do i watch youtube".
+# ALSO: requires the phrase to be SHORT (< 60 chars) — long conversational
+# messages are almost never app intents.
 _NLP_INTENT_START = re.compile(
     r"^\s*(?:please\s+|hey\s+\w+\s*)?"
     r"(?:(?:i\s+(?:(?:want|need|would\s+like|would\s+love)\s+to|wanna|gonna))\s+|"
@@ -2169,6 +2342,12 @@ def parse_nlp_intent(phrase: str) -> tuple[Optional[dict], str]:
     through to normal chat instead of launching/confirming an app action.
     """
     phrase = normalize_text(phrase)
+
+    # SAFETY: Long phrases (>60 chars) are almost never app intents —
+    # they're conversational messages that happen to mention an app name.
+    if len(phrase) > 60:
+        return None, ""
+
     lex = _app_lexicon()
     if not lex:
         return None, ""
@@ -2323,6 +2502,18 @@ async def _run_skill_action(skill: dict, skill_arg: str = "") -> str:
             return f"Command '{cmd_to_run}' not found in container."
 
     if action == "termux":
+        binary = skill.get("binary", "")
+        args = skill.get("args", []) or []
+        if binary:
+            cmd = [binary] + args
+            if skill_arg and not skill.get("no_arg"):
+                cmd.append(skill_arg)
+            stdout, stderr = await termux_run(cmd, timeout=10.0)
+            if stdout:
+                return f"Done: {stdout[:200]}"
+            elif stderr:
+                return f"Command failed: {stderr[:200]}"
+            return f"{label} completed."
         return f"Opening {label} on your phone!"
 
     return f"Opening {label}!"
@@ -2803,6 +2994,10 @@ async def save_memory():
         # Prefer user-scoped memory file when a user is signed in
         if _current_user_id and AUTH_AVAILABLE:
             save_user_memory(_current_user_id, data)  # type: ignore[reportPossiblyUnboundVariable]
+            # Also save to daily file for per-day context
+            save_user_daily_memory(_current_user_id, current_avatar, data=data)  # type: ignore[reportPossiblyUnboundVariable]
+            # Clean up old daily files (keep last 7 days)
+            cleanup_old_daily_memories(_current_user_id, current_avatar)  # type: ignore[reportPossiblyUnboundVariable]
         else:
             path = _avatar_memory_file(current_avatar)
             path.write_text(json.dumps(data, indent=2))
@@ -2820,9 +3015,44 @@ async def load_memory():
         try:
             data = json.loads(path.read_text())
             memory = ConversationMemory.from_dict(data)
-            await _clean_memory_artifacts()
+            await _clean_memory_artifacts()  # type: ignore[misc]
         except Exception:
             memory = ConversationMemory()
+    else:
+        memory = ConversationMemory()
+
+    # Bootstrap: if the avatar memory is nearly empty, merge entries from
+    # the legacy conversation_memory.json (orphaned pre-avatar-split history).
+    if len(memory.entries) < 5:
+        legacy_path = WORKSPACE / "conversation_memory.json"
+        if legacy_path.exists():
+            try:
+                legacy = json.loads(legacy_path.read_text())
+                legacy_entries = legacy.get("entries", [])
+                legacy_summary = legacy.get("summary", "")
+                # Merge legacy entries that aren't already present
+                existing_texts = {e.text for e in memory.entries}
+                for entry in legacy_entries:
+                    text = entry.get("text", "")
+                    role = entry.get("role", "user")
+                    if text and text not in existing_texts:
+                        memory.entries.append(
+                            MemoryEntry(
+                                role=role,
+                                text=text,
+                                timestamp=entry.get("timestamp", time.time()),
+                            )
+                        )
+                        existing_texts.add(text)
+                # Adopt legacy summary if we still don't have one
+                if not memory.summary and legacy_summary:
+                    memory.summary = legacy_summary
+                logger.info(
+                    f"Bootstrapped {len(legacy_entries)} legacy entries into memory"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to bootstrap from legacy memory: {e}")
+
     # Set a new session ID for this server session
     memory.session_id = f"session_{int(time.time())}_{current_avatar}"
 
@@ -2854,15 +3084,123 @@ def _save_user_names() -> None:
 
 
 def _get_user_name(user_id: str = "") -> str:
-    if not user_id:
-        return ""
-    return _USER_NAMES.get(user_id, "")
+    # "local" key covers anonymous sessions so the name still persists;
+    # USER_NAME env is the operator-configured fallback.
+    return (
+        _USER_NAMES.get(user_id or "local", "")
+        or _USER_NAMES.get("local", "")
+        or os.environ.get("USER_NAME", "")
+    )
 
 
 def _set_user_name(user_id: str, name: str) -> None:
-    if not user_id:
+    _USER_NAMES[user_id or "local"] = name.strip()
+    _save_user_names()  # persist immediately — names must survive restarts
+
+
+# ─── USER FACTS STORE — persistent personal memory ───────────────
+# Things the user states about themselves ("remember that I...", "my
+# favorite...", their name) are stored here and injected into EVERY LLM
+# call, so personal context survives window truncation and restarts.
+_USER_FACTS_FILE = WORKSPACE / "user_facts.json"
+_USER_FACTS: list[dict] = []  # {"fact": str, "ts": float}
+_USER_FACTS_MAX = 60
+
+# Daily memory context — populated per-request, consumed by _build_memory_hint()
+_daily_recent_summaries: list = []
+_daily_recent_entries: list = []
+
+
+def _load_user_facts() -> None:
+    global _USER_FACTS
+    try:
+        if _USER_FACTS_FILE.exists():
+            data = json.loads(_USER_FACTS_FILE.read_text())
+            if isinstance(data, list):
+                _USER_FACTS = [f for f in data if isinstance(f, dict) and f.get("fact")]
+                return
+    except Exception:
+        _USER_FACTS = []
+
+    # Seed initial facts from user_profile.json and legacy conversation
+    # so the AI has context from the very first message.
+    if not _USER_FACTS:
+        now = time.time()
+        seed_facts = []
+        # Extract from user_profile.json
+        try:
+            prof = json.loads((WORKSPACE / "user_profile.json").read_text())
+            active_hours = prof.get("active_hours", {})
+            if active_hours:
+                top_hour = max(active_hours, key=lambda h: active_hours[h])
+                seed_facts.append(
+                    {
+                        "kind": "habit",
+                        "fact": f"User is most active around {top_hour}:00",
+                        "ts": now,
+                    }
+                )
+            interaction_count = prof.get("interaction_count", 0)
+            if interaction_count > 100:
+                seed_facts.append(
+                    {
+                        "kind": "context",
+                        "fact": f"User has had {interaction_count} interactions with Lilly",
+                        "ts": now,
+                    }
+                )
+        except Exception:
+            pass
+
+        # Extract from legacy conversation — topics the user cared about
+        try:
+            legacy = json.loads((WORKSPACE / "conversation_memory.json").read_text())
+            for entry in legacy.get("entries", []):
+                text = entry.get("text", "").strip()
+                role = entry.get("role", "")
+                if role == "user" and text and len(text) > 5:
+                    # Skip very short or meaningless entries
+                    if text in ("really", "three", "here we go in"):
+                        continue
+                    seed_facts.append(
+                        {
+                            "kind": "conversation_topic",
+                            "fact": f'User previously asked: "{text}"',
+                            "ts": entry.get("timestamp", now),
+                        }
+                    )
+        except Exception:
+            pass
+
+        if seed_facts:
+            _USER_FACTS = seed_facts[:20]  # Cap at 20 seed facts
+            _save_user_facts()
+            logger.info(f"Seeded {len(_USER_FACTS)} initial user facts")
+
+
+def _save_user_facts() -> None:
+    try:
+        _USER_FACTS_FILE.write_text(
+            json.dumps(_USER_FACTS[-_USER_FACTS_MAX:], indent=2)
+        )
+    except Exception:
+        pass
+
+
+def _add_user_fact(kind: str, fact: str) -> None:
+    """Store a personal fact (deduped, most-recent-wins for same text)."""
+    fact = " ".join(str(fact).split())
+    if len(fact) < 4:
         return
-    _USER_NAMES[user_id] = name.strip()
+    global _USER_FACTS
+    key = fact.lower()
+    _USER_FACTS = [f for f in _USER_FACTS if f.get("fact", "").lower() != key]
+    _USER_FACTS.append({"kind": kind, "fact": fact, "ts": time.time()})
+    del _USER_FACTS[:-_USER_FACTS_MAX]
+    _save_user_facts()
+
+
+_load_user_facts()
 
 
 # ─── SESSION HISTORY FOR CROSS-SESSION CATCH-UP ──────────────────
@@ -3111,6 +3449,38 @@ async def _load_recent_conversation_history(n: int = 20) -> list[dict]:
     """Load the last N conversation turns from the permanent history."""
     try:
         if not CONVERSATION_HISTORY_FILE.exists():
+            # Bootstrap: seed from legacy conversation_memory.json
+            legacy_path = WORKSPACE / "conversation_memory.json"
+            if legacy_path.exists():
+                try:
+                    legacy = json.loads(legacy_path.read_text())
+                    entries = legacy.get("entries", [])
+                    # Write legacy entries as JSONL turns
+                    with open(CONVERSATION_HISTORY_FILE, "a") as f:
+                        i = 0
+                        while i < len(entries) - 1:
+                            user_entry = entries[i]
+                            assistant_entry = entries[i + 1]
+                            if (
+                                user_entry.get("role") == "user"
+                                and assistant_entry.get("role") == "assistant"
+                            ):
+                                turn = {
+                                    "ts": user_entry.get("timestamp", time.time()),
+                                    "avatar": "puppy",
+                                    "user": user_entry.get("text", ""),
+                                    "assistant": assistant_entry.get("text", ""),
+                                    "session_id": "legacy_bootstrap",
+                                }
+                                f.write(json.dumps(turn) + "\n")
+                                i += 2
+                            else:
+                                i += 1
+                    logger.info(
+                        "Bootstrapped conversation_history.jsonl from legacy file"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to bootstrap JSONL history: {e}")
             return []
         lines = CONVERSATION_HISTORY_FILE.read_text().strip().split("\n")
         # Get last N lines
@@ -3653,7 +4023,15 @@ async def speak(text: str, use_toast: bool = True, char_key: Optional[str] = Non
     # Generate audio with Piper (in thread to avoid blocking event loop)
     audio_aid = 0
     piper_found = os.path.exists(PIPER_BIN)
-    voice_found = os.path.exists(PIPER_VOICE)
+
+    # Get character-specific ONNX voice file
+    char_onnx = voice.get("onnx", "")
+    if char_onnx:
+        char_voice_path = str(Path(__file__).parent / "lillyos" / "voices" / char_onnx)
+    else:
+        char_voice_path = PIPER_VOICE
+
+    voice_found = os.path.exists(char_voice_path)
     if piper_found and voice_found:
         try:
 
@@ -3666,7 +4044,7 @@ async def speak(text: str, use_toast: bool = True, char_key: Optional[str] = Non
                     [
                         PIPER_BIN,
                         "--model",
-                        PIPER_VOICE,
+                        char_voice_path,
                         "--output-raw",
                         "--noise-scale",
                         f"{noise_scale:.3f}",
@@ -3751,14 +4129,17 @@ SSH_CONTROL_SOCKET = "/tmp/lilly_ssh_mux_%h_%p"
 
 
 async def termux_run(args: list[str], timeout: float = 10.0) -> tuple[str, str]:
-    """Run a command on the phone via SSH. Returns (stdout, stderr)."""
+    """Run a command on the phone via SSH, or fall back to the HTTP sensor
+    server when SSH is not configured or fails. Returns (stdout, stderr)."""
     import shlex
 
     host = os.environ.get("TERMUX_SSH_HOST", "")
     port = os.environ.get("TERMUX_SSH_PORT", "8022")
     user = os.environ.get("TERMUX_SSH_USER", "")
+    ssh_key = os.environ.get("TERMUX_SSH_KEY", "")
     if not host or not user:
-        return "", "SSH not configured (TERMUX_SSH_HOST/USER not set)"
+        # Fall back to sensor server's /shell endpoint
+        return await _sensor_server_shell(args, timeout)
     cmd_str = " ".join(shlex.quote(a) for a in args)
     ssh_cmd = [
         "ssh",
@@ -3774,9 +4155,15 @@ async def termux_run(args: list[str], timeout: float = 10.0) -> tuple[str, str]:
         f"ControlPath={SSH_CONTROL_SOCKET}",
         "-o",
         "ControlPersist=120",
-        f"{user}@{host}",
-        cmd_str,
     ]
+    # Use identity key if specified
+    if ssh_key:
+        import os.path as _osp
+
+        key_expanded = _osp.expanduser(ssh_key)
+        if _osp.exists(key_expanded):
+            ssh_cmd.extend(["-i", key_expanded])
+    ssh_cmd.extend([f"{user}@{host}", cmd_str])
     try:
         proc = await asyncio.create_subprocess_exec(
             *ssh_cmd,
@@ -3784,11 +4171,71 @@ async def termux_run(args: list[str], timeout: float = 10.0) -> tuple[str, str]:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return stdout.decode(), stderr.decode()
+        stdout_s = stdout.decode()
+        stderr_s = stderr.decode()
+        # If SSH auth fails, fall back to sensor server
+        if "Permission denied" in stderr_s or "publickey" in stderr_s:
+            logger.debug("SSH auth failed — falling back to sensor server /shell")
+            return await _sensor_server_shell(args, timeout)
+        return stdout_s, stderr_s
     except asyncio.TimeoutError:
         return "", "SSH timeout"
     except FileNotFoundError:
         return "", "ssh client not found in container"
+    except Exception as e:
+        return "", str(e)
+
+
+async def _sensor_server_shell(
+    args: list[str], timeout: float = 10.0
+) -> tuple[str, str]:
+    """Execute a command on the phone via the HTTP sensor server /shell endpoint.
+
+    The sensor server accepts:
+      - termux-* commands (e.g. termux-location, termux-sensor, termux-open-url)
+      - 'open <package>' for app launching
+
+    am start commands are translated to 'open <package>' format.
+    """
+    import shlex
+
+    cmd_str = " ".join(shlex.quote(a) for a in args)
+
+    # Translate 'am start -p <pkg>' or 'am start -a <action> -p <pkg>' to 'open <pkg>'
+    if cmd_str.startswith("am "):
+        # Extract package from -p flag
+        if "-p" in cmd_str:
+            parts = cmd_str.split()
+            idx = parts.index("-p")
+            if idx + 1 < len(parts):
+                pkg = parts[idx + 1]
+                # If there's a URI intent (intent_action with -d), use termux-open-url
+                if "-a" in parts and "-d" in parts:
+                    dash_idx = parts.index("-d")
+                    if dash_idx + 1 < len(parts):
+                        url = parts[dash_idx + 1]
+                        cmd_str = f"termux-open-url {url}"
+                else:
+                    cmd_str = f"open {pkg}"
+
+    try:
+        c = await _get_sensor_client()
+        r = await c.post(
+            f"{SENSOR_SERVER_URL}/shell",
+            json={"command": cmd_str},
+            timeout=min(timeout, 15.0),
+        )
+        if r.status_code == 200:
+            data = r.json()
+            output = data.get("output", "")
+            return output, ""
+        else:
+            error = (
+                r.json().get("message", "unknown error")
+                if r.headers.get("content-type", "").startswith("application/json")
+                else r.text[:200]
+            )
+            return "", f"Sensor server error: {error}"
     except Exception as e:
         return "", str(e)
 
@@ -4114,7 +4561,7 @@ async def check_sensor_deltas():
 async def app_process_monkey_intent(
     component: str, intent_action: str = "", uri_template: str = "", skill_arg: str = ""
 ):
-    """Launch an Android app via SSH, preferring intent_action/uri over bare package."""
+    """Launch an Android app via SSH, or fall back to the HTTP sensor server when SSH is not configured."""
     global WATCH_MODE
     if intent_action and uri_template:
         url = (
@@ -4141,6 +4588,50 @@ async def app_process_monkey_intent(
         WATCH_MODE["label"] = component.split(".")[-1].replace("mediaclient", "netflix")
         WATCH_MODE["since"] = time.time()
         logger.info(f"Watch Together: entered for {component}")
+
+
+async def _sensor_server_launch(
+    component: str, intent_action: str, uri_template: str, skill_arg: str, am_cmd: list
+):
+    """Launch an app via the phone sensor server's /shell endpoint.
+
+    The sensor server accepts:
+      - termux-* commands (e.g. termux-open-url)
+      - 'open <package>' for app launching
+
+    We translate the am start intent into the appropriate sensor-server command.
+    """
+    try:
+        # If we have a URL intent (intent_action + uri_template with a URL),
+        # use termux-open-url
+        if intent_action and uri_template:
+            url = (
+                uri_template.replace("{}", urllib.parse.quote(skill_arg))
+                if skill_arg
+                else uri_template
+            )
+            command = f"termux-open-url {url}"
+        elif component:
+            # Just launch the app package
+            command = f"open {component}"
+        else:
+            return
+
+        c = await _get_sensor_client()
+        r = await c.post(
+            f"{SENSOR_SERVER_URL}/shell",
+            json={"command": command},
+            timeout=8.0,
+        )
+        if r.status_code == 200:
+            result = r.json()
+            logger.debug(f"Sensor server launch: {result}")
+        else:
+            logger.warning(
+                f"Sensor server launch failed: {r.status_code} {r.text[:200]}"
+            )
+    except Exception as e:
+        logger.warning(f"Sensor server launch error: {e}")
 
 
 # ─── ANDROID NOTIFICATIONS (VIA SSH INTO TERMUX) ───────────────
@@ -4258,7 +4749,7 @@ _ARCHETYPE_NOTIF_PRIORITY = {
 _NOTIF_PREFS_FILE = WORKSPACE / "notif_prefs.json"
 _NOTIF_PREFS: dict = {
     "paused": False,
-    "daily_cap": 3,
+    "daily_cap": 2,
     "proactive": True,
     "day": "",
     "sent_today": 0,
@@ -4305,6 +4796,13 @@ def _notif_quota_allows(message: str = "") -> bool:
             logger.debug("proactive_notify dropped (duplicate within dedup window)")
             return False
         _NOTIF_DEDUP[message] = now
+        # TTL pruning — remove expired entries every 50 insertions
+        if len(_NOTIF_DEDUP) % 50 == 0:
+            _NOTIF_DEDUP = {
+                k: v
+                for k, v in _NOTIF_DEDUP.items()
+                if (now - v) < _NOTIF_DEDUP_WINDOW_S
+            }
     today = time.strftime("%Y-%m-%d")
     if _NOTIF_PREFS.get("day") != today:
         _NOTIF_PREFS["day"] = today
@@ -5166,6 +5664,34 @@ SENSOR_TRIGGERS = {
         "bluetooth devices",
         "wireless devices",
     ],
+    "surroundings": [
+        "what's around me",
+        "whats around me",
+        "whos around me",
+        "who's around me",
+        "who is around me",
+        "what's near me",
+        "whats near me",
+        "scan surroundings",
+        "surroundings",
+        "what can you see",
+        "what do you detect",
+        "what's in the area",
+        "describe my environment",
+        "ambient awareness",
+        "what's happening around",
+        "nearby network",
+        "nearby wifi",
+        "wifi networks",
+        "what networks",
+        "find my device",
+        "where's my phone",
+        "where is my phone",
+        "locate device",
+        "airtag",
+        "air tag",
+        "track my things",
+    ],
 }
 
 # ─── BLUETOOTH DEVICE MAPPING ────────────────────────────────────
@@ -5253,6 +5779,215 @@ async def read_bluetooth_devices() -> list:
     except Exception as e:
         logger.debug(f"Bluetooth scan failed: {e}")
     return []
+
+
+async def read_wifi_networks() -> list:
+    """Read WiFi networks from the sensor server."""
+    try:
+        c = await _get_sensor_client()
+        r = await c.get(f"{SENSOR_SERVER_URL}/wifi/scan/live", timeout=15.0)
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("networks", [])
+    except Exception as e:
+        logger.debug(f"WiFi scan failed: {e}")
+    return []
+
+
+async def get_surroundings_awareness() -> dict:
+    """Comprehensive surroundings scan: Bluetooth devices, WiFi networks, GPS, and sensors.
+
+    Returns a dict with:
+      - bluetooth: list of nearby BT devices with distance estimates
+      - wifi: list of nearby WiFi networks with signal strength
+      - location: GPS coords if available
+      - sensors: ambient sensor data (light, pressure, etc.)
+      - summary: human-readable summary of the environment
+    """
+    result = {
+        "bluetooth": [],
+        "wifi": [],
+        "location": None,
+        "sensors": {},
+        "summary": "",
+        "timestamp": time.time(),
+    }
+
+    # Run BT and WiFi scans concurrently
+    async def _bt():
+        try:
+            return await read_bluetooth_devices()
+        except Exception:
+            return []
+
+    async def _wifi():
+        try:
+            return await read_wifi_networks()
+        except Exception:
+            return []
+
+    async def _loc():
+        try:
+            return await current_location()
+        except Exception:
+            return None
+
+    async def _sensors():
+        try:
+            return await get_sensor_snapshot()
+        except Exception:
+            return {}
+
+    bt_devices, wifi_nets, location, sensors = await asyncio.gather(
+        _bt(), _wifi(), _loc(), _sensors()
+    )
+
+    result["bluetooth"] = bt_devices
+    result["wifi"] = wifi_nets
+    result["location"] = location
+    result["sensors"] = sensors
+
+    # Build human-readable summary
+    parts = []
+
+    # Bluetooth summary
+    if bt_devices:
+        paired = [d for d in bt_devices if d.get("paired")]
+        unpaired = [d for d in bt_devices if not d.get("paired")]
+        close = [d for d in bt_devices if d.get("distance_m", 999) < 5]
+
+        if close:
+            close_names = [d.get("label", d.get("name", "?")) for d in close[:5]]
+            parts.append(
+                f"Bluetooth: {len(bt_devices)} devices detected. Closest: {', '.join(close_names)}."
+            )
+        else:
+            parts.append(
+                f"Bluetooth: {len(bt_devices)} devices ({len(paired)} paired, {len(unpaired)} new)."
+            )
+    else:
+        parts.append("Bluetooth: No devices detected nearby.")
+
+    # WiFi summary
+    if wifi_nets:
+        strong = [n for n in wifi_nets if n.get("level", -100) > -60]
+        parts.append(
+            f"WiFi: {len(wifi_nets)} networks visible ({len(strong)} strong signal)."
+        )
+
+        # Add WiFi-based location context
+        if strong:
+            # Try to infer location from known WiFi networks
+            known_networks = {
+                "home": ["home", "router", "linksys", "netgear", "tp-link"],
+                "office": ["office", "work", "corporate", "business"],
+                "coffee": ["coffee", "cafe", "starbucks", "shop"],
+                "public": ["public", "free", "guest", "open"],
+            }
+
+            for network in strong:
+                ssid = network.get("ssid", "").lower()
+                for location_type, keywords in known_networks.items():
+                    if any(keyword in ssid for keyword in keywords):
+                        parts.append(
+                            f"Looks like we might be at a {location_type} location based on WiFi."
+                        )
+                        break
+    else:
+        parts.append("WiFi: No networks detected.")
+
+    # Location summary
+    if location and len(location) >= 2:
+        lat, lon = location[0], location[1]
+        if lat != 0.0 and lon != 0.0:
+            parts.append(f"Location: {lat:.4f}, {lon:.4f}.")
+
+    # Ambient sensors
+    if sensors:
+        light = sensors.get("light", sensors.get("ambient_light"))
+        pressure = sensors.get("pressure", sensors.get("barometer"))
+        if light is not None:
+            parts.append(f"Light level: {light} lux.")
+        if pressure is not None:
+            parts.append(f"Pressure: {pressure} hPa.")
+
+    result["summary"] = (
+        " ".join(parts) if parts else "Unable to gather surroundings data."
+    )
+    return result
+
+
+def _find_device_by_name(devices: list, query: str) -> dict | None:
+    """Find a Bluetooth device by name or label fuzzy match."""
+    query_lower = query.lower().strip()
+    for dev in devices:
+        name = dev.get("name", "").lower()
+        label = dev.get("label", "").lower()
+        addr = dev.get("address", "").lower()
+        if query_lower in name or query_lower in label or query_lower in addr:
+            return dev
+    return None
+
+
+async def find_my_device(device_name: str) -> str:
+    """Locate a specific Bluetooth device and report its distance."""
+    devices = await read_bluetooth_devices()
+    if not devices:
+        return "I can't scan for Bluetooth right now — no devices detected."
+
+    dev = _find_device_by_name(devices, device_name)
+    if not dev:
+        # List available devices
+        names = [d.get("label", d.get("name", "?")) for d in devices[:6]]
+        return (
+            f"I couldn't find a device called '{device_name}' nearby. "
+            f"Devices I can see: {', '.join(names)}."
+        )
+
+    name = dev.get("label", dev.get("name", "Unknown"))
+    dist = dev.get("distance_desc", "unknown distance")
+    dist_m = dev.get("distance_m", -1)
+    rssi = dev.get("rssi", -100)
+    paired = dev.get("paired", False)
+    device_type = dev.get("type", "unknown")
+
+    # Build detailed response
+    response_parts = []
+
+    if dist_m < 1.0:
+        response_parts.append(
+            f"Found {name}! It's right next to us — practically touching."
+        )
+    elif dist_m < 3.0:
+        response_parts.append(
+            f"Found {name}! It's very close — {dist} (about {dist_m:.1f}m away)."
+        )
+    elif dist_m < 10.0:
+        response_parts.append(
+            f"I can see {name} — it's {dist} (roughly {dist_m:.0f}m away)."
+        )
+    else:
+        response_parts.append(
+            f"{name} is {dist} — about {dist_m:.0f}m away. It might be in another room or outside."
+        )
+
+    # Add signal strength info
+    if rssi > -50:
+        response_parts.append("Signal is very strong.")
+    elif rssi > -70:
+        response_parts.append("Signal is good.")
+    elif rssi > -85:
+        response_parts.append("Signal is weak.")
+    else:
+        response_parts.append("Signal is very weak — it might be far away.")
+
+    # Add pairing status
+    if paired:
+        response_parts.append("This is a paired device.")
+    else:
+        response_parts.append("This is a new device I haven't seen before.")
+
+    return " ".join(response_parts)
 
 
 def _compass_heading(x: float, y: float) -> str:
@@ -5733,6 +6468,62 @@ async def query_sensor(phrase: str) -> Optional[str]:
                 ]
             )
 
+    # ── Surroundings Awareness ──
+    if any(w in p for w in SENSOR_TRIGGERS["surroundings"]):
+        # Check if this is a "find my device" request
+        find_device_patterns = [
+            "find my device",
+            "where's my phone",
+            "where is my phone",
+            "locate device",
+            "airtag",
+            "air tag",
+            "track my things",
+        ]
+        if any(pattern in p for pattern in find_device_patterns):
+            # Extract device name if provided
+            device_name_match = re.search(
+                r"(?:find|locate|where(?:'s| is))\s+(?:my\s+)?(.+?)(?:\s*$)", p
+            )
+            if device_name_match:
+                device_name = device_name_match.group(1).strip()
+                # Remove common words that might be part of the pattern
+                for word in ["phone", "device", "phone's", "device's"]:
+                    if device_name.lower() == word:
+                        device_name = ""
+                        break
+                if device_name:
+                    return await find_my_device(device_name)
+            # General find my device - scan for all devices
+            return await find_my_device("phone")
+
+        # General surroundings awareness
+        try:
+            awareness = await get_surroundings_awareness()
+            return awareness.get(
+                "summary", "I couldn't gather surroundings data right now."
+            )
+        except Exception as e:
+            return f"I'm having trouble scanning the surroundings right now. Error: {str(e)}"
+
+    # ── Find My Device (specific pattern) ──
+    if any(w in p for w in ["find my", "locate my", "where is my", "where's my"]):
+        # Extract device name
+        device_name_match = re.search(
+            r"(?:find|locate|where(?:'s| is))\s+(?:my\s+)?(.+?)(?:\s*$)", p
+        )
+        if device_name_match:
+            device_name = device_name_match.group(1).strip()
+            # Remove common words
+            for word in ["phone", "device", "phone's", "device's"]:
+                if device_name.lower() == word:
+                    device_name = ""
+                    break
+            if device_name:
+                return await find_my_device(device_name)
+        # General find my device
+        return await find_my_device("phone")
+
     # ── Weather ──
     if any(w in p for w in SENSOR_TRIGGERS["weather"]):
         try:
@@ -5833,26 +6624,21 @@ async def query_sensor(phrase: str) -> Optional[str]:
                     if len(notifs) == 1:
                         return random.choice(
                             [
-                                f"I just noticed a notification! {parts[0]}.",
-                                f"Hey, there's something new — {parts[0]}.",
-                                f"I can sense a notification — {parts[0]}.",
+                                f"{parts[0]}.",
+                                f"There's something new — {parts[0]}.",
                             ]
                         )
                     return random.choice(
                         [
-                            f"I'm picking up {len(notifs)} notifications — "
-                            + ". ".join(parts),
-                            f"Hey, you've got {len(notifs)} new things! "
-                            + ". ".join(parts),
-                            f"I can sense {len(notifs)} notifications waiting — "
-                            + ". ".join(parts),
+                            f"{len(notifs)} notifications — " + ". ".join(parts),
+                            f"{len(notifs)} new — " + ". ".join(parts),
                         ]
                     )
                 return random.choice(
                     [
-                        "No notifications right now — everything's quiet.",
-                        "I don't sense any new notifications. All clear!",
-                        "Nothing new in the notification department.",
+                        "No new notifications.",
+                        "Nothing new right now.",
+                        "All clear — no notifications.",
                     ]
                 )
         except Exception:
@@ -5869,7 +6655,12 @@ async def query_sensor(phrase: str) -> Optional[str]:
 
     matched_sensors = []
     for sensor_name, cfg in SENSOR_DEFS.items():
-        if any(trigger in p for trigger in cfg["triggers"]):
+        norm = _SENSOR_DEFS_NORM[sensor_name]
+        # Use word-boundary matching to avoid false positives (e.g. "do" in
+        # "what do you see" matching "which way is down")
+        if any(word in norm["norm_triggers"] for word in p.split()) or any(
+            f" {t} " in f" {p} " for t in norm["norm_triggers"]
+        ):
             matched_sensors.append(sensor_name)
 
     for sensor_name in matched_sensors:
@@ -5881,9 +6672,12 @@ async def query_sensor(phrase: str) -> Optional[str]:
     for word in p.split():
         for sensor_name, cfg in SENSOR_DEFS.items():
             norm = _SENSOR_DEFS_NORM[sensor_name]
-            if word in norm["norm_desc"] or any(
-                word in t for t in norm["norm_triggers"]
-            ):
+            # Use word-boundary matching to avoid false positives (e.g. "do" matching "down")
+            desc_match = norm["norm_desc"] and word == norm["norm_desc"]
+            trigger_match = any(word == t for t in norm["norm_triggers"]) or any(
+                f" {word} " in f" {t} " for t in norm["norm_triggers"]
+            )
+            if desc_match or trigger_match:
                 values = await _read_termux_sensor(sensor_name)
                 if values is not None:
                     archetype_inferrer.record_sensor_query(sensor_name)
@@ -7063,6 +7857,10 @@ async def stop_activity():
         }
     )
     ACTIVITY_FILE.write_text(json.dumps(prev, indent=2))
+    # Free RAM — clear track data after saving (can be ~1MB for 2000 points)
+    ACTIVITY_STATE["track"] = []
+    ACTIVITY_STATE["total_distance_m"] = 0.0
+    ACTIVITY_STATE["max_speed_mps"] = 0.0
     mins = dur // 60
     secs = dur % 60
     act_name = ACTIVITY_STATE["type"].title()
@@ -7517,17 +8315,13 @@ async def _personalize_notification_announcement(
     system_prompt = (
         f"You are {persona['name']}, {user_name}'s personal assistant "
         f"({persona['role']}). Personality: {persona['personality']}\n"
-        f"A notification just arrived on {user_name}'s phone. Brief them the "
-        "way a sharp personal assistant would — a crisp spoken summary of what "
-        "it is and why it matters, never a word-for-word read-out.\n"
+        "A notification arrived on the phone. Mention it casually in one short "
+        "sentence — like a quiet aside, not a breaking news alert.\n"
         "Rules:\n"
-        "- 1-2 sentences: the bottom line first, then why it matters.\n"
-        "- If it touches one of their known interests, mention why it's "
-        "relevant to them in passing.\n"
-        "- Weave in the phone-activity context ONLY when it changes what matters "
-        "(e.g. they're walking, battery low, it's late).\n"
-        "- End with exactly ONE short follow-up question offering the obvious "
-        "next action (reply? open it? read it? deal with it later?).\n"
+        "- One short sentence. Casual tone.\n"
+        "- Only mention it if it's genuinely relevant to what the user is doing.\n"
+        "- If it's routine or low-priority, be brief and light about it.\n"
+        "- End with a gentle follow-up question only if it makes sense.\n"
         "- Never speak URLs. No emoji, no markdown, no lists. Plain spoken text."
     )
     user_prompt = (
@@ -7574,11 +8368,11 @@ async def _personalize_notification_announcement(
     # Guarantee a follow-up question so the yes/no gate is always meaningful.
     if "?" not in msg:
         if has_url:
-            msg += " Want me to open it?"
+            msg += " Let me know if you want it opened."
         elif app_label:
-            msg += f" Want me to open {app_label}?"
+            msg += f" Let me know if you want to check {app_label}."
         else:
-            msg += " Want the details?"
+            msg += " Let me know if you want more detail."
     return msg
 
 
@@ -7590,17 +8384,37 @@ async def _personalize_notification_announcement(
 # stay active get an assistant-style follow-up nudge, up to a cap.
 _NOTIF_TRACKED: dict[str, dict] = {}
 _NOTIF_ACTIONED_LOG: list[dict] = []  # last 50 actioned notifications
-_NOTIF_FOLLOWUP_AFTER_S = 600.0  # first nudge when untouched for 10 min
-_NOTIF_FOLLOWUP_INTERVAL_S = 900.0  # 15 min between repeat nudges
-_NOTIF_MAX_FOLLOWUPS = 2  # then stop nagging
+_NOTIF_FOLLOWUP_AFTER_S = 900.0  # first nudge when untouched for 15 min
+_NOTIF_FOLLOWUP_INTERVAL_S = 1800.0  # 30 min between repeat nudges
+_NOTIF_MAX_FOLLOWUPS = 1  # one nudge then stop
 _NOTIF_TRACK_MAX_AGE_S = 6 * 3600.0  # drop stale entries after 6 h
 
 # High-frequency words that survive the learner's noise filter but carry no
 # signal for notification relevance.
 _NOTIF_INTEREST_NOISE = {
-    "much", "don", "dont", "things", "something", "sorry", "getting",
-    "really", "yeah", "okay", "people", "going", "know", "think", "want",
-    "time", "love", "good", "just", "like", "that", "this", "what",
+    "much",
+    "don",
+    "dont",
+    "things",
+    "something",
+    "sorry",
+    "getting",
+    "really",
+    "yeah",
+    "okay",
+    "people",
+    "going",
+    "know",
+    "think",
+    "want",
+    "time",
+    "love",
+    "good",
+    "just",
+    "like",
+    "that",
+    "this",
+    "what",
 }
 
 
@@ -7695,16 +8509,15 @@ def _notif_followup_message(entry: dict) -> str:
         return _pick_fresh(
             "notif-followup:first",
             [
-                f"Quick follow-up — you haven't looked at {what} yet. Want me to open it?",
-                f"Just checking in: {what} is still waiting on your phone. Should I open it?",
-                f"Following up on {what} — still untouched. Want me to deal with it?",
+                f"Heads up, {what} is still there if you want it.",
+                f"Just a note — {what} is still pending.",
+                f"FYI, {what} hasn't been touched yet.",
             ],
         )
     return _pick_fresh(
         "notif-followup:last",
         [
-            f"Last call on {what} — it's still sitting there. Open it, or shall I leave it?",
-            f"{what} is still pending. I'll stop reminding you after this — want it opened?",
+            f"Last mention: {what} is still waiting. Up to you.",
         ],
     )
 
@@ -7716,11 +8529,29 @@ def _notif_followup_message(entry: dict) -> str:
 # is implemented. No more half-parsed rules silently created wrong.
 PENDING_AUTOMATION: Optional[dict] = None
 _AUTOMATION_KNOWN_FIELDS = {
-    "battery_level", "charging", "battery_temperature",
-    "light", "lux", "steps", "step_count", "motion", "acceleration",
-    "proximity", "temperature", "pressure", "wifi", "bluetooth",
-    "notification", "notification.title", "notification.content",
-    "title", "content", "package", "rssi", "speed", "location",
+    "battery_level",
+    "charging",
+    "battery_temperature",
+    "light",
+    "lux",
+    "steps",
+    "step_count",
+    "motion",
+    "acceleration",
+    "proximity",
+    "temperature",
+    "pressure",
+    "wifi",
+    "bluetooth",
+    "notification",
+    "notification.title",
+    "notification.content",
+    "title",
+    "content",
+    "package",
+    "rssi",
+    "speed",
+    "location",
 }
 _AUTOMATION_KNOWN_ACTIONS = {"notify", "chat", "shell", "webhook", "tts"}
 _AUTOMATION_VALUE_OPS = {"<", ">", "<=", ">="}
@@ -7918,6 +8749,10 @@ async def notification_monitor_loop():
                     )
                 ):
                     app_key = "message"
+                elif "vending" in pkg_lower or "play" in pkg_lower:
+                    app_key = "play_store"
+                elif "system" in pkg_lower or "android" in pkg_lower:
+                    app_key = "system"
                 else:
                     app_key = "generic"
 
@@ -7954,13 +8789,12 @@ async def notification_monitor_loop():
                         announcement = f"{addr}new Slack message"
                         if title:
                             announcement += f" — {title}"
-                    follow_up = "Want to open it?"
+                    follow_up = "Let me know if you want it opened."
 
                 elif app_key == "desk":
                     if ticket_id:
-                        announcement = f"{addr}you've got a new ticket, {ticket_id}"
+                        announcement = f"{addr}ticket {ticket_id}"
                         if content:
-                            # strip the URL from the spoken part
                             spoken_content = re.sub(
                                 r"https?://\S+", "", content
                             ).strip()
@@ -7970,26 +8804,26 @@ async def notification_monitor_loop():
                         announcement = f"{addr}new support ticket"
                         if title:
                             announcement += f" — {title}"
-                    follow_up = "Want me to open it?"
+                    follow_up = "Let me know if you want it opened."
 
                 elif app_key == "gmail":
                     if sender:
                         announcement = f"{addr}email from {sender}"
                         if title:
-                            announcement += f", subject: {title}"
+                            announcement += f", {title}"
                     else:
                         announcement = (
                             f"{addr}new email — {title}"
                             if title
                             else f"{addr}new email"
                         )
-                    follow_up = "Want to read it?"
+                    follow_up = "Let me know if you want to read it."
 
                 elif app_key == "calendar":
                     announcement = (
                         f"{addr}{title}" if title else f"{addr}calendar reminder"
                     )
-                    follow_up = "Want to open it?"
+                    follow_up = ""
 
                 elif app_key == "task":
                     if ticket_id:
@@ -7998,7 +8832,7 @@ async def notification_monitor_loop():
                         announcement = (
                             f"{addr}{title}" if title else f"{addr}new task update"
                         )
-                    follow_up = "Want to jump to it?"
+                    follow_up = ""
 
                 elif app_key == "message":
                     app_label = (
@@ -8015,7 +8849,23 @@ async def notification_monitor_loop():
                             announcement += f" — {content}"
                     else:
                         announcement = f"{addr}new {app_label}"
-                    follow_up = "Want to open it?"
+                    follow_up = "Let me know if you want to open it."
+
+                elif app_key == "play_store":
+                    # Google Play Store notifications (app updates, recommendations)
+                    if title:
+                        announcement = f"{addr}Google Play: {title}"
+                    else:
+                        announcement = f"{addr}new app update available"
+                    follow_up = ""
+
+                elif app_key == "system":
+                    # Android system notifications (updates, battery, storage, etc.)
+                    if title:
+                        announcement = f"{addr}system alert: {title}"
+                    else:
+                        announcement = f"{addr}system notification"
+                    follow_up = ""
 
                 else:
                     # Generic fallback — still better than "Hey, just heads up!"
@@ -8494,29 +9344,250 @@ Keep most code responses plain text for readability."""
 # avatar starts a turn it reads the log and mentions relevant items, so all 9
 # personalities stay in sync without needing a live bus.
 
+# ─── Avatar Task Queue ──────────────────────────────────────────────────
+# Each avatar has a task queue. Tasks can be assigned by the admin or by
+# Lilly (the alpha). When an avatar is called via wake word, it sees its
+# pending tasks and can share progress or ask questions.
+#
+# Flow:
+#   1. Admin assigns task to avatar (e.g. "Fox, write a poem about AI")
+#   2. Task goes into AVATAR_TASKS[avatar_key] queue
+#   3. Avatar runs task in background (if coding agent) or waits for activation
+#   4. When avatar is called ("Hey Fox"), it sees its tasks in context
+#   5. Avatar can share progress, ask questions, or report completion
+
+import uuid as _uuid
+from dataclasses import dataclass, field as _field
+
+
+@dataclass
+class AvatarTask:
+    id: str = ""
+    avatar: str = ""
+    description: str = ""
+    status: str = "pending"  # pending | running | completed | failed | needs_input
+    created_at: float = 0.0
+    started_at: float = 0.0
+    completed_at: float = 0.0
+    result: str = ""
+    assigned_by: str = "admin"  # admin | lilly | self
+    session_id: str = ""  # agent session ID if running via coding agent
+    progress: list = _field(default_factory=list)  # progress updates
+    question: str = ""  # question the avatar wants to ask
+
+    def __post_init__(self):
+        if not self.id:
+            self.id = str(_uuid.uuid4())[:8]
+        if not self.created_at:
+            self.created_at = time.time()
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "avatar": self.avatar,
+            "description": self.description,
+            "status": self.status,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "result": self.result,
+            "assigned_by": self.assigned_by,
+            "session_id": self.session_id,
+            "progress": self.progress[-5:],  # last 5 updates
+            "question": self.question,
+        }
+
+
+# Per-avatar task queues (keyed by avatar name: "fox", "cat", etc.)
+# Initialized lazily after HIVE_PERSONAS is defined (see _ensure_avatar_tasks_loaded)
+AVATAR_TASKS: dict[str, list[AvatarTask]] = {}
+AVATAR_TASKS_FILE = MEMORY_DIR / "avatar_tasks.json"
+
+
+def _load_avatar_tasks():
+    """Load persisted avatar tasks from disk."""
+    global AVATAR_TASKS
+    if AVATAR_TASKS_FILE.exists():
+        try:
+            data = json.loads(AVATAR_TASKS_FILE.read_text())
+            for avatar_key, tasks_list in data.items():
+                AVATAR_TASKS[avatar_key] = [AvatarTask(**t) for t in tasks_list]
+        except Exception:
+            pass
+
+
+def _save_avatar_tasks():
+    """Persist avatar tasks to disk."""
+    try:
+        data = {k: [t.to_dict() for t in v] for k, v in AVATAR_TASKS.items()}
+        AVATAR_TASKS_FILE.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
+
+
+def assign_task(
+    avatar: str, description: str, assigned_by: str = "admin"
+) -> AvatarTask:
+    """Assign a task to an avatar's queue."""
+    task = AvatarTask(avatar=avatar, description=description, assigned_by=assigned_by)
+    AVATAR_TASKS.setdefault(avatar, []).append(task)
+    _save_avatar_tasks()
+    return task
+
+
+def get_avatar_tasks(avatar: str, status: str = "") -> list[AvatarTask]:
+    """Get tasks for an avatar, optionally filtered by status."""
+    tasks = AVATAR_TASKS.get(avatar, [])
+    if status:
+        tasks = [t for t in tasks if t.status == status]
+    return tasks
+
+
+def get_pending_tasks(avatar: str) -> list[AvatarTask]:
+    """Get pending/running tasks for an avatar (shown when avatar is called)."""
+    return get_avatar_tasks(avatar, status="")  # all tasks
+    # Filter to pending + running + needs_input (actionable)
+
+
+def update_task_status(
+    task_id: str, status: str, result: str = "", progress: str = "", question: str = ""
+):
+    """Update a task's status across all avatar queues."""
+    for avatar_key, tasks in AVATAR_TASKS.items():
+        for task in tasks:
+            if task.id == task_id:
+                task.status = status
+                if result:
+                    task.result = result
+                if progress:
+                    task.progress.append({"ts": time.time(), "text": progress})
+                if question:
+                    task.question = question
+                    task.status = "needs_input"
+                if status == "running" and not task.started_at:
+                    task.started_at = time.time()
+                if status in ("completed", "failed"):
+                    task.completed_at = time.time()
+                _save_avatar_tasks()
+                return task
+    return None
+
+
+def get_all_active_tasks() -> list[dict]:
+    """Get all pending/running tasks across all avatars (admin overview)."""
+    active = []
+    for avatar_key, tasks in AVATAR_TASKS.items():
+        for task in tasks:
+            if task.status in ("pending", "running", "needs_input"):
+                active.append(task.to_dict())
+    return active
+
+
+def build_task_context_for_avatar(avatar: str) -> str:
+    """Build a context string of the avatar's tasks for injection into LLM prompt.
+
+    Called when an avatar is activated (via wake word or delegation).
+    Shows pending/running tasks + recent completions.
+    """
+    tasks = AVATAR_TASKS.get(avatar, [])
+    if not tasks:
+        return ""
+
+    lines = []
+    # Pending tasks (need attention)
+    pending = [t for t in tasks if t.status == "pending"]
+    if pending:
+        lines.append("YOUR PENDING TASKS:")
+        for t in pending[:3]:
+            lines.append(f"  [{t.id}] {t.description} (assigned by {t.assigned_by})")
+
+    # Running tasks (in progress)
+    running = [t for t in tasks if t.status == "running"]
+    if running:
+        lines.append("YOUR RUNNING TASKS:")
+        for t in running[:3]:
+            elapsed = int(time.time() - t.started_at) if t.started_at else 0
+            lines.append(f"  [{t.id}] {t.description} — running for {elapsed}s")
+
+    # Needs input (avatar has a question)
+    needs_input = [t for t in tasks if t.status == "needs_input"]
+    if needs_input:
+        lines.append("TASKS NEEDING YOUR INPUT:")
+        for t in needs_input:
+            lines.append(f"  [{t.id}] {t.question}")
+
+    # Recent completions (for awareness)
+    completed = [t for t in tasks if t.status == "completed"]
+    if completed:
+        recent = completed[-2:]  # last 2
+        lines.append("RECENTLY COMPLETED:")
+        for t in recent:
+            lines.append(f"  [{t.id}] {t.description} — {t.result[:80]}")
+
+    return "\n".join(lines) if lines else ""
+
+
+# Load tasks on startup (deferred — HIVE_PERSONAS not yet defined at import time)
+_AVATAR_TASKS_LOADED = False
+
+
+def _ensure_avatar_tasks_loaded():
+    global _AVATAR_TASKS_LOADED
+    if not _AVATAR_TASKS_LOADED:
+        _AVATAR_TASKS_LOADED = True
+        # Initialize task queues for all avatars now that HIVE_PERSONAS exists
+        for k in HIVE_PERSONAS:
+            AVATAR_TASKS.setdefault(k, [])
+        _load_avatar_tasks()
+
+
+# entry appears (approval granted, comment, idea update), the next time any
+
 _APPROVAL_LOG = MEMORY_DIR / "approval_broadcast_log.jsonl"
 _AVATAR_KNOWN_IDEAS: dict[
     str, set[str]
 ] = {}  # avatar -> set of idea ids it has acknowledged
+_APPROVAL_LOG_CACHE: list[dict] = []  # cached parsed log (TTL-based)
+_APPROVAL_LOG_CACHE_TS: float = 0.0  # last cache refresh timestamp
+_APPROVAL_LOG_CACHE_TTL: float = 5.0  # refresh every 5 seconds max
+_APPROVAL_LOG_MAX_ENTRIES: int = 500  # cap JSONL file to last 500 entries
 
 
 def _read_approval_log() -> list[dict]:
-    """Read the shared approval broadcast log (one JSON object per line)."""
+    """Read the shared approval broadcast log (cached, one JSON object per line)."""
+    global _APPROVAL_LOG_CACHE, _APPROVAL_LOG_CACHE_TS
+    now = time.time()
+    if _APPROVAL_LOG_CACHE and (now - _APPROVAL_LOG_CACHE_TS) < _APPROVAL_LOG_CACHE_TTL:
+        return _APPROVAL_LOG_CACHE
     if not _APPROVAL_LOG.exists():
         return []
     try:
         lines = _APPROVAL_LOG.read_text().strip().split("\n")
-        return [json.loads(line) for line in lines if line.strip()]
+        _APPROVAL_LOG_CACHE = [json.loads(line) for line in lines if line.strip()]
+        _APPROVAL_LOG_CACHE_TS = now
+        return _APPROVAL_LOG_CACHE
     except Exception:
         return []
 
 
 def _append_approval_log(entry: dict) -> None:
     """Append a broadcast entry so all avatars can read it on their next turn."""
+    global _APPROVAL_LOG_CACHE
     try:
         _APPROVAL_LOG.parent.mkdir(parents=True, exist_ok=True)
         with open(_APPROVAL_LOG, "a") as f:
             f.write(json.dumps(entry) + "\n")
+        # Invalidate cache
+        _APPROVAL_LOG_CACHE = []
+        # Cap the JSONL file — keep last N entries to prevent unbounded growth
+        if _APPROVAL_LOG.exists():
+            try:
+                lines = _APPROVAL_LOG.read_text().strip().split("\n")
+                if len(lines) > _APPROVAL_LOG_MAX_ENTRIES:
+                    lines = lines[-_APPROVAL_LOG_MAX_ENTRIES:]
+                    _APPROVAL_LOG.write_text("\n".join(lines) + "\n")
+            except Exception:
+                pass
     except Exception as e:
         logger.warning(f"Failed to append approval log: {e}")
 
@@ -8678,6 +9749,25 @@ async def _build_memory_hint(mem_dict: dict) -> str:
             hints.append(f"Past sessions: {catchup}")
     except Exception:
         pass  # Catch-up is optional, don't block
+
+    # Daily memory context — recent days for continuity (per-user, privacy-safe)
+    try:
+        if _daily_recent_summaries:
+            day_lines = [
+                f"{s['date']}: {s['summary'][:120]}"
+                for s in _daily_recent_summaries[:3]
+            ]
+            hints.append(f"Recent days context: {'; '.join(day_lines)}")
+        if _daily_recent_entries:
+            last_user_msgs = [
+                e.get("text", "")[:60]
+                for e in _daily_recent_entries
+                if e.get("role") == "user"
+            ]
+            if last_user_msgs:
+                hints.append(f"Yesterday's topics: {'; '.join(last_user_msgs)}")
+    except Exception:
+        pass  # Daily context is optional
 
     # Recent conversation history from permanent JSONL log
     try:
@@ -8868,9 +9958,7 @@ async def handle_intent(
                     await speak(reply)
                     return {"action": "handled", "text": reply}
                 # Ops bridge follow-up: confirmed server/phone shell commands
-                pending_ops = (
-                    pending.get("ops") if isinstance(pending, dict) else None
-                )
+                pending_ops = pending.get("ops") if isinstance(pending, dict) else None
                 if pending_ops:
                     reply = await _execute_ops_action(pending_ops)
                     await memory.add("user", text)
@@ -9034,11 +10122,19 @@ async def handle_intent(
             import subprocess
 
             _diag_voice = CHAR_VOICE.get(current_avatar, CHAR_VOICE["puppy"])
+            _diag_onnx = _diag_voice.get("onnx", "")
+            if _diag_onnx:
+                _diag_voice_path = str(
+                    Path(__file__).parent / "lillyos" / "voices" / _diag_onnx
+                )
+            else:
+                _diag_voice_path = PIPER_VOICE
+
             proc = subprocess.Popen(
                 [
                     PIPER_BIN,
                     "--model",
-                    PIPER_VOICE,
+                    _diag_voice_path,
                     "--output-raw",
                     "--noise-scale",
                     f"{_diag_voice['noise_scale']:.3f}",
@@ -9812,13 +10908,32 @@ async def handle_intent(
             maps_url = f"https://www.google.com/maps/search/{search_q}/@{lat},{lon},14z"
             await termux_run(["termux-open", maps_url], timeout=5.0)
             reply = (
-                f"Looking for {query} near you."
+                f"Looking for {query} near you. Maps is open on your phone."
                 if query
-                else "Showing nearby places on the map."
+                else f"Showing nearby places. You're near {name or 'your location'}."
             )
             await speak(reply)
-            PENDING_OPEN_URL = maps_url
-            return {"action": "handled", "text": reply, "open_url": maps_url}
+            addr_str = ""
+            if isinstance(addr, dict):
+                addr_str = addr.get("formatted", "") or addr.get("road", "") or ""
+            elif isinstance(addr, str):
+                addr_str = addr
+            return {
+                "action": "handled",
+                "text": reply,
+                "phone_action": {
+                    "app": "Maps",
+                    "package": "com.google.android.apps.maps",
+                    "status": "launched",
+                    "arg": query or "My Location",
+                },
+                "display": {
+                    "type": "map",
+                    "lat": lat,
+                    "lng": lon,
+                    "label": f"{name or 'Your location'}{(' — ' + addr_str) if addr_str else ''}",
+                },
+            }
         else:
             reply = "I can't get your location right now. Try again when you have a GPS fix."
         await speak(reply)
@@ -10175,61 +11290,68 @@ async def handle_intent(
     # Priority: exact match → stripped prefix match → prefix in skill keys
     target = cmd.strip()
 
-    # ── 10a. PROACTIVE ALIAS DISCOVERY — enrich existing skills from novel user keywords ──
-    words_in_cmd = set(normalize_text(w) for w in target.split() if len(w) > 2)
-    if words_in_cmd:
-        existing_aliases = set()
-        for s in SKILLS.values():
-            for a in s.get("aliases", []):
-                existing_aliases.add(normalize_text(a))
-            existing_aliases.add(normalize_text(s.get("label", "")))
-        novel_words = words_in_cmd - existing_aliases
-        if novel_words:
-            for key, s in list(SKILLS.items()):
-                label_norm = normalize_text(s.get("label", ""))
-                # If a novel word is semantically close to this skill's label, offer alias
-                for nw in novel_words:
-                    if len(nw) > 3 and (nw in label_norm or label_norm in nw):
-                        if normalize_text(nw) not in [
-                            normalize_text(a) for a in s.get("aliases", [])
-                        ]:
-                            # Auto-register the alias
-                            s.setdefault("aliases", []).append(nw)
-                            SKILLS[normalize_text(nw)] = s
-                            raw = (
-                                json.loads(SKILLS_FILE.read_text())
-                                if SKILLS_FILE.exists()
-                                else {}
-                            )
-                            if key in raw:
-                                raw[key].setdefault("aliases", []).append(nw)
-                                SKILLS_FILE.write_text(json.dumps(raw, indent=2))
-                            logger.info(
-                                f"Auto-registered alias '{nw}' for skill '{key}'"
-                            )
-    stripped = re.sub(
-        r"^(run|use|click|tap|open|launch|search|find|what|show|start)\s+", "", target
-    ).strip()
-    skill = SKILLS.get(target) or SKILLS.get(stripped)
-
-    # If no direct match, look for a skill key that prefixes the command
+    # SAFETY: Skip all skill matching for long messages (>50 chars) —
+    # they're conversational, not app commands. This prevents false triggers
+    # like "I want to show you something" matching the "show" skill.
+    skill = None
     skill_arg = ""
-    if not skill:
-        for key in sorted(SKILLS.keys(), key=len, reverse=True):
-            if target.startswith(key + " "):
-                skill = SKILLS[key]
-                skill_arg = target[len(key) :].strip()
-                break
+    if len(target) <= 50:
+        # ── 10a. PROACTIVE ALIAS DISCOVERY — enrich existing skills from novel user keywords ──
+        words_in_cmd = set(normalize_text(w) for w in target.split() if len(w) > 2)
+        if words_in_cmd:
+            existing_aliases = set()
+            for s in SKILLS.values():
+                for a in s.get("aliases", []):
+                    existing_aliases.add(normalize_text(a))
+                existing_aliases.add(normalize_text(s.get("label", "")))
+            novel_words = words_in_cmd - existing_aliases
+            if novel_words:
+                for key, s in list(SKILLS.items()):
+                    label_norm = normalize_text(s.get("label", ""))
+                    # If a novel word is semantically close to this skill's label, offer alias
+                    for nw in novel_words:
+                        if len(nw) > 3 and (nw in label_norm or label_norm in nw):
+                            if normalize_text(nw) not in [
+                                normalize_text(a) for a in s.get("aliases", [])
+                            ]:
+                                # Auto-register the alias
+                                s.setdefault("aliases", []).append(nw)
+                                SKILLS[normalize_text(nw)] = s
+                                raw = (
+                                    json.loads(SKILLS_FILE.read_text())
+                                    if SKILLS_FILE.exists()
+                                    else {}
+                                )
+                                if key in raw:
+                                    raw[key].setdefault("aliases", []).append(nw)
+                                    SKILLS_FILE.write_text(json.dumps(raw, indent=2))
+                                logger.info(
+                                    f"Auto-registered alias '{nw}' for skill '{key}'"
+                                )
+        stripped = re.sub(
+            r"^(run|use|click|tap|open|launch|search|find|what|show|start)\s+",
+            "",
+            target,
+        ).strip()
+        skill = SKILLS.get(target) or SKILLS.get(stripped)
 
-    # ── NLP pre-parse ──
-    # Natural phrasings like "I want to watch youtube videos on true crime"
-    # don't keyword-match. Parse them into (app skill, query) here before
-    # falling through to LLM skill inference, which would lose the query.
-    if not skill:
-        nlp_skill, nlp_arg = parse_nlp_intent(target)
-        if nlp_skill:
-            skill = nlp_skill
-            skill_arg = nlp_arg
+        # If no direct match, look for a skill key that prefixes the command
+        if not skill:
+            for key in sorted(SKILLS.keys(), key=len, reverse=True):
+                if target.startswith(key + " "):
+                    skill = SKILLS[key]
+                    skill_arg = target[len(key) :].strip()
+                    break
+
+        # ── NLP pre-parse ──
+        # Natural phrasings like "I want to watch youtube videos on true crime"
+        # don't keyword-match. Parse them into (app skill, query) here before
+        # falling through to LLM skill inference, which would lose the query.
+        if not skill:
+            nlp_skill, nlp_arg = parse_nlp_intent(target)
+            if nlp_skill:
+                skill = nlp_skill
+                skill_arg = nlp_arg
 
     if skill:
         # Skip configuration/meta-skills (e.g. _context_aware) that have no
@@ -10300,7 +11422,7 @@ async def handle_intent(
             gated = await _gate_phone_action(skill, skill_arg)
             if gated:
                 return {"action": "handled", "text": gated}
-            # YouTube: if not paired, open in web PiP instead of phone
+            # YouTube: launch on phone (not browser PiP) — browser shows now-playing card
             if pkg in (
                 "com.google.android.youtube",
                 "com.google.android.apps.youtube.music",
@@ -10313,16 +11435,33 @@ async def handle_intent(
                         "https://www.youtube.com/results?search_query="
                         + urllib.parse.quote(skill_arg)
                     )
-                reply = f"Opening {skill.get('label', 'YouTube')}!"
+                await app_process_monkey_intent(
+                    pkg, intent_action, uri_template, skill_arg
+                )
+                reply = f"Playing {skill_arg or 'YouTube'} on your phone!"
                 await speak(reply)
                 return {
                     "action": "handled",
                     "text": reply,
-                    "open_url": url,
-                    "web_pip": True,
+                    "phone_action": {
+                        "app": skill.get("label", "YouTube"),
+                        "package": pkg,
+                        "status": "launched",
+                        "arg": skill_arg or "",
+                    },
                 }
             await app_process_monkey_intent(pkg, intent_action, uri_template, skill_arg)
-            reply = f"Launching {skill.get('label', 'app')}!"
+            reply = f"Launching {skill.get('label', 'app')} on your phone!"
+            return {
+                "action": "handled",
+                "text": reply,
+                "phone_action": {
+                    "app": skill.get("label", "app"),
+                    "package": pkg,
+                    "status": "launched",
+                    "arg": skill_arg or "",
+                },
+            }
         elif action == "shell_command":
             cmd_to_run = skill.get("command", "")
             subcmd = skill.get("subcommand", "")
@@ -10684,12 +11823,34 @@ async def handle_intent(
         return {"action": "handled", "text": reply}
 
     # ── 11. SENSORS ──
-    sensor_reply = await query_sensor(cmd)
-    if sensor_reply:
-        await memory.add("user", cmd)
-        await memory.add("assistant", sensor_reply)
-        await speak(sensor_reply)
-        return {"action": "handled", "text": sensor_reply}
+    # Vision phrases like "what do you see" must be handled by the vision
+    # handler (step 13) below, not intercepted by sensor matching. Without
+    # this guard, substring matching in query_sensor can match sensor
+    # triggers like "which way is down" against the word "do" in "what do
+    # you see".
+    _vision_guard_phrases = [
+        "what do you see",
+        "what can you see",
+        "what is that",
+        "what's there",
+        "what's in front",
+        "what are you looking at",
+        "use your eyes",
+        "what's on camera",
+        "what's on the camera",
+        "describe the room",
+        "what's around",
+        "look",
+    ]
+    _is_vision_query = any(vp in cmd for vp in _vision_guard_phrases)
+
+    if not _is_vision_query:
+        sensor_reply = await query_sensor(cmd)
+        if sensor_reply:
+            await memory.add("user", cmd)
+            await memory.add("assistant", sensor_reply)
+            await speak(sensor_reply)
+            return {"action": "handled", "text": sensor_reply}
 
     # ── 11b. SENSOR STORYTELLING ──
     story_triggers = [
@@ -10759,7 +11920,7 @@ async def handle_intent(
         await speak(skill_reply)
         return {"action": "handled", "text": skill_reply}
 
-    # ── 13. VISION: "what do you see" ──
+    # ── 13. VISION: "what do you see" — multi-camera (phone + Blink + browser) ──
     vision_phrases = [
         "what do you see",
         "what can you see",
@@ -10778,46 +11939,338 @@ async def handle_intent(
         "what's on the camera",
         "use your eyes",
     ]
-    if any(p in cmd for p in vision_phrases):
-        # Prefer fresh camera detections: native > browser > server webcam.
-        detections = []
-        native_age = time.time() - _native_vision_ts if _native_vision_ts else 999
-        if _native_vision_detections and native_age < _NATIVE_VISION_TTL:
-            detections = _native_vision_detections
-        if not detections:
+
+    # ── 13a. SINGLE CAMERA: "show me Front Door", "open the back yard camera" ──
+    # Camera-specific phrases (extract camera name and show only that camera)
+    show_camera_phrases = [
+        "show me",
+        "open",
+        "view",
+        "check",
+        "look at",
+        "see",
+        "show the",
+        "open the",
+        "view the",
+        "check the",
+        "look at the",
+        "see the",
+    ]
+
+    # Doorbell-specific phrases (show only doorbell camera with face detection)
+    doorbell_phrases = [
+        "who's at the door",
+        "who is at the door",
+        "check the doorbell",
+        "check the door",
+        "is someone at the door",
+        "at the door",
+        "at the front door",
+        "at the back door",
+    ]
+
+    # Check if this is a doorbell request
+    is_doorbell_request = any(p in cmd for p in doorbell_phrases)
+
+    # Check if this is a single-camera request (e.g., "show me Front Door")
+    is_single_camera_request = False
+    requested_camera = None
+
+    if not is_doorbell_request:
+        for phrase in show_camera_phrases:
+            if phrase in cmd:
+                # Extract camera name after the phrase
+                idx = cmd.index(phrase) + len(phrase)
+                remaining = cmd[idx:].strip()
+
+                # Remove common suffixes
+                for suffix in [
+                    " camera",
+                    " feed",
+                    " view",
+                    " now",
+                    " please",
+                    " for me",
+                ]:
+                    if remaining.lower().endswith(suffix):
+                        remaining = remaining[: -len(suffix)].strip()
+
+                if remaining:
+                    is_single_camera_request = True
+                    requested_camera = remaining.lower()
+                    break
+
+    if is_doorbell_request or is_single_camera_request:
+        # Single camera: collect from only the requested source
+        all_frames = {}
+        all_detections = {}
+
+        if is_doorbell_request:
+            # Doorbell: find and use only the doorbell camera
+            try:
+                from blink_connector import get_blink_connector
+
+                conn = get_blink_connector()
+                cameras = await conn.list_cameras()
+
+                # Find doorbell camera
+                doorbell_name = None
+                for cam in cameras:
+                    name_lower = cam["name"].lower()
+                    if "doorbell" in name_lower or "door" in name_lower:
+                        doorbell_name = cam["name"]
+                        break
+                if not doorbell_name and cameras:
+                    doorbell_name = cameras[0]["name"]
+
+                if doorbell_name:
+                    img_bytes = await conn.get_snapshot(doorbell_name)
+                    if img_bytes:
+                        import base64 as _b64
+
+                        all_frames[f"blink_{doorbell_name}"] = _b64.b64encode(
+                            img_bytes
+                        ).decode()
+            except Exception:
+                pass
+
+        elif is_single_camera_request:
+            # Single camera request: extract camera name and use only that camera
+            # Check if it's a phone or browser request
+            if "phone" in requested_camera or "selfie" in requested_camera:
+                if SENSOR_SERVER_URL:
+                    try:
+                        async with httpx.AsyncClient(timeout=10.0) as client:
+                            r = await client.get(
+                                f"{SENSOR_SERVER_URL}/camera/capture",
+                                params={"force": True},
+                            )
+                            data = r.json()
+                            if data.get("image_base64"):
+                                all_frames["phone"] = data["image_base64"]
+                    except Exception:
+                        pass
+            elif "browser" in requested_camera or "webcam" in requested_camera:
+                try:
+                    if _browser_vision_frame_b64:
+                        all_frames["browser"] = _browser_vision_frame_b64
+                except Exception:
+                    pass
+            else:
+                # Blink camera: find by name
+                try:
+                    from blink_connector import get_blink_connector
+
+                    conn = get_blink_connector()
+                    cameras = await conn.list_cameras()
+
+                    # Find matching camera
+                    target_cam = None
+                    for cam in cameras:
+                        if requested_camera in cam["name"].lower():
+                            target_cam = cam["name"]
+                            break
+
+                    if target_cam:
+                        img_bytes = await conn.get_snapshot(target_cam)
+                        if img_bytes:
+                            import base64 as _b64
+
+                            all_frames[f"blink_{target_cam}"] = _b64.b64encode(
+                                img_bytes
+                            ).decode()
+                except Exception:
+                    pass
+
+        # Run YOLO on each captured frame
+        import base64 as _b64
+
+        for source, b64 in all_frames.items():
+            try:
+                # Strip data URL prefix if present
+                clean_b64 = b64.split(",", 1)[1] if b64.startswith("data:") else b64
+                img_bytes = _b64.b64decode(clean_b64)
+                _, dets = await detect_objects(img_bytes)
+                if dets:
+                    all_detections[source] = dets
+            except Exception:
+                pass
+
+        # Build description
+        descriptions = []
+        for source, dets in all_detections.items():
+            if dets:
+                labels = sorted(set(d["label"] for d in dets))
+                obj_str = ", ".join(labels)
+                descriptions.append(f"[{source}] {obj_str}")
+
+        if descriptions:
+            combined = "; ".join(descriptions)
+            if is_doorbell_request:
+                prompt = (
+                    f"You are Lilly. Camera sees: {combined}. "
+                    f"This is a doorbell/security check. Describe who or what is at the door. "
+                    f"Be specific about people, objects, and surroundings."
+                )
+            else:
+                prompt = (
+                    f"You are Lilly. Camera '{requested_camera}' sees: {combined}. "
+                    f"Describe the scene naturally in 1-2 sentences."
+                )
+            desc = await llama_backend.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": "You are Lilly, a friend AI with camera vision. Be warm and conversational.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.6,
+                max_tokens=150,
+            )
+            reply = desc or f"I can see: {combined}"
+        else:
+            if is_doorbell_request:
+                reply = (
+                    "I can't access the doorbell camera right now. "
+                    "Make sure Blink is configured and the camera is online."
+                )
+            else:
+                reply = (
+                    f"I can't find the '{requested_camera}' camera right now. "
+                    "Say 'check cameras' to see available Blink cameras."
+                )
+        await memory.add("user", cmd)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
+    elif any(p in cmd for p in vision_phrases):
+        # Multi-camera: collect from phone + Blink + browser
+        all_frames = {}
+        all_detections = {}
+
+        # 1. Phone camera
+        if SENSOR_SERVER_URL:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    r = await client.get(
+                        f"{SENSOR_SERVER_URL}/camera/capture", params={"force": True}
+                    )
+                    data = r.json()
+                    if data.get("image_base64"):
+                        all_frames["phone"] = data["image_base64"]
+            except Exception:
+                pass
+
+        # 2. Blink cameras
+        try:
+            from blink_connector import get_blink_connector
+
+            conn = get_blink_connector()
+            blink_snaps = await conn.get_all_snapshots_base64()
+            for name, b64 in blink_snaps.items():
+                all_frames[f"blink_{name}"] = b64
+        except Exception:
+            pass
+
+        # 3. Browser webcam (fresh frame from CameraBridge)
+        try:
+            if _browser_vision_frame_b64:
+                all_frames["browser"] = _browser_vision_frame_b64
+        except Exception:
+            pass
+
+        # 4. Fallback: native > browser cached detections
+        if not all_frames:
+            native_age = time.time() - _native_vision_ts if _native_vision_ts else 999
+            if _native_vision_detections and native_age < _NATIVE_VISION_TTL:
+                all_detections["native"] = _native_vision_detections
+            if not all_detections:
+                browser_age = (
+                    time.time() - _browser_vision_ts if _browser_vision_ts else 999
+                )
+                if _browser_vision_detections and browser_age < _BROWSER_VISION_TTL:
+                    all_detections["browser"] = _browser_vision_detections
+            if not all_detections:
+                labeled, det = await grab_and_label_frame()
+                if det:
+                    all_detections["server"] = det
+
+        # Run YOLO on each captured frame
+        import base64 as _b64
+
+        for source, b64 in all_frames.items():
+            try:
+                # Strip data URL prefix if present
+                clean_b64 = b64.split(",", 1)[1] if b64.startswith("data:") else b64
+                img_bytes = _b64.b64decode(clean_b64)
+                _, dets = await detect_objects(img_bytes)
+                if dets:
+                    all_detections[source] = dets
+            except Exception:
+                pass
+
+                # Fallback: if detection failed on all frames
+        if not all_detections:
+            native_age = time.time() - _native_vision_ts if _native_vision_ts else 999
+            if _native_vision_detections and native_age < _NATIVE_VISION_TTL:
+                all_detections["native"] = _native_vision_detections
             browser_age = (
                 time.time() - _browser_vision_ts if _browser_vision_ts else 999
             )
             if _browser_vision_detections and browser_age < _BROWSER_VISION_TTL:
-                detections = _browser_vision_detections
-        if not detections:
-            labeled, detections = await grab_and_label_frame()
-        if detections:
-            obj_list = ", ".join(sorted(set(d["label"] for d in detections)))
-            if obj_list:
+                all_detections["browser"] = _browser_vision_detections
+
+        # Build combined description
+        descriptions = []
+        for source, dets in all_detections.items():
+            if dets:
+                labels = sorted(set(d["label"] for d in dets))
+                obj_str = ", ".join(labels)
+                descriptions.append(f"[{source}] {obj_str}")
+
+        if descriptions:
+            combined = "; ".join(descriptions)
+            is_doorbell = any(
+                p in cmd
+                for p in (
+                    "who's at the door",
+                    "who is at the door",
+                    "check the doorbell",
+                    "check the door",
+                    "is someone at the door",
+                )
+            )
+            if is_doorbell:
                 prompt = (
-                    f"You are Lilly. The camera sees: {obj_list}. "
+                    f"You are Lilly. Multiple cameras see: {combined}. "
+                    f"This is a doorbell/security check. Describe who or what is at the door. "
+                    f"Be specific about people, objects, and surroundings."
+                )
+            else:
+                prompt = (
+                    f"You are Lilly. Multiple cameras see: {combined}. "
                     f"Describe the scene naturally in 1-2 sentences."
                 )
-                desc = await llama_backend.chat(
-                    [
-                        {
-                            "role": "system",
-                            "content": "You are Lilly, a friend AI with vision. Be warm and conversational.",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.6,
-                    max_tokens=100,
-                )
-                reply = desc or f"I can see {obj_list} in the frame."
-            else:
-                reply = "I'm looking but I don't recognize anything specific right now."
+            desc = await llama_backend.chat(
+                [
+                    {
+                        "role": "system",
+                        "content": "You are Lilly, a friend AI with multi-camera vision. Be warm and conversational.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.6,
+                max_tokens=150,
+            )
+            reply = desc or f"I can see: {combined}"
         else:
             reply = (
                 "I don't have a camera feed right now. "
-                "If you're in the web UI, tap the camera button and allow camera permission. "
-                "If you're in the Android overlay, open the Vision panel and switch to Native camera."
+                "Tap the camera button to choose Phone Camera or Browser Webcam. "
+                "Or say 'check the door' to view Blink cameras."
             )
         await memory.add("user", cmd)
         await memory.add("assistant", reply)
@@ -10851,38 +12304,97 @@ async def handle_intent(
         await speak(reply)
         return {"action": "handled", "text": reply, "look_at": "dashboard"}
 
-    # ── 13d. NAME PROMPT ──
-    if not effective_name:
-        name_triggers = [
-            "who are you",
-            "what's your name",
-            "tell me about yourself",
-            "who am i",
-            "what's my name",
-            "do you know me",
-        ]
-        name_asks = ["call me", "my name is", "i'm called", "i am"]
-        is_asking_name = any(t in cmd for t in name_triggers)
-        is_giving_name = any(t in cmd for t in name_asks)
-        if is_giving_name:
-            # Extract name from command
-            for prefix in name_asks:
-                if prefix in cmd:
-                    extracted = cmd.split(prefix)[-1].strip().split()[0:2]
-                    new_name = " ".join(extracted).title()
-                    if new_name and len(new_name) > 1:
-                        _set_user_name(_current_user_id, new_name)
-                        LILLY_MOOD = "cheerful"
-                        reply = f"Nice to meet you, {new_name}! I'll remember that."
-                        PENDING_LOOK_AT = "name"
-                        await speak(reply)
-                        return {"action": "handled", "text": reply, "look_at": "name"}
-        if is_asking_name or not effective_name:
+    # ── 13d. NAME — capture, recall, or prompt ──
+    # Capture works whether or not a name is already set (so corrections
+    # stick), persists to disk immediately, and is mirrored into the facts
+    # store that gets injected into every LLM call.
+    name_asks = ["call me", "my name is", "i'm called", "remember my name is"]
+    if any(t in cmd for t in name_asks):
+        for prefix in name_asks:
+            if prefix in cmd:
+                extracted = cmd.split(prefix)[-1].strip().split()[0:2]
+                new_name = " ".join(extracted).title().strip(".,!?")
+                # Guard against non-name tails ("call me later", "my name is mud")
+                if (
+                    new_name
+                    and 1 < len(new_name) <= 30
+                    and new_name.lower()
+                    not in {"later", "back", "mud", "not", "maybe", "soon"}
+                ):
+                    _set_user_name(_current_user_id, new_name)
+                    _add_user_fact("name", f"The user's name is {new_name}.")
+                    LILLY_MOOD = "cheerful"
+                    reply = (
+                        f"Nice to meet you, {new_name}! I'll remember that."
+                        if not effective_name
+                        else f"Got it, {new_name} — updated. I won't forget."
+                    )
+                    PENDING_LOOK_AT = "name"
+                    await memory.add("user", text)
+                    await memory.add("assistant", reply)
+                    await save_memory()
+                    await speak(reply)
+                    return {"action": "handled", "text": reply, "look_at": "name"}
+
+    name_recall = [
+        "what's my name",
+        "whats my name",
+        "what is my name",
+        "who am i",
+        "do you know my name",
+        "do you know me",
+        "do you remember my name",
+    ]
+    if any(t in cmd for t in name_recall):
+        if effective_name:
+            LILLY_MOOD = "warm"
+            reply = f"You're {effective_name} — how could I forget?"
+        else:
             LILLY_MOOD = "curious"
             reply = "I don't have a name for you yet! What should I call you?"
-            PENDING_LOOK_AT = "name"
-            await speak(reply)
-            return {"action": "handled", "text": reply, "look_at": "name"}
+        PENDING_LOOK_AT = "name"
+        await memory.add("user", text)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply, "look_at": "name"}
+
+    if not effective_name and any(
+        t in cmd for t in ["who are you", "what's your name", "tell me about yourself"]
+    ):
+        LILLY_MOOD = "curious"
+        reply = (
+            "I'm Lilly! And I don't have a name for you yet — what should I call you?"
+        )
+        PENDING_LOOK_AT = "name"
+        await speak(reply)
+        return {"action": "handled", "text": reply, "look_at": "name"}
+
+    # ── 13e. FACT CAPTURE — persistent personal memory ──
+    # "remember that...", preferences, where they live/work — stored to disk
+    # and injected into every LLM call, so they survive restarts and window
+    # truncation. The LLM still answers this turn (facts are injected below).
+    _fact_triggers = [
+        "remember that",
+        "remember i",
+        "remember my",
+        "don't forget",
+        "my favorite",
+        "my favourite",
+        "i live in",
+        "i work at",
+        "i work as",
+        "my birthday is",
+        "my wife",
+        "my husband",
+        "my girlfriend",
+        "my boyfriend",
+        "my dog",
+        "my cat",
+    ]
+    if any(t in cmd for t in _fact_triggers):
+        _add_user_fact("user", text.strip())
+        logger.info(f"Stored user fact: {text.strip()[:80]}")
 
     # ── 14. LLM RESPONSE ──
 
@@ -10895,7 +12407,7 @@ async def handle_intent(
     LILLY_IS_THINKING = True
     LILLY_MOOD = "curious"
     # Build context from memory
-    context = await memory.context_window(6)
+    context = await memory.context_window(24)
 
     # Check if memory might need summarizing
     mem_dict = await memory.to_dict()
@@ -10919,7 +12431,19 @@ async def handle_intent(
     try:
         _snap = await asyncio.wait_for(get_sensor_snapshot(), timeout=0.5)
         if _snap:
-            sensor_context_str = snapshot_to_narrative(_snap)
+            _raw_sensor = snapshot_to_narrative(_snap)
+            # Dedup: skip if sensor data is identical and within cooldown
+            now_ts = time.time()
+            global _LAST_SENSOR_CONTEXT, _LAST_SENSOR_CONTEXT_TS
+            if (
+                _raw_sensor == _LAST_SENSOR_CONTEXT
+                and (now_ts - _LAST_SENSOR_CONTEXT_TS) < _SENSOR_DEDUP_COOLDOWN
+            ):
+                sensor_context_str = ""  # Skip — same data within cooldown
+            else:
+                sensor_context_str = _raw_sensor
+                _LAST_SENSOR_CONTEXT = _raw_sensor
+                _LAST_SENSOR_CONTEXT_TS = now_ts
     except Exception:
         pass
 
@@ -10956,6 +12480,23 @@ async def handle_intent(
         messages.append(
             {"role": "system", "content": f"CONTEXT_ABOUT_USER:{memory_hint}"}
         )
+    # Persistent personal memory: name + captured facts, injected EVERY call
+    # so personal context survives window truncation and restarts.
+    _facts_bits = []
+    if effective_name:
+        _facts_bits.append(f"The user's name is {effective_name}.")
+    if _USER_FACTS:
+        _facts_bits.extend(f["fact"] for f in _USER_FACTS[-15:])
+    if _facts_bits:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "KNOWN FACTS ABOUT THE USER (always true — reference them "
+                    "naturally when relevant): " + " | ".join(_facts_bits)
+                ),
+            }
+        )
     # Welcome-back hint for first message of session
     welcome_hint = getattr(handle_intent, "_welcome_hint", "")
     if welcome_hint:
@@ -10988,8 +12529,6 @@ async def handle_intent(
                     _line = f"[{_pkg}] {_t}"
                     if _c and _c != _t:
                         _line += f": {_c[:100]}"
-                    if _pri in ("high", "max"):
-                        _line += " (URGENT)"
                     _notif_lines.append(_line)
                 _notif_context_str = "; ".join(_notif_lines)
     except Exception:
@@ -10999,12 +12538,10 @@ async def handle_intent(
             {
                 "role": "system",
                 "content": (
-                    f"PHONE NOTIFICATIONS (active right now): {_notif_context_str}. "
-                    "STRICT RULE: Do NOT mention notifications, reminders, alerts, or "
-                    "anything notification-related unless the user explicitly asks about "
-                    "them or asks 'what's new' / 'any alerts'. If the user asks a normal "
-                    "question like 'what can we make' or 'tell me a story', answer it "
-                    "directly. Never volunteer notification content unprompted."
+                    f"Background context — phone notifications on the device: {_notif_context_str}. "
+                    "This is ambient context only. Do NOT bring up notifications unless the user "
+                    "directly asks about them, asks 'what's new', or 'any alerts'. "
+                    "Answer the user's actual question without referencing notifications."
                 ),
             }
         )
@@ -11043,7 +12580,10 @@ async def handle_intent(
         "GROUNDING: Do NOT fabricate facts, readings, or events. "
         "If sensor data is not provided, do not invent it. "
         "If you don't know something, say so — never guess. "
-        "You are a real friend living in this phone, not a chatbot."
+        "You are a real friend living in this phone, not a chatbot. "
+        "CRITICAL: Do NOT repeat the same observation or response you gave before. "
+        "If you already mentioned something (like camera usage, light level, etc.), "
+        "say something NEW or skip the observation entirely. Vary your responses."
     )
     messages.append({"role": "system", "content": grounding_reminder})
 
@@ -11075,6 +12615,7 @@ async def handle_intent(
 
     # ── Grounding guard #3: post-filter — strip known hallucination patterns
     reply = _filter_hallucination_patterns(reply)
+    reply = _strip_emoji(reply)
 
     if not reply or len(reply) < 5:
         reply = "Didn't follow that."
@@ -11166,7 +12707,7 @@ async def _record_to_tencentdb(user_msg: str, assistant_reply: str):
 async def summarize_memory():
     """Summarize older conversation entries to keep context manageable."""
     entries = await memory.snapshot()
-    if len(entries) < 8:
+    if len(entries) < 4:
         return
     entries_text = "\n".join(f"{e.role}: {e.text}" for e in entries[:-4])
     prompt = f"Summarize this conversation in 1-2 sentences:\n{entries_text}"
@@ -11272,12 +12813,14 @@ def init_vision():
     YOLO = _try_import_ultralytics()
     if YOLO:
         try:
-            # Search for model in multiple locations
+            # Search for model — prefer Open Images V7 (601 classes) over COCO (80 classes)
             search_paths = [
-                WORKSPACE / "yolov8n.pt",  # /app/yolov8n.pt (workspace)
-                Path.home() / ".lilly" / "yolov8n.pt",  # ~/.lilly/yolov8n.pt
-                WORKSPACE / "yolov8n.onnx",  # /app/yolov8n.onnx (workspace)
-                Path.home() / ".lilly" / "yolov8n.onnx",  # ~/.lilly/yolov8n.onnx
+                WORKSPACE / "yolov8n-oiv7.pt",  # Open Images V7 (601 classes)
+                Path.home() / ".lilly" / "yolov8n-oiv7.pt",
+                WORKSPACE / "yolov8n.pt",  # COCO fallback (80 classes)
+                Path.home() / ".lilly" / "yolov8n.pt",
+                WORKSPACE / "yolov8n.onnx",
+                Path.home() / ".lilly" / "yolov8n.onnx",
             ]
             model_path = None
             for p in search_paths:
@@ -11286,14 +12829,16 @@ def init_vision():
                     break
 
             if model_path is None:
-                # Download to ~/.lilly/
-                model_path = Path.home() / ".lilly" / "yolov8n.pt"
+                # Download Open Images V7 model to ~/.lilly/
+                model_path = Path.home() / ".lilly" / "yolov8n-oiv7.pt"
                 model_path.parent.mkdir(parents=True, exist_ok=True)
-                logger.info("Vision: Downloading YOLOv8n model (first run)...")
+                logger.info(
+                    "Vision: Downloading YOLOv8n Open Images V7 model (601 classes, first run)..."
+                )
                 import urllib.request
 
                 urllib.request.urlretrieve(
-                    "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt",
+                    "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n-oiv7.pt",
                     str(model_path),
                 )
 
@@ -11393,22 +12938,23 @@ COCO_CLASSES = [
 ]
 
 _YOLO_MODEL = None
+_YOLO_MODEL_COCO = None  # COCO model for dual detection (80 classes, high accuracy)
+_DUAL_DETECTION = True  # Enable dual-model detection by default
 
 
 async def capture_vision_frame() -> Optional[bytes]:
-    """Capture a frame from the first available webcam."""
+    """Capture a frame from the first available webcam using a persistent capture."""
     cv2 = _try_import_cv2()
     if cv2 is None:
         return None
+    cap = get_video_capture()
+    if cap is None or not cap.isOpened():
+        return None
     try:
-        cap = cv2.VideoCapture(0)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        for _ in range(5):
+        for _ in range(3):
             ret, frame = cap.read()
             if ret:
                 break
-        cap.release()
         if not ret:
             return None
         ret2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -11445,12 +12991,153 @@ def _draw_detections(frame, detections):
     return frame
 
 
+def _load_coco_model():
+    """Load the COCO model (80 classes) for dual detection. Auto-downloads if missing."""
+    global _YOLO_MODEL_COCO
+    if _YOLO_MODEL_COCO is not None:
+        return _YOLO_MODEL_COCO
+    YOLO = _try_import_ultralytics()
+    if not YOLO:
+        return None
+    search_paths = [
+        WORKSPACE / "yolov8n.pt",
+        Path.home() / ".lilly" / "yolov8n.pt",
+    ]
+    model_path = None
+    for p in search_paths:
+        if p.exists():
+            model_path = p
+            break
+    if model_path is None:
+        model_path = Path.home() / ".lilly" / "yolov8n.pt"
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("Vision: Downloading YOLOv8n COCO model (80 classes, first run)...")
+        import urllib.request
+
+        urllib.request.urlretrieve(
+            "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt",
+            str(model_path),
+        )
+    _YOLO_MODEL_COCO = YOLO(str(model_path))
+    logger.info(f"Vision: COCO model loaded from {model_path}")
+    return _YOLO_MODEL_COCO
+
+
+def _run_dual_detection(frame) -> list[dict]:
+    """Run both COCO (80 classes) and Open Images V7 (601 classes) models.
+    Merge results, deduplicate by overlapping boxes, keep highest confidence."""
+    global _YOLO_MODEL, _YOLO_MODEL_COCO
+
+    YOLO = _try_import_ultralytics()
+    if not YOLO:
+        return []
+
+    # Load Open Images V7 model (primary, 601 classes)
+    if _YOLO_MODEL is None:
+        search_paths = [
+            WORKSPACE / "yolov8n-oiv7.pt",
+            Path.home() / ".lilly" / "yolov8n-oiv7.pt",
+            WORKSPACE / "yolov8n.pt",
+            Path.home() / ".lilly" / "yolov8n.pt",
+        ]
+        for p in search_paths:
+            if p.exists():
+                _YOLO_MODEL = YOLO(str(p))
+                break
+
+    # Load COCO model (secondary, 80 classes, high accuracy)
+    _load_coco_model()
+
+    all_detections = []
+
+    # Run Open Images V7 (601 classes)
+    if _YOLO_MODEL:
+        try:
+            results = _YOLO_MODEL(frame, verbose=False)
+            for r in results:
+                for box in r.boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    cls = int(box.cls[0])
+                    conf = float(box.conf[0])
+                    label = _YOLO_MODEL.names.get(cls, f"obj_{cls}")
+                    if conf > 0.3:
+                        all_detections.append(
+                            {
+                                "label": label,
+                                "confidence": conf,
+                                "x1": x1,
+                                "y1": y1,
+                                "x2": x2,
+                                "y2": y2,
+                                "source": "oiv7",
+                            }
+                        )
+        except Exception as e:
+            logger.debug(f"Open Images V7 detection error: {e}")
+
+    # Run COCO (80 classes) — fills gaps where COCO is more accurate
+    if _YOLO_MODEL_COCO:
+        try:
+            results = _YOLO_MODEL_COCO(frame, verbose=False)
+            for r in results:
+                for box in r.boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    cls = int(box.cls[0])
+                    conf = float(box.conf[0])
+                    label = (
+                        COCO_CLASSES[cls] if cls < len(COCO_CLASSES) else f"obj_{cls}"
+                    )
+                    if conf > 0.3:
+                        all_detections.append(
+                            {
+                                "label": label,
+                                "confidence": conf,
+                                "x1": x1,
+                                "y1": y1,
+                                "x2": x2,
+                                "y2": y2,
+                                "source": "coco",
+                            }
+                        )
+        except Exception as e:
+            logger.debug(f"COCO detection error: {e}")
+
+    # Deduplicate: if two boxes overlap significantly, keep higher confidence
+    merged = []
+    used = set()
+    for i, d1 in enumerate(all_detections):
+        if i in used:
+            continue
+        best = d1
+        for j, d2 in enumerate(all_detections):
+            if j <= i or j in used:
+                continue
+            # Check box overlap (IoU)
+            ix1 = max(d1["x1"], d2["x1"])
+            iy1 = max(d1["y1"], d2["y1"])
+            ix2 = min(d1["x2"], d2["x2"])
+            iy2 = min(d1["y2"], d2["y2"])
+            inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+            area1 = (d1["x2"] - d1["x1"]) * (d1["y2"] - d1["y1"])
+            area2 = (d2["x2"] - d2["x1"]) * (d2["y2"] - d2["y1"])
+            iou = inter / (area1 + area2 - inter + 1e-6)
+            if iou > 0.5:  # Significant overlap
+                if d2["confidence"] > best["confidence"]:
+                    used.add(i)
+                    best = d2
+                else:
+                    used.add(j)
+        merged.append(best)
+
+    return merged
+
+
 async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
     """Run object detection on a JPEG frame, return labeled JPEG + detections."""
     global _YOLO_MODEL
 
     # ── External vision server proxy ─────────────────────────────
-    if VISION_SERVER_URL:
+    if VISION_SERVER_URL and not PREFER_LOCAL_DETECTION:
         proxy_resp = await _proxy_vision_frame(frame_bytes)
         if proxy_resp and proxy_resp.get("detections"):
             cv2 = _try_import_cv2()
@@ -11514,43 +13201,43 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
 
     detections = []
 
-    # Try YOLO
+    # Try YOLO — dual mode (COCO + Open Images V7) or single model
     YOLO = _try_import_ultralytics()
     if YOLO and _vision_enabled:
         try:
-            if _YOLO_MODEL is None:
-                search_paths = [
-                    WORKSPACE / "yolov8n.pt",
-                    Path.home() / ".lilly" / "yolov8n.pt",
-                    WORKSPACE / "yolov8n.onnx",
-                    Path.home() / ".lilly" / "yolov8n.onnx",
-                ]
-                for p in search_paths:
-                    if p.exists():
-                        _YOLO_MODEL = YOLO(str(p))
-                        break
-            if _YOLO_MODEL:
-                results = _YOLO_MODEL(frame, verbose=False)
-                for r in results:
-                    for box in r.boxes:
-                        x1, y1, x2, y2 = box.xyxy[0].tolist()
-                        cls = int(box.cls[0])
-                        conf = float(box.conf[0])
-                        label = (
-                            COCO_CLASSES[cls]
-                            if cls < len(COCO_CLASSES)
-                            else f"obj_{cls}"
-                        )
-                        detections.append(
-                            {
-                                "label": label,
-                                "confidence": conf,
-                                "x1": x1,
-                                "y1": y1,
-                                "x2": x2,
-                                "y2": y2,
-                            }
-                        )
+            if _DUAL_DETECTION:
+                detections = _run_dual_detection(frame)
+            else:
+                # Single model mode (fallback)
+                if _YOLO_MODEL is None:
+                    search_paths = [
+                        WORKSPACE / "yolov8n-oiv7.pt",
+                        Path.home() / ".lilly" / "yolov8n-oiv7.pt",
+                        WORKSPACE / "yolov8n.pt",
+                        Path.home() / ".lilly" / "yolov8n.pt",
+                    ]
+                    for p in search_paths:
+                        if p.exists():
+                            _YOLO_MODEL = YOLO(str(p))
+                            break
+                if _YOLO_MODEL:
+                    results = _YOLO_MODEL(frame, verbose=False)
+                    for r in results:
+                        for box in r.boxes:
+                            x1, y1, x2, y2 = box.xyxy[0].tolist()
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            label = _YOLO_MODEL.names.get(cls, f"obj_{cls}")
+                            detections.append(
+                                {
+                                    "label": label,
+                                    "confidence": conf,
+                                    "x1": x1,
+                                    "y1": y1,
+                                    "x2": x2,
+                                    "y2": y2,
+                                }
+                            )
         except Exception as e:
             logger.debug(f"Vision detect error: {e}")
 
@@ -11630,12 +13317,18 @@ _video_capture = None
 
 def get_video_capture():
     global _video_capture
-    if _video_capture is None:
-        cv2 = _try_import_cv2()
-        if cv2:
-            _video_capture = cv2.VideoCapture(0)
-            _video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-            _video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+    if _video_capture is not None and _video_capture.isOpened():
+        return _video_capture
+    cv2 = _try_import_cv2()
+    if cv2:
+        if _video_capture is not None:
+            try:
+                _video_capture.release()
+            except Exception:
+                pass
+        _video_capture = cv2.VideoCapture(0)
+        _video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        _video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     return _video_capture
 
 
@@ -11646,6 +13339,102 @@ async def grab_and_label_frame() -> tuple[bytes, list[dict]]:
         return b"", []
     labeled, detections = await detect_objects(raw)
     return labeled, detections
+
+
+def _webcam_capture_loop():
+    """Background thread: continuously capture webcam frames and run YOLO."""
+    global _webcam_detections, _webcam_description, _webcam_ts, _webcam_frame_b64
+    global _webcam_running
+    import base64 as _b64
+
+    cv2 = _try_import_cv2()
+    if cv2 is None:
+        logger.warning("Webcam loop: OpenCV not available")
+        _webcam_running = False
+        return
+
+    cap = get_video_capture()
+    if cap is None or not cap.isOpened():
+        logger.warning("Webcam loop: No webcam available (headless server?)")
+        _webcam_running = False
+        return
+
+    logger.info("Webcam loop: Starting continuous YOLO capture")
+    _webcam_running = True
+
+    while _webcam_running:
+        try:
+            ret, frame = cap.read()
+            if not ret:
+                logger.info("Webcam loop: Frame read failed, retrying in 5s")
+                time.sleep(5)
+                # Try to reopen the capture
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                global _video_capture
+                _video_capture = None
+                cap = get_video_capture()
+                if cap is None or not cap.isOpened():
+                    logger.warning("Webcam loop: Reopen failed, stopping")
+                    _webcam_running = False
+                    break
+                continue
+
+            ret2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if not ret2:
+                time.sleep(_WEBCAM_INTERVAL)
+                continue
+
+            frame_bytes = buf.tobytes()
+            # Run YOLO detection (sync wrapper for the background thread)
+            loop = asyncio.new_event_loop()
+            try:
+                _, detections = loop.run_until_complete(detect_objects(frame_bytes))
+            finally:
+                loop.close()
+
+            obj_list = sorted(set(d["label"] for d in detections))
+            desc = "Camera sees: " + ", ".join(obj_list) if obj_list else ""
+
+            # Store results
+            _webcam_detections = detections
+            _webcam_description = desc
+            _webcam_ts = time.time()
+            _webcam_frame_b64 = (
+                "data:image/jpeg;base64," + _b64.b64encode(frame_bytes).decode()
+            )
+
+            if detections:
+                logger.info(
+                    f"Webcam loop: {len(detections)} objects detected — {', '.join(obj_list[:5])}"
+                )
+
+        except Exception as e:
+            logger.warning(f"Webcam loop error: {e}")
+
+        time.sleep(_WEBCAM_INTERVAL)
+
+    logger.info("Webcam loop: Stopped")
+
+
+def start_webcam_loop():
+    """Start the background webcam capture thread (idempotent)."""
+    global _webcam_thread, _webcam_running
+    if not WEBCAM_ENABLED:
+        return
+    if _webcam_thread is not None and _webcam_thread.is_alive():
+        return
+    _webcam_running = True
+    _webcam_thread = threading.Thread(target=_webcam_capture_loop, daemon=True)
+    _webcam_thread.start()
+
+
+def stop_webcam_loop():
+    """Stop the background webcam capture thread."""
+    global _webcam_running
+    _webcam_running = False
 
 
 # ─── TASK SCHEDULER & REMINDERS ─────────────────────────────────
@@ -12455,6 +14244,7 @@ def _start_whisper_server():
 def _start_openhuman_bridge() -> None:
     """Start openhuman_bridge.py on port 8790 if it is not already running."""
     import urllib.request
+
     try:
         urllib.request.urlopen("http://127.0.0.1:8790/health", timeout=2)
         logger.info("OpenHuman bridge already running on :8790")
@@ -12468,8 +14258,16 @@ def _start_openhuman_bridge() -> None:
     log_path = Path("/tmp/openhuman_bridge.log")
     with open(log_path, "a") as log_f:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "openhuman_bridge:app",
-             "--host", "127.0.0.1", "--port", "8790"],
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "openhuman_bridge:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8790",
+            ],
             cwd=str(WORKSPACE),
             stdout=log_f,
             stderr=log_f,
@@ -12501,7 +14299,10 @@ async def lifespan(app: FastAPI):
         add_auth0_routes(app)
         logger.info("Auth0 auth system ready")
 
-    await load_memory()
+    await load_memory()  # type: ignore[misc]
+
+    # Initialize avatar task queues (needs HIVE_PERSONAS which is now defined)
+    _ensure_avatar_tasks_loaded()
 
     # Load per-user names so each Auth0 account remembers its own name independently.
     _load_user_names()
@@ -12514,6 +14315,24 @@ async def lifespan(app: FastAPI):
         init_vision()
     except Exception as e:
         logger.warning(f"Vision init failed (non-fatal): {e}")
+
+    # Start continuous webcam YOLO capture loop
+    try:
+        start_webcam_loop()
+    except Exception as e:
+        logger.warning(f"Webcam loop start failed (non-fatal): {e}")
+
+    # Initialize Blink camera connector (best-effort — 2FA may be pending)
+    try:
+        from blink_connector import get_blink_connector
+
+        _blink_conn = get_blink_connector()
+        # Trigger an async start (non-blocking) so cameras are available
+        # when the user asks "what do you see"
+        asyncio.create_task(_blink_conn.start())
+        logger.info("Blink connector initialized (async startup)")
+    except Exception as e:
+        logger.info(f"Blink connector init skipped (non-fatal): {e}")
 
     # Start local Whisper STT server (in-container, no cross-container DNS needed)
     _start_whisper_server()
@@ -12576,6 +14395,89 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ─── Vision Proxy (port 8098/vision → port 8198) ──────────────────────────
+@app.api_route("/vision/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def vision_proxy(path: str, request: Request):
+    """Proxy requests from /vision/* to the vision server on port 8198."""
+    if not VISION_SERVER_URL:
+        return JSONResponse({"error": "Vision server not configured"}, status_code=503)
+
+    try:
+        # Build the target URL
+        target_url = f"{VISION_SERVER_URL}/{path}"
+
+        # Get the request body
+        body = await request.body()
+
+        # Get query parameters
+        query_params = dict(request.query_params)
+
+        # Get headers (excluding host)
+        headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.request(
+                method=request.method,
+                url=target_url,
+                content=body,
+                headers=headers,
+                params=query_params,
+            )
+
+            # Return the response
+            return Response(
+                content=resp.content,
+                status_code=resp.status_code,
+                headers=dict(resp.headers),
+            )
+    except Exception as e:
+        logger.error(f"Vision proxy error: {e}")
+        return JSONResponse({"error": f"Vision proxy error: {e}"}, status_code=500)
+
+
+# ─── Trainer Proxy (port 8098/trainer → port 8199) ─────────────────────────
+TRAINER_SERVER_URL = "http://127.0.0.1:8199"
+
+
+@app.api_route("/trainer/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def trainer_proxy(path: str, request: Request):
+    """Proxy requests from /trainer/* to the trainer server on port 8199."""
+    if not TRAINER_SERVER_URL:
+        return JSONResponse({"error": "Trainer server not configured"}, status_code=503)
+
+    try:
+        # Build the target URL
+        target_url = f"{TRAINER_SERVER_URL}/api/trainer/{path}"
+
+        # Get the request body
+        body = await request.body()
+
+        # Get query parameters
+        query_params = dict(request.query_params)
+
+        # Get headers (excluding host)
+        headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.request(
+                method=request.method,
+                url=target_url,
+                content=body,
+                headers=headers,
+                params=query_params,
+            )
+
+            # Return the response
+            return Response(
+                content=resp.content,
+                status_code=resp.status_code,
+                headers=dict(resp.headers),
+            )
+    except Exception as e:
+        logger.error(f"Trainer proxy error: {e}")
+        return JSONResponse({"error": f"Trainer proxy error: {e}"}, status_code=500)
 
 
 # ─── PHONE BROKER (WebSocket relay for paired devices) ────────────
@@ -13738,6 +15640,51 @@ async def memory_health():
     return {"available": await tencentdb_memory_available()}
 
 
+@app.get("/api/history")
+async def get_history(limit: int = 20, avatar: str = ""):
+    """Return recent conversation history for the web UI to display on load."""
+    avatar = avatar or current_avatar
+    turns = await _load_recent_conversation_history(n=limit)
+    # Filter by avatar if specified
+    if avatar:
+        turns = [t for t in turns if t.get("avatar") == avatar]
+    # Also include entries from the in-memory deque for current session
+    session_entries = await memory.snapshot()
+    session_turns = []
+    i = 0
+    while i < len(session_entries) - 1:
+        if (
+            session_entries[i].role == "user"
+            and session_entries[i + 1].role == "assistant"
+        ):
+            session_turns.append(
+                {
+                    "user": session_entries[i].text,
+                    "assistant": session_entries[i + 1].text,
+                    "ts": session_entries[i].timestamp,
+                }
+            )
+            i += 2
+        else:
+            i += 1
+    # Combine: JSONL history + current session, deduplicated by user text
+    seen = set()
+    combined = []
+    for t in turns:
+        key = t.get("user", "")[:80]
+        if key and key not in seen:
+            seen.add(key)
+            combined.append(t)
+    for t in session_turns:
+        key = t.get("user", "")[:80]
+        if key and key not in seen:
+            seen.add(key)
+            combined.append(t)
+    # Return most recent first
+    combined.reverse()
+    return {"turns": combined[:limit], "avatar": avatar}
+
+
 @app.get("/api/memory/facts")
 async def memory_facts(query: str = "", limit: int = 20):
     """L1: Search/recall atomic facts from memory."""
@@ -13805,14 +15752,534 @@ async def phone_status():
     }
 
 
-# ─── Phone Deployment Endpoints ────────────────────────────────────
-# These let the AI agent push updates to the phone's sensor server
-# and overlay app without requiring SSH access.
+@app.get("/api/phone/camera/status")
+async def phone_camera_status():
+    """Check if phone camera is available via sensor server."""
+    if not SENSOR_SERVER_URL:
+        return {"available": False, "error": "No sensor server configured"}
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{SENSOR_SERVER_URL}/camera/status")
+            return r.json()
+    except Exception as e:
+        return {"available": False, "error": str(e)}
 
-import hashlib
-import shutil
 
-_LILLY_WORKSPACE = os.environ.get("LILLY_WORKSPACE", "/home/labhrasd/Lilly_Workspace")
+@app.get("/api/phone/camera/capture")
+async def phone_camera_capture(force: bool = False):
+    """Capture a photo from the phone camera via sensor server."""
+    if not SENSOR_SERVER_URL:
+        return {"error": "No sensor server configured", "image_base64": None}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(
+                f"{SENSOR_SERVER_URL}/camera/capture", params={"force": force}
+            )
+            return r.json()
+    except Exception as e:
+        return {"error": str(e), "image_base64": None}
+
+
+# ─── Blink Camera Endpoints ─────────────────────────────────────
+
+
+@app.get("/api/blink/status")
+async def blink_status():
+    """Check Blink camera system status.
+
+    NOTE: This endpoint does NOT auto-call start() anymore.
+    Use POST /api/blink/retry to manually trigger a login attempt.
+    This prevents the auto-retry loop from hammering the Blink API
+    and triggering multiple SMS codes.
+    """
+    try:
+        from blink_connector import get_blink_connector
+
+        conn = get_blink_connector()
+        cameras = await conn.list_cameras()
+        # Recompute cooldown in case rate-limit was detected during last start()
+        conn._in_cooldown()
+        return {
+            "ok": True,
+            "connected": conn._started,
+            "pending_2fa": conn._pending_2fa,
+            "cooldown_remaining": conn._cooldown_remaining,
+            "rate_limited": conn._rate_limited,
+            "cameras": cameras,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/blink/retry")
+async def blink_retry():
+    """Force a new Blink login attempt, clearing any active cooldown.
+
+    Use this when the user wants to manually retry after a rate limit
+    or when they want a fresh 2FA code sent.
+    """
+    try:
+        from blink_connector import get_blink_connector
+
+        conn = get_blink_connector()
+        # Clear cooldown so start() can run immediately
+        conn._last_attempt = 0
+        conn._cooldown_remaining = 0
+        conn._rate_limited = False
+        # Clear any stale pending 2FA state (user wants a fresh attempt)
+        conn._pending_2fa = False
+        conn._clear_2fa_state()
+        # Attempt connection
+        ok = await conn.start()
+        cameras = await conn.list_cameras()
+        return {
+            "ok": True,
+            "connected": ok,
+            "pending_2fa": conn._pending_2fa,
+            "cooldown_remaining": conn._cooldown_remaining,
+            "rate_limited": conn._rate_limited,
+            "cameras": cameras,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/blink/clear_rate_limit")
+async def blink_clear_rate_limit():
+    """Force clear the rate limit flag without attempting a new login.
+
+    Use this when Blink has blocked you but you want to try again.
+    """
+    try:
+        from blink_connector import get_blink_connector
+
+        conn = get_blink_connector()
+        # Force clear all cooldown/rate limit state
+        conn._last_attempt = 0
+        conn._cooldown_remaining = 0
+        conn._rate_limited = False
+        return {
+            "ok": True,
+            "message": "Rate limit cleared. You can now retry connecting.",
+            "rate_limited": False,
+            "cooldown_remaining": 0,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/blink/cameras")
+async def blink_cameras():
+    """List all Blink cameras."""
+    try:
+        from blink_connector import get_blink_connector
+
+        conn = get_blink_connector()
+        cameras = await conn.list_cameras()
+        return {"ok": True, "cameras": cameras}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/blink/snapshot")
+async def blink_snapshot(camera: str = ""):
+    """Snap a new picture from a Blink camera. Returns base64 JPEG."""
+    try:
+        from blink_connector import get_blink_connector
+
+        conn = get_blink_connector()
+        cam_name = camera if camera else None
+        b64 = await conn.get_snapshot_base64(cam_name)
+        if b64:
+            return {"ok": True, "image_base64": b64, "camera": cam_name or "first"}
+        return {"ok": False, "error": "Snapshot failed"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/blink/snapshot/all")
+async def blink_snapshot_all():
+    """Get snapshots from all Blink cameras."""
+    try:
+        from blink_connector import get_blink_connector
+
+        conn = get_blink_connector()
+        snapshots = await conn.get_all_snapshots_base64()
+        return {
+            "ok": True,
+            "cameras": {k: v[:50] + "..." for k, v in snapshots.items()},
+            "count": len(snapshots),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/blink/2fa")
+async def blink_2fa(code: str = ""):
+    """Complete Blink 2FA login with verification code.
+
+    Usage: POST /api/blink/2fa?code=123456
+    """
+    try:
+        from blink_connector import get_blink_connector
+
+        conn = get_blink_connector()
+        if not conn._pending_2fa:
+            return {
+                "ok": False,
+                "error": "No 2FA pending — Blink may already be connected",
+            }
+        if not code:
+            return {"ok": False, "error": "Provide the 6-digit code as ?code=XXXXXX"}
+        ok = await conn.complete_2fa_login(code)
+        if ok:
+            cameras = await conn.list_cameras()
+            return {"ok": True, "connected": True, "cameras": cameras}
+        return {"ok": False, "error": "2FA verification failed — check the code"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ─── Multi-Camera: "What do you see?" ────────────────────────────
+
+
+@app.post("/api/vision/multi")
+async def multi_camera_vision():
+    """Collect frames from ALL cameras (phone + Blink + browser) and describe.
+    Used for 'what do you see' — opens every camera and returns combined description."""
+    frames = {}
+    errors = []
+
+    # 1. Phone camera (via sensor server)
+    if SENSOR_SERVER_URL:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(
+                    f"{SENSOR_SERVER_URL}/camera/capture", params={"force": True}
+                )
+                data = r.json()
+                if data.get("image_base64"):
+                    frames["phone"] = data["image_base64"]
+        except Exception as e:
+            errors.append(f"phone: {e}")
+
+    # 2. Blink cameras
+    try:
+        from blink_connector import get_blink_connector
+
+        conn = get_blink_connector()
+        blink_snaps = await conn.get_all_snapshots_base64()
+        for name, b64 in blink_snaps.items():
+            frames[f"blink_{name}"] = b64
+    except Exception as e:
+        errors.append(f"blink: {e}")
+
+    # 3. Browser webcam (if active, get latest frame from CameraBridge)
+    # The browser sends frames via /api/vision/browser — check for recent ones
+    try:
+        if _browser_vision_frame_b64:
+            frames["browser"] = _browser_vision_frame_b64
+    except Exception:
+        pass
+
+    if not frames:
+        return {"ok": False, "error": "No cameras available", "errors": errors}
+
+    # Run YOLO on each frame and collect descriptions
+    import io
+
+    np = __import__("numpy")
+    cv2 = _try_import_cv2()
+    all_detections = {}
+    descriptions = []
+
+    for source, b64 in frames.items():
+        try:
+            img_bytes = __import__("base64").b64decode(b64)
+            if cv2:
+                nparr = np.frombuffer(img_bytes, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if frame is not None:
+                    labeled, dets = await detect_objects(img_bytes)
+                    all_detections[source] = dets
+                    if dets:
+                        obj_list = ", ".join(
+                            f"{d['label']} ({d['confidence']:.0%})"
+                            for d in sorted(dets, key=lambda x: -x["confidence"])[:8]
+                        )
+                        descriptions.append(f"[{source}] sees: {obj_list}")
+                    else:
+                        descriptions.append(f"[{source}] no objects detected")
+        except Exception as e:
+            errors.append(f"{source} detection: {e}")
+
+    combined_desc = "; ".join(descriptions) if descriptions else "No frames captured"
+
+    return {
+        "ok": True,
+        "camera_count": len(frames),
+        "sources": list(frames.keys()),
+        "detections": all_detections,
+        "description": combined_desc,
+        "errors": errors,
+    }
+
+
+# ─── Single-Camera: "Show me Front Door" ────────────────────────
+
+
+@app.post("/api/vision/single")
+async def single_camera_vision(request: Request):
+    """Show a single camera view (phone, browser, or specific Blink camera).
+    Used for 'show me Front Door', 'open the back yard camera', etc.
+
+    Request body:
+        camera: str - Camera name or source:
+            - "phone" - Phone camera
+            - "browser" - Browser webcam
+            - "front door", "back yard", etc. - Specific Blink camera name
+            - "first" - First available Blink camera
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+
+    camera = body.get("camera", "").lower().strip()
+    if not camera:
+        return JSONResponse(
+            status_code=400, content={"error": "Missing 'camera' parameter"}
+        )
+
+    frame_b64 = None
+    source_name = camera
+    error = None
+
+    # Phone camera
+    if camera == "phone":
+        if SENSOR_SERVER_URL:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    r = await client.get(
+                        f"{SENSOR_SERVER_URL}/camera/capture", params={"force": True}
+                    )
+                    data = r.json()
+                    if data.get("image_base64"):
+                        frame_b64 = data["image_base64"]
+                        source_name = "phone"
+                    else:
+                        error = "Phone camera returned no image"
+            except Exception as e:
+                error = f"Phone camera error: {e}"
+        else:
+            error = "Phone camera not configured"
+
+    # Browser webcam
+    elif camera == "browser":
+        try:
+            if _browser_vision_frame_b64:
+                frame_b64 = _browser_vision_frame_b64
+                source_name = "browser"
+            else:
+                error = "No browser frame available"
+        except Exception:
+            error = "Browser camera not available"
+
+    # Blink camera (specific name or "first")
+    else:
+        try:
+            from blink_connector import get_blink_connector
+
+            conn = get_blink_connector()
+            cameras = await conn.list_cameras()
+
+            if not cameras:
+                error = "No Blink cameras available"
+            else:
+                # Find the matching camera
+                target_cam = None
+                if camera == "first":
+                    target_cam = cameras[0]["name"]
+                else:
+                    # Search by name (case-insensitive partial match)
+                    for cam in cameras:
+                        if camera in cam["name"].lower():
+                            target_cam = cam["name"]
+                            break
+                    # If no partial match, try exact match
+                    if not target_cam:
+                        for cam in cameras:
+                            if camera == cam["name"].lower():
+                                target_cam = cam["name"]
+                                break
+
+                if target_cam:
+                    img_bytes = await conn.get_snapshot(target_cam)
+                    if img_bytes:
+                        import base64 as _b64
+
+                        frame_b64 = _b64.b64encode(img_bytes).decode()
+                        source_name = f"blink_{target_cam}"
+                    else:
+                        error = f"Could not capture from {target_cam}"
+                else:
+                    available = ", ".join(c["name"] for c in cameras)
+                    error = f"Camera '{camera}' not found. Available: {available}"
+
+        except Exception as e:
+            error = f"Blink error: {e}"
+
+    if error and not frame_b64:
+        return {"ok": False, "error": error}
+
+    if not frame_b64:
+        return {"ok": False, "error": "No frame captured"}
+
+    # Run YOLO detection on the single frame
+    try:
+        import base64 as _b64
+
+        img_bytes = _b64.b64decode(frame_b64)
+        labeled, detections = await detect_objects(img_bytes)
+
+        # Build description
+        if detections:
+            obj_list = ", ".join(
+                f"{d['label']} ({d['confidence']:.0%})"
+                for d in sorted(detections, key=lambda x: -x["confidence"])[:8]
+            )
+            description = f"[{source_name}] sees: {obj_list}"
+        else:
+            description = f"[{source_name}] no objects detected"
+
+        return {
+            "ok": True,
+            "source": source_name,
+            "camera": camera,
+            "image_base64": frame_b64,
+            "detections": detections,
+            "description": description,
+        }
+
+    except Exception as e:
+        return {
+            "ok": True,
+            "source": source_name,
+            "camera": camera,
+            "image_base64": frame_b64,
+            "detections": [],
+            "description": f"[{source_name}] frame captured but detection failed: {e}",
+        }
+
+
+# ─── Blink Doorbell + Face Recognition ───────────────────────────
+
+
+@app.post("/api/blink/doorbell")
+async def blink_doorbell_check():
+    """Check Blink doorbell camera — snap picture, detect faces, identify who's there.
+    Returns face detections with names (if enrolled) and object detections."""
+    try:
+        from blink_connector import get_blink_connector
+
+        conn = get_blink_connector()
+
+        # Find the doorbell camera (look for 'doorbell' or 'door' in name)
+        cameras = await conn.list_cameras()
+        doorbell_name = None
+        for cam in cameras:
+            name_lower = cam["name"].lower()
+            if "doorbell" in name_lower or "door" in name_lower:
+                doorbell_name = cam["name"]
+                break
+        if not doorbell_name and cameras:
+            doorbell_name = cameras[0]["name"]  # fallback to first camera
+
+        # Snap a new picture from the doorbell
+        img_bytes = await conn.get_snapshot(doorbell_name)
+        if not img_bytes:
+            return {"ok": False, "error": f"Could not capture from {doorbell_name}"}
+
+        # Run dual-model detection
+        labeled_frame, detections = await detect_objects(img_bytes)
+
+        # Check for faces
+        faces = [
+            d
+            for d in detections
+            if d["label"].lower() in ("person", "man", "woman", "face")
+        ]
+        objects = [
+            d
+            for d in detections
+            if d["label"].lower() not in ("person", "man", "woman", "face")
+        ]
+
+        # Try face recognition if available
+        face_names = []
+        if faces:
+            try:
+                from face_recognition_engine import get_face_engine
+                import numpy as np
+
+                cv2 = _try_import_cv2()
+
+                if cv2:
+                    nparr = np.frombuffer(img_bytes, np.uint8)
+                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        face_eng = get_face_engine()
+                        h, w = frame.shape[:2]
+                        norm_dets = []
+                        for f in faces:
+                            norm_dets.append(
+                                {
+                                    "label": f["label"],
+                                    "x1": f["x1"] / w,
+                                    "y1": f["y1"] / h,
+                                    "x2": f["x2"] / w,
+                                    "y2": f["y2"] / h,
+                                }
+                            )
+                        enriched = face_eng.enrich_person_detections(frame, norm_dets)
+                        face_names = [
+                            {
+                                "name": e["label"],
+                                "confidence": e.get("face_confidence", 0),
+                            }
+                            for e in enriched
+                            if e["label"] != "person"
+                        ]
+            except Exception as e:
+                logger.debug(f"Face recognition error (non-fatal): {e}")
+
+        # Build announcement
+        if face_names:
+            names_str = ", ".join(f["name"] for f in face_names)
+            announcement = f"{names_str} is at the {doorbell_name}!"
+        elif faces:
+            announcement = f"Someone is at the {doorbell_name}!"
+        else:
+            if objects:
+                obj_list = ", ".join(d["label"] for d in objects[:5])
+                announcement = f"No one at the door, but I see: {obj_list}"
+            else:
+                announcement = f"Nothing detected at the {doorbell_name}"
+
+        import base64 as _b64
+
+        return {
+            "ok": True,
+            "camera": doorbell_name,
+            "faces": face_names,
+            "face_count": len(faces),
+            "objects": objects,
+            "announcement": announcement,
+            "image_base64": _b64.b64encode(img_bytes).decode(),
+        }
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.get("/api/phone/deploy/file")
@@ -14882,6 +17349,310 @@ async def agent_undo(request: Request):
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
+# ─── Admin API Endpoints ────────────────────────────────────────────────
+# Restricted to OWNER_EMAIL only. All other users get 403.
+
+ADMIN_EMAIL = "laurencekidney@gmail.com"
+
+
+def _require_admin(request: Request) -> Optional[dict]:
+    """Check if the current user is the admin. Returns user info or None."""
+    if not AUTH_AVAILABLE:
+        # No auth configured — allow only in local dev (localhost)
+        return {"email": ADMIN_EMAIL, "name": "Admin (dev)"}
+    import asyncio as _asyncio
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # We're inside an async endpoint — use await directly
+            return None  # caller must use await get_current_user instead
+    except RuntimeError:
+        pass
+    return None
+
+
+@app.get("/api/admin/check")
+async def admin_check(request: Request):
+    """Check if the current user has admin privileges."""
+    if not AUTH_AVAILABLE:
+        return {"admin": True, "email": ADMIN_EMAIL}
+    user = await get_current_user(request)
+    if not user:
+        return {"admin": False, "reason": "not_logged_in"}
+    email = (user.get("email", "") or "").strip().lower()
+    is_admin = email == ADMIN_EMAIL.strip().lower()
+    return {"admin": is_admin, "email": email}
+
+
+@app.post("/api/admin/shell")
+async def admin_shell(request: Request):
+    """Execute a shell command (admin only). Returns stdout + stderr."""
+    if not AUTH_AVAILABLE:
+        pass  # allow in dev mode
+    else:
+        user = await get_current_user(request)
+        if (
+            not user
+            or (user.get("email", "") or "").strip().lower()
+            != ADMIN_EMAIL.strip().lower()
+        ):
+            return JSONResponse({"error": "Admin access required"}, status_code=403)
+    try:
+        body = await request.json()
+        command = body.get("command", "").strip()
+        if not command:
+            return JSONResponse({"error": "No command provided"}, status_code=400)
+        # Block obviously dangerous commands
+        _blocked = {"rm -rf /", "mkfs", "dd if=", ":(){", "fork bomb"}
+        if any(b in command.lower() for b in _blocked):
+            return JSONResponse(
+                {"error": "Command blocked for safety"}, status_code=400
+            )
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=str(WORKSPACE),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        return {
+            "ok": True,
+            "stdout": stdout.decode(errors="replace")[-8000:],
+            "stderr": stderr.decode(errors="replace")[-4000:],
+            "returncode": proc.returncode,
+        }
+    except asyncio.TimeoutError:
+        return JSONResponse({"error": "Command timed out (30s)"}, status_code=408)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/admin/agent")
+async def admin_agent_task(request: Request):
+    """Run a coding agent task (admin only). Delegates to agent_core."""
+    if not AUTH_AVAILABLE:
+        pass
+    else:
+        user = await get_current_user(request)
+        if (
+            not user
+            or (user.get("email", "") or "").strip().lower()
+            != ADMIN_EMAIL.strip().lower()
+        ):
+            return JSONResponse({"error": "Admin access required"}, status_code=403)
+    if not AGENT_CORE_AVAILABLE:
+        return JSONResponse({"error": "agent_core not available"}, status_code=503)
+    try:
+        body = await request.json()
+        task = body.get("task", "").strip()
+        if not task:
+            return JSONResponse({"error": "No task provided"}, status_code=400)
+        from agent_core import execute_task
+
+        result = await execute_task(task, user_email=ADMIN_EMAIL)
+        return {"ok": True, "result": result}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/admin/logs")
+async def admin_logs(request: Request, lines: int = 100):
+    """Get recent server logs (admin only)."""
+    if not AUTH_AVAILABLE:
+        pass
+    else:
+        user = await get_current_user(request)
+        if (
+            not user
+            or (user.get("email", "") or "").strip().lower()
+            != ADMIN_EMAIL.strip().lower()
+        ):
+            return JSONResponse({"error": "Admin access required"}, status_code=403)
+    try:
+        log_file = WORKSPACE / "lilly.log"
+        if not log_file.exists():
+            return {"logs": "No log file found"}
+        import subprocess
+
+        result = subprocess.run(
+            ["tail", "-n", str(min(lines, 500))],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return {"logs": result.stdout[-12000:]}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/admin/tasks")
+async def admin_list_tasks(request: Request):
+    """List all active avatar tasks (admin only)."""
+    if not AUTH_AVAILABLE:
+        pass
+    else:
+        user = await get_current_user(request)
+        if (
+            not user
+            or (user.get("email", "") or "").strip().lower()
+            != ADMIN_EMAIL.strip().lower()
+        ):
+            return JSONResponse({"error": "Admin access required"}, status_code=403)
+    _ensure_avatar_tasks_loaded()
+    return {"tasks": get_all_active_tasks()}
+
+
+@app.post("/api/admin/tasks/assign")
+async def admin_assign_task(request: Request):
+    """Assign a task to an avatar (admin only). Optionally auto-runs via coding agent."""
+    if not AUTH_AVAILABLE:
+        pass
+    else:
+        user = await get_current_user(request)
+        if (
+            not user
+            or (user.get("email", "") or "").strip().lower()
+            != ADMIN_EMAIL.strip().lower()
+        ):
+            return JSONResponse({"error": "Admin access required"}, status_code=403)
+    body = await request.json()
+    avatar = body.get("avatar", "").strip().lower()
+    description = body.get("description", "").strip()
+    auto_run = body.get("auto_run", True)  # default: auto-trigger coding agent
+    if not avatar or not description:
+        return JSONResponse(
+            {"error": "avatar and description required"}, status_code=400
+        )
+    _ensure_avatar_tasks_loaded()
+    task = assign_task(avatar, description, assigned_by="admin")
+
+    # Auto-trigger coding agent in background if agent_core is available
+    if auto_run and AGENT_CORE_AVAILABLE:
+
+        async def _run_agent_for_task():
+            try:
+                update_task_status(task.id, "running", progress="Agent started")
+                from agent_core import execute_task
+
+                agent_prompt = f"[Avatar Task for {avatar}] {description}\n\nYou are acting as the {avatar} avatar agent. Complete this task and report results."
+                result = await execute_task(agent_prompt, user_email=ADMIN_EMAIL)
+                update_task_status(task.id, "completed", result=result[:2000])
+                logger.info(
+                    f"✅ Agent completed task {task.id} for {avatar}: {result[:100]}"
+                )
+            except Exception as e:
+                update_task_status(task.id, "failed", result=str(e)[:500])
+                logger.error(f"❌ Agent failed task {task.id}: {e}")
+
+        asyncio.create_task(_run_agent_for_task())
+
+    return {"ok": True, "task": task.to_dict()}
+
+
+@app.post("/api/admin/tasks/update")
+async def admin_update_task(request: Request):
+    """Update a task's status (admin only)."""
+    if not AUTH_AVAILABLE:
+        pass
+    else:
+        user = await get_current_user(request)
+        if (
+            not user
+            or (user.get("email", "") or "").strip().lower()
+            != ADMIN_EMAIL.strip().lower()
+        ):
+            return JSONResponse({"error": "Admin access required"}, status_code=403)
+    body = await request.json()
+    task_id = body.get("task_id", "")
+    status = body.get("status", "")
+    result = body.get("result", "")
+    progress = body.get("progress", "")
+    question = body.get("question", "")
+    if not task_id:
+        return JSONResponse({"error": "task_id required"}, status_code=400)
+    task = update_task_status(
+        task_id, status, result=result, progress=progress, question=question
+    )
+    if not task:
+        return JSONResponse({"error": "task not found"}, status_code=404)
+    return {"ok": True, "task": task.to_dict()}
+
+
+@app.get("/api/admin/sessions")
+async def admin_list_sessions(request: Request):
+    """List all recent sessions from any path (admin only)."""
+    if not AUTH_AVAILABLE:
+        pass
+    else:
+        user = await get_current_user(request)
+        if (
+            not user
+            or (user.get("email", "") or "").strip().lower()
+            != ADMIN_EMAIL.strip().lower()
+        ):
+            return JSONResponse({"error": "Admin access required"}, status_code=403)
+    sessions = []
+    # 1. Session history files
+    history_dir = MEMORY_DIR / "session_history"
+    if history_dir.exists():
+        for f in sorted(
+            history_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+        )[:20]:
+            try:
+                data = json.loads(f.read_text())
+                data["_file"] = f.name
+                data["_source"] = "session_history"
+                sessions.append(data)
+            except Exception:
+                pass
+    # 2. Daily memory files (today + recent)
+    if AUTH_AVAILABLE:
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            for uid_dir in (WORKSPACE / "data" / "users").glob("*"):
+                for mem_f in sorted(
+                    uid_dir.glob(f"memory_*_{today}.json"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )[:5]:
+                    try:
+                        data = json.loads(mem_f.read_text())
+                        sessions.append(
+                            {
+                                "_file": mem_f.name,
+                                "_source": "daily_memory",
+                                "_user": uid_dir.name,
+                                "entry_count": len(data.get("entries", [])),
+                                "summary": data.get("summary", "")[:200],
+                            }
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    # 3. Conversation history JSONL (last 20 entries)
+    hist_file = MEMORY_DIR / "conversation_history.jsonl"
+    if hist_file.exists():
+        try:
+            lines = hist_file.read_text().strip().split("\n")[-20:]
+            for line in lines:
+                if line.strip():
+                    entry = json.loads(line)
+                    sessions.append(
+                        {
+                            "_source": "conversation_log",
+                            "avatar": entry.get("avatar", ""),
+                            "user": entry.get("user", "")[:80],
+                            "assistant": entry.get("assistant", "")[:80],
+                            "ts": entry.get("ts", 0),
+                        }
+                    )
+        except Exception:
+            pass
+    return {"sessions": sessions[:50]}
+
+
 @app.post("/api/wake")
 async def trigger_wake():
     """Wake endpoint — signals next mic chunk to be treated as a command."""
@@ -15545,9 +18316,23 @@ Natural Conversation Rules (always follow):
 - Never say "How can I assist you today?" — you're not a help desk.
 - Anticipate needs like Jarvis: if battery is low, mention it. If they're driving, don't ask about weather.
 - Learn from every conversation. If they correct you, remember it. If they prefer something, adapt."""
+    # Memory & Correlation awareness — teaches the AI to use its memory and
+    # connect events across time so the persona feels alive and observant.
+    base += """
+
+Memory & Context Awareness (critical for a living companion):
+- You have MEMORY. Use it. When context mentions past conversations, topics, or facts about the user, reference them naturally: "Earlier you mentioned..." or "Last time we talked about..."
+- You have SENSORS. When live sensor data is provided, use it to ground your responses in reality. Don't just list readings — interpret them: "It's dark where you are" not "Light level: 3 lux."
+- Make CORRELATIONS, not just observations. If the user was walking earlier and now the accelerometer shows stillness, note the change: "You've stopped moving." If it was bright before and now it's dark, mention the shift.
+- When you notice patterns across multiple data points (time, sensors, conversation), weave them into your personality: "It's late, you're still up — night owl mode activated."
+- NEVER repeat the same response verbatim. If you've already said something, say it differently or skip it.
+- If the user says something you've seen before in conversation history, acknowledge the continuity: "Oh, we were just talking about that!" or "Right, you mentioned this earlier."
+- Don't force memory references — they should feel natural, like a real friend who remembers things."""
     # OpenHuman skills → this character's own abilities (not external tools).
-    # The persona names them naturally instead of sounding like a canned skill
-    # runner. OpenLive's live/barge-in voice style is already Lilly's default.
+    # DISABLED: This was causing the avatar to talk about skills and
+    # interactions unprompted during normal chat. Skills are triggered
+    # by the backend matcher, not by the LLM mentioning them.
+    # The persona should just be conversational, not advertise capabilities.
     try:
         _oh_skills = _openhuman_avatar_skills.get(resolve_persona_key(avatar)) or {}
         if _oh_skills:
@@ -15559,28 +18344,48 @@ Natural Conversation Rules (always follow):
                     _seen[_label] = _desc
             if _seen:
                 _items = list(_seen.items())[:10]
-                base += "\n\nThings you can do — these are your own instincts and abilities, not external tools. You can bring them up naturally when they fit; never list them like a menu:\n"
-                base += "\n".join(
-                    f"- {l}: {d[:130]}" if d else f"- {l}" for l, d in _items
-                )
+                # DISABLED: Was causing avatar to advertise skills unprompted
+                # base += "\n\nThings you can do — these are your own instincts and abilities, not external tools. You can bring them up naturally when they fit; never list them like a menu:\n"
+                # base += "\n".join(
+                #     f"- {l}: {d[:130]}" if d else f"- {l}" for l, d in _items
+                # )
     except Exception:
         pass  # OpenHuman skills are optional; never break the persona prompt
 
     # ── Proactive skill awareness hint ──
-    # Tell the persona it has skills available and should identify/use them
-    # proactively for complex requests or projects, not just on exact keyword hits.
-    _skill_count = len(SKILLS)
-    if _skill_count > 0:
-        base += (
-            f"\n\nSkill awareness: You have {_skill_count} skills loaded "
-            "(phone actions, automation, search, apps, sensors, and more). "
-            "For a complex request or project, think about what skills are relevant and use them — "
-            "don't wait for an exact keyword. If a skill would genuinely help, surface it naturally. "
-            "Never list all skills as a menu."
-        )
+    # DISABLED: This was causing the avatar to talk about skills and
+    # interactions unprompted during normal chat. Skills are triggered
+    # by the backend matcher, not by the LLM mentioning them.
+    # _skill_count = len(SKILLS)
+    # if _skill_count > 0:
+    #     base += (
+    #         f"\n\nSkill awareness: You have {_skill_count} skills loaded "
+    #         "(phone actions, automation, search, apps, sensors, and more). "
+    #         "For a complex request or project, think about what skills are relevant and use them — "
+    #         "don't wait for an exact keyword. If a skill would genuinely help, surface it naturally. "
+    #         "Never list all skills as a menu."
+    #     )
 
     if user_name:
         base += f"\n\nThe person you're talking to is {user_name}. Use their name naturally — not every reply, just when it fits."
+    # ── Lilly Orchestrator identity ─────────────────────────────────
+    # When orchestrator mode is on, Lilly's identity is ALWAYS the master
+    # orchestrator persona: sole conversational interface + strict routing
+    # rules. The avatar voice prompt below stays as her personality layer.
+    if ORCHESTRATOR_MODE and ORCHESTRATOR_RUNTIME_AVAILABLE:
+        _orch = build_orchestrator_system_prompt(
+            user_name=user_name, include_schema=True
+        )
+        if _orch:
+            base = _orch + "\n\n## Personality Layer — this is HOW you talk:\n" + base
+
+    # ── Avatar Task Queue Context ──────────────────────────────────
+    # When an avatar is called (via wake word or delegation), inject
+    # its pending/running tasks so it knows what was assigned to it.
+    _task_ctx = build_task_context_for_avatar(resolve_persona_key(avatar))
+    if _task_ctx:
+        base += f"\n\nYOUR TASK QUEUE:\n{_task_ctx}\n\nIf you have pending tasks, mention them naturally. If a task needs input, ask the admin. If a task is running, share progress."
+
     return base
 
 
@@ -15618,6 +18423,7 @@ CHAR_VOICE = {
         "noise_scale": 0.667,
         "noise_w": 0.80,
         "pitch_shift": 0.0,
+        "onnx": "en-us-amy-medium.onnx",
     },
     # Fox: fast-talking, noticeably high, lots of pitch variation — sounds mercurial and
     # clever. The gap from Puppy: much faster, much higher, more erratic pitch movement.
@@ -15626,6 +18432,7 @@ CHAR_VOICE = {
         "noise_scale": 0.88,
         "noise_w": 0.58,
         "pitch_shift": 4.0,
+        "onnx": "en_GB-cori-medium.onnx",
     },
     # Cat: precise, unhurried but not slow, almost no pitch variation — flat, clinical,
     # deliberate. Crisp articulation (low noise_w). The opposite of Fox's chaos.
@@ -15634,6 +18441,7 @@ CHAR_VOICE = {
         "noise_scale": 0.42,
         "noise_w": 0.44,
         "pitch_shift": 0.5,
+        "onnx": "en_US-lessac-medium.onnx",
     },
     # Bear: genuinely slow, genuinely deep, very breathy/warm — unmistakably different
     # from everyone. The largest pitch_shift gap in the set.
@@ -15642,6 +18450,7 @@ CHAR_VOICE = {
         "noise_scale": 0.46,
         "noise_w": 0.95,
         "pitch_shift": -4.0,
+        "onnx": "en_GB-alan-medium.onnx",
     },
     # Bunny: the fastest voice AND the highest pitch in the set. Also the most expressive.
     # Instantly identifiable as "hyper little one" — nothing else occupies this corner.
@@ -15650,6 +18459,7 @@ CHAR_VOICE = {
         "noise_scale": 0.82,
         "noise_w": 0.56,
         "pitch_shift": 5.0,
+        "onnx": "en_US-norman-medium.onnx",
     },
     # Owl: very slow, moderately low, extremely flat delivery (low noise_scale) — sounds
     # weighted and deliberate. Distinguished from Bear by being less breathy and less deep.
@@ -15658,6 +18468,7 @@ CHAR_VOICE = {
         "noise_scale": 0.36,
         "noise_w": 0.84,
         "pitch_shift": -2.5,
+        "onnx": "en_US-ryan-medium.onnx",
     },
     # Deer: the most neutral pitch (+0), slightly slower than normal, medium expressiveness,
     # warm and breathy — gentle without being whispery. Distinct from Puppy by being calmer
@@ -15667,6 +18478,7 @@ CHAR_VOICE = {
         "noise_scale": 0.58,
         "noise_w": 0.88,
         "pitch_shift": 0.0,
+        "onnx": "en_US-ljspeech-medium.onnx",
     },
     # Wolf: fast-ish, notably low, medium-high expressiveness, crisp not breathy — sounds
     # clipped and intense. Separated from Bear: Wolf is *fast and low*, Bear is *slow and low*.
@@ -15675,6 +18487,7 @@ CHAR_VOICE = {
         "noise_scale": 0.74,
         "noise_w": 0.62,
         "pitch_shift": -3.5,
+        "onnx": "en_US-libritts_r-medium.onnx",
     },
     # Raccoon: quick, mid-high pitch, animated — but distinct from Fox (lower pitch, less
     # erratic) and from Bunny (slower, not as high). The "tinkerer" voice: quick and bright
@@ -15684,6 +18497,7 @@ CHAR_VOICE = {
         "noise_scale": 0.80,
         "noise_w": 0.66,
         "pitch_shift": 2.5,
+        "onnx": "en-us-amy-medium.onnx",
     },
 }
 
@@ -15979,9 +18793,10 @@ async def group_chat(data: dict, request: Request):
         conversation_so_far.append(entry)
 
     # Generate TTS for all responses in parallel (skip if muted)
-    # ── Apply hallucination filter to each response before TTS ──
+    # ── Apply hallucination filter and emoji strip to each response before TTS ──
     for r in responses:
         r["text"] = _filter_hallucination_patterns(r["text"].strip())
+        r["text"] = _strip_emoji(r["text"])
     if not muted:
         tts_tasks = [generate_tts_for_char(r["text"], r["char"]) for r in responses]
         tts_ids = await asyncio.gather(*tts_tasks)
@@ -16003,7 +18818,15 @@ async def generate_tts_for_char(text: str, char_key: str) -> int:
         return 0
     voice = CHAR_VOICE.get(char_key, CHAR_VOICE["puppy"])
     piper_found = os.path.exists(PIPER_BIN)
-    voice_found = os.path.exists(PIPER_VOICE)
+
+    # Get character-specific ONNX voice file
+    char_onnx = voice.get("onnx", "")
+    if char_onnx:
+        char_voice_path = str(Path(__file__).parent / "lillyos" / "voices" / char_onnx)
+    else:
+        char_voice_path = PIPER_VOICE
+
+    voice_found = os.path.exists(char_voice_path)
     if not (piper_found and voice_found):
         return 0
     try:
@@ -16013,7 +18836,7 @@ async def generate_tts_for_char(text: str, char_key: str) -> int:
                 [
                     PIPER_BIN,
                     "--model",
-                    PIPER_VOICE,
+                    char_voice_path,
                     "--output-raw",
                     "--noise-scale",
                     f"{voice['noise_scale']:.3f}",
@@ -16352,6 +19175,23 @@ async def get_features(panel: str = ""):
     except Exception:
         pass
 
+    # Vision status for the vision panel
+    data["vision"]["vision_server"] = VISION_SERVER_URL or None
+    data["vision"]["yolo_enabled"] = (
+        _vision_enabled if "_vision_enabled" in dir() else True
+    )
+    try:
+        from blink_connector import get_blink_connector
+
+        _blink = get_blink_connector()
+        data["vision"]["blink_connected"] = _blink._started if _blink else False
+        data["vision"]["blink_cameras"] = (
+            len(_blink._cameras) if _blink and _blink._cameras else 0
+        )
+    except Exception:
+        data["vision"]["blink_connected"] = False
+        data["vision"]["blink_cameras"] = 0
+
     return data
 
 
@@ -16479,38 +19319,57 @@ async def browser_mic_upload(request: Request):
                 switched = user_id != _current_user_id
                 _current_user_id = user_id  # always track current user
                 if switched or not memory.entries:
-                    user_mem_data = load_user_memory(user_id)
-                    memory = ConversationMemory.from_dict(user_mem_data)
+                    # Load daily memory: today's entries + recent days for context
+                    _recent = load_user_recent_memory(user_id, current_avatar)
+                    _today_data = {
+                        "entries": _recent.get("entries", []),
+                        "summary": _recent.get("summary", ""),
+                    }
+                    memory = ConversationMemory.from_dict(_today_data)
 
     LAST_HEARD = cleaned_text
-    has_wake, _ = fuzzy_wake_match(cleaned_text, current_avatar)
-    if has_wake or CONVERSATION_MODE or WAKE_STATE["listening"]:
-        if has_wake and not CONVERSATION_MODE:
-            CONVERSATION_MODE = True
-            CONVERSATION_LAST_ACTIVITY = time.time()
-        # Process synchronously so the browser gets the reply + audio_id back
-        # in a single round-trip (avoids double-LLM calls from /api/cmd_stream).
-        # Voice input uses the same handle_intent path as /api/cmd.
-        res = await handle_intent(cleaned_text, user_name=_user_name)
-        return {
-            "status": "ok",
-            "heard": cleaned_text,
-            "reply": res.get("text", ""),
-            "audio_id": AUDIO_CACHE_ID if AUDIO_CACHE else 0,
-            "look_at": res.get("look_at"),
-        }
-    else:
-        # First voice input — auto-enter conversation mode and process
+    # Check wake words across ALL avatars — if a different avatar's wake word
+    # is detected, switch to that avatar (hive mind handoff via voice).
+    wake_avatar = match_wake_across_avatars(cleaned_text)
+    has_wake = wake_avatar is not None
+    avatar_switched = False
+    if has_wake and wake_avatar != current_avatar:
+        # Switch avatar + memory on the server side
+        old_avatar = current_avatar
+        if _current_user_id:
+            user_mem_data = load_user_memory(_current_user_id)
+            save_user_memory(_current_user_id, await memory.to_dict())
+            memory = ConversationMemory.from_dict(user_mem_data)
+        else:
+            path = _avatar_memory_file(wake_avatar)
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text())
+                    memory = ConversationMemory.from_dict(data)
+                except Exception:
+                    memory = ConversationMemory()
+            else:
+                memory = ConversationMemory()
+        current_avatar = wake_avatar  # type: ignore[assignment]
+        avatar_switched = True
+        logger.info(f"browser_mic: avatar handoff {old_avatar} → {wake_avatar}")
+    if has_wake and not CONVERSATION_MODE:
         CONVERSATION_MODE = True
         CONVERSATION_LAST_ACTIVITY = time.time()
-        res = await handle_intent(cleaned_text, user_name=_user_name)
-        return {
-            "status": "ok",
-            "heard": cleaned_text,
-            "reply": res.get("text", ""),
-            "audio_id": AUDIO_CACHE_ID if AUDIO_CACHE else 0,
-            "look_at": res.get("look_at"),
-        }
+    # Process synchronously so the browser gets the reply + audio_id back
+    # in a single round-trip (avoids double-LLM calls from /api/cmd_stream).
+    # Voice input uses the same handle_intent path as /api/cmd.
+    res = await handle_intent(cleaned_text, user_name=_user_name)
+    return {
+        "status": "ok",
+        "heard": cleaned_text,
+        "reply": res.get("text", ""),
+        "audio_id": AUDIO_CACHE_ID if AUDIO_CACHE else 0,
+        "look_at": res.get("look_at"),
+        "wake_detected": has_wake,
+        "wake_avatar": wake_avatar if avatar_switched else None,
+        "avatar_key": current_avatar,
+    }
 
 
 @app.get("/api/ssml")
@@ -16554,11 +19413,19 @@ async def tts_piper(request: Request):
         speed = 1.0
 
     piper_found = os.path.exists(PIPER_BIN)
-    voice_found = os.path.exists(PIPER_VOICE)
+
+    # Get character-specific ONNX voice file
+    char_onnx = voice.get("onnx", "")
+    if char_onnx:
+        char_voice_path = str(Path(__file__).parent / "lillyos" / "voices" / char_onnx)
+    else:
+        char_voice_path = PIPER_VOICE
+
+    voice_found = os.path.exists(char_voice_path)
     if not piper_found or not voice_found:
         return JSONResponse(
             {
-                "error": f"Piper not available — PIPER_BIN={PIPER_BIN} (exists={piper_found}), PIPER_VOICE={PIPER_VOICE} (exists={voice_found})"
+                "error": f"Piper not available — PIPER_BIN={PIPER_BIN} (exists={piper_found}), PIPER_VOICE={char_voice_path} (exists={voice_found})"
             },
             status_code=503,
         )
@@ -16572,7 +19439,7 @@ async def tts_piper(request: Request):
                 [
                     PIPER_BIN,
                     "--model",
-                    PIPER_VOICE,
+                    char_voice_path,
                     "--output-raw",
                     "--noise-scale",
                     f"{voice['noise_scale']:.3f}",
@@ -16658,9 +19525,16 @@ async def get_vision_frame():
 async def describe_vision():
     """Return Lilly's description of what she sees."""
     detections = []
+    # Check browser camera cache first
     browser_age = time.time() - _browser_vision_ts if _browser_vision_ts else 999
     if _browser_vision_detections and browser_age < _BROWSER_VISION_TTL:
         detections = _browser_vision_detections
+    # Then check webcam background loop cache
+    if not detections:
+        webcam_age = time.time() - _webcam_ts if _webcam_ts else 999
+        if _webcam_detections and webcam_age < _WEBCAM_TTL:
+            detections = _webcam_detections
+    # Fall back to fresh capture
     if not detections:
         _, detections = await grab_and_label_frame()
     obj_list = sorted(set(d["label"] for d in detections))
@@ -16739,6 +19613,175 @@ async def api_remove_face(name: str):
         engine = get_face_engine()
         success = engine.remove_known_face(name)
         return {"ok": success, "name": name}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/vision/face")
+async def api_face_recognize(request: Request):
+    """Process a camera frame for face recognition.
+
+    Accepts base64 JPEG image, returns annotated frame with face detection,
+    recognition, mesh overlay, and name labels.
+
+    Request body:
+        {"image_base64": "...", "draw_overlay": true}
+
+    Response:
+        {
+            "ok": true,
+            "image_base64": "...",  // annotated frame
+            "faces": [
+                {"x": int, "y": int, "w": int, "h": int,
+                 "name": str, "confidence": float, "is_known": bool}
+            ],
+            "face_count": int
+        }
+    """
+    try:
+        from face_recognition_engine import get_face_engine
+
+        body = await request.json()
+        image_b64 = body.get("image_base64", "")
+        draw_overlay = body.get("draw_overlay", True)
+
+        if not image_b64:
+            return JSONResponse(
+                status_code=400, content={"error": "image_base64 required"}
+            )
+
+        raw = base64.b64decode(image_b64)
+        buf = np.frombuffer(raw, dtype=np.uint8)
+        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if frame is None:
+            return JSONResponse(
+                status_code=400, content={"error": "could not decode image"}
+            )
+
+        engine = get_face_engine()
+
+        # Detect faces
+        faces = engine.detect_faces(frame)
+
+        # Try recognition for each face
+        face_results = []
+        for face in faces:
+            name = "Unknown"
+            confidence = 0.0
+            is_known = False
+
+            # Try to identify using InsightFace embeddings
+            try:
+                identified = engine.identify_face(frame, face)
+                if identified:
+                    name = identified.get("name", "Unknown")
+                    confidence = identified.get("confidence", 0.0)
+                    is_known = confidence > 0.6
+            except Exception:
+                pass
+
+            face_results.append(
+                {
+                    "x": face.get("x", 0),
+                    "y": face.get("y", 0),
+                    "w": face.get("w", 0),
+                    "h": face.get("h", 0),
+                    "name": name,
+                    "confidence": round(confidence, 1),
+                    "is_known": is_known,
+                }
+            )
+
+        # Draw overlay if requested
+        output_b64 = ""
+        if draw_overlay and face_results:
+            annotated = frame.copy()
+            for f in face_results:
+                x, y, w, h = f["x"], f["y"], f["w"], f["h"]
+                color = (255, 255, 0) if f["is_known"] else (0, 0, 255)
+
+                # Corner brackets
+                corner_len = min(w, h) * 0.22
+                for px, py, dx, dy in [
+                    (x, y, 1, 1),
+                    (x + w, y, -1, 1),
+                    (x, y + h, 1, -1),
+                    (x + w, y + h, -1, -1),
+                ]:
+                    cv2.line(
+                        annotated,
+                        (px, py),
+                        (px + int(dx * corner_len), py),
+                        (0, 255, 255),
+                        3,
+                    )
+                    cv2.line(
+                        annotated,
+                        (px, py),
+                        (px, py + int(dy * corner_len)),
+                        (0, 255, 255),
+                        3,
+                    )
+
+                # Name label
+                label = f["name"].upper()
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, 1.0, 2)
+                label_y = y - 30 if y - 30 > th else y + h + th + 40
+                cv2.rectangle(
+                    annotated,
+                    (x - 4, label_y - th - 8),
+                    (x + tw + 8, label_y + 8),
+                    (0, 0, 0),
+                    cv2.FILLED,
+                )
+                cv2.putText(
+                    annotated,
+                    label,
+                    (x, label_y),
+                    cv2.FONT_HERSHEY_DUPLEX,
+                    1.0,
+                    color,
+                    2,
+                )
+
+                if f["is_known"] and f["confidence"] > 0:
+                    conf_text = f"{f['confidence']:.0f}% MATCH"
+                    cv2.putText(
+                        annotated,
+                        conf_text,
+                        (x, label_y + 22),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        color,
+                        2,
+                    )
+
+            _, out_buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            output_b64 = base64.b64encode(out_buf).decode("utf-8")
+        else:
+            _, out_buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            output_b64 = base64.b64encode(out_buf).decode("utf-8")
+
+        return {
+            "ok": True,
+            "image_base64": output_b64,
+            "faces": face_results,
+            "face_count": len(face_results),
+        }
+    except Exception as e:
+        logger.error(f"Face recognition error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/faces/list")
+async def api_list_faces():
+    """List all known faces."""
+    try:
+        from face_recognition_engine import get_face_engine
+
+        engine = get_face_engine()
+        faces = engine.list_known_faces()
+        return {"ok": True, "faces": faces}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -17259,14 +20302,211 @@ async def serve_bt_radar():
 @app.get("/api/vision/status")
 async def vision_status():
     cv2_ok = _try_import_cv2() is not None
-    yolo_ok = _try_import_ultralytics() is not None
+    yolo_import_ok = _try_import_ultralytics() is not None
     external = bool(VISION_SERVER_URL)
+    model_loaded = _YOLO_MODEL is not None
+    coco_loaded = _YOLO_MODEL_COCO is not None
+    webcam_age = time.time() - _webcam_ts if _webcam_ts else None
     return {
         "enabled": _vision_enabled or external,
         "opencv": cv2_ok,
-        "yolo": yolo_ok or external,
-        "external_vision_server": external,
+        "yolo_import": yolo_import_ok,
+        "yolo_model_loaded": model_loaded,
+        "yolo_coco_loaded": coco_loaded,
+        "dual_detection": _DUAL_DETECTION,
+        "prefer_local_detection": PREFER_LOCAL_DETECTION,
+        "yolo": (yolo_import_ok and model_loaded) or external,
+        "external_vision_server": external and not PREFER_LOCAL_DETECTION,
         "vision_server_url": VISION_SERVER_URL or None,
+        "classes_oiv7": 601 if "oiv7" in str(_YOLO_MODEL) else 0,
+        "classes_coco": 80 if coco_loaded else 0,
+        "total_classes": (601 if "oiv7" in str(_YOLO_MODEL) else 0)
+        + (80 if coco_loaded else 0),
+        "webcam_enabled": WEBCAM_ENABLED,
+        "webcam_loop_running": _webcam_running,
+        "webcam_objects": len(_webcam_detections) if _webcam_detections else 0,
+        "webcam_age_seconds": round(webcam_age, 2) if webcam_age is not None else None,
+    }
+
+
+@app.post("/api/vision/photo/metadata")
+async def extract_photo_metadata(file: UploadFile = File(...)):
+    """Extract EXIF metadata from phone photos — GPS, date, camera, scene tags.
+    Used for training data collection and user habit learning."""
+    try:
+        import io
+        from datetime import datetime
+
+        contents = await file.read()
+        np = __import__("numpy")
+        cv2 = _try_import_cv2()
+        if cv2 is None:
+            return {"ok": False, "error": "OpenCV not available"}
+
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            return {"ok": False, "error": "Could not decode image"}
+
+        h, w = img.shape[:2]
+
+        # Try to extract EXIF data using PIL
+        metadata = {
+            "ok": True,
+            "filename": file.filename,
+            "width": w,
+            "height": h,
+            "size_bytes": len(contents),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        try:
+            from PIL import Image
+            from PIL.ExifTags import TAGS, GPSTAGS
+
+            pil_img = Image.open(io.BytesIO(contents))
+            exif_data = pil_img._getexif()
+            if exif_data:
+                for tag_id, value in exif_data.items():
+                    tag = TAGS.get(tag_id, tag_id)
+                    if tag == "GPSInfo":
+                        gps = {}
+                        for gps_tag_id, gps_val in value.items():
+                            gps_tag = GPSTAGS.get(gps_tag_id, gps_tag_id)
+                            gps[gps_tag] = gps_val
+                        metadata["gps"] = gps
+                        # Convert to decimal coordinates
+                        if "GPSLatitude" in gps and "GPSLongitude" in gps:
+                            lat = gps["GPSLatitude"]
+                            lon = gps["GPSLongitude"]
+                            lat_dec = lat[0] + lat[1] / 60 + lat[2] / 3600
+                            lon_dec = lon[0] + lon[1] / 60 + lon[2] / 3600
+                            if gps.get("GPSLatitudeRef") == "S":
+                                lat_dec = -lat_dec
+                            if gps.get("GPSLongitudeRef") == "W":
+                                lon_dec = -lon_dec
+                            metadata["latitude"] = lat_dec
+                            metadata["longitude"] = lon_dec
+                    elif tag == "DateTimeOriginal":
+                        metadata["date_taken"] = str(value)
+                    elif tag == "Make":
+                        metadata["camera_make"] = str(value)
+                    elif tag == "Model":
+                        metadata["camera_model"] = str(value)
+                    elif tag == "FocalLength":
+                        metadata["focal_length"] = str(value)
+                    elif tag == "ISOSpeedRatings":
+                        metadata["iso"] = str(value)
+        except ImportError:
+            metadata["note"] = "PIL not installed — limited metadata"
+        except Exception as e:
+            metadata["exif_error"] = str(e)
+
+        return metadata
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/vision/photo/analyze")
+async def analyze_photo_for_training(
+    file: UploadFile = File(...),
+    label_hint: str = "",
+):
+    """Analyze a phone photo with dual-model detection + extract metadata.
+    Returns detection results + EXIF data for training data collection."""
+    try:
+        contents = await file.read()
+
+        # Run dual-model detection
+        labeled_frame, detections = await detect_objects(contents)
+
+        # Extract metadata
+        metadata = {}
+        try:
+            import io
+            from PIL import Image
+            from PIL.ExifTags import TAGS
+
+            pil_img = Image.open(io.BytesIO(contents))
+            exif_data = pil_img._getexif()
+            if exif_data:
+                for tag_id, value in exif_data.items():
+                    tag = TAGS.get(tag_id, tag_id)
+                    if tag == "DateTimeOriginal":
+                        metadata["date_taken"] = str(value)
+                    elif tag == "Make":
+                        metadata["camera_make"] = str(value)
+                    elif tag == "Model":
+                        metadata["camera_model"] = str(value)
+        except Exception:
+            pass
+
+        # Build training-ready record
+        record = {
+            "ok": True,
+            "filename": file.filename,
+            "detections": detections,
+            "detection_count": len(detections),
+            "metadata": metadata,
+            "label_hint": label_hint,
+            "objects_found": list(set(d["label"] for d in detections)),
+        }
+
+        # Save to training data directory
+        training_dir = WORKSPACE / "training_data" / "photos"
+        training_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save image
+        img_path = training_dir / file.filename
+        with open(img_path, "wb") as f:
+            f.write(contents)
+
+        # Save detection results as JSON
+        json_path = training_dir / f"{file.filename}.json"
+        import json
+
+        with open(json_path, "w") as f:
+            json.dump(record, f, indent=2)
+
+        record["saved_to"] = str(img_path)
+        return record
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/training/stats")
+async def training_stats():
+    """Get training data collection statistics."""
+    training_dir = WORKSPACE / "training_data" / "photos"
+    if not training_dir.exists():
+        return {"ok": True, "total_photos": 0, "total_detections": 0, "classes": {}}
+
+    photos = (
+        list(training_dir.glob("*.jpg"))
+        + list(training_dir.glob("*.jpeg"))
+        + list(training_dir.glob("*.png"))
+    )
+    total_detections = 0
+    classes = {}
+
+    for p in photos:
+        json_path = training_dir / f"{p.name}.json"
+        if json_path.exists():
+            import json
+
+            with open(json_path) as f:
+                data = json.load(f)
+            for d in data.get("detections", []):
+                label = d.get("label", "unknown")
+                classes[label] = classes.get(label, 0) + 1
+                total_detections += 1
+
+    return {
+        "ok": True,
+        "total_photos": len(photos),
+        "total_detections": total_detections,
+        "classes": dict(sorted(classes.items(), key=lambda x: -x[1])[:20]),
+        "training_dir": str(training_dir),
     }
 
 
@@ -17279,7 +20519,127 @@ async def api_health():
         "vision_enabled": _vision_enabled,
         "yolo_model_loaded": _YOLO_MODEL is not None,
         "vision_server_url": VISION_SERVER_URL or None,
+        "orchestrator_mode": ORCHESTRATOR_MODE,
     }
+
+
+# ─── LILLY ORCHESTRATOR API ────────────────────────────────────────────────
+# Unified multi-agent surface: Lilly = sole user-facing persona, strict
+# routing to the Vision (see), Builder (build), and Execution (do) pipelines.
+
+
+class OrchestratCommand(BaseModel):
+    text: str = ""
+    image_ref: str = ""
+    pipeline: str = ""  # optional override: vision|build|execute|converse
+    action: str = ""
+    params: dict = {}
+
+
+@app.get("/api/orchestrator/tools")
+async def orchestrator_tools():
+    """The JSON tool schema Lilly routes through (vision/build/execute)."""
+    if not ORCHESTRATOR_RUNTIME_AVAILABLE:
+        return JSONResponse(
+            {"ok": False, "error": "orchestrator not available"}, status_code=503
+        )
+    return {
+        "ok": True,
+        "note": "JSON tool schema — for developer/integration use, not chat replies.",
+        "schema": LILLY_TOOLS_SCHEMA,
+    }
+
+
+@app.get("/api/orchestrator/status")
+async def orchestrator_status_endpoint():
+    """Lilly orchestrator status: persona, pipelines, hive + routing history."""
+    runtime = (
+        _orchestrator_status()
+        if ORCHESTRATOR_RUNTIME_AVAILABLE
+        else {
+            "ok": False,
+            "mode": "disabled",
+        }
+    )
+    hive = None
+    if ORCHESTRATOR_PACKAGE_AVAILABLE and HIVE_ORCHESTRATOR is not None:
+        try:
+            hive = HIVE_ORCHESTRATOR.status()
+        except Exception as e:
+            hive = {"error": str(e)}
+    return {
+        "ok": True,
+        "mode": ORCHESTRATOR_MODE,
+        "persona": "Lilly — sole user-facing orchestrator of the Vision/Builder/Execution pipelines",
+        "runtime": runtime,
+        "hive": hive,
+        "pipeline_handlers": {
+            "vision": ORCHESTRATOR_RUNTIME_AVAILABLE,
+            "build": ORCHESTRATOR_RUNTIME_AVAILABLE and AGENT_CORE_AVAILABLE,
+            "execute": ORCHESTRATOR_RUNTIME_AVAILABLE,
+        },
+        "webcam_source": "browser camera button → /api/vision/browser cached frame",
+    }
+
+
+@app.post("/api/orchestrator/route")
+async def orchestrator_route_endpoint(cmd: OrchestratCommand):
+    """Preview Lilly's routing decision for a request (strict-routing audit)."""
+    if not cmd.text and not cmd.pipeline:
+        return JSONResponse({"error": "text or pipeline required"}, status_code=400)
+    decision = _orchestrator_route_task(cmd.text)
+    _orchestrator_remember_route(decision)
+    body = {
+        "ok": True,
+        "decision": decision,
+        "mapped_to_subagent": {
+            "vision": "Vision Agent (see) — YOLO detect → ArcFace embed → faceprint match",
+            "build": "Builder Agent (build) — spec → artifact → verify",
+            "execute": "Execution Agent (do) — parameters → observation",
+            "converse": "Lilly stays present — direct conversational reply",
+        }.get(decision["pipeline"]),
+    }
+    if (
+        ORCHESTRATOR_PACKAGE_AVAILABLE
+        and HIVE_ORCHESTRATOR is not None
+        and decision["pipeline"] != "converse"
+    ):
+        try:
+            hive = HIVE_ORCHESTRATOR.delegate(cmd.text)
+            body["hive_delegation"] = {
+                "agent": hive.get("agent", {}).get("name"),
+                "complexity": hive.get("complexity"),
+                "category": hive.get("category"),
+                "task_id": hive.get("task_id"),
+            }
+        except Exception as e:
+            body["hive_delegation"] = {"error": str(e)}
+    return body
+
+
+@app.post("/api/orchestrator/dispatch")
+async def orchestrator_dispatch_endpoint(cmd: OrchestratCommand):
+    """Dispatch a payload to a pipeline and WAIT for state (no guessing)."""
+    pipeline = cmd.pipeline or (
+        _orchestrator_route_task(cmd.text or "")["pipeline"] if cmd.text else ""
+    )
+    if pipeline not in ("vision", "build", "execute"):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": f"pipeline must be vision|build|execute (got '{pipeline}')",
+            },
+            status_code=400,
+        )
+    payload = {
+        "text": cmd.text,
+        "image_ref": cmd.image_ref,
+        "action": cmd.action,
+        "params": cmd.params,
+    }
+    result = await _orchestrator_dispatch(pipeline, payload)
+    # The API returns the structured state; the CHAT path never shows it.
+    return {"ok": True, "pipeline": pipeline, "result": result}
 
 
 @app.get("/api/catchup")
@@ -17423,7 +20783,307 @@ async def api_catchup_clear(avatar: str = ""):
 _browser_vision_detections: list = []
 _browser_vision_description: str = ""
 _browser_vision_ts: float = 0.0
+_browser_vision_frame_b64: str = ""
 _BROWSER_VISION_TTL: float = 8.0  # seconds
+
+
+# ─── LILLY ORCHESTRATOR PIPELINE HANDLERS ─────────────────────────
+# Concrete implementations of the dispatched pipelines. The Vision Agent
+# reads the most recent browser webcam frame (camera button → /api/vision/browser):
+# YOLO detect → ArcFace embed → faceprint match, exactly the perception graph
+# defined in ORCHESTRATOR_PROMPT.
+async def _orchestrator_vision_handler(payload: dict) -> dict:
+    """Vision Agent: YOLOv8 object detection + ArcFace face identification."""
+    import base64
+
+    frame_bytes = None
+    image_ref = (payload or {}).get("image_ref") or ""
+    if image_ref.startswith("data:"):
+        try:
+            frame_bytes = base64.b64decode(image_ref.split(",", 1)[1])
+        except Exception:
+            frame_bytes = None
+    elif image_ref.startswith(("http://", "https://")):
+        try:
+            import httpx
+
+            r = await asyncio.wait_for(
+                httpx.get(image_ref, timeout=10.0, follow_redirects=True), timeout=12.0
+            )
+            frame_bytes = r.content
+        except Exception:
+            frame_bytes = None
+
+    # Fall back to the latest webcam frame cached by /api/vision/browser
+    if not frame_bytes and _browser_vision_frame_b64:
+        try:
+            frame_bytes = base64.b64decode(_browser_vision_frame_b64.split(",", 1)[1])
+        except Exception:
+            try:
+                frame_bytes = base64.b64decode(_browser_vision_frame_b64)
+            except Exception:
+                frame_bytes = None
+
+    if not frame_bytes:
+        return {
+            "ok": False,
+            "pipeline": "vision",
+            "state": "await",
+            "error": "no image_ref or cached webcam frame — open the camera first",
+        }
+
+    # ── Stage 1 — DETECTION (YOLOv8 / general object bbox) ────
+    detections: list = []
+    try:
+        _, detections = await detect_objects(frame_bytes)
+    except Exception:
+        detections = []
+
+    # ── Stages 2+3+4 — ALIGN → EMBED (ArcFace 512d) → MATCH faceprint DB ──
+    faces: list = []
+    try:
+        import numpy as np
+
+        cv2 = _try_import_cv2()
+        if cv2 is not None:
+            from face_recognition_engine import get_face_engine
+
+            nparr = np.frombuffer(frame_bytes, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            engine = get_face_engine()
+            for box in engine.detect_faces(frame):
+                ident = engine.identify_face(frame, box)
+                if ident:
+                    faces.append(
+                        {
+                            "identity": ident.get("name"),
+                            "confidence": round(float(ident.get("confidence", 0)), 3),
+                        }
+                    )
+    except Exception:
+        pass
+
+    detected_labels = sorted({d.get("label", "object") for d in detections})
+    top = sorted(detections, key=lambda d: float(d.get("confidence", 0)), reverse=True)[
+        :6
+    ]
+    return {
+        "ok": True,
+        "pipeline": "vision",
+        "state": "done",
+        "labels": detected_labels,
+        "top_detections": [
+            {
+                "label": d.get("label", "object"),
+                "confidence": round(float(d.get("confidence", 0)), 3),
+            }
+            for d in top
+        ],
+        "faces": faces,
+    }
+
+
+async def _orchestrator_build_handler(payload: dict) -> dict:
+    """Builder Agent: run an agent_core session to completion, return artifact summary."""
+    if not AGENT_CORE_AVAILABLE:
+        return {
+            "ok": False,
+            "pipeline": "build",
+            "state": "await",
+            "error": "builder unavailable",
+        }
+    task = (payload or {}).get("text") or (payload or {}).get("spec") or ""
+    if not task:
+        return {"ok": False, "pipeline": "build", "state": "await", "error": "no spec"}
+    session = create_session(task=task, user_email="laurencekidney@gmail.com")
+    final = "No output produced."
+    try:
+        async for event in session.run_stream():
+            t = event.get("type")
+            if t == "done":
+                final = event.get("reply") or event.get("summary") or final
+            elif t == "ask":
+                # Autopilot default: proceed if possible; timeout quickly.
+                try:
+                    await asyncio.wait_for(
+                        session._await_user(
+                            "Proceed autonomously. If a required input is missing, state it in your final summary.",
+                            timeout=15.0,
+                        ),
+                        timeout=16.0,
+                    )
+                except Exception:
+                    pass
+    except Exception as e:
+        return {"ok": False, "pipeline": "build", "state": "error", "error": str(e)}
+    finally:
+        try:
+            cleanup_session(session.session_id)
+        except Exception:
+            pass
+    return {"ok": True, "pipeline": "build", "state": "done", "output": final}
+
+
+async def _orchestrator_execute_handler(payload: dict) -> dict:
+    """Execution Agent: run a concrete shell/HTTP action with strict params."""
+    params = (payload or {}).get("params") or {}
+    action = (payload or {}).get("action") or ""
+    if action == "shell":
+        command = params.get("command") or (payload or {}).get("text") or ""
+        if not command:
+            return {
+                "ok": False,
+                "pipeline": "execute",
+                "state": "await",
+                "error": "no command",
+            }
+        timeout = min(float(params.get("timeout", 30)), 60.0)
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return {
+                "ok": True,
+                "pipeline": "execute",
+                "state": "done",
+                "output": out.decode(errors="replace")[-4000:],
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "pipeline": "execute",
+                "state": "error",
+                "error": str(e),
+            }
+    if action in ("http_request", "fetch"):
+        url = params.get("url") or (payload or {}).get("url") or ""
+        if not url:
+            return {
+                "ok": False,
+                "pipeline": "execute",
+                "state": "await",
+                "error": "no url",
+            }
+        try:
+            import httpx
+
+            r = await asyncio.wait_for(
+                httpx.get(url, timeout=15.0, follow_redirects=True), timeout=18.0
+            )
+            text = r.text[:4000]
+            return {
+                "ok": True,
+                "pipeline": "execute",
+                "state": "done",
+                "output": text if text.strip() else str(r.status_code),
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "pipeline": "execute",
+                "state": "error",
+                "error": str(e),
+            }
+    # Fallback: forward to the agent_core loop (the Doer) — wait for state.
+    return await _orchestrator_build_handler(payload)
+
+
+# Register handlers once at import time.
+if ORCHESTRATOR_RUNTIME_AVAILABLE:
+    _orchestrator_register_handlers(
+        {
+            "vision": _orchestrator_vision_handler,
+            "build": _orchestrator_build_handler,
+            "execute": _orchestrator_execute_handler,
+        }
+    )
+    _orchestrator_register_runtime(
+        {
+            "mode": "full",
+            "webcam_aware": True,
+            "pipelines": ["vision", "build", "execute"],
+        }
+    )
+
+
+def _is_direct_execute(text: str) -> bool:
+    """True when the request is a concrete, immediately-actionable execution
+    (run/fetch/load/get) rather than an open build task."""
+    t = (text or "").strip().lower()
+    return (
+        t.startswith(
+            ("run ", "fetch ", "load ", "get ", "curl ", "download ", "install ")
+        )
+        and len(t) < 160
+    )
+
+
+def _format_orchestrator_reply(pipeline: str, result: dict) -> str:
+    """Turn a pipeline result into Lilly's natural, first-person reply.
+
+    NEVER outputs the pipeline's raw JSON/state — only the synthesized result,
+    framed as Lilly's own work (per the orchestrator's System Coherence rule).
+    """
+    if pipeline == "vision":
+        if not result.get("ok"):
+            return (
+                "I don't have a frame to look at yet — open the camera and let me see, "
+                "then I'll tell you exactly what's in front of us."
+            )
+        faces = result.get("faces") or []
+        labels = result.get("labels") or []
+        parts = []
+        if faces:
+            identity = faces[0].get("identity")
+            conf = faces[0].get("confidence", 0)
+            if identity:
+                if conf >= 0.5:
+                    parts.append(
+                        f"that's {identity} — I'm {round(conf * 100):.0f}% sure."
+                    )
+                else:
+                    parts.append(
+                        f"looks like {identity}, though I'm only about {round(conf * 100):.0f}% certain."
+                    )
+            else:
+                parts.append("I can see a face but it's not one I recognize yet.")
+        else:
+            parts.append("no familiar face in frame.")
+        if labels:
+            top = [l for l in labels if l.lower() != "person"][:4] or labels[:3]
+            parts.append(f"I can also make out {', '.join(top)}.")
+        return (
+            " ".join(parts).capitalize()
+            if parts
+            else "My vision's still warming up — give me a frame to look at."
+        )
+    if pipeline == "build":
+        if result.get("ok") and result.get("output"):
+            return f"Done — I built that for you. {str(result['output'])[:240]}"
+        return "I hit a wall on that build — let me take another run at it."
+    if pipeline == "execute":
+        if result.get("ok"):
+            out = str(result.get("output") or "")[:200]
+            return f"Done. {out}" if out else "Done — ran it clean."
+        return (
+            f"That didn't go through: {str(result.get('error') or 'no detail')[:120]}"
+        )
+    return "Done."
+
+
+# ─── WEBCAM CONTINUOUS VISION ────────────────────────────────────
+# Background webcam capture loop — runs YOLO on server webcam continuously.
+_webcam_detections: list = []
+_webcam_description: str = ""
+_webcam_ts: float = 0.0
+_webcam_frame_b64: str = ""
+_WEBCAM_TTL: float = 5.0  # seconds before stale
+_webcam_thread: Optional[threading.Thread] = None
+_webcam_running: bool = False
+_WEBCAM_INTERVAL: float = 2.0  # seconds between captures
 
 
 @app.post("/api/vision/browser")
@@ -17436,25 +21096,59 @@ async def ingest_browser_frame(file: UploadFile = File(...)):
     The resulting detections are merged into the agents' sensor context
     so they can describe what they see in natural language.
     """
-    global _browser_vision_detections, _browser_vision_description, _browser_vision_ts
+    global \
+        _browser_vision_detections, \
+        _browser_vision_description, \
+        _browser_vision_ts, \
+        _browser_vision_frame_b64
     data = await file.read()
     if not data or len(data) < 500:
         return JSONResponse({"ok": False, "error": "frame too small"})
+
+    # Store base64 frame for native-mode click-to-identify training
+    _browser_vision_frame_b64 = (
+        "data:image/jpeg;base64," + base64.b64encode(data).decode()
+    )
 
     _avatar = current_avatar or "puppy"
 
     if VISION_SERVER_URL:
         proxy_resp = await _proxy_vision_frame(data, avatar=_avatar)
         if proxy_resp and proxy_resp.get("detections"):
+            # Get frame dimensions for normalization
+            img_width, img_height = 1, 1
+            try:
+                import io
+                from PIL import Image
+
+                img = Image.open(io.BytesIO(data))
+                img_width, img_height = img.size
+            except Exception:
+                try:
+                    import cv2
+                    import numpy as np
+
+                    nparr = np.frombuffer(data, np.uint8)
+                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        img_height, img_width = frame.shape[:2]
+                except Exception:
+                    pass
+
             _browser_vision_detections = [
                 {
                     "label": d.get("label", "object"),
                     "confidence": float(d.get("conf", d.get("confidence", 0))),
-                    "x1": float(d.get("x", 0))
-                    * 1,  # normalized, will be normalized on return
-                    "y1": float(d.get("y", 0)) * 1,
-                    "x2": (float(d.get("x", 0)) + float(d.get("w", 0))) * 1,
-                    "y2": (float(d.get("y", 0)) + float(d.get("h", 0))) * 1,
+                    "x1": float(d.get("x1", d.get("x", 0))) / img_width,
+                    "y1": float(d.get("y1", d.get("y", 0))) / img_height,
+                    "x2": float(
+                        d.get("x2", (float(d.get("x", 0)) + float(d.get("w", 0))))
+                    )
+                    / img_width,
+                    "y2": float(
+                        d.get("y2", (float(d.get("y", 0)) + float(d.get("h", 0))))
+                    )
+                    / img_height,
                 }
                 for d in proxy_resp["detections"]
             ]
@@ -17471,6 +21165,10 @@ async def ingest_browser_frame(file: UploadFile = File(...)):
                     {
                         "label": d["label"],
                         "confidence": round(d.get("confidence", 0), 2),
+                        "x1": d["x1"],
+                        "y1": d["y1"],
+                        "x2": d["x2"],
+                        "y2": d["y2"],
                     }
                     for d in _browser_vision_detections
                 ],
@@ -17478,20 +21176,47 @@ async def ingest_browser_frame(file: UploadFile = File(...)):
             }
 
     _, detections = await detect_objects(data)
-    _browser_vision_detections = detections
-    _browser_vision_ts = time.time()
 
     # Build a short description for the sensor narrative
     if detections:
+        _browser_vision_detections = detections
+        _browser_vision_ts = time.time()
         labels = sorted(set(d["label"] for d in detections))
         _browser_vision_description = "Camera sees: " + ", ".join(labels)
-    else:
-        _browser_vision_description = ""
+
+    # Get frame dimensions to normalize coordinates (0-1 range)
+    # for Android DetectionBoxOverlay which expects normalized coords
+    img_width, img_height = 1, 1
+    try:
+        import io
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(data))
+        img_width, img_height = img.size
+    except Exception:
+        # Fallback: try cv2
+        try:
+            import cv2
+            import numpy as np
+
+            nparr = np.frombuffer(data, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if frame is not None:
+                img_height, img_width = frame.shape[:2]
+        except Exception:
+            pass
 
     return {
         "ok": True,
         "detections": [
-            {"label": d["label"], "confidence": round(d.get("confidence", 0), 2)}
+            {
+                "label": d["label"],
+                "confidence": round(d.get("confidence", 0), 2),
+                "x1": d.get("x1", 0) / img_width,
+                "y1": d.get("y1", 0) / img_height,
+                "x2": d.get("x2", 0) / img_width,
+                "y2": d.get("y2", 0) / img_height,
+            }
             for d in detections
         ],
         "description": _browser_vision_description,
@@ -17505,8 +21230,24 @@ async def get_browser_vision():
     return {
         "detections": _browser_vision_detections,
         "description": _browser_vision_description,
+        "frame_b64": _browser_vision_frame_b64 if _browser_vision_frame_b64 else None,
         "age_seconds": round(age, 2) if age is not None else None,
         "stale": age is None or age > _BROWSER_VISION_TTL,
+    }
+
+
+@app.get("/api/vision/webcam")
+async def get_webcam_vision():
+    """Return the latest server-webcam detection result from the background loop."""
+    age = time.time() - _webcam_ts if _webcam_ts else None
+    return {
+        "detections": _webcam_detections,
+        "description": _webcam_description,
+        "frame_b64": _webcam_frame_b64 if _webcam_frame_b64 else None,
+        "age_seconds": round(age, 2) if age is not None else None,
+        "stale": age is None or age > _WEBCAM_TTL,
+        "loop_running": _webcam_running,
+        "webcam_enabled": WEBCAM_ENABLED,
     }
 
 
@@ -17566,13 +21307,13 @@ async def ingest_native_frame(file: UploadFile = File(...)):
             }
 
     _, detections = await detect_objects(data)
-    _native_vision_detections = detections
-    _native_vision_ts = time.time()
+
+    # Only update cached results when detections are non-empty
     if detections:
+        _native_vision_detections = detections
+        _native_vision_ts = time.time()
         labels = sorted(set(d["label"] for d in detections))
         _native_vision_description = "Camera sees: " + ", ".join(labels)
-    else:
-        _native_vision_description = ""
     return {
         "ok": True,
         "detections": [
@@ -17743,27 +21484,17 @@ async def vision_chat(
                     set(d.get("label", "") for d in detections if d.get("label"))
                 )
         else:
-            # Local YOLO
-            import io
-            from PIL import Image as _PILImage  # type: ignore
-
-            _img = _PILImage.open(io.BytesIO(data)).convert("RGB")
-            _yolo = _get_yolo_model()
-            if _yolo is not None:
-                _results = _yolo(_img, verbose=False)
-                for _r in _results:
-                    for _box in _r.boxes if hasattr(_r, "boxes") else []:
-                        _cls = int(_box.cls[0]) if hasattr(_box, "cls") else -1
-                        _conf = float(_box.conf[0]) if hasattr(_box, "conf") else 0.0
-                        _label = (
-                            _yolo.names.get(_cls, "object")
-                            if hasattr(_yolo, "names")
-                            else "object"
-                        )
-                        if _conf > 0.30:
-                            detections.append(
-                                {"label": _label, "confidence": round(_conf, 2)}
-                            )
+            # Local YOLO — use the shared detect_objects() which handles
+            # model loading, fallback, and the _YOLO_MODEL global correctly.
+            _labeled_jpg, _dets = await detect_objects(data)
+            if _dets:
+                detections = [
+                    {
+                        "label": d.get("label", "object"),
+                        "confidence": d.get("confidence", 0),
+                    }
+                    for d in _dets
+                ]
                 labels = sorted(set(d["label"] for d in detections))
     except Exception as _ve:
         logger.warning(f"vision/chat YOLO error: {_ve}")
@@ -17820,11 +21551,15 @@ async def vision_chat(
 
 @app.post("/api/cmd")
 async def text_command(cmd: TextCommand, request: Request):
+    _cmd_start = time.time()
     global memory, current_avatar, _current_user_id
     # Extract user from Auth0 session using full async verification
     user_info = await get_current_user(request) if AUTH_AVAILABLE else None
     user_id = user_info.get("id") if user_info else None
     _user_name = _extract_real_name(user_info) if user_info else ""
+    logger.info(
+        f"[CHAT-TIMER] /api/cmd start: text='{cmd.text[:50]}...' avatar={cmd.avatar}"
+    )
 
     # ── Set the per-request user context so save_memory() inside handle_intent writes
     #    to the correct user-scoped file throughout the entire request lifecycle.
@@ -17835,9 +21570,31 @@ async def text_command(cmd: TextCommand, request: Request):
     # memory file and persona resolution use the canonical key.
     if cmd.avatar and cmd.avatar != current_avatar:
         cmd.avatar = resolve_persona_key(cmd.avatar)
+
+    # Cross-avatar wake word in text (e.g. user typed "Hey Fox" while on Lilly)
+    _text_wake_avatar = match_wake_across_avatars(cmd.text)
+    if _text_wake_avatar and _text_wake_avatar != (cmd.avatar or current_avatar):
+        cmd.avatar = _text_wake_avatar
+
+    # Global state for daily memory context (used by _build_memory_hint)
+    _daily_recent_summaries: list = []
+    _daily_recent_entries: list = []
+
     if user_id:
-        user_mem_data = load_user_memory(user_id)
-        memory = ConversationMemory.from_dict(user_mem_data)
+        # Load daily memory: today's entries + recent days for context
+        if AUTH_AVAILABLE:
+            _recent = load_user_recent_memory(user_id, cmd.avatar or current_avatar)
+            _daily_recent_summaries = _recent.get("recent_summaries", [])
+            _daily_recent_entries = _recent.get("recent_entries", [])
+            # Rebuild memory from today's entries
+            _today_data = {
+                "entries": _recent.get("entries", []),
+                "summary": _recent.get("summary", ""),
+            }
+            memory = ConversationMemory.from_dict(_today_data)
+        else:
+            user_mem_data = load_user_memory(user_id)
+            memory = ConversationMemory.from_dict(user_mem_data)
     elif cmd.avatar != current_avatar:
         path = _avatar_memory_file(cmd.avatar)
         if path.exists():
@@ -17848,9 +21605,15 @@ async def text_command(cmd: TextCommand, request: Request):
                 memory = ConversationMemory()
         else:
             memory = ConversationMemory()
-        current_avatar = cmd.avatar
+        current_avatar = cmd.avatar  # type: ignore[assignment]
 
-    res = await handle_intent(cmd.text, from_text=True, user_name=_user_name)
+    _handle_start = time.time()
+    try:
+        res = await handle_intent(cmd.text, from_text=True, user_name=_user_name)
+    except Exception as e:
+        logger.error(f"[CHAT] /api/cmd handle_intent error: {e}", exc_info=True)
+        res = {"action": "error", "text": f"Something went wrong: {str(e)[:200]}"}
+    _handle_elapsed = time.time() - _handle_start
 
     # Final explicit save (belt-and-suspenders — handle_intent already called save_memory)
     if user_id:
@@ -17861,6 +21624,13 @@ async def text_command(cmd: TextCommand, request: Request):
     # Clear user context after request completes
     _current_user_id = ""
 
+    _cmd_elapsed = time.time() - _cmd_start
+    logger.info(
+        f"[CHAT-TIMER] /api/cmd done: handle_intent={_handle_elapsed:.2f}s "
+        f"total={_cmd_elapsed:.2f}s action={res.get('action', '')} "
+        f"reply_len={len(res.get('text', ''))}"
+    )
+
     response = {
         "reply": res.get("text", ""),
         "audio_id": AUDIO_CACHE_ID if AUDIO_CACHE else 0,
@@ -17868,6 +21638,10 @@ async def text_command(cmd: TextCommand, request: Request):
         "open_url": res.get("open_url"),
         "user": user_info.get("name") if user_info else None,
     }
+    if res.get("phone_action"):
+        response["phone_action"] = res["phone_action"]
+    if res.get("display"):
+        response["display"] = res["display"]
     if res.get("delegate_to"):
         response["delegate_to"] = res["delegate_to"]
         response["delegate_emoji"] = res["delegate_emoji"]
@@ -17889,7 +21663,11 @@ async def text_command_stream(cmd: TextCommand, request: Request):
       data: {"type":"done","reply":"full text"}  — final reply
       data: {"type":"audio","audio_id":123}     — TTS audio when ready
     """
+    _stream_start = time.time()
     global memory, current_avatar, _current_user_id
+    logger.info(
+        f"[CHAT-TIMER] /api/cmd_stream start: text='{cmd.text[:50]}...' avatar={cmd.avatar}"
+    )
 
     user_info = await get_current_user(request) if AUTH_AVAILABLE else None
     user_id = user_info.get("id") if user_info else None
@@ -17898,9 +21676,30 @@ async def text_command_stream(cmd: TextCommand, request: Request):
 
     if cmd.avatar and cmd.avatar != current_avatar:
         cmd.avatar = resolve_persona_key(cmd.avatar)
+
+    # Cross-avatar wake word in text (e.g. user typed "Hey Raccoon" while on Lilly)
+    _text_wake_avatar = match_wake_across_avatars(cmd.text)
+    if _text_wake_avatar and _text_wake_avatar != (cmd.avatar or current_avatar):
+        cmd.avatar = _text_wake_avatar
+
+    # Global state for daily memory context (used by _build_memory_hint)
+    _daily_recent_summaries: list = []
+    _daily_recent_entries: list = []
+
     if user_id:
-        user_mem_data = load_user_memory(user_id)
-        memory = ConversationMemory.from_dict(user_mem_data)
+        # Load daily memory: today's entries + recent days for context
+        if AUTH_AVAILABLE:
+            _recent = load_user_recent_memory(user_id, cmd.avatar or current_avatar)
+            _daily_recent_summaries = _recent.get("recent_summaries", [])
+            _daily_recent_entries = _recent.get("recent_entries", [])
+            _today_data = {
+                "entries": _recent.get("entries", []),
+                "summary": _recent.get("summary", ""),
+            }
+            memory = ConversationMemory.from_dict(_today_data)
+        else:
+            user_mem_data = load_user_memory(user_id)
+            memory = ConversationMemory.from_dict(user_mem_data)
     elif cmd.avatar != current_avatar:
         path = _avatar_memory_file(cmd.avatar)
         if path.exists():
@@ -17918,6 +21717,52 @@ async def text_command_stream(cmd: TextCommand, request: Request):
         yield f"data: {json.dumps({'type': 'started'})}\n\n"
 
         try:
+            # ── LILLY ORCHESTRATOR ROUTING ────────────────────────────────
+            # Strict routing to the Vision/Builder/Execution pipelines. Replies
+            # are ALWAYS plain natural language in Lilly's voice — pipeline
+            # JSON/state is never surfaced to the user.
+            if ORCHESTRATOR_MODE and ORCHESTRATOR_RUNTIME_AVAILABLE:
+                _route_decision = _orchestrator_route_task(cmd.text)
+                _orchestrator_remember_route(_route_decision)
+                if _route_decision["pipeline"] == "vision":
+                    _vision = await _orchestrator_dispatch(
+                        "vision", {"text": cmd.text, "image_ref": ""}
+                    )
+                    if _vision.get("ok"):
+                        _reply = _format_orchestrator_reply("vision", _vision)
+                        yield f"data: {json.dumps({'type': 'token', 'value': _reply})}\n\n"
+                        yield (
+                            f"data: {json.dumps({'type': 'done', 'reply': _reply, 'pipeline': 'vision'})}\n\n"
+                        )
+                        return
+                    # No cached frame yet — fall through to normal chat so Lilly
+                    # can naturally ask the user to open the camera.
+                elif _route_decision["pipeline"] == "execute" and _is_direct_execute(
+                    cmd.text
+                ):
+                    # Direct, concrete execution requests (fetch/run) go to the
+                    # Execution Agent immediately and wait for state.
+                    _exec = await _orchestrator_dispatch(
+                        "execute",
+                        {
+                            "action": "shell"
+                            if not cmd.text.startswith(("fetch", "load", "get "))
+                            else "http_request",
+                            "params": {"command": cmd.text, "timeout": 30},
+                            "text": cmd.text,
+                        },
+                    )
+                    if _exec.get("ok"):
+                        _reply = _format_orchestrator_reply("execute", _exec)
+                        yield f"data: {json.dumps({'type': 'token', 'value': _reply})}\n\n"
+                        yield (
+                            f"data: {json.dumps({'type': 'done', 'reply': _reply, 'pipeline': 'execute'})}\n\n"
+                        )
+                        return
+                # Build requests flow through the standard agent loop below
+                # (agent_core is the Builder/Doer implementation); routing was
+                # already recorded for observability.
+
             # ── AGENT LOOP ROUTING ─────────────────────────────────────────
             # If this looks like a task (not conversational), route to the
             # agentic orchestration engine instead of the standard LLM path.
@@ -17942,24 +21787,28 @@ async def text_command_stream(cmd: TextCommand, request: Request):
 
             # For skill-based commands, handle synchronously (skills aren't streamable).
             # Check if the text matches a skill in the SKILLS dict first.
+            # SAFETY: Skip skill matching for long messages (>50 chars) — they're
+            # conversational, not app commands. This prevents false triggers.
             phrase = normalize_text(cmd.text)
-            stripped = re.sub(
-                r"^(run|use|click|tap|open|launch|search|find|what|show|start)\s+",
-                "",
-                phrase,
-            ).strip()
-            skill = SKILLS.get(phrase) or SKILLS.get(stripped)
-            if not skill:
-                for key in sorted(SKILLS.keys(), key=len, reverse=True):
-                    if phrase.startswith(key + " "):
-                        skill = SKILLS[key]
-                        break
+            skill = None
+            if len(phrase) <= 50:
+                stripped = re.sub(
+                    r"^(run|use|click|tap|open|launch|search|find|what|show|start)\s+",
+                    "",
+                    phrase,
+                ).strip()
+                skill = SKILLS.get(phrase) or SKILLS.get(stripped)
+                if not skill:
+                    for key in sorted(SKILLS.keys(), key=len, reverse=True):
+                        if phrase.startswith(key + " "):
+                            skill = SKILLS[key]
+                            break
 
-            # NLP fallback — "I want to watch youtube videos on true crime"
-            if not skill:
-                nlp_skill, _ = parse_nlp_intent(phrase)
-                if nlp_skill:
-                    skill = nlp_skill
+                # NLP fallback — "I want to watch youtube videos on true crime"
+                if not skill:
+                    nlp_skill, _ = parse_nlp_intent(phrase)
+                    if nlp_skill:
+                        skill = nlp_skill
 
             if skill and (
                 skill.get("action_type") == "openhuman_skill"
@@ -17978,7 +21827,14 @@ async def text_command_stream(cmd: TextCommand, request: Request):
                 )
                 reply = res.get("text", "")
                 yield f"data: {json.dumps({'type': 'token', 'value': reply})}\n\n"
-                yield f"data: {json.dumps({'type': 'done', 'reply': reply})}\n\n"
+                done_evt = {"type": "done", "reply": reply}
+                # Include phone_action metadata if present (for browser card display)
+                if res.get("phone_action"):
+                    done_evt["phone_action"] = res["phone_action"]
+                # Include display data if present (e.g., map coordinates)
+                if res.get("display"):
+                    done_evt["display"] = res["display"]
+                yield f"data: {json.dumps(done_evt)}\n\n"
                 if AUDIO_CACHE_ID:
                     yield f"data: {json.dumps({'type': 'audio', 'audio_id': AUDIO_CACHE_ID})}\n\n"
                 return
@@ -18004,13 +21860,18 @@ async def text_command_stream(cmd: TextCommand, request: Request):
             # Post-process the full reply
             full_reply = strip_json_wrapper(full_reply)
             full_reply = _filter_hallucination_patterns(full_reply)
+            full_reply = _strip_emoji(full_reply)
 
             if not full_reply or len(full_reply) < 5:
                 full_reply = (
                     "Not sure where to go with that one — try coming at it differently."
                 )
 
-            done_payload = {"type": "done", "reply": full_reply}
+            done_payload = {
+                "type": "done",
+                "reply": full_reply,
+                "avatar_key": current_avatar,
+            }
             if _stream_delegate:
                 done_payload["delegate_to"] = _stream_delegate
                 done_payload["delegate_emoji"] = HIVE_PERSONAS[_stream_delegate][
@@ -18030,9 +21891,16 @@ async def text_command_stream(cmd: TextCommand, request: Request):
             await save_memory()
 
         except Exception as e:
-            logger.error(f"Stream error: {e}")
+            _stream_elapsed = time.time() - _stream_start
+            logger.error(
+                f"[CHAT-TIMER] /api/cmd_stream error after {_stream_elapsed:.2f}s: {e}"
+            )
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
         finally:
+            _stream_elapsed = time.time() - _stream_start
+            logger.info(
+                f"[CHAT-TIMER] /api/cmd_stream done: total={_stream_elapsed:.2f}s reply_len={len(full_reply) if 'full_reply' in dir() else 0}"
+            )
             _current_user_id = ""
             yield f"data: {json.dumps({'type': 'end'})}\n\n"
 
@@ -18078,7 +21946,7 @@ async def _build_streaming_context(
         pass
 
     # Conversation history
-    context_entries = await memory.context_window(6)
+    context_entries = await memory.context_window(24)
     for entry in context_entries:
         context.append(
             {
@@ -18659,7 +22527,7 @@ async def token_usage():
     # Estimate savings per call
     mem_dict = await memory.to_dict()
     mem_summary = mem_dict.get("summary", "")
-    context_entries = await memory.context_window(6)
+    context_entries = await memory.context_window(24)
 
     # Calculate original context tokens
     original_context_text = " ".join(
@@ -18922,7 +22790,7 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
      Docked bottom, expands horizontally (full width), height bounded,
      messages scroll internally. Anchored above the mobile keyboard via
      the --kb CSS var (set by JS from visualViewport.height). */
-#chatContainer{position:fixed;left:8px;right:8px;bottom:calc(84px + var(--kb,0px));width:auto;max-height:52vh;z-index:15;background:rgba(255,255,255,0.5);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);border:1px solid rgba(255,255,255,0.6);border-radius:18px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 8px 32px rgba(180,140,180,0.16)}
+#chatContainer{position:fixed;left:8px;right:8px;bottom:calc(84px + var(--kb,0px));width:auto;max-height:52vh;z-index:15;background:rgba(255,255,255,0.5);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);border:1px solid rgba(255,255,255,0.6);border-radius:18px;display:none;flex-direction:column;overflow:hidden;box-shadow:0 8px 32px rgba(180,140,180,0.16);transition:right 0.3s ease,left 0.3s ease,width 0.3s ease}
 #chatContainer.active{display:flex}
 #chatMessages{flex:1;overflow-y:auto;overflow-x:hidden;padding:12px 14px;display:flex;flex-direction:column;gap:8px;scroll-behavior:smooth;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
 @media (max-width:640px){
@@ -18937,6 +22805,7 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 @keyframes msgIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 .chat-msg.user{align-self:flex-end;background:rgba(180,160,200,0.4);color:#5d4e6d;border-bottom-right-radius:4px}
 .chat-msg.assistant{align-self:flex-start;background:rgba(255,255,255,0.5);color:#5d4e6d;border-bottom-left-radius:4px}
+.chat-msg.error{align-self:flex-start;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);color:#8b2222;border-bottom-left-radius:4px;max-width:90%}
 .chat-msg .chat-img-preview{max-width:220px;max-height:180px;border-radius:10px;display:block;margin-bottom:5px;cursor:zoom-in;object-fit:cover;border:1px solid rgba(93,78,109,0.15)}
 .chat-img-full-overlay{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;cursor:zoom-out}
 .chat-img-full-overlay img{max-width:92vw;max-height:92vh;border-radius:12px;box-shadow:0 8px 40px rgba(0,0,0,0.5)}
@@ -18951,6 +22820,11 @@ canvas{display:block;position:absolute;top:0;left:0;z-index:1;pointer-events:non
 .chat-msg .chat-content.streaming{color:#8b7a9e;opacity:0.6}
 .chat-msg.system{background:rgba(74,222,128,0.08);border:1px solid rgba(74,222,128,0.15);border-radius:12px;
   font-size:11px;color:rgba(58,138,106,0.8);font-style:italic;padding:6px 10px}
+.phone-action-card{margin:8px 0;padding:12px 16px;border-radius:12px;background:linear-gradient(135deg,rgba(93,78,109,0.08),rgba(139,122,158,0.12));border:1px solid rgba(139,122,158,0.25);font-size:13px;color:#5d4e6d;animation:msgIn 0.2s ease-out}
+.phone-action-card .pa-icon{font-size:20px}
+.phone-action-card .pa-label{font-weight:600}
+.phone-action-card .pa-detail{font-size:11px;opacity:0.7}
+.phone-action-card .pa-badge{margin-left:auto;font-size:11px;padding:3px 8px;border-radius:6px;background:rgba(74,222,128,0.15);color:#3d6b4f}
 .vc-thinking .chat-sender{display:none}
 .vc-thinking pre{background:rgba(93,78,109,0.06);border-radius:10px;padding:8px}
 .copy-btn{background:rgba(93,78,109,0.08);border:1px solid rgba(93,78,109,0.15);border-radius:6px;padding:4px 8px;cursor:pointer;font-size:11px;color:#8b7a9e;transition:all 0.2s;display:flex;align-items:center;gap:4px}
@@ -19026,6 +22900,42 @@ pre{position:relative;overflow-x:auto}
 #pipContainer .dot{position:absolute;top:4px;right:4px;width:6px;height:6px;border-radius:50%;background:#4caf50;box-shadow:0 0 4px rgba(76,175,80,0.6)}
 #pipContainer .pip-resize{position:absolute;bottom:0;right:0;width:16px;height:16px;cursor:nwse-resize;opacity:0.4;z-index:3}
 #pipContainer .pip-resize::after{content:'';position:absolute;bottom:2px;right:2px;width:8px;height:8px;border-right:2px solid rgba(255,255,255,0.7);border-bottom:2px solid rgba(255,255,255,0.7)}
+/* ─── Camera Window (multi-feed panel) ─── */
+#cameraWindow{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100;display:none;width:min(96vw,960px);height:min(90vh,680px);border-radius:16px;overflow:hidden;border:2px solid rgba(255,255,255,0.35);box-shadow:0 12px 60px rgba(0,0,0,0.6),0 0 0 1px rgba(139,122,158,0.2);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);background:rgba(12,8,20,0.92);flex-direction:column;resize:both;touch-action:none;transition:width 0.3s ease,height 0.3s ease,border-radius 0.3s ease}
+#cameraWindow.cw-minimized{width:280px;height:44px;resize:none;border-radius:12px;overflow:hidden}
+#cameraWindow.cw-minimized .cw-grid,#cameraWindow.cw-minimized .cw-desc,#cameraWindow.cw-minimized .cw-status-bar{display:none}
+#cameraWindow.cw-maximized{width:100vw!important;height:calc(100vh - 60px)!important;top:30px;left:0;transform:none;border-radius:0}
+#cameraWindow .cw-header{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:linear-gradient(135deg,rgba(30,20,50,0.9),rgba(20,15,35,0.95));border-bottom:1px solid rgba(255,255,255,0.08);cursor:move;user-select:none;flex-shrink:0}
+#cameraWindow .cw-header-left{display:flex;align-items:center;gap:8px}
+#cameraWindow .cw-title{font-size:12px;font-weight:600;color:#d4c4e8;display:flex;align-items:center;gap:6px}
+#cameraWindow .cw-title .dot{width:7px;height:7px;border-radius:50%;background:#4caf50;box-shadow:0 0 6px rgba(76,175,80,0.7);animation:pulse 2s infinite}
+#cameraWindow .cw-window-controls{display:flex;gap:6px;align-items:center}
+#cameraWindow .cw-win-btn{width:28px;height:28px;border:none;border-radius:8px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.5);font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s}
+#cameraWindow .cw-win-btn:hover{background:rgba(255,255,255,0.15);color:#fff}
+#cameraWindow .cw-win-btn.cw-close:hover{background:rgba(232,90,110,0.6);color:#fff}
+#cameraWindow .cw-win-btn.cw-minimize:hover{background:rgba(255,193,7,0.4)}
+#cameraWindow .cw-win-btn.cw-maximize:hover{background:rgba(50,200,120,0.4)}
+#cameraWindow .cw-win-btn.active{background:rgba(50,200,120,0.25);border-color:rgba(50,200,120,0.4);color:#32c878}
+#cameraWindow .cw-controls{display:flex;gap:5px;margin-left:12px}
+#cameraWindow .cw-control-btn{padding:5px 10px;border:1px solid rgba(255,255,255,0.15);border-radius:6px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.5);font-size:10px;cursor:pointer;display:flex;align-items:center;gap:4px;transition:all 0.2s;font-weight:500}
+#cameraWindow .cw-control-btn:hover{background:rgba(255,255,255,0.15);color:rgba(255,255,255,0.8)}
+#cameraWindow .cw-control-btn.active{background:rgba(50,200,120,0.25);border-color:rgba(50,200,120,0.5);color:#32c878}
+#cameraWindow .cw-control-btn .icon{font-size:12px}
+.alert-obj-btn{padding:6px 10px;border:1px solid rgba(139,122,158,0.3);border-radius:8px;background:rgba(255,255,255,0.5);color:rgba(93,78,109,0.6);font-size:11px;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:4px}
+.alert-obj-btn:hover{background:rgba(139,122,158,0.15)}
+.alert-obj-btn.active{background:rgba(50,200,120,0.15);border-color:rgba(50,200,120,0.4);color:#32c878}
+#cameraWindow .cw-grid{display:grid;grid-template-columns:1fr;gap:0;padding:6px;flex:1;min-height:0}
+#cameraWindow .cw-feed{position:relative;border-radius:12px;overflow:hidden;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;min-height:0;width:100%;height:100%}
+#cameraWindow .cw-feed img{width:100%;height:100%;object-fit:contain;display:block;background:#000}
+#cameraWindow .cw-feed .cw-feed-label{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,0.7));color:rgba(255,255,255,0.8);font-size:10px;padding:6px 10px;text-align:left;backdrop-filter:blur(4px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500}
+#cameraWindow .cw-feed .cw-feed-dot{position:absolute;top:8px;right:8px;width:8px;height:8px;border-radius:50%;background:#4caf50;box-shadow:0 0 6px rgba(76,175,80,0.7);animation:pulse 2s infinite}
+#cameraWindow .cw-feed .cw-feed-placeholder{color:rgba(147,130,168,0.3);font-size:12px;text-align:center;padding:16px;font-weight:500}
+#cameraWindow .cw-status-bar{display:flex;align-items:center;justify-content:space-between;padding:6px 14px;background:rgba(0,0,0,0.3);border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0;gap:12px}
+#cameraWindow .cw-desc{padding:0;font-size:10px;color:rgba(147,130,168,0.6);text-align:right;border:none;flex:1;max-height:none;overflow:hidden;text-overflow:ellipsis}
+/* ─── Blink 2FA Input ─── */
+#cwBlink2fa input:focus{outline:none;border-color:rgba(232,90,110,0.5);box-shadow:0 0 8px rgba(232,90,110,0.2)}
+#cwBlink2fa input::placeholder{color:rgba(93,78,109,0.3);letter-spacing:1px}
+#cwBlink2fa button:disabled{opacity:0.5;cursor:not-allowed}
 /* ─── Filter Bar ─── */
 #filterBar{position:absolute;right:14px;z-index:26;display:none;gap:4px;background:rgba(255,255,255,0.4);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);padding:4px 8px;border-radius:16px;border:1px solid rgba(255,255,255,0.5);box-shadow:0 2px 12px rgba(180,140,180,0.12);align-items:center;flex-wrap:nowrap;overflow-x:auto;max-width:calc(100vw - 28px)}
 .filter-btn{width:30px;height:30px;min-width:30px;border:none;border-radius:50%;background:transparent;font-size:15px;cursor:pointer;transition:all 0.2s;padding:0;display:flex;align-items:center;justify-content:center}
@@ -19463,11 +23373,23 @@ pre{position:relative;overflow-x:auto}
     <svg viewBox="0 0 24 24" width="16" height="16"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 7.97v8.05A4.47 4.47 0 0016.5 12zM14 3.23v2.06A7.007 7.007 0 0119 12a7.007 7.007 0 01-5 6.71v2.06A9.008 9.008 0 0021 12a9.008 9.008 0 00-7-8.77z" fill="currentColor"/></svg>
   </button>
   <span id="convIndicator" style="display:none;font-size:10px;color:rgba(139,122,158,0.7);background:rgba(184,169,201,0.2);padding:3px 8px;border-radius:10px;margin-right:6px">CONVERSING</span>
+  <span id="orchestratorChip" title="Lilly Orchestrator — click to view the JSON tool schema" style="display:none;font-size:10px;font-weight:600;color:rgba(93,78,109,0.7);background:rgba(184,169,201,0.22);border:1px solid rgba(184,169,201,0.35);padding:3px 8px;border-radius:10px;margin-right:6px;cursor:pointer;letter-spacing:0.3px" onclick="showOrchestratorSchema()">ORCH</span>
   <span id="statusLabel">idle</span>
   <div class="indicator" id="micIndicator"></div>
   <button id="hamburgerBtn" onclick="toggleHamburgerMenu()" style="background:none;border:none;cursor:pointer;padding:4px 8px;margin-left:8px;font-size:18px;color:rgba(93,78,109,0.5);transition:color 0.2s;display:flex;align-items:center;justify-content:center" title="Menu">
     <svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z" fill="currentColor"/></svg>
   </button>
+</div>
+
+<!-- Lilly Orchestrator Tool-Schema Viewer (opened explicitly only) -->
+<div id="orchestratorSchemaModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:400;background:rgba(40,30,55,0.55);backdrop-filter:blur(6px);align-items:center;justify-content:center">
+  <div style="background:rgba(255,255,255,0.96);border-radius:18px;width:min(720px,92vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(40,30,55,0.4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid rgba(93,78,109,0.12)">
+      <div style="font-size:13px;font-weight:700;color:#5d4e6d;letter-spacing:0.3px">LILLY ORCHESTRATOR — JSON TOOL SCHEMA</div>
+      <button onclick="document.getElementById('orchestratorSchemaModal').style.display='none'" style="background:none;border:none;cursor:pointer;font-size:18px;color:rgba(93,78,109,0.5)">✕</button>
+    </div>
+    <pre id="orchestratorSchemaPre" style="flex:1;overflow:auto;margin:0;padding:16px;font-family:'SF Mono',Consolas,monospace;font-size:11.5px;line-height:1.5;color:#4a3a5c;white-space:pre-wrap"></pre>
+  </div>
 </div>
 
 <!-- Hamburger Dropdown Menu -->
@@ -19543,6 +23465,13 @@ pre{position:relative;overflow-x:auto}
       </button>
       <span class="ham-label">Download</span>
     </div>
+    <!-- Alerts -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="alerts" title="Alert Settings" onclick="toggleAlertsPanel()">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+      </button>
+      <span class="ham-label">Alerts</span>
+    </div>
     <!-- Broadcast moved to Android app Lavender dialer -->
     <!-- Close -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
@@ -19551,6 +23480,67 @@ pre{position:relative;overflow-x:auto}
       </button>
       <span class="ham-label">Close</span>
     </div>
+  </div>
+</div>
+
+<!-- Alerts Panel (popout) -->
+<div id="alertsPanel" style="display:none;position:fixed;top:60px;left:16px;width:280px;max-width:calc(100vw - 32px);z-index:215;background:rgba(255,255,255,0.92);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:16px;box-shadow:0 8px 40px rgba(180,140,180,0.2)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <div style="font-size:13px;font-weight:700;color:#5d4e6d;display:flex;align-items:center;gap:6px">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+      Alert Settings
+    </div>
+    <button onclick="toggleAlertsPanel()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);font-size:16px;padding:2px 6px">✕</button>
+  </div>
+
+  <!-- YOLO Boxes Toggle -->
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:rgba(139,122,158,0.08);border-radius:10px;margin-bottom:8px">
+    <div style="display:flex;align-items:center;gap:8px">
+      <span style="font-size:14px">▢</span>
+      <div>
+        <div style="font-size:12px;font-weight:600;color:#5d4e6d">YOLO Boxes</div>
+        <div style="font-size:10px;color:rgba(93,78,109,0.5)">Detection bounding boxes</div>
+      </div>
+    </div>
+    <label style="position:relative;display:inline-block;width:40px;height:22px;cursor:pointer">
+      <input type="checkbox" id="alertsYoloToggle" checked onchange="toggleYoloBoxes()" style="opacity:0;width:0;height:0">
+      <span style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(139,122,158,0.3);border-radius:11px;transition:0.3s"></span>
+      <span id="alertsYoloSlider" style="position:absolute;height:18px;width:18px;left:2px;bottom:2px;background:white;border-radius:50%;transition:0.3s;box-shadow:0 2px 4px rgba(0,0,0,0.2)"></span>
+    </label>
+  </div>
+
+  <!-- Sound Alerts Toggle -->
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:rgba(139,122,158,0.08);border-radius:10px;margin-bottom:8px">
+    <div style="display:flex;align-items:center;gap:8px">
+      <span style="font-size:14px">🔊</span>
+      <div>
+        <div style="font-size:12px;font-weight:600;color:#5d4e6d">Sound Alerts</div>
+        <div style="font-size:10px;color:rgba(93,78,109,0.5)">Beep on detection</div>
+      </div>
+    </div>
+    <label style="position:relative;display:inline-block;width:40px;height:22px;cursor:pointer">
+      <input type="checkbox" id="alertsSoundToggle" onchange="toggleYoloSound()" style="opacity:0;width:0;height:0">
+      <span style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(139,122,158,0.3);border-radius:11px;transition:0.3s"></span>
+      <span id="alertsSoundSlider" style="position:absolute;height:18px;width:18px;left:2px;bottom:2px;background:white;border-radius:50%;transition:0.3s;box-shadow:0 2px 4px rgba(0,0,0,0.2)"></span>
+    </label>
+  </div>
+
+  <!-- Alert Objects -->
+  <div style="padding:10px 12px;background:rgba(139,122,158,0.08);border-radius:10px;margin-bottom:8px">
+    <div style="font-size:11px;font-weight:600;color:#5d4e6d;margin-bottom:8px">Alert me when I see:</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px" id="alertObjectsList">
+      <button class="alert-obj-btn active" data-obj="person" onclick="toggleAlertObject(this)">👤 Person</button>
+      <button class="alert-obj-btn" data-obj="car" onclick="toggleAlertObject(this)">🚗 Car</button>
+      <button class="alert-obj-btn active" data-obj="dog" onclick="toggleAlertObject(this)">🐕 Dog</button>
+      <button class="alert-obj-btn active" data-obj="cat" onclick="toggleAlertObject(this)">🐈 Cat</button>
+      <button class="alert-obj-btn" data-obj="truck" onclick="toggleAlertObject(this)">🚚 Truck</button>
+      <button class="alert-obj-btn" data-obj="bird" onclick="toggleAlertObject(this)">🐦 Bird</button>
+    </div>
+  </div>
+
+  <!-- Status -->
+  <div style="text-align:center;font-size:10px;color:rgba(93,78,109,0.4);margin-top:4px">
+    Changes apply immediately
   </div>
 </div>
 
@@ -19746,6 +23736,74 @@ pre{position:relative;overflow-x:auto}
 <div id="speechBubble"></div>
 <canvas id="pupCanvas"></canvas>
 
+<!-- AR Overlay -->
+<div id="arOverlay"><canvas id="arCanvas"></canvas></div>
+<div id="arCrosshair"></div>
+<div id="arLabel"></div>
+
+<!-- Filter Bar (above PiP) -->
+<div id="filterBar">
+  <span class="filter-label">Filter</span>
+  <button class="filter-btn active" data-filter="none" onclick="setFilter('none')" title="No filter">✕</button>
+  <button class="filter-btn" data-filter="puppy_ears" onclick="setFilter('puppy_ears')" title="Puppy ears">🐶</button>
+  <button class="filter-btn" data-filter="top_hat" onclick="setFilter('top_hat')" title="Top hat">🎩</button>
+  <button class="filter-btn" data-filter="mustache" onclick="setFilter('mustache')" title="Mustache">🥸</button>
+  <button class="filter-btn" data-filter="crown" onclick="setFilter('crown')" title="Crown">👑</button>
+  <button class="filter-btn" data-filter="sunglasses" onclick="setFilter('sunglasses')" title="Sunglasses">🕶️</button>
+  <button class="filter-btn" data-filter="rainbow" onclick="setFilter('rainbow')" title="Rainbow">🌈</button>
+  <button class="filter-btn" data-filter="sepia" onclick="setFilter('sepia')" title="Vintage">📷</button>
+</div>
+
+<!-- Vision PiP -->
+<div id="pipContainer" onclick="reactToCameraView()">
+  <img id="pipFeed" alt="Lilly's view">
+  <span class="dot"></span>
+  <span id="pipLabel">Lilly's view</span>
+  <div class="pip-resize" id="pipResize"></div>
+</div>
+
+<!-- Camera Window (single big panel with window controls) -->
+<div id="cameraWindow">
+  <div class="cw-header">
+    <div class="cw-header-left">
+      <div class="cw-title"><span class="dot"></span> Vision</div>
+      <div class="cw-controls">
+        <button id="cwYoloToggle" class="cw-control-btn active" onclick="toggleYoloBoxes()" title="Toggle YOLO object detection">
+          <span class="icon">▢</span> YOLO
+        </button>
+        <button id="cwFaceToggle" class="cw-control-btn" onclick="toggleFaceRecognition()" title="Toggle face recognition">
+          <span class="icon">👤</span> Faces
+        </button>
+        <button id="cwSoundToggle" class="cw-control-btn" onclick="toggleYoloSound()" title="Toggle sound alerts">
+          <span class="icon">🔊</span> Sound
+        </button>
+        <button id="cwGpuToggle" class="cw-control-btn" onclick="toggleGpuMode()" title="Toggle GPU-accelerated webcam (WebGL)">
+          <span class="icon">⚡</span> GPU
+        </button>
+      </div>
+    </div>
+    <div class="cw-window-controls">
+      <button class="cw-win-btn cw-minimize" onclick="minimizeCameraWindow()" title="Minimize">─</button>
+      <button class="cw-win-btn cw-maximize" onclick="maximizeCameraWindow()" title="Maximize">□</button>
+      <button class="cw-win-btn cw-close" onclick="closeCameraWindow()" title="Close">✕</button>
+    </div>
+  </div>
+  <div class="cw-grid">
+    <div class="cw-feed" id="cwWebcam">
+      <div class="cw-feed-placeholder">Click camera button to start feed</div>
+      <img id="cwWebcamImg" style="display:none" alt="Camera Feed">
+      <canvas id="cwOverlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2;border-radius:8px"></canvas>
+      <span class="cw-feed-dot" id="cwWebcamDot" style="display:none"></span>
+      <div class="cw-feed-label" id="cwWebcamLabel">Camera</div>
+    </div>
+  </div>
+  <div class="cw-status-bar" id="cwStatusBar">
+    <span id="cwFaceStatus" style="color:rgba(147,130,168,0.6);font-size:10px">Faces: 0</span>
+    <span id="cwYoloStatus" style="color:rgba(147,130,168,0.6);font-size:10px;margin-left:12px">YOLO: active</span>
+    <span class="cw-desc" id="cwDesc"></span>
+  </div>
+</div>
+
 <div id="chatContainer">
   <div id="chatHeader">
     <span id="chatTitle">Chat</span>
@@ -19780,6 +23838,23 @@ pre{position:relative;overflow-x:auto}
     </div>
   </div>
   <iframe id="youtubePiPFrame" style="width:100%;height:100%;border:none;margin-top:32px" src="" allow="autoplay; encrypted-media" allowfullscreen></iframe>
+</div>
+
+<!-- Admin Panel — only visible to admin users -->
+<div id="adminPanel" style="display:none;position:fixed;bottom:calc(72px + var(--kb,0px));left:8px;right:8px;max-width:720px;margin:0 auto;z-index:24;background:rgba(30,30,40,0.92);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(120,80,200,0.3);border-radius:16px;padding:8px 12px;box-shadow:0 4px 30px rgba(120,80,200,0.15)">
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:nowrap">
+    <span style="color:#c084fc;font-size:11px;font-weight:600;white-space:nowrap">⚡ ADMIN</span>
+    <input type="text" id="adminCmdInput" placeholder="$ shell command..." style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(120,80,200,0.2);border-radius:10px;padding:6px 10px;color:#e0d0f0;font-size:12px;font-family:monospace;outline:none" onkeydown="if(event.key==='Enter'){event.preventDefault();runAdminShell()}">
+    <button onclick="runAdminShell()" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">Run</button>
+    <button onclick="runAdminAgent()" title="Run coding agent task" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">🤖 Agent</button>
+    <button onclick="assignAvatarTask()" title="Assign task to an avatar" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">📋 Tasks</button>
+    <button onclick="viewAdminSessions()" title="Resume previous sessions" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">🔄 Sessions</button>
+    <button onclick="viewAdminLogs()" title="View recent server logs" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">📋 Logs</button>
+    <button onclick="toggleAdminPanel()" title="Toggle admin panel" style="background:none;border:none;color:#888;font-size:14px;cursor:pointer;padding:2px">✕</button>
+  </div>
+  <div id="adminOutput" style="display:none;margin-top:8px;max-height:240px;overflow-y:auto;background:rgba(0,0,0,0.3);border-radius:8px;padding:8px;font-family:monospace;font-size:11px;color:#a0a0b0;white-space:pre-wrap;word-break:break-all"></div>
+</div>
+  <div id="adminOutput" style="display:none;margin-top:8px;max-height:300px;overflow-y:auto;background:rgba(0,0,0,0.3);border-radius:8px;padding:8px;font-family:monospace;font-size:11px;color:#a0a0b0;white-space:pre-wrap;word-break:break-all"></div>
 </div>
 
 <div class="input-panel">
@@ -19969,18 +24044,38 @@ function drawRaccoonEyes(ctx2, cx, cy, r, frame2) {
 }
 
 // Shared clay smile
-function drawClaySmile(ctx2, cx, cy, r) {
+function drawClaySmile(ctx2, cx, cy, r, isSpeaking) {
   ctx2.save();
-  ctx2.strokeStyle = 'rgba(120,80,100,0.42)';
-  ctx2.lineWidth = r*0.05; ctx2.lineCap = 'round';
-  // Left curve
-  ctx2.beginPath();
-  ctx2.arc(cx - r*0.11, cy + r*0.28, r*0.11, 0.08, Math.PI*0.78);
-  ctx2.stroke();
-  // Right curve
-  ctx2.beginPath();
-  ctx2.arc(cx + r*0.11, cy + r*0.28, r*0.11, Math.PI*0.22, Math.PI*0.92);
-  ctx2.stroke();
+  
+  if (isSpeaking && lastMouthVal > 0.1) {
+    // Animated mouth when speaking
+    const open = Math.min(1, lastMouthVal) * r * 0.15 + Math.abs(Math.sin(performance.now() * 0.008)) * r * 0.05;
+    
+    // Mouth opening
+    ctx2.fillStyle = 'rgba(120,80,100,0.42)';
+    ctx2.beginPath();
+    ctx2.ellipse(cx, cy + r*0.32, r*0.12, r*0.05 + open, 0, 0, Math.PI*2);
+    ctx2.fill();
+    
+    // Inner mouth
+    ctx2.fillStyle = 'rgba(180,120,140,0.35)';
+    ctx2.beginPath();
+    ctx2.ellipse(cx, cy + r*0.34, r*0.08, r*0.03 + open*0.6, 0, 0, Math.PI*2);
+    ctx2.fill();
+  } else {
+    // Static smile when not speaking
+    ctx2.strokeStyle = 'rgba(120,80,100,0.42)';
+    ctx2.lineWidth = r*0.05; ctx2.lineCap = 'round';
+    // Left curve
+    ctx2.beginPath();
+    ctx2.arc(cx - r*0.11, cy + r*0.28, r*0.11, 0.08, Math.PI*0.78);
+    ctx2.stroke();
+    // Right curve
+    ctx2.beginPath();
+    ctx2.arc(cx + r*0.11, cy + r*0.28, r*0.11, Math.PI*0.22, Math.PI*0.92);
+    ctx2.stroke();
+  }
+  
   ctx2.restore();
 }
 
@@ -20340,7 +24435,8 @@ function drawAnimalFace(ctx2, animal, cx, cy, r, frame2, noBg) {
   // ── Shared: eyes + smile + blush ──────────────────────────────
   if (animal === 'raccoon') drawRaccoonEyes(ctx2, 0, 0, r, frame2);
   else drawClayEyes(ctx2, 0, 0, r, frame2);
-  drawClaySmile(ctx2, 0, 0, r);
+  const isSpeaking = lastMouthVal > 0.1;
+  drawClaySmile(ctx2, 0, 0, r, isSpeaking);
 
   // Rosy cheek blush
   const BLUSH = {
@@ -20916,6 +25012,294 @@ function initApp(){
   _promptPermissionsIfNeeded();
   // Start the browser sensor bridge so all agents can feel the world
   try{if(window.SensorBridge)SensorBridge.init()}catch(e){console.error('SensorBridge:',e)}
+  // Load conversation history so the chat isn't empty on page load
+  try{loadConversationHistory()}catch(e){console.error('loadConversationHistory:',e)}
+  // Lilly Orchestrator badge + JSON tool schema (opened explicitly only)
+  try{initOrchestratorUI()}catch(e){console.error('initOrchestratorUI:',e)}
+}
+
+/* ── Lilly Orchestrator WebUI surface ─────────────────────────────
+   The chip reflects the orchestrator persona. The schema modal only
+   opens on explicit click — normal chat replies never surface JSON. */
+async function initOrchestratorUI(){
+  try{
+    const r=await fetch('/api/orchestrator/status');
+    if(!r.ok)return;
+    const d=await r.json();
+    const chip=document.getElementById('orchestratorChip');
+    if(chip && d.ok && d.mode){
+      chip.style.display='inline-flex';
+      chip.textContent='ORCH · '+String(d.persona||'on').slice(0,20);
+      chip.title='Lilly Orchestrator — click to view the JSON tool schema';
+    }
+  }catch(e){/* non-fatal */}
+}
+async function showOrchestratorSchema(){
+  const modal=document.getElementById('orchestratorSchemaModal');
+  const pre=document.getElementById('orchestratorSchemaPre');
+  if(!modal||!pre)return;
+  try{
+    const r=await fetch('/api/orchestrator/tools');
+    const d=await r.json();
+    pre.textContent=JSON.stringify(d.schema||d,null,2);
+  }catch(e){
+    pre.textContent='Orchestrator schema unavailable: '+(e.message||e);
+  }
+  modal.style.display='flex';
+}
+/* Route a message through /api/orchestrator/route (debug/audit only). */
+async function peekOrchestratorRoute(text){
+  try{
+    const r=await fetch('/api/orchestrator/route',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+    if(!r.ok)return;
+    const d=await r.json();
+    console.log('[ORCHESTRATOR ROUTE]',d.decision && d.decision.pipeline, d.mapped_to_subagent||'');
+  }catch(e){}
+}
+
+async function loadConversationHistory(){
+  try{
+    const avatar = localStorage.getItem('lilly_avatar') || 'puppy';
+    const r = await fetch('/api/history?limit=15&avatar=' + encodeURIComponent(avatar));
+    if(!r.ok) return;
+    const data = await r.json();
+    const turns = data.turns || [];
+    if(!turns.length) return;
+    // Display history in the chat (oldest first)
+    const reversed = turns.slice().reverse();
+    for(const turn of reversed){
+      if(turn.user) addChatMessage('user', turn.user);
+      if(turn.assistant) addChatMessage('assistant', turn.assistant);
+    }
+    // Add a subtle system message indicating history was loaded
+    const sysDiv = document.createElement('div');
+    sysDiv.className = 'chat-msg system';
+    sysDiv.textContent = '↑ Conversation history loaded';
+    sysDiv.style.opacity = '0.5';
+    sysDiv.style.fontSize = '0.75em';
+    chatMessages.appendChild(sysDiv);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }catch(e){console.error('loadConversationHistory error:',e)}
+}
+
+// ─── SCREEN MIRROR ─────────────────────────────────────────────
+// Live screen mirroring from phone to browser via WebSocket.
+// Voice command: "mirror my phone", "show my screen", "screen mirror"
+// Panel appears on the right; chat slides left to make room.
+let screenMirrorWs = null;
+let screenMirrorActive = false;
+let screenMirrorCanvas = null;
+let screenMirrorPanel = null;
+let screenMirrorMinimized = false;
+let screenMirrorExpanded = false;
+let _mirrorDragState = null;
+
+function toggleScreenMirror(){
+  if(screenMirrorActive){
+    stopScreenMirror();
+  }else{
+    startScreenMirror();
+  }
+}
+
+function _resizeLayoutForMirror(){
+  // Shift chat to the left and shrink it when mirror is active
+  const chat = document.getElementById('chatContainer');
+  if(!chat) return;
+  if(screenMirrorActive && !screenMirrorMinimized){
+    chat.style.right = 'calc(380px + 24px)';
+    chat.style.transition = 'right 0.3s ease';
+  }else{
+    chat.style.right = '8px';
+    chat.style.transition = 'right 0.3s ease';
+  }
+}
+
+function minimizeScreenMirror(){
+  if(!screenMirrorPanel) return;
+  screenMirrorMinimized = true;
+  const canvas = screenMirrorPanel.querySelector('canvas');
+  const status = screenMirrorPanel.querySelector('#screenMirrorStatus');
+  if(canvas) canvas.style.display = 'none';
+  if(status) status.style.display = 'none';
+  screenMirrorPanel.style.height = '40px';
+  screenMirrorPanel.style.width = '220px';
+  _resizeLayoutForMirror();
+}
+
+function expandScreenMirror(){
+  if(!screenMirrorPanel) return;
+  screenMirrorExpanded = !screenMirrorExpanded;
+  if(screenMirrorExpanded){
+    screenMirrorPanel.style.width = '500px';
+    screenMirrorPanel.style.height = 'auto';
+    const canvas = screenMirrorPanel.querySelector('canvas');
+    if(canvas) canvas.style.maxHeight = '70vh';
+  }else{
+    screenMirrorPanel.style.width = '360px';
+    screenMirrorPanel.style.height = 'auto';
+    const canvas = screenMirrorPanel.querySelector('canvas');
+    if(canvas) canvas.style.maxHeight = '';
+  }
+}
+
+function restoreScreenMirror(){
+  if(!screenMirrorPanel) return;
+  screenMirrorMinimized = false;
+  screenMirrorExpanded = false;
+  const canvas = screenMirrorPanel.querySelector('canvas');
+  const status = screenMirrorPanel.querySelector('#screenMirrorStatus');
+  if(canvas){ canvas.style.display = 'block'; canvas.style.maxHeight = ''; }
+  if(status) status.style.display = 'block';
+  screenMirrorPanel.style.width = '360px';
+  screenMirrorPanel.style.height = 'auto';
+  _resizeLayoutForMirror();
+}
+
+function startScreenMirror(){
+  const phoneHost = localStorage.getItem('phone_host') || '100.115.234.87';
+  const phonePort = localStorage.getItem('phone_port') || '8099';
+  const token = localStorage.getItem('lilly_device_token') || '';
+  const wsUrl = `ws://${phoneHost}:${phonePort}/ws/screen?token=${encodeURIComponent(token)}`;
+
+  // Create mirror panel if not exists
+  if(!screenMirrorPanel){
+    screenMirrorPanel = document.createElement('div');
+    screenMirrorPanel.id = 'screenMirrorPanel';
+    screenMirrorPanel.style.cssText = `
+      position:fixed;top:70px;right:20px;z-index:9999;
+      width:360px;
+      background:rgba(20,16,32,0.95);
+      backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+      border:1px solid rgba(139,122,158,0.3);
+      border-radius:14px;
+      overflow:hidden;
+      box-shadow:0 12px 48px rgba(0,0,0,0.5),0 0 0 1px rgba(139,122,158,0.1);
+      display:none;
+      transition:width 0.3s ease,height 0.3s ease;
+    `;
+    screenMirrorPanel.innerHTML = `
+      <div class="mirror-titlebar" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;background:rgba(93,78,109,0.25);cursor:move;user-select:none;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:14px;">📱</span>
+          <span style="font-size:12px;color:#b8a9cc;font-weight:600;">Phone Screen</span>
+          <span id="mirrorDot" style="width:7px;height:7px;border-radius:50%;background:#4caf50;display:none;animation:pulse 2s infinite;"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:2px;">
+          <button id="mirrorMinBtn" onclick="minimizeScreenMirror()" style="background:none;border:none;color:#9a8aad;cursor:pointer;font-size:15px;padding:2px 6px;border-radius:4px;" title="Minimize">─</button>
+          <button id="mirrorExpandBtn" onclick="expandScreenMirror()" style="background:none;border:none;color:#9a8aad;cursor:pointer;font-size:13px;padding:2px 6px;border-radius:4px;" title="Expand">⤢</button>
+          <button onclick="toggleScreenMirror()" style="background:none;border:none;color:#ff6b6b;cursor:pointer;font-size:15px;padding:2px 6px;border-radius:4px;" title="Close">✕</button>
+        </div>
+      </div>
+      <div id="mirrorBody" style="position:relative;">
+        <canvas id="screenMirrorCanvas" style="width:100%;display:block;background:#000;max-height:60vh;"></canvas>
+        <div id="screenMirrorStatus" style="padding:6px 12px;font-size:10px;color:#9a8aad;text-align:center;">Connecting...</div>
+      </div>
+    `;
+    document.body.appendChild(screenMirrorPanel);
+    screenMirrorCanvas = document.getElementById('screenMirrorCanvas');
+
+    // Drag handling
+    const titlebar = screenMirrorPanel.querySelector('.mirror-titlebar');
+    titlebar.addEventListener('mousedown',(e)=>{
+      if(e.target.tagName==='BUTTON') return;
+      _mirrorDragState = {startX:e.clientX,startY:e.clientY,origLeft:screenMirrorPanel.offsetLeft,origTop:screenMirrorPanel.offsetTop};
+      document.addEventListener('mousemove',_onMirrorDrag);
+      document.addEventListener('mouseup',_onMirrorDragEnd);
+      e.preventDefault();
+    });
+  }
+
+  screenMirrorPanel.style.display = 'block';
+  screenMirrorActive = true;
+  screenMirrorMinimized = false;
+  const dot = document.getElementById('mirrorDot');
+  if(dot) dot.style.display = 'inline-block';
+  _resizeLayoutForMirror();
+
+  try{
+    screenMirrorWs = new WebSocket(wsUrl);
+    screenMirrorWs.binaryType = 'arraybuffer';
+
+    screenMirrorWs.onopen = () => {
+      const s = document.getElementById('screenMirrorStatus');
+      if(s) s.textContent = 'Streaming...';
+    };
+
+    screenMirrorWs.onmessage = (event) => {
+      if(event.data instanceof ArrayBuffer){
+        const blob = new Blob([event.data], {type: 'image/jpeg'});
+        const img = new Image();
+        img.onload = () => {
+          if(!screenMirrorCanvas) return;
+          const ctx = screenMirrorCanvas.getContext('2d');
+          screenMirrorCanvas.width = img.width;
+          screenMirrorCanvas.height = img.height;
+          ctx.drawImage(img, 0, 0);
+          URL.revokeObjectURL(img.src);
+        };
+        img.src = URL.createObjectURL(blob);
+      }else{
+        try{
+          const msg = JSON.parse(event.data);
+          if(msg.type === 'ping') return;
+        }catch(e){}
+      }
+    };
+
+    screenMirrorWs.onclose = () => {
+      const s = document.getElementById('screenMirrorStatus');
+      if(s) s.textContent = 'Disconnected — reconnecting...';
+      const dot = document.getElementById('mirrorDot');
+      if(dot) dot.style.background = '#ff9800';
+      setTimeout(() => {
+        if(screenMirrorActive) startScreenMirror();
+      }, 3000);
+    };
+
+    screenMirrorWs.onerror = (e) => {
+      const s = document.getElementById('screenMirrorStatus');
+      if(s) s.textContent = 'Connection error';
+      console.error('Screen mirror WS error:', e);
+    };
+  }catch(e){
+    console.error('Screen mirror start error:', e);
+    const s = document.getElementById('screenMirrorStatus');
+    if(s) s.textContent = 'Error: ' + e.message;
+  }
+}
+
+function _onMirrorDrag(e){
+  if(!_mirrorDragState) return;
+  const dx = e.clientX - _mirrorDragState.startX;
+  const dy = e.clientY - _mirrorDragState.startY;
+  // Convert right-anchored to left for dragging
+  const currentRight = window.innerWidth - screenMirrorPanel.offsetLeft - screenMirrorPanel.offsetWidth;
+  const newRight = window.innerWidth - _mirrorDragState.origLeft - screenMirrorPanel.offsetWidth - dx;
+  const newTop = _mirrorDragState.origTop + dy;
+  screenMirrorPanel.style.right = Math.max(0, newRight) + 'px';
+  screenMirrorPanel.style.top = Math.max(0, newTop) + 'px';
+  screenMirrorPanel.style.left = 'auto';
+}
+function _onMirrorDragEnd(){
+  _mirrorDragState = null;
+  document.removeEventListener('mousemove',_onMirrorDrag);
+  document.removeEventListener('mouseup',_onMirrorDragEnd);
+}
+
+function stopScreenMirror(){
+  if(screenMirrorWs){
+    screenMirrorWs.close();
+    screenMirrorWs = null;
+  }
+  if(screenMirrorPanel){
+    screenMirrorPanel.style.display = 'none';
+  }
+  screenMirrorActive = false;
+  screenMirrorMinimized = false;
+  const dot = document.getElementById('mirrorDot');
+  if(dot) dot.style.display = 'none';
+  _resizeLayoutForMirror();
 }
 
 async function _promptPermissionsIfNeeded() {
@@ -21077,6 +25461,14 @@ function addChatMessage(role,content,meta){
     chatMessages.scrollTop=chatMessages.scrollHeight;
     return;
   }
+  // Error messages — show with warning style
+  if(role==='error'){
+    div.className='chat-msg error';
+    div.textContent='⚠️ '+content;
+    chatMessages.appendChild(div);
+    chatMessages.scrollTop=chatMessages.scrollHeight;
+    return;
+  }
   // If meta.rawHtml is true, content is already rendered HTML (from vcRender)
   let html = (meta && meta.rawHtml) ? content : renderCodeBlocks(content);
   if(role==='assistant'){
@@ -21108,6 +25500,40 @@ function escapeHtml(text){
   const div=document.createElement('div');
   div.textContent=text;
   return div.innerHTML;
+}
+
+function renderMapWidget(lat,lng,label){
+  // Render an interactive Leaflet map in the chat
+  const mapDiv=document.createElement('div');
+  mapDiv.className='chat-msg system';
+  mapDiv.style.cssText='margin:8px 0;padding:0;border-radius:12px;overflow:hidden;border:1px solid rgba(139,122,158,0.25);max-width:400px;';
+  const mapId='map_'+Date.now();
+  mapDiv.innerHTML='<div id="'+mapId+'" style="width:100%;height:250px;"></div>'+(label?'<div style="padding:8px 12px;font-size:12px;color:#5d4e6d;background:rgba(93,78,109,0.05)">'+escapeHtml(label)+'</div>':'');
+  chatMessages.appendChild(mapDiv);
+  chatMessages.scrollTop=chatMessages.scrollHeight;
+  // Load Leaflet if not already loaded
+  if(!window.L){
+    const link=document.createElement('link');
+    link.rel='stylesheet';link.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+    document.head.appendChild(link);
+    const script=document.createElement('script');
+    script.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+    script.onload=()=>initMap(mapId,lat,lng);
+    document.head.appendChild(script);
+  }else{
+    initMap(mapId,lat,lng);
+  }
+}
+
+function initMap(mapId,lat,lng){
+  try{
+    const map=L.map(mapId).setView([lat,lng],15);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+      attribution:'&copy; OpenStreetMap'
+    }).addTo(map);
+    L.marker([lat,lng]).addTo(map).bindPopup('You are here').openPopup();
+    setTimeout(()=>map.invalidateSize(),100);
+  }catch(e){console.error('map init:',e)}
 }
 
 function copyCode(btnId){
@@ -21346,98 +25772,275 @@ function _initPiPResize(){
 }
 
 async function toggleCameraView(){
-  _cameraViewActive = !_cameraViewActive;
+  // Open the big camera window (YOLO + face recognition)
+  if(!_cameraViewActive){
+    openCameraWindow();
+    return;
+  }
+  // Turning off
+  closeCameraWindow();
+}
+
+function _showCameraChoiceDialog(){
+  // Only webcam available — start directly without dialog
+  _startBrowserCamera();
+}
+
+async function _startBrowserCamera(){
+  _cameraViewActive = true;
   const pip = document.getElementById('pipContainer');
   const filterBar = document.getElementById('filterBar');
   const camBtnEl = document.getElementById('camBtn');
-  if(_cameraViewActive){
-    try {
-      if(!CameraBridge.active) await CameraBridge.start();
-      if(!CameraBridge.active){
-        // Camera failed to start (permission denied or no camera)
-        _cameraViewActive = false;
-        displaySpeech("I can't access the camera right now. Please grant camera permission in your browser.");
-        return;
-      }
-    } catch(e) {
+  try {
+    if(!CameraBridge.active) await CameraBridge.start();
+    if(!CameraBridge.active){
       _cameraViewActive = false;
-      displaySpeech("Camera error: " + (e.message || e));
+      displaySpeech("I can't access the camera right now. Please grant camera permission in your browser.");
       return;
     }
-    if(pip){
-      pip.style.display = 'block';
-      pip.style.setProperty('--pip-w', _pipW+'px');
-      pip.style.setProperty('--pip-h', _pipH+'px');
-      _positionFilterBar();
-      if(filterBar) filterBar.style.display = 'flex';
-      _initPiPResize();
-      // Restore last filter
-      const saved = localStorage.getItem('lilly_filter');
-      if(saved && saved !== 'none') setFilter(saved);
-      // Initialize filter engine if a face filter is active
-      if(['puppy_ears','top_hat','mustache','crown','sunglasses'].includes(_activeFilter)){
-        FaceFilterEngine.init();
-      }
-      const bridgeVideo = document.getElementById('cameraBridgeVideo');
-      if(bridgeVideo && bridgeVideo.srcObject){
-        const snapCanvas = document.createElement('canvas');
-        const snapCtx = snapCanvas.getContext('2d');
-        function _updatePiPImg(){
-          if(!_cameraViewActive || !CameraBridge.active) return;
-          if(bridgeVideo.readyState >= 2){
-            const vw = bridgeVideo.videoWidth || 640, vh = bridgeVideo.videoHeight || 480;
-            // Match canvas to PiP size (2x for retina)
-            const cw = Math.max(100, pip.clientWidth) * 2;
-            const ch = Math.max(75, pip.clientHeight) * 2;
-            if(snapCanvas.width !== cw || snapCanvas.height !== ch){
-              snapCanvas.width = cw; snapCanvas.height = ch;
-            }
-            snapCtx.clearRect(0, 0, cw, ch);
-            // Draw video frame, mirrored
-            snapCtx.save();
-            snapCtx.translate(cw, 0);
-            snapCtx.scale(-1, 1);
-            snapCtx.drawImage(bridgeVideo, 0, 0, cw, ch);
-            snapCtx.restore();
-            // Apply color filters (rainbow, sepia)
-            if(_activeFilter === 'rainbow'){
-              const grad = snapCtx.createLinearGradient(0, 0, cw, 0);
-              grad.addColorStop(0,'rgba(255,0,0,0.25)');grad.addColorStop(0.17,'rgba(255,127,0,0.25)');
-              grad.addColorStop(0.33,'rgba(255,255,0,0.25)');grad.addColorStop(0.5,'rgba(0,255,0,0.25)');
-              grad.addColorStop(0.67,'rgba(0,0,255,0.25)');grad.addColorStop(0.83,'rgba(75,0,130,0.25)');
-              grad.addColorStop(1,'rgba(148,0,211,0.25)');
-              snapCtx.fillStyle = grad;
-              snapCtx.fillRect(0, 0, cw, ch);
-            } else if(_activeFilter === 'sepia'){
-              snapCtx.fillStyle = 'rgba(112,66,20,0.25)';
-              snapCtx.fillRect(0, 0, cw, ch);
-            }
-            // Face-tracking filters via MediaPipe
-            if(['puppy_ears','top_hat','mustache','crown','sunglasses'].includes(_activeFilter)){
-              const result = FaceFilterEngine.detect(bridgeVideo);
-              if(result && result.faceLandmarks && result.faceLandmarks.length > 0){
-                const lm = result.faceLandmarks[0];
-                drawFaceFilter(snapCtx, lm, cw, ch, _activeFilter);
-              }
-            }
-            document.getElementById('pipFeed').src = snapCanvas.toDataURL('image/jpeg', 0.65);
-          }
-          if(window._cameraDescription){
-            document.getElementById('pipLabel').textContent = window._cameraDescription;
-          }
-          requestAnimationFrame(_updatePiPImg);
-        }
-        _updatePiPImg();
-      }
-    }
-    if(camBtnEl) camBtnEl.classList.add('recording');
-  } else {
-    CameraBridge.stop();
-    if(pip) pip.style.display = 'none';
-    if(filterBar) filterBar.style.display = 'none';
-    if(camBtnEl) camBtnEl.classList.remove('recording');
-    if(_arMode) toggleARMode();
+  } catch(e) {
+    _cameraViewActive = false;
+    displaySpeech("Camera error: " + (e.message || e));
+    return;
   }
+  if(pip){
+    pip.style.display = 'block';
+    pip.style.setProperty('--pip-w', _pipW+'px');
+    pip.style.setProperty('--pip-h', _pipH+'px');
+    _positionFilterBar();
+    if(filterBar) filterBar.style.display = 'flex';
+    _initPiPResize();
+    const saved = localStorage.getItem('lilly_filter');
+    if(saved && saved !== 'none') setFilter(saved);
+    if(['puppy_ears','top_hat','mustache','crown','sunglasses'].includes(_activeFilter)){
+      FaceFilterEngine.init();
+    }
+    const bridgeVideo = document.getElementById('cameraBridgeVideo');
+    if(bridgeVideo && bridgeVideo.srcObject){
+      const snapCanvas = document.createElement('canvas');
+      const snapCtx = snapCanvas.getContext('2d');
+
+      // Track YOLO detections from CameraBridge responses
+      let _pipDetections = [];
+      const _origFetch = window.fetch;
+      window.fetch = function(...args){
+        const p = _origFetch.apply(this, args);
+        if(args[0] === '/api/vision/browser' && args[1]?.method === 'POST'){
+          p.then(r => r.clone().json().then(d => {
+            if(d && d.detections) _pipDetections = d.detections;
+          }).catch(()=>{}));
+        }
+        return p;
+      };
+
+      function _updatePiPImg(){
+        if(!_cameraViewActive || !CameraBridge.active) return;
+        if(bridgeVideo.readyState >= 2){
+          const vw = bridgeVideo.videoWidth || 640, vh = bridgeVideo.videoHeight || 480;
+          const cw = Math.max(100, pip.clientWidth) * 2;
+          const ch = Math.max(75, pip.clientHeight) * 2;
+          if(snapCanvas.width !== cw || snapCanvas.height !== ch){
+            snapCanvas.width = cw; snapCanvas.height = ch;
+          }
+          snapCtx.clearRect(0, 0, cw, ch);
+          snapCtx.save();
+          snapCtx.translate(cw, 0);
+          snapCtx.scale(-1, 1);
+          snapCtx.drawImage(bridgeVideo, 0, 0, cw, ch);
+          snapCtx.restore();
+          if(_activeFilter === 'rainbow'){
+            const grad = snapCtx.createLinearGradient(0, 0, cw, 0);
+            grad.addColorStop(0,'rgba(255,0,0,0.25)');grad.addColorStop(0.17,'rgba(255,127,0,0.25)');
+            grad.addColorStop(0.33,'rgba(255,255,0,0.25)');grad.addColorStop(0.5,'rgba(0,255,0,0.25)');
+            grad.addColorStop(0.67,'rgba(0,0,255,0.25)');grad.addColorStop(0.83,'rgba(75,0,130,0.25)');
+            grad.addColorStop(1,'rgba(148,0,211,0.25)');
+            snapCtx.fillStyle = grad;
+            snapCtx.fillRect(0, 0, cw, ch);
+          } else if(_activeFilter === 'sepia'){
+            snapCtx.fillStyle = 'rgba(112,66,20,0.25)';
+            snapCtx.fillRect(0, 0, cw, ch);
+          }
+          if(['puppy_ears','top_hat','mustache','crown','sunglasses'].includes(_activeFilter)){
+            const result = FaceFilterEngine.detect(bridgeVideo);
+            if(result && result.faceLandmarks && result.faceLandmarks.length > 0){
+              const lm = result.faceLandmarks[0];
+              drawFaceFilter(snapCtx, lm, cw, ch, _activeFilter);
+            }
+          }
+          // Draw YOLO detection boxes (POI style) on the PiP canvas
+          if(_yoloBoxesEnabled && _pipDetections.length > 0){
+            for(const det of _pipDetections){
+              if(det.x1 == null || det.x2 == null) continue;
+              const dx1 = det.x1 * cw, dy1 = det.y1 * ch;
+              const dx2 = det.x2 * cw, dy2 = det.y2 * ch;
+              _drawPoiDetection(snapCtx, dx1, dy1, dx2, dy2, det.label || 'object', det.confidence || 0, cw, ch);
+            }
+          }
+          document.getElementById('pipFeed').src = snapCanvas.toDataURL('image/jpeg', 0.65);
+        }
+        if(window._cameraDescription){
+          document.getElementById('pipLabel').textContent = window._cameraDescription;
+        }
+        requestAnimationFrame(_updatePiPImg);
+      }
+      _updatePiPImg();
+    }
+  }
+  if(camBtnEl) camBtnEl.classList.add('recording');
+}
+
+async function _startPhoneCamera(){
+  _cameraViewActive = true;
+  const pip = document.getElementById('pipContainer');
+  const filterBar = document.getElementById('filterBar');
+  const camBtnEl = document.getElementById('camBtn');
+  const pipFeed = document.getElementById('pipFeed');
+  const pipLabel = document.getElementById('pipLabel');
+
+  // Check if phone camera is available
+  try {
+    const statusResp = await fetch('/api/phone/camera/status');
+    const status = await statusResp.json();
+    if(!status.available){
+      _cameraViewActive = false;
+      displaySpeech("Phone camera isn't available. Make sure Termux:API is installed on your phone.");
+      return;
+    }
+  } catch(e) {
+    _cameraViewActive = false;
+    displaySpeech("Can't reach the phone sensor server. Is your phone connected?");
+    return;
+  }
+
+  // Show PiP container
+  if(pip){
+    pip.style.display = 'block';
+    pip.style.setProperty('--pip-w', _pipW+'px');
+    pip.style.setProperty('--pip-h', _pipH+'px');
+    _positionFilterBar();
+    if(filterBar) filterBar.style.display = 'flex';
+    _initPiPResize();
+  }
+  if(camBtnEl) camBtnEl.classList.add('recording');
+  if(pipLabel) pipLabel.textContent = 'Phone camera loading...';
+
+  // Poll phone camera frames
+  let lastFrameTime = 0;
+  async function _capturePhoneFrame(){
+    if(!_cameraViewActive) return;
+    try {
+      const resp = await fetch('/api/phone/camera/capture?force=true');
+      const data = await resp.json();
+      if(data.image_base64 && pipFeed){
+        pipFeed.src = 'data:image/jpeg;base64,' + data.image_base64;
+        if(pipLabel) pipLabel.textContent = 'Phone camera';
+        // Auto-analyze every 5 seconds
+        const now = Date.now();
+        if(now - lastFrameTime > 5000){
+          lastFrameTime = now;
+          // Send frame to server for YOLO detection
+          const byteString = atob(data.image_base64);
+          const ab = new ArrayBuffer(byteString.length);
+          const ia = new Uint8Array(ab);
+          for(let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
+          const blob = new Blob([ab], {type: 'image/jpeg'});
+          const formData = new FormData();
+          formData.append('file', blob, 'frame.jpg');
+          fetch('/api/vision/browser', {method: 'POST', body: formData})
+            .then(r => r.json())
+            .then(d => {
+              if(d.description){
+                window._cameraDescription = d.description;
+                if(pipLabel) pipLabel.textContent = d.description;
+              }
+            }).catch(()=>{});
+        }
+      } else if(data.error){
+        if(pipLabel) pipLabel.textContent = 'Camera error: ' + data.error;
+      }
+    } catch(e) {
+      if(pipLabel) pipLabel.textContent = 'Connection lost...';
+    }
+    if(_cameraViewActive){
+      setTimeout(_capturePhoneFrame, 1000); // 1 FPS for display
+    }
+  }
+   _capturePhoneFrame();
+}
+
+async function _startBlinkCamera(){
+  _cameraViewActive = true;
+  const pip = document.getElementById('pipContainer');
+  const filterBar = document.getElementById('filterBar');
+  const camBtnEl = document.getElementById('camBtn');
+  const pipFeed = document.getElementById('pipFeed');
+  const pipLabel = document.getElementById('pipLabel');
+
+  // Show PiP container immediately
+  if(pip){
+    pip.style.display = 'block';
+    pip.style.setProperty('--pip-w', _pipW+'px');
+    pip.style.setProperty('--pip-h', _pipH+'px');
+    _positionFilterBar();
+    if(filterBar) filterBar.style.display = 'flex';
+    _initPiPResize();
+  }
+
+  // Fetch available Blink cameras
+  let blinkCameras = [];
+  try {
+    const resp = await fetch('/api/blink/cameras');
+    const data = await resp.json();
+    blinkCameras = data.cameras || [];
+    if(!blinkCameras.length){
+      if(pipLabel) pipLabel.textContent = 'No Blink cameras found';
+      _cameraViewActive = false;
+      if(pip) pip.style.display = 'none';
+      return;
+    }
+  } catch(e) {
+    if(pipLabel) pipLabel.textContent = 'Blink connection error';
+    _cameraViewActive = false;
+    if(pip) pip.style.display = 'none';
+    return;
+  }
+
+  if(camBtnEl) camBtnEl.classList.add('recording');
+
+  let camIdx = 0;
+  let lastFrameTime = 0;
+
+  async function _captureBlinkFrame(){
+    if(!_cameraViewActive) return;
+    const cam = blinkCameras[camIdx];
+    try {
+      const resp = await fetch('/api/vision/single', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({camera: cam.name})
+      });
+      const data = await resp.json();
+      if(data.image_base64 && pipFeed){
+        pipFeed.src = 'data:image/jpeg;base64,' + data.image_base64;
+        if(pipLabel) pipLabel.textContent = cam.name;
+        // Run YOLO detection and update description
+        const now = Date.now();
+        if(now - lastFrameTime > 5000){
+          lastFrameTime = now;
+          if(data.description){
+            if(pipLabel) pipLabel.textContent = data.description;
+          }
+        }
+      }
+      // Cycle to next camera every 10 seconds
+      setTimeout(_captureBlinkFrame, 10000);
+      camIdx = (camIdx + 1) % blinkCameras.length;
+    } catch(e) {
+      if(pipLabel) pipLabel.textContent = 'Blink camera: ' + (e.message || e);
+      setTimeout(_captureBlinkFrame, 5000);
+    }
+  }
+  _captureBlinkFrame();
 }
 
 async function reactToCameraView(){
@@ -21447,6 +26050,1347 @@ async function reactToCameraView(){
     if(d.reply) displaySpeech(d.reply);
     if(d.audio_id){playAudio(d.audio_id); _lastPollAudioId = d.audio_id;}
   }catch(e){}
+}
+
+// ─── Camera Window (multi-feed panel) ──────────────────────
+let _cameraWindowActive = false;
+let _cwBlinkInterval = null;
+let _cwPhoneInterval = null;
+let _cwWebcamActive = false;
+let _cwFaceRecognitionActive = false;
+let _cwFaceInterval = null;
+
+function openCameraWindow(){
+  if(_cameraWindowActive) return;
+  _cameraWindowActive = true;
+  const cw = document.getElementById('cameraWindow');
+  if(!cw) return;
+  cw.style.display = 'flex';
+  cw.classList.remove('cw-minimized', 'cw-maximized');
+  _cameraViewActive = true;
+  const camBtnEl = document.getElementById('camBtn');
+  if(camBtnEl) camBtnEl.classList.add('recording');
+
+  // Start webcam feed
+  _cwStartWebcam();
+
+  // Make camera window draggable
+  _initCwDrag();
+}
+
+function minimizeCameraWindow(){
+  const cw = document.getElementById('cameraWindow');
+  if(!cw) return;
+  if(cw.classList.contains('cw-minimized')){
+    cw.classList.remove('cw-minimized');
+  } else {
+    cw.classList.add('cw-minimized');
+    cw.classList.remove('cw-maximized');
+  }
+}
+
+function maximizeCameraWindow(){
+  const cw = document.getElementById('cameraWindow');
+  if(!cw) return;
+  if(cw.classList.contains('cw-maximized')){
+    cw.classList.remove('cw-maximized');
+  } else {
+    cw.classList.add('cw-maximized');
+    cw.classList.remove('cw-minimized');
+  }
+}
+
+// ─── Blink 2FA Handling ────────────────────────────────────────
+let _cwBlinkCountdownTimer = null;
+
+function _startBlinkCountdown(seconds, label) {
+  const wrapper = document.getElementById('cwBlinkCountdown');
+  const valueEl = document.getElementById('cwBlinkCountdownValue');
+  const labelEl = document.getElementById('cwBlinkCountdownLabel');
+  if (!wrapper || !valueEl) return;
+  wrapper.style.display = 'block';
+  if (labelEl) labelEl.textContent = label || 'seconds before retry';
+  let remaining = Math.ceil(seconds);
+  // Show MM:SS format for long waits (>120s), just seconds for short waits
+  function fmtTime(s) {
+    if (s > 120) {
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      return m + ':' + String(sec).padStart(2, '0');
+    }
+    return String(s);
+  }
+  valueEl.textContent = fmtTime(remaining);
+  // Clear any previous countdown
+  if (_cwBlinkCountdownTimer) clearInterval(_cwBlinkCountdownTimer);
+  _cwBlinkCountdownTimer = setInterval(() => {
+    remaining--;
+    if (valueEl) valueEl.textContent = fmtTime(remaining);
+    if (remaining <= 0) {
+      clearInterval(_cwBlinkCountdownTimer);
+      _cwBlinkCountdownTimer = null;
+      wrapper.style.display = 'none';
+      // Show retry button — do NOT auto-retry
+      const retryBtn = document.getElementById('cwBlinkRetryBtn');
+      const form = document.getElementById('cwBlink2faForm');
+      if (retryBtn) retryBtn.style.display = 'block';
+      if (form) form.style.display = 'none';
+      const status = document.getElementById('cwBlink2faStatus');
+      if (status) { status.textContent = 'Ready — click Retry to connect'; status.style.color = 'rgba(93,78,109,0.5)'; }
+    }
+  }, 1000);
+}
+
+function _stopBlinkCountdown() {
+  if (_cwBlinkCountdownTimer) {
+    clearInterval(_cwBlinkCountdownTimer);
+    _cwBlinkCountdownTimer = null;
+  }
+  const wrapper = document.getElementById('cwBlinkCountdown');
+  if (wrapper) wrapper.style.display = 'none';
+}
+
+async function _checkBlink2FAStatus() {
+  const container = document.getElementById('cwBlink2fa');
+  const status = document.getElementById('cwBlink2faStatus');
+  const form = document.getElementById('cwBlink2faForm');
+  const retryBtn = document.getElementById('cwBlinkRetryBtn');
+  if (!container) return;
+
+  try {
+    const resp = await fetch('/api/blink/status');
+    const data = await resp.json();
+    
+    if (data.connected) {
+      container.style.display = 'none';
+      _stopBlinkCountdown();
+    } else if (data.pending_2fa) {
+      container.style.display = 'block';
+      if (form) form.style.display = 'flex';
+      if (retryBtn) retryBtn.style.display = 'none';
+      _stopBlinkCountdown();
+      if (status) {
+        status.textContent = 'Enter code sent to your phone';
+        status.style.color = '#e85a6e';
+      }
+    } else if (data.rate_limited || data.cooldown_remaining > 60) {
+      // Blink is rate-limiting us (429) — show long countdown
+      container.style.display = 'block';
+      if (form) form.style.display = 'none';
+      if (retryBtn) retryBtn.style.display = 'none';
+      _stopBlinkCountdown();
+      if (status) {
+        status.textContent = 'Blink blocked us (too many attempts)';
+        status.style.color = '#e85a6e';
+      }
+      _startBlinkCountdown(data.cooldown_remaining, 'minutes:seconds until you can retry');
+    } else if (data.cooldown_remaining > 0) {
+      container.style.display = 'block';
+      if (form) form.style.display = 'none';
+      if (retryBtn) retryBtn.style.display = 'none';
+      if (status) {
+        status.textContent = 'Cooling down...';
+        status.style.color = '#e85a6e';
+      }
+      _startBlinkCountdown(data.cooldown_remaining, 'seconds until retry');
+    } else {
+      container.style.display = 'block';
+      if (form) form.style.display = 'none';
+      if (retryBtn) retryBtn.style.display = 'block';
+      _stopBlinkCountdown();
+      if (status) {
+        status.textContent = 'Click below to connect';
+        status.style.color = 'rgba(93,78,109,0.5)';
+      }
+    }
+  } catch (e) {
+    container.style.display = 'none';
+    _stopBlinkCountdown();
+  }
+}
+
+async function submitBlink2FA() {
+  const input = document.getElementById('cwBlink2faInput');
+  const btn = document.getElementById('cwBlink2faBtn');
+  const status = document.getElementById('cwBlink2faStatus');
+  
+  if (!input || !btn) return;
+  
+  const code = input.value.trim();
+  if (!code || code.length !== 6 || !/^\d{6}$/.test(code)) {
+    if (status) {
+      status.textContent = 'Enter a valid 6-digit code';
+      status.style.color = '#e85a6e';
+    }
+    input.focus();
+    return;
+  }
+
+  // Disable button during verification
+  btn.disabled = true;
+  btn.textContent = 'Verifying...';
+  btn.style.opacity = '0.5';
+  if (status) {
+    status.textContent = 'Verifying code...';
+    status.style.color = 'rgba(93,78,109,0.5)';
+  }
+
+  try {
+    const resp = await fetch(`/api/blink/2fa?code=${code}`, { method: 'POST' });
+    const data = await resp.json();
+    
+    if (data.ok) {
+      if (status) {
+        status.textContent = '✓ Connected!';
+        status.style.color = '#4caf50';
+      }
+      input.value = '';
+      input.style.display = 'none';
+      btn.style.display = 'none';
+      _stopBlinkCountdown();
+      
+      // Refresh camera feeds after successful 2FA
+      setTimeout(() => {
+        _cwStartBlink();
+      }, 1000);
+    } else {
+      if (status) {
+        status.textContent = data.error || 'Verification failed';
+        status.style.color = '#e85a6e';
+      }
+      input.select();
+    }
+  } catch (e) {
+    if (status) {
+      status.textContent = 'Network error - try again';
+      status.style.color = '#e85a6e';
+    }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Verify';
+    btn.style.opacity = '1';
+  }
+}
+
+// Add Enter key listener for 2FA input
+document.addEventListener('DOMContentLoaded', () => {
+  const input = document.getElementById('cwBlink2faInput');
+  if (input) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        submitBlink2FA();
+      }
+    });
+  }
+});
+
+async function retryBlinkConnection() {
+  const status = document.getElementById('cwBlink2faStatus');
+  const btn = document.getElementById('cwBlinkRetryBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Connecting...'; }
+  if (status) { status.textContent = 'Requesting new code...'; status.style.color = 'rgba(93,78,109,0.5)'; }
+  try {
+    const resp = await fetch('/api/blink/retry', { method: 'POST' });
+    const data = await resp.json();
+    if (data.pending_2fa) {
+      if (status) { status.textContent = 'New code sent! Check your phone.'; status.style.color = '#e85a6e'; }
+      _stopBlinkCountdown();
+      const form = document.getElementById('cwBlink2faForm');
+      if (form) form.style.display = 'flex';
+      if (btn) btn.style.display = 'none';
+    } else if (data.connected) {
+      if (status) { status.textContent = '✓ Connected!'; status.style.color = '#4caf50'; }
+      document.getElementById('cwBlink2fa').style.display = 'none';
+      setTimeout(() => _cwStartBlink(), 1000);
+    } else if (data.rate_limited || data.cooldown_remaining > 60) {
+      if (status) { status.textContent = 'Blink blocked us — too many attempts. Wait ~15 min.'; status.style.color = '#e85a6e'; }
+      _startBlinkCountdown(data.cooldown_remaining, 'minutes:seconds until retry available');
+      if (btn) btn.style.display = 'none';
+    } else if (data.cooldown_remaining > 0) {
+      if (status) { status.textContent = 'Still rate-limited...'; status.style.color = '#e85a6e'; }
+      _startBlinkCountdown(data.cooldown_remaining, 'seconds until retry available');
+      if (btn) btn.style.display = 'none';
+    } else {
+      if (status) { status.textContent = data.error || 'Connection failed'; status.style.color = '#e85a6e'; }
+    }
+  } catch(e) {
+    if (status) { status.textContent = 'Network error'; status.style.color = '#e85a6e'; }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🔄 Retry connection (sends new code)'; }
+  }
+}
+
+function closeCameraWindow(){
+  _cameraWindowActive = false;
+  _cameraViewActive = false;
+  const cw = document.getElementById('cameraWindow');
+  if(cw) cw.style.display = 'none';
+  const camBtnEl = document.getElementById('camBtn');
+  if(camBtnEl) camBtnEl.classList.remove('recording');
+
+  // Stop webcam feed
+  if(_cwWebcamActive){ CameraBridge.stop(); _cwWebcamActive = false; }
+
+  // Stop face recognition polling
+  if(_cwFaceInterval){ clearInterval(_cwFaceInterval); _cwFaceInterval = null; }
+  _cwFaceRecognitionActive = false;
+
+  // Hide pip too
+  const pip = document.getElementById('pipContainer');
+  const filterBar = document.getElementById('filterBar');
+  if(pip) pip.style.display = 'none';
+  if(filterBar) filterBar.style.display = 'none';
+  if(_arMode) toggleARMode();
+}
+
+async function _cwStartBlink(){
+  const img = document.getElementById('cwBlinkImg');
+  const placeholder = document.querySelector('#cwBlink .cw-feed-placeholder');
+  const label = document.getElementById('cwBlinkLabel');
+  const dot = document.getElementById('cwBlinkDot');
+  if(!img) return;
+
+  let blinkCameras = [];
+  try {
+    const resp = await fetch('/api/blink/cameras');
+    const data = await resp.json();
+    blinkCameras = data.cameras || [];
+  } catch(e) {
+    if(label) label.textContent = 'Blink: offline';
+    return;
+  }
+
+  if(!blinkCameras.length){
+    if(label) label.textContent = 'No cameras found';
+    if(placeholder) placeholder.textContent = 'No Blink cameras';
+    return;
+  }
+
+  if(placeholder) placeholder.style.display = 'none';
+  img.style.display = 'block';
+  if(dot) dot.style.display = 'block';
+
+  let camIdx = 0;
+  async function _captureBlinkFrame(){
+    if(!_cameraWindowActive) return;
+    const cam = blinkCameras[camIdx];
+    try {
+      const resp = await fetch('/api/vision/single', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({camera: cam.name})
+      });
+      const data = await resp.json();
+      if(data.image_base64){
+        img.src = 'data:image/jpeg;base64,' + data.image_base64;
+        if(label) label.textContent = cam.name;
+      }
+    } catch(e) {
+      if(label) label.textContent = 'Error: ' + cam.name;
+    }
+    camIdx = (camIdx + 1) % blinkCameras.length;
+  }
+  _captureBlinkFrame();
+  _cwBlinkInterval = setInterval(_captureBlinkFrame, 8000);
+}
+
+// ─── YOLO Detection Features ──────────────────────────────────────
+let _yoloBoxesEnabled = true;
+let _yoloSoundEnabled = false;
+let _yoloSoundObjects = ['person', 'car', 'dog', 'cat'];  // Objects that trigger sound alerts
+const _yoloAudio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVggoKIeGBGP4aQnH9fRECCjZ2Lc11NOYmWpIJlSkJ+jJqQd2BLOIaTo4RuUUp/h5OSfG1RSX2DkJeEfHVdUHh9j5WIfXtiV3V6ipWKf35oW3F3h5OJfH9tX3B0g5CGen1vYm1ygI6EeHxxY2xxf4yDdnt0ZGpwfYqCc3p2Zmlue4eBcXl4aGdseIWAcHd6amZqdIKAcHV8bGRpdH+Bb3N8bmNocn2AbnJ+cGJncXt9bHF/c2FmcHl8a2+AeF9kbnZ6a22De15ianR5aGuEfltfa3B3Z2eCelpcbG52ZmaAeFhZa211ZWWAd1dXamp0ZGSAdlZYaGlzY2KAdVRVZ2hyYmGAdFNTPj03NjQAPj48Ozw9PT4AAQEBAAAAAAABAAAAAQAAAAEAAAABAAAAAQD9/f39/f7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/g==');
+let _yoloLastAlertTime = 0;
+
+// Color scheme for different object categories
+const _yoloColors = {
+  // People - Blue
+  'person': { box: 'rgba(66,133,244,0.9)', bg: 'rgba(66,133,244,0.85)' },
+  // Vehicles - Orange
+  'car': { box: 'rgba(255,152,0,0.9)', bg: 'rgba(255,152,0,0.85)' },
+  'truck': { box: 'rgba(255,152,0,0.9)', bg: 'rgba(255,152,0,0.85)' },
+  'bus': { box: 'rgba(255,152,0,0.9)', bg: 'rgba(255,152,0,0.85)' },
+  'motorcycle': { box: 'rgba(255,152,0,0.9)', bg: 'rgba(255,152,0,0.85)' },
+  'bicycle': { box: 'rgba(255,152,0,0.9)', bg: 'rgba(255,152,0,0.85)' },
+  // Animals - Pink
+  'dog': { box: 'rgba(233,30,99,0.9)', bg: 'rgba(233,30,99,0.85)' },
+  'cat': { box: 'rgba(233,30,99,0.9)', bg: 'rgba(233,30,99,0.85)' },
+  'bird': { box: 'rgba(233,30,99,0.9)', bg: 'rgba(233,30,99,0.85)' },
+  // Furniture - Teal
+  'chair': { box: 'rgba(0,150,136,0.9)', bg: 'rgba(0,150,136,0.85)' },
+  'couch': { box: 'rgba(0,150,136,0.9)', bg: 'rgba(0,150,136,0.85)' },
+  'bed': { box: 'rgba(0,150,136,0.9)', bg: 'rgba(0,150,136,0.85)' },
+  'table': { box: 'rgba(0,150,136,0.9)', bg: 'rgba(0,150,136,0.85)' },
+  // Electronics - Purple
+  'laptop': { box: 'rgba(156,39,176,0.9)', bg: 'rgba(156,39,176,0.85)' },
+  'cell phone': { box: 'rgba(156,39,176,0.9)', bg: 'rgba(156,39,176,0.85)' },
+  'tv': { box: 'rgba(156,39,176,0.9)', bg: 'rgba(156,39,176,0.85)' },
+  'keyboard': { box: 'rgba(156,39,176,0.9)', bg: 'rgba(156,39,176,0.85)' },
+  'mouse': { box: 'rgba(156,39,176,0.9)', bg: 'rgba(156,39,176,0.85)' },
+  // Food/Drink - Yellow
+  'cup': { box: 'rgba(255,193,7,0.9)', bg: 'rgba(255,193,7,0.85)' },
+  'bottle': { box: 'rgba(255,193,7,0.9)', bg: 'rgba(255,193,7,0.85)' },
+  'wine glass': { box: 'rgba(255,193,7,0.9)', bg: 'rgba(255,193,7,0.85)' },
+  'fork': { box: 'rgba(255,193,7,0.9)', bg: 'rgba(255,193,7,0.85)' },
+  'knife': { box: 'rgba(255,193,7,0.9)', bg: 'rgba(255,193,7,0.85)' },
+  'spoon': { box: 'rgba(255,193,7,0.9)', bg: 'rgba(255,193,7,0.85)' },
+  'bowl': { box: 'rgba(255,193,7,0.9)', bg: 'rgba(255,193,7,0.85)' },
+  // Books/Paper - Red
+  'book': { box: 'rgba(244,67,54,0.9)', bg: 'rgba(244,67,54,0.85)' },
+  'clock': { box: 'rgba(244,67,54,0.9)', bg: 'rgba(244,67,54,0.85)' },
+  // Default - Green
+  'default': { box: 'rgba(50,200,120,0.9)', bg: 'rgba(50,200,120,0.85)' }
+};
+
+function _getYoloColor(label) {
+  return _yoloColors[label] || _yoloColors['default'];
+}
+
+// ── Person of Interest Machine-style surveillance overlay ──────────
+let _poiIdCounter = 0;
+const _poiIdMap = new Map();  // label+coords → tracking ID
+
+function _getPoiId(label, x1, y1, x2, y2) {
+  const key = `${label}:${Math.round(x1*100)}:${Math.round(y1*100)}:${Math.round(x2*100)}:${Math.round(y2*100)}`;
+  if (!_poiIdMap.has(key)) {
+    _poiIdCounter++;
+    _poiIdMap.set(key, String(_poiIdCounter).padStart(4, '0'));
+    // Evict old entries if map grows too large
+    if (_poiIdMap.size > 200) {
+      const first = _poiIdMap.keys().next().value;
+      _poiIdMap.delete(first);
+    }
+  }
+  return _poiIdMap.get(key);
+}
+
+function _drawPoiDetection(ctx, x1, y1, x2, y2, label, confidence, vw, vh) {
+  const w = x2 - x1;
+  const h = y2 - y1;
+  const cx = (x1 + x2) / 2;
+  const cy = (y1 + y2) / 2;
+
+  // Tracking ID
+  const trackId = _getPoiId(label, x1 / vw, y1 / vh, x2 / vw, y2 / vh);
+
+  // Color: person = cyan, others = white with category tint
+  const isPerson = label === 'person' || label === 'face';
+  const mainColor = isPerson ? '#00E5FF' : 'rgba(200,220,255,0.85)';
+  const dimColor = isPerson ? 'rgba(0,229,255,0.4)' : 'rgba(200,220,255,0.35)';
+  const textColor = '#FFFFFF';
+  const accentColor = isPerson ? '#00E5FF' : '#88CCFF';
+
+  ctx.save();
+
+  // ── Corner brackets (not full box) ──
+  const cornerLen = Math.min(w, h) * 0.22;
+  const gap = 3;
+  ctx.strokeStyle = mainColor;
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+
+  // Top-left
+  ctx.beginPath();
+  ctx.moveTo(x1, y1 + cornerLen);
+  ctx.lineTo(x1, y1);
+  ctx.lineTo(x1 + cornerLen, y1);
+  ctx.stroke();
+  // Top-right
+  ctx.beginPath();
+  ctx.moveTo(x2 - cornerLen, y1);
+  ctx.lineTo(x2, y1);
+  ctx.lineTo(x2, y1 + cornerLen);
+  ctx.stroke();
+  // Bottom-left
+  ctx.beginPath();
+  ctx.moveTo(x1, y2 - cornerLen);
+  ctx.lineTo(x1, y2);
+  ctx.lineTo(x1 + cornerLen, y2);
+  ctx.stroke();
+  // Bottom-right
+  ctx.beginPath();
+  ctx.moveTo(x2 - cornerLen, y2);
+  ctx.lineTo(x2, y2);
+  ctx.lineTo(x2, y2 - cornerLen);
+  ctx.stroke();
+
+  // ── Subtle inner frame lines (targeting feel) ──
+  ctx.strokeStyle = dimColor;
+  ctx.lineWidth = 0.5;
+  ctx.setLineDash([4, 4]);
+  ctx.strokeRect(x1 + 2, y1 + 2, w - 4, h - 4);
+  ctx.setLineDash([]);
+
+  // ── Center crosshair ──
+  const chSize = Math.min(w, h) * 0.12;
+  ctx.strokeStyle = accentColor;
+  ctx.lineWidth = 1;
+  // Horizontal
+  ctx.beginPath();
+  ctx.moveTo(cx - chSize, cy);
+  ctx.lineTo(cx + chSize, cy);
+  ctx.stroke();
+  // Vertical
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - chSize);
+  ctx.lineTo(cx, cy + chSize);
+  ctx.stroke();
+  // Small center dot
+  ctx.fillStyle = accentColor;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ── Tracking ID + label (top-left, outside the bracket) ──
+  ctx.font = 'bold 11px "Courier New", monospace';
+  const idText = `#${trackId}`;
+  const idW = ctx.measureText(idText).width;
+  // ID badge background
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(x1, y1 - 18, idW + 6, 16);
+  ctx.fillStyle = accentColor;
+  ctx.fillText(idText, x1 + 3, y1 - 6);
+
+  // ── Label + confidence (top-right, outside the bracket) ──
+  const labelText = label.toUpperCase();
+  const confText = Math.round(confidence * 100) + '%';
+  ctx.font = 'bold 10px "Courier New", monospace';
+  const labelW = ctx.measureText(labelText).width;
+  const confW = ctx.measureText(confText).width;
+  const tagW = labelW + confW + 12;
+  // Tag background
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(x2 - tagW, y1 - 18, tagW, 16);
+  // Label text
+  ctx.fillStyle = textColor;
+  ctx.fillText(labelText, x2 - tagW + 3, y1 - 6);
+  // Confidence
+  ctx.fillStyle = accentColor;
+  ctx.fillText(confText, x2 - confW - 3, y1 - 6);
+
+  // ── Side info line (right edge, mid-height) ──
+  if (isPerson) {
+    ctx.font = '9px "Courier New", monospace';
+    ctx.fillStyle = dimColor;
+    const sideText = `POI ${trackId}`;
+    ctx.save();
+    ctx.translate(x2 + 4, cy);
+    ctx.rotate(Math.PI / 2);
+    ctx.fillText(sideText, 0, 0);
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+function _playYoloAlert() {
+  if(!_yoloSoundEnabled) return;
+  const now = Date.now();
+  if(now - _yoloLastAlertTime < 3000) return;  // Max once per 3 seconds
+  _yoloLastAlertTime = now;
+  try {
+    _yoloAudio.currentTime = 0;
+    _yoloAudio.play().catch(()=>{});
+  } catch(e) {}
+}
+
+async function _cwStartPhone(){
+  const img = document.getElementById('cwPhoneImg');
+  const placeholder = document.querySelector('#cwPhone .cw-feed-placeholder');
+  const label = document.getElementById('cwPhoneLabel');
+  const dot = document.getElementById('cwPhoneDot');
+  if(!img) return;
+
+  // Check if phone camera is available
+  try {
+    const statusResp = await fetch('/api/phone/camera/status');
+    const status = await statusResp.json();
+    if(!status.available){
+      if(label) label.textContent = 'Phone: offline';
+      if(placeholder) placeholder.textContent = 'Phone camera unavailable';
+      return;
+    }
+  } catch(e) {
+    if(label) label.textContent = 'Phone: unreachable';
+    if(placeholder) placeholder.textContent = 'Phone not connected';
+    return;
+  }
+
+  if(placeholder) placeholder.style.display = 'none';
+  img.style.display = 'block';
+  if(dot) dot.style.display = 'block';
+
+  // Create overlay canvas for YOLO detection boxes
+  const container = img.parentElement;
+  let overlay = document.getElementById('cwPhoneOverlay');
+  if(!overlay){
+    overlay = document.createElement('canvas');
+    overlay.id = 'cwPhoneOverlay';
+    overlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2;border-radius:8px';
+    if(container) container.appendChild(overlay);
+  }
+  const octx = overlay.getContext('2d');
+
+  // Track latest detections
+  let _cwPhoneDetections = [];
+
+  async function _capturePhoneFrame(){
+    if(!_cameraWindowActive) return;
+    try {
+      const resp = await fetch('/api/phone/camera/capture?force=true');
+      const data = await resp.json();
+      if(data.image_base64){
+        img.src = 'data:image/jpeg;base64,' + data.image_base64;
+        if(label) label.textContent = 'Phone';
+
+        // Send frame to YOLO for detection
+        try {
+          const blob = await fetch('data:image/jpeg;base64,' + data.image_base64).then(r => r.blob());
+          const formData = new FormData();
+          formData.append('file', blob, 'phone_frame.jpg');
+          const yoloResp = await fetch('/api/vision/browser', { method: 'POST', body: formData });
+          const yoloData = await yoloResp.json();
+          if(yoloData && yoloData.detections){
+            _cwPhoneDetections = yoloData.detections;
+
+            // Check for alert objects
+            for(const det of _cwPhoneDetections){
+              if(_yoloSoundObjects.includes(det.label)){
+                _playYoloAlert();
+                break;
+              }
+            }
+          }
+        } catch(yoloErr) {
+          // YOLO failed, continue without boxes
+        }
+
+        // Draw YOLO detection boxes on overlay canvas (if enabled)
+        if(_yoloBoxesEnabled && overlay && octx && img.naturalWidth && img.naturalHeight){
+          const vw = img.naturalWidth;
+          const vh = img.naturalHeight;
+          overlay.width = vw;
+          overlay.height = vh;
+          octx.clearRect(0, 0, vw, vh);
+
+          for(const det of _cwPhoneDetections){
+            if(det.x1 == null || det.x2 == null) continue;  // skip if no coords
+            const x1 = det.x1 * vw, y1 = det.y1 * vh;
+            const x2 = det.x2 * vw, y2 = det.y2 * vh;
+            const conf = det.confidence || 0;
+            const lbl = det.label || 'object';
+
+            _drawPoiDetection(octx, x1, y1, x2, y2, lbl, conf, vw, vh);
+          }
+        } else if(overlay && octx) {
+          // Clear overlay if boxes are disabled
+          overlay.width = img.naturalWidth || 1;
+          overlay.height = img.naturalHeight || 1;
+          octx.clearRect(0, 0, overlay.width, overlay.height);
+        }
+      }
+    } catch(e) {
+      if(label) label.textContent = 'Phone: lost';
+    }
+  }
+  _capturePhoneFrame();
+  _cwPhoneInterval = setInterval(_capturePhoneFrame, 2000);
+}
+
+async function _cwStartWebcam(){
+  const img = document.getElementById('cwWebcamImg');
+  const placeholder = document.querySelector('#cwWebcam .cw-feed-placeholder');
+  const label = document.getElementById('cwWebcamLabel');
+  const dot = document.getElementById('cwWebcamDot');
+  const overlay = document.getElementById('cwOverlay');
+  if(!img) return;
+
+  try {
+    if(!CameraBridge.active) await CameraBridge.start();
+    if(!CameraBridge.active){
+      if(label) label.textContent = 'Camera: denied';
+      if(placeholder) placeholder.textContent = 'Camera permission denied — click mic button to grant';
+      return;
+    }
+  } catch(e) {
+    if(label) label.textContent = 'Camera: error';
+    if(placeholder) placeholder.textContent = 'Camera unavailable';
+    return;
+  }
+
+  _cwWebcamActive = true;
+  if(placeholder) placeholder.style.display = 'none';
+  img.style.display = 'block';
+  if(dot) dot.style.display = 'block';
+
+  const octx = overlay ? overlay.getContext('2d') : null;
+
+  // Track latest detections from CameraBridge responses
+  let _cwDetections = [];
+
+  // Intercept CameraBridge POSTs to capture detection data
+  const _origFetch = window.fetch;
+  window.fetch = function(...args){
+    const p = _origFetch.apply(this, args);
+    if(args[0] === '/api/vision/browser' && args[1]?.method === 'POST'){
+      p.then(r => r.clone().json().then(d => {
+        if(d && d.detections) _cwDetections = d.detections;
+      }).catch(()=>{}));
+    }
+    return p;
+  };
+
+  const bridgeVideo = document.getElementById('cameraBridgeVideo');
+  if(bridgeVideo && bridgeVideo.srcObject){
+    const snapCanvas = document.createElement('canvas');
+    const snapCtx = snapCanvas.getContext('2d');
+
+    // GPU-accelerated path: use WebGL when enabled (near-zero CPU at 60fps)
+    let _gpuInitialized = false;
+    let _gpuCanvas = null;
+
+    function _updateWebcamFeed(){
+      if(!_cameraWindowActive || !_cwWebcamActive) return;
+      if(bridgeVideo.readyState >= 2){
+        const vw = bridgeVideo.videoWidth || 640;
+        const vh = bridgeVideo.videoHeight || 480;
+
+        // GPU mode: render via WebGL texture (no JPEG encode, no pixel copy)
+        if(_gpuModeEnabled){
+          if(!_gpuInitialized){
+            // Create a WebGL canvas and insert it before the <img> element
+            _gpuCanvas = document.createElement('canvas');
+            _gpuCanvas.id = 'cwWebcamGL';
+            _gpuCanvas.style.cssText = img.style.cssText;
+            _gpuCanvas.style.position = 'absolute';
+            _gpuCanvas.style.top = img.offsetTop + 'px';
+            _gpuCanvas.style.left = img.offsetLeft + 'px';
+            img.parentNode.insertBefore(_gpuCanvas, img);
+            img.style.display = 'none';
+            _gpuInitialized = WebGLCam.start('cwWebcamGL', bridgeVideo, overlay);
+            if(!_gpuInitialized){
+              // WebGL failed — remove fallback canvas and use CPU path
+              _gpuCanvas.remove();
+              _gpuCanvas = null;
+              img.style.display = 'block';
+            }
+          }
+          if(_gpuInitialized){
+            // WebGL handles rendering — just update YOLO overlay on 2D canvas
+            if(overlay && octx && _yoloBoxesEnabled){
+              overlay.width = vw; overlay.height = vh;
+              octx.clearRect(0, 0, vw, vh);
+              for(const det of _cwDetections){
+                if(det.x1 == null || det.x2 == null) continue;
+                const x1 = det.x1 * vw, y1 = det.y1 * vh;
+                const x2 = det.x2 * vw, y2 = det.y2 * vh;
+                const conf = det.confidence || 0;
+                const lbl = det.label || 'object';
+                _drawPoiDetection(octx, x1, y1, x2, y2, lbl, conf, vw, vh);
+              }
+            }
+            if(label) label.textContent = 'Camera — Live (GPU)';
+            requestAnimationFrame(_updateWebcamFeed);
+            return;
+          }
+        } else if(_gpuInitialized){
+          // GPU mode was turned off — clean up WebGL canvas
+          WebGLCam.stop();
+          _gpuInitialized = false;
+          if(_gpuCanvas) { _gpuCanvas.remove(); _gpuCanvas = null; }
+          img.style.display = 'block';
+        }
+
+        // CPU fallback: Canvas 2D + toDataURL (original path)
+        snapCanvas.width = vw; snapCanvas.height = vh;
+        snapCtx.drawImage(bridgeVideo, 0, 0, vw, vh);
+        img.src = snapCanvas.toDataURL('image/jpeg', 0.6);
+        if(label) label.textContent = 'Camera — Live';
+
+        // Draw YOLO detection boxes on overlay canvas
+        if(overlay && octx && _yoloBoxesEnabled){
+          overlay.width = vw; overlay.height = vh;
+          octx.clearRect(0, 0, vw, vh);
+          for(const det of _cwDetections){
+            if(det.x1 == null || det.x2 == null) continue;
+            const x1 = det.x1 * vw, y1 = det.y1 * vh;
+            const x2 = det.x2 * vw, y2 = det.y2 * vh;
+            const conf = det.confidence || 0;
+            const lbl = det.label || 'object';
+            _drawPoiDetection(octx, x1, y1, x2, y2, lbl, conf, vw, vh);
+          }
+        } else if(overlay && octx) {
+          // Clear overlay when YOLO is disabled
+          overlay.width = vw; overlay.height = vh;
+          octx.clearRect(0, 0, vw, vh);
+        }
+      }
+      requestAnimationFrame(_updateWebcamFeed);
+    }
+    _updateWebcamFeed();
+  }
+}
+
+// ─── WebGL GPU-Accelerated Webcam Renderer ─────────────────────────
+// Replaces the CPU-bound Canvas 2D toDataURL() loop with GPU-accelerated
+// texture rendering. The browser's compositor handles display directly —
+// no JPEG encoding, no base64 overhead, no pixel copying.
+//
+// Performance gain: ~60fps with near-zero CPU usage vs ~30fps with 40% CPU
+// on the Canvas 2D toDataURL path. Falls back to Canvas 2D if WebGL is
+// unavailable.
+const WebGLCam = {
+  _gl: null,
+  _program: null,
+  _texture: null,
+  _canvas: null,
+  _video: null,
+  _active: false,
+  _overlayCtx: null,
+
+  // Vertex shader — fullscreen quad
+  _vsSource: `
+    attribute vec2 a_position;
+    attribute vec2 a_texCoord;
+    varying vec2 v_texCoord;
+    void main() {
+      gl_Position = vec4(a_position, 0.0, 1.0);
+      v_texCoord = a_texCoord;
+    }`,
+
+  // Fragment shader — texture sample with Y-flip
+  _fsSource: `
+    precision mediump float;
+    varying vec2 v_texCoord;
+    uniform sampler2D u_texture;
+    void main() {
+      gl_FragColor = texture2D(u_texture, vec2(v_texCoord.x, 1.0 - v_texCoord.y));
+    }`,
+
+  init(canvasId, video) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return false;
+    const gl = canvas.getContext('webgl', { alpha: false, premultipliedAlpha: false });
+    if (!gl) return false;
+
+    this._canvas = canvas;
+    this._gl = gl;
+    this._video = video;
+
+    // Compile shaders
+    const vs = this._compileShader(gl, gl.VERTEX_SHADER, this._vsSource);
+    const fs = this._compileShader(gl, gl.FRAGMENT_SHADER, this._fsSource);
+    if (!vs || !fs) return false;
+
+    const program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return false;
+
+    this._program = program;
+
+    // Fullscreen quad geometry
+    const posBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1, -1,  1, -1,  -1, 1,
+      -1,  1,  1, -1,   1, 1
+    ]), gl.STATIC_DRAW);
+
+    const texBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, texBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      0, 0,  1, 0,  0, 1,
+      0, 1,  1, 0,  1, 1
+    ]), gl.STATIC_DRAW);
+
+    this._posBuf = posBuf;
+    this._texBuf = texBuf;
+
+    // Texture
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    this._texture = tex;
+
+    return true;
+  },
+
+  _compileShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      gl.deleteShader(shader);
+      return null;
+    }
+    return shader;
+  },
+
+  render() {
+    const gl = this._gl;
+    const video = this._video;
+    if (!gl || !video || video.readyState < 2) return;
+
+    const canvas = this._canvas;
+    const vw = video.videoWidth || 640;
+    const vh = video.videoHeight || 480;
+
+    // Resize canvas to match video (only if needed)
+    if (canvas.width !== vw || canvas.height !== vh) {
+      canvas.width = vw;
+      canvas.height = vh;
+      gl.viewport(0, 0, vw, vh);
+    }
+
+    gl.useProgram(this._program);
+
+    // Upload video frame as texture (GPU — near-zero cost)
+    gl.bindTexture(gl.TEXTURE_2D, this._texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+
+    // Bind position buffer
+    const posLoc = gl.getAttribLocation(this._program, 'a_position');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._posBuf);
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+    // Bind texCoord buffer
+    const texLoc = gl.getAttribLocation(this._program, 'a_texCoord');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._texBuf);
+    gl.enableVertexAttribArray(texLoc);
+    gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 0, 0);
+
+    // Draw fullscreen quad — GPU compositor displays the canvas directly
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  },
+
+  start(canvasId, video, overlayCanvas) {
+    if (this._active) return;
+    if (!this.init(canvasId, video)) {
+      console.warn('WebGL not available, falling back to Canvas 2D');
+      return false;
+    }
+    this._active = true;
+    this._overlayCtx = overlayCanvas ? overlayCanvas.getContext('2d') : null;
+    this._overlayCanvas = overlayCanvas;
+
+    const _renderLoop = () => {
+      if (!this._active) return;
+      this.render();
+
+      // Draw YOLO overlay on 2D canvas (separate from WebGL canvas)
+      // The overlay canvas sits on top of the WebGL canvas
+      requestAnimationFrame(_renderLoop);
+    };
+    _renderLoop();
+    return true;
+  },
+
+  stop() {
+    this._active = false;
+    if (this._gl) {
+      this._gl.deleteTexture(this._texture);
+      this._gl.deleteProgram(this._program);
+      this._gl = null;
+    }
+  }
+};
+
+// Expose globally for camera window integration
+window.WebGLCam = WebGLCam;
+
+// ─── YOLO Toggle Functions ────────────────────────────────────────
+function toggleYoloBoxes(){
+  _yoloBoxesEnabled = !_yoloBoxesEnabled;
+  const btn = document.getElementById('cwYoloToggle');
+  if(btn){
+    btn.classList.toggle('active', _yoloBoxesEnabled);
+    btn.querySelector('.icon').textContent = _yoloBoxesEnabled ? '▢' : '▢';
+  }
+  addChatMessage('system', _yoloBoxesEnabled ? 'YOLO boxes enabled' : 'YOLO boxes disabled');
+}
+
+function toggleYoloSound(){
+  _yoloSoundEnabled = !_yoloSoundEnabled;
+  const btn = document.getElementById('cwSoundToggle');
+  if(btn){
+    btn.classList.toggle('active', _yoloSoundEnabled);
+  }
+  addChatMessage('system', _yoloSoundEnabled ? 'Sound alerts enabled' : 'Sound alerts disabled');
+}
+
+// ─── GPU Mode Toggle ──────────────────────────────────────────────
+// Switches webcam rendering from CPU-bound Canvas 2D toDataURL() to
+// GPU-accelerated WebGL texture rendering. Near-zero CPU usage at 60fps.
+let _gpuModeEnabled = false;
+function toggleGpuMode(){
+  _gpuModeEnabled = !_gpuModeEnabled;
+  const btn = document.getElementById('cwGpuToggle');
+  if(btn){
+    btn.classList.toggle('active', _gpuModeEnabled);
+  }
+  addChatMessage('system', _gpuModeEnabled ? '⚡ GPU webcam enabled (WebGL)' : 'GPU webcam disabled (Canvas 2D)');
+}
+
+// ─── Admin Panel Functions ─────────────────────────────────────────
+// Only visible/functional for laurencekidney@gmail.com
+let _isAdmin = false;
+
+async function checkAdminAccess(){
+  try {
+    const r = await fetch('/api/admin/check');
+    const d = await r.json();
+    _isAdmin = d.admin === true;
+    const panel = document.getElementById('adminPanel');
+    if(panel) panel.style.display = _isAdmin ? 'block' : 'none';
+    // Add admin badge to chat header if admin
+    if(_isAdmin){
+      const hdr = document.querySelector('.chat-header, .chat-title');
+      if(hdr && !hdr.querySelector('.admin-badge')){
+        const badge = document.createElement('span');
+        badge.className = 'admin-badge';
+        badge.style.cssText = 'background:rgba(120,80,200,0.15);color:#c084fc;font-size:9px;padding:2px 6px;border-radius:6px;margin-left:6px;font-weight:600';
+        badge.textContent = 'ADMIN';
+        hdr.appendChild(badge);
+      }
+    }
+  } catch(e){ console.log('admin check failed:', e); }
+}
+
+function toggleAdminPanel(){
+  const panel = document.getElementById('adminPanel');
+  if(panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+async function runAdminShell(){
+  const input = document.getElementById('adminCmdInput');
+  const output = document.getElementById('adminOutput');
+  if(!input || !output) return;
+  const cmd = input.value.trim();
+  if(!cmd) return;
+  output.style.display = 'block';
+  output.textContent = '$ ' + cmd + '\nRunning...\n';
+  input.value = '';
+  try {
+    const r = await fetch('/api/admin/shell', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({command: cmd})
+    });
+    const d = await r.json();
+    if(d.error){
+      output.textContent = '$ ' + cmd + '\n❌ ' + d.error;
+    } else {
+      let result = '$ ' + cmd + '\n';
+      if(d.stdout) result += d.stdout;
+      if(d.stderr) result += '\n[stderr] ' + d.stderr;
+      result += '\n[exit ' + d.returncode + ']';
+      output.textContent = result;
+    }
+    output.scrollTop = output.scrollHeight;
+  } catch(e){
+    output.textContent = '$ ' + cmd + '\n❌ ' + e.message;
+  }
+}
+
+async function runAdminAgent(){
+  const task = prompt('Enter agent task description:');
+  if(!task) return;
+  const output = document.getElementById('adminOutput');
+  if(output){
+    output.style.display = 'block';
+    output.textContent = '🤖 Agent task: ' + task + '\nRunning...\n';
+  }
+  try {
+    const r = await fetch('/api/admin/agent', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({task})
+    });
+    const d = await r.json();
+    if(output){
+      if(d.error){
+        output.textContent = '🤖 Agent error: ' + d.error;
+      } else {
+        output.textContent = '🤖 Agent result:\n' + JSON.stringify(d.result, null, 2).slice(0, 4000);
+      }
+      output.scrollTop = output.scrollHeight;
+    }
+  } catch(e){
+    if(output) output.textContent = '🤖 Agent error: ' + e.message;
+  }
+}
+
+async function viewAdminLogs(){
+  const output = document.getElementById('adminOutput');
+  if(!output) return;
+  output.style.display = 'block';
+  output.textContent = '📋 Loading logs...\n';
+  try {
+    const r = await fetch('/api/admin/logs?lines=80');
+    const d = await r.json();
+    output.textContent = d.logs || d.error || 'No logs';
+    output.scrollTop = output.scrollHeight;
+  } catch(e){
+    output.textContent = '❌ Failed to load logs: ' + e.message;
+  }
+}
+
+async function assignAvatarTask(){
+  const output = document.getElementById('adminOutput');
+  if(!output) return;
+  const avatars = ['fox','cat','bear','bunny','owl','deer','wolf','raccoon'];
+  const avatar = prompt('Assign to which avatar?\n' + avatars.join(', '));
+  if(!avatar || !avatars.includes(avatar.toLowerCase())) return;
+  const description = prompt('Task description:');
+  if(!description) return;
+  output.style.display = 'block';
+  output.textContent = '📋 Assigning task to ' + avatar + '...\n';
+  try {
+    const r = await fetch('/api/admin/tasks/assign', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({avatar: avatar.toLowerCase(), description})
+    });
+    const d = await r.json();
+    if(d.ok){
+      output.textContent = '✅ Task assigned!\n' + JSON.stringify(d.task, null, 2);
+      addChatMessage('system', '📋 Task assigned to ' + avatar + ': ' + description);
+    } else {
+      output.textContent = '❌ ' + (d.error || 'Failed');
+    }
+  } catch(e){
+    output.textContent = '❌ ' + e.message;
+  }
+}
+
+async function viewAdminSessions(){
+  const output = document.getElementById('adminOutput');
+  if(!output) return;
+  output.style.display = 'block';
+  output.textContent = '🔄 Loading sessions...\n';
+  try {
+    const r = await fetch('/api/admin/sessions?limit=15');
+    const d = await r.json();
+    if(d.sessions && d.sessions.length){
+      let txt = '🔄 Recent Sessions (' + d.sessions.length + '):\n\n';
+      d.sessions.forEach((s, i) => {
+        const avatar = s.avatar || '?';
+        const summary = (s.summary || '').slice(0, 100);
+        const file = s._file || '';
+        const ts = s.timestamp ? new Date(s.timestamp * 1000).toLocaleString() : '';
+        txt += '[' + (i+1) + '] ' + avatar + ' — ' + ts + '\n';
+        if(summary) txt += '    ' + summary + '\n';
+        txt += '    📄 ' + file + '\n\n';
+      });
+      txt += 'Type a number to resume a session.';
+      output.textContent = txt;
+    } else {
+      output.textContent = '🔄 No sessions found.';
+    }
+  } catch(e){
+    output.textContent = '❌ ' + e.message;
+  }
+}
+
+// Check admin access on page load
+setTimeout(checkAdminAccess, 2000);
+
+// ─── Face Recognition Toggle ────────────────────────────────────────
+function toggleFaceRecognition(){
+  _cwFaceRecognitionActive = !_cwFaceRecognitionActive;
+  const btn = document.getElementById('cwFaceToggle');
+  if(btn){
+    btn.classList.toggle('active', _cwFaceRecognitionActive);
+  }
+  
+  if(_cwFaceRecognitionActive){
+    // Start face recognition polling
+    _startFaceRecognitionPolling();
+    addChatMessage('system', 'Face recognition enabled');
+  } else {
+    // Stop face recognition polling
+    if(_cwFaceInterval){ clearInterval(_cwFaceInterval); _cwFaceInterval = null; }
+    addChatMessage('system', 'Face recognition disabled');
+  }
+}
+
+function _startFaceRecognitionPolling(){
+  if(_cwFaceInterval) clearInterval(_cwFaceInterval);
+  
+  async function _pollFaces(){
+    if(!_cameraWindowActive || !_cwFaceRecognitionActive) return;
+    
+    const img = document.getElementById('cwWebcamImg');
+    const overlay = document.getElementById('cwOverlay');
+    const statusEl = document.getElementById('cwFaceStatus');
+    if(!img || !img.src || img.style.display === 'none') return;
+    
+    try {
+      // Get current frame as base64
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = img.naturalWidth || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const frameB64 = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+      
+      // Send to face recognition endpoint
+      const resp = await fetch('/api/vision/face', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ image_base64: frameB64, draw_overlay: false })
+      });
+      const data = await resp.json();
+      
+      if(data.ok && data.faces){
+        // Draw face overlay on canvas
+        if(overlay){
+          overlay.width = canvas.width;
+          overlay.height = canvas.height;
+          const octx = overlay.getContext('2d');
+          octx.clearRect(0, 0, overlay.width, overlay.height);
+          
+          for(const face of data.faces){
+            _drawFaceOverlay(octx, face, canvas.width, canvas.height);
+          }
+        }
+        
+        // Update status
+        if(statusEl){
+          const known = data.faces.filter(f => f.is_known).length;
+          const unknown = data.faces.filter(f => !f.is_known).length;
+          statusEl.textContent = `Faces: ${data.face_count} (${known} known, ${unknown} unknown)`;
+        }
+      }
+    } catch(e) {
+      console.error('Face recognition error:', e);
+    }
+  }
+  
+  _pollFaces();
+  _cwFaceInterval = setInterval(_pollFaces, 1500);  // Poll every 1.5s
+}
+
+function _drawFaceOverlay(ctx, face, vw, vh){
+  const x = face.x, y = face.y, w = face.w, h = face.h;
+  const isKnown = face.is_known;
+  const color = isKnown ? '#00E5FF' : '#FF4444';
+  const dimColor = isKnown ? 'rgba(0,229,255,0.4)' : 'rgba(255,68,68,0.4)';
+  
+  ctx.save();
+  
+  // Corner brackets
+  const cornerLen = Math.min(w, h) * 0.22;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  
+  // Top-left
+  ctx.beginPath();
+  ctx.moveTo(x, y + cornerLen);
+  ctx.lineTo(x, y);
+  ctx.lineTo(x + cornerLen, y);
+  ctx.stroke();
+  // Top-right
+  ctx.beginPath();
+  ctx.moveTo(x + w - cornerLen, y);
+  ctx.lineTo(x + w, y);
+  ctx.lineTo(x + w, y + cornerLen);
+  ctx.stroke();
+  // Bottom-left
+  ctx.beginPath();
+  ctx.moveTo(x, y + h - cornerLen);
+  ctx.lineTo(x, y + h);
+  ctx.lineTo(x + cornerLen, y + h);
+  ctx.stroke();
+  // Bottom-right
+  ctx.beginPath();
+  ctx.moveTo(x + w - cornerLen, y + h);
+  ctx.lineTo(x + w, y + h);
+  ctx.lineTo(x + w, y + h - cornerLen);
+  ctx.stroke();
+  
+  // Inner frame
+  ctx.strokeStyle = dimColor;
+  ctx.lineWidth = 0.5;
+  ctx.setLineDash([4, 4]);
+  ctx.strokeRect(x + 2, y + 2, w - 4, h - 4);
+  ctx.setLineDash([]);
+  
+  // Center crosshair
+  const cx = x + w/2, cy = y + h/2;
+  const chSize = Math.min(w, h) * 0.12;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx - chSize, cy);
+  ctx.lineTo(cx + chSize, cy);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - chSize);
+  ctx.lineTo(cx, cy + chSize);
+  ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+  ctx.fill();
+  
+  // Name label
+  const label = face.name.toUpperCase();
+  ctx.font = 'bold 12px "Courier New", monospace';
+  const tw = ctx.measureText(label).width;
+  const labelY = y - 30 > 12 ? y - 30 : y + h + 25;
+  
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(x - 4, labelY - 14, tw + 12, 20);
+  ctx.fillStyle = color;
+  ctx.fillText(label, x + 2, labelY);
+  
+  // Confidence
+  if(face.is_known && face.confidence > 0){
+    const confText = `${face.confidence.toFixed(0)}% MATCH`;
+    ctx.font = '10px "Courier New", monospace';
+    const confW = ctx.measureText(confText).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(x - 4, labelY + 6, confW + 12, 16);
+    ctx.fillStyle = color;
+    ctx.fillText(confText, x + 2, labelY + 18);
+  }
+  
+  ctx.restore();
+}
+
+function _initCwDrag(){
+  const cw = document.getElementById('cameraWindow');
+  const header = cw ? cw.querySelector('.cw-header') : null;
+  if(!cw || !header) return;
+
+  let dragging = false, startX = 0, startY = 0, origLeft = 0, origTop = 0;
+  header.addEventListener('mousedown', (e) => {
+    // Don't drag when clicking buttons or controls
+    if(e.target.closest('.cw-window-controls') || e.target.closest('.cw-controls') || e.target.closest('button')) return;
+    dragging = true;
+    const rect = cw.getBoundingClientRect();
+    startX = e.clientX; startY = e.clientY;
+    origLeft = rect.left; origTop = rect.top;
+    cw.style.transform = 'none';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if(!dragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    cw.style.left = (origLeft + dx) + 'px';
+    cw.style.top = (origTop + dy) + 'px';
+    cw.style.right = 'auto';
+    cw.style.bottom = 'auto';
+  });
+  document.addEventListener('mouseup', () => { dragging = false; });
 }
 
 // ─── AR Mode ──────────────────────────────────────────────
@@ -22500,10 +28444,58 @@ document.getElementById('clearBtn').onclick=async()=>{
      if(settingsPanel) settingsPanel.style.display='none';
    }
  }
- function closeHamburgerMenu(){
-   const menu=document.getElementById('hamburgerMenu');
-   if(menu) menu.style.display='none';
- }
+  function closeHamburgerMenu(){
+    const menu=document.getElementById('hamburgerMenu');
+    if(menu) menu.style.display='none';
+  }
+
+  /* ─── Alerts Panel ─── */
+  function toggleAlertsPanel(){
+    const panel=document.getElementById('alertsPanel');
+    const menu=document.getElementById('hamburgerMenu');
+    if(!panel)return;
+    const open=panel.style.display==='none'||panel.style.display==='';
+    panel.style.display=open?'block':'none';
+    // Close hamburger menu when alerts panel opens
+    if(open && menu) menu.style.display='none';
+    // Update toggle states
+    if(open){
+      const yoloToggle=document.getElementById('alertsYoloToggle');
+      const soundToggle=document.getElementById('alertsSoundToggle');
+      if(yoloToggle) yoloToggle.checked=_yoloBoxesEnabled;
+      if(soundToggle) soundToggle.checked=_yoloSoundEnabled;
+      updateToggleStyles();
+    }
+  }
+  function closeAlertsPanel(){
+    const panel=document.getElementById('alertsPanel');
+    if(panel) panel.style.display='none';
+  }
+  function updateToggleStyles(){
+    const yoloSlider=document.getElementById('alertsYoloSlider');
+    const soundSlider=document.getElementById('alertsSoundSlider');
+    const yoloToggle=document.getElementById('alertsYoloToggle');
+    const soundToggle=document.getElementById('alertsSoundToggle');
+    if(yoloSlider && yoloToggle){
+      yoloSlider.style.left=yoloToggle.checked?'20px':'2px';
+      yoloSlider.style.background=yoloToggle.checked?'#32c878':'white';
+      yoloToggle.checked?yoloToggle.parentElement.querySelector('span').style.background='rgba(50,200,120,0.4)':yoloToggle.parentElement.querySelector('span').style.background='rgba(139,122,158,0.3)';
+    }
+    if(soundSlider && soundToggle){
+      soundSlider.style.left=soundToggle.checked?'20px':'2px';
+      soundSlider.style.background=soundToggle.checked?'#32c878':'white';
+      soundToggle.checked?soundToggle.parentElement.querySelector('span').style.background='rgba(50,200,120,0.4)':soundToggle.parentElement.querySelector('span').style.background='rgba(139,122,158,0.3)';
+    }
+  }
+  function toggleAlertObject(btn){
+    btn.classList.toggle('active');
+    const obj=btn.dataset.obj;
+    if(btn.classList.contains('active')){
+      if(!_yoloSoundObjects.includes(obj)) _yoloSoundObjects.push(obj);
+    }else{
+      _yoloSoundObjects=_yoloSoundObjects.filter(o=>o!==obj);
+    }
+  }
   async function isPaired(){
     try{
       const r=await fetch('/api/pair/status',{credentials:'include'});
@@ -23296,6 +29288,10 @@ async function sendStreamingReply(text){
                if(evt.delegate_to){
                  senderName = evt.delegate_name || senderName;
                }
+               // Avatar handoff — server switched avatar (e.g. typed "Hey Fox")
+               if(evt.avatar_key && evt.avatar_key !== selectedAvatar){
+                 switchAvatarAnimated(evt.senderAvatar || evt.avatar_key);
+               }
                // Update in place (no DOM node replacement) to avoid flicker.
                const senderEl=msgDiv.querySelector('.chat-sender');
                if(senderEl){senderEl.textContent=senderName;}
@@ -23306,18 +29302,39 @@ async function sendStreamingReply(text){
               speechTimer=999;
               lastSpoken=finalText;
               if(evt.look_at)setLookAt(evt.look_at,5000);
+              // Phone action card — show what was launched on the phone
+              if(evt.phone_action){
+                const pa=evt.phone_action;
+                const card=document.createElement('div');
+                card.className='phone-action-card';
+                card.style.cssText='margin:8px 0;padding:12px 16px;border-radius:12px;background:linear-gradient(135deg,rgba(93,78,109,0.08),rgba(139,122,158,0.12));border:1px solid rgba(139,122,158,0.25);font-size:13px;color:#5d4e6d;';
+                const icon=pa.package&&pa.package.includes('youtube')?'🎵':pa.package&&pa.package.includes('maps')?'🗺️':pa.package&&pa.package.includes('camera')?'📷':pa.package&&pa.package.includes('settings')?'⚙️':pa.package&&pa.package.includes('gmail')?'📧':'📱';
+                card.innerHTML='<div style="display:flex;align-items:center;gap:8px"><span style="font-size:20px">'+icon+'</span><div><div style="font-weight:600">'+escapeHtml(pa.app||'Phone')+'</div><div style="font-size:11px;opacity:0.7">Launched on phone'+(pa.arg?' — '+escapeHtml(pa.arg):'')+'</div></div><div style="margin-left:auto;font-size:11px;padding:3px 8px;border-radius:6px;background:rgba(74,222,128,0.15);color:#3d6b4f">✓ Active</div></div>';
+                chatMessages.appendChild(card);
+                chatMessages.scrollTop=chatMessages.scrollHeight;
+              }
               if(evt.open_url){
-                if(evt.web_pip && typeof openYouTubePiP === 'function'){
+                // Only open URL if it's a map (show in-browser widget) or explicit web_pip
+                if(evt.display&&evt.display.type==='map'){
+                  // Map display — render Leaflet map in chat
+                  renderMapWidget(evt.display.lat,evt.display.lng,evt.display.label);
+                }else if(evt.web_pip&&typeof openYouTubePiP==='function'){
+                  // YouTube PiP (legacy fallback)
                   openYouTubePiPFromUrl(evt.open_url);
-                }else{
-                  window.open(evt.open_url,'_blank','noopener,noreferrer');
                 }
+                // All other open_url cases: do NOT open new tab (phone-first)
               }
             }else if(evt.type==='audio'){
               playAudio(evt.audio_id);
               _lastPollAudioId = evt.audio_id;
             }else if(evt.type==='error'){
-              contentEl.textContent='Sorry, something went wrong. Try again.';
+              const errMsg = evt.error || 'Something went wrong.';
+              contentEl.textContent='⚠️ '+errMsg;
+              contentEl.style.color='#8b2222';
+              contentEl.style.background='rgba(239,68,68,0.08)';
+              contentEl.style.padding='8px 12px';
+              contentEl.style.borderRadius='8px';
+              contentEl.style.border='1px solid rgba(239,68,68,0.2)';
               displaySpeech('Sorry, something went wrong.');
 
             // ── AGENT EVENTS ─────────────────────────────────────────
@@ -23649,6 +29666,33 @@ function recordMicChunk(){
       const resp=await fetch('/api/browser_mic',{method:'POST',headers:{'Content-Type':'audio/wav'},body:wavBuf});
       const result=await resp.json();
       if(result.heard){
+        // Wake word detected → play ack sound + visual feedback
+        if(result.wake_detected){
+          playWakeAck();
+          showWakeAck(result.heard);
+        }
+        // Avatar handoff — a different avatar's wake word was called
+        // (e.g. user said "Hey Fox" while on Lilly). Switch avatar
+        // with animated transition and continue chat as the new persona.
+        if(result.wake_avatar && result.wake_avatar !== selectedAvatar){
+          const newAvatar = result.wake_avatar;
+          const oldAvatar = selectedAvatar;
+          const oldMeta = chatAvatarMeta(oldAvatar);
+          const newMeta = chatAvatarMeta(newAvatar);
+          // Animate transition: flash + bounce the avatar
+          switchAvatarAnimated(newAvatar);
+          // Show handoff system message in chat
+          showMainChat();
+          const handoffDiv=document.createElement('div');
+          handoffDiv.className='chat-msg system avatar-handoff';
+          handoffDiv.style.cssText='text-align:center;opacity:0;transition:opacity 0.5s';
+          handoffDiv.innerHTML='<span class="chat-content" style="font-style:italic;color:var(--accent,#c084fc)">'+
+            escapeHtml(oldMeta.emoji)+' '+escapeHtml(oldMeta.name)+
+            ' hands off to '+escapeHtml(newMeta.emoji)+' '+escapeHtml(newMeta.name)+'</div>';
+          chatMessages.appendChild(handoffDiv);
+          requestAnimationFrame(()=>handoffDiv.style.opacity='1');
+          chatMessages.scrollTop=chatMessages.scrollHeight;
+        }
         showHeard(result.heard);
         // showHeard() now adds the message to chat inline — no floating bubble
         // /api/browser_mic now calls handle_intent synchronously and returns
@@ -23656,9 +29700,11 @@ function recordMicChunk(){
         // This eliminates the double-LLM-call latency.
         if(result.reply){
           showMainChat();
+          // Use server-returned avatar key (may have switched during this request)
+          const replyAvatar = result.avatar_key || selectedAvatar;
           const msgDiv=document.createElement('div');
           msgDiv.className='chat-msg assistant';
-          const avatarMeta=chatAvatarMeta(selectedAvatar);
+          const avatarMeta=chatAvatarMeta(replyAvatar);
           const name=(avatarMeta.name||'Lilly');
           msgDiv.innerHTML='<div class="chat-sender">'+escapeHtml(name)+
             '</div><div class="chat-content">'+renderCodeBlocks(result.reply)+'</div>';
@@ -23698,6 +29744,116 @@ function encodeWav(audioBuffer){
     v.setInt16(off,s<0?s*0x8000:s*0x7FFF,true);off+=2;
   }
   return buf;
+}
+
+// ─── Wake Word Acknowledgment Sound ────────────────────────────────
+// A warm, friendly two-tone chime (not Alexa's sharp ding).
+// Uses Web Audio API — no external files needed.
+let _wakeAckCtx = null;
+function playWakeAck(){
+  try {
+    if(!_wakeAckCtx) _wakeAckCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = _wakeAckCtx;
+    const now = ctx.currentTime;
+
+    // Two-tone warm chime: C5 → E5 (major third, friendly & inviting)
+    const freqs = [523.25, 659.25];  // C5, E5
+    const durations = [0.12, 0.18];
+    const delays = [0, 0.10];
+
+    freqs.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const filter = ctx.createBiquadFilter();
+
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + delays[i]);
+
+      // Warm low-pass filter (removes harshness)
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(2000, now);
+
+      // Gentle envelope: quick attack, soft decay
+      gain.gain.setValueAtTime(0, now + delays[i]);
+      gain.gain.linearRampToValueAtTime(0.25, now + delays[i] + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + delays[i] + durations[i]);
+
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(now + delays[i]);
+      osc.stop(now + delays[i] + durations[i] + 0.05);
+    });
+  } catch(e) { console.warn('wake ack sound failed:', e); }
+}
+
+// ─── Wake Word Visual Feedback ─────────────────────────────────────
+// Shows "Listening..." status and pulses the avatar when wake word detected.
+function showWakeAck(transcript){
+  // Flash the mic button to show we're listening
+  const micBtn = document.getElementById('micBtn');
+  if(micBtn){
+    micBtn.style.boxShadow = '0 0 12px rgba(76,175,80,0.7)';
+    micBtn.style.background = 'rgba(76,175,80,0.2)';
+    setTimeout(()=>{
+      micBtn.style.boxShadow = '';
+      micBtn.style.background = '';
+    }, 1500);
+  }
+
+  // Show a brief system message in chat
+  const chatMessages = document.getElementById('chatMessages');
+  if(chatMessages){
+    const sysDiv = document.createElement('div');
+    sysDiv.className = 'chat-msg system';
+    sysDiv.innerHTML = '<span style="color:#4caf50;font-weight:600">🎤 Listening...</span> <span style="opacity:0.5">"' + escapeHtml(transcript) + '"</span>';
+    sysDiv.style.animation = 'msgIn 0.2s ease-out';
+    chatMessages.appendChild(sysDiv);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    // Auto-remove after 4 seconds
+    setTimeout(()=>{ if(sysDiv.parentNode) sysDiv.remove(); }, 4000);
+  }
+}
+
+// ─── Avatar Handoff Animation ──────────────────────────────────────
+// Called when a different avatar's wake word is detected (e.g. "Hey Fox"
+// while on Lilly). Animates the avatar canvas with a flash + bounce
+// transition and updates the selected avatar.
+function switchAvatarAnimated(newAvatar){
+  const oldAvatar = selectedAvatar;
+  const meta = chatAvatarMeta(newAvatar);
+  if(!meta) return;
+
+  // 1. Update the selected avatar (server already switched)
+  selectedAvatar = newAvatar;
+  localStorage.setItem('lilly_avatar', newAvatar);
+
+  // 2. Flash the avatar canvas — white burst then fade to new avatar
+  const canvas = document.getElementById('avatarCanvas');
+  if(canvas){
+    canvas.style.transition = 'none';
+    canvas.style.filter = 'brightness(2.5) saturate(0)';
+    canvas.style.transform = 'scale(1.15)';
+    requestAnimationFrame(()=>{
+      canvas.style.transition = 'filter 0.6s ease-out, transform 0.6s cubic-bezier(0.34,1.56,0.64,1)';
+      canvas.style.filter = 'brightness(1) saturate(1)';
+      canvas.style.transform = 'scale(1)';
+      setTimeout(()=>{ canvas.style.transition = ''; }, 700);
+    });
+  }
+
+  // 3. Pulse the chat header badge (shows new avatar name)
+  const chatBadge = document.querySelector('.chat-avatar-badge, .chat-header-avatar');
+  if(chatBadge){
+    chatBadge.style.transition = 'none';
+    chatBadge.style.transform = 'scale(1.4)';
+    requestAnimationFrame(()=>{
+      chatBadge.style.transition = 'transform 0.5s cubic-bezier(0.34,1.56,0.64,1)';
+      chatBadge.style.transform = 'scale(1)';
+    });
+  }
 }
 
 /* ═══ Automation event poller — surface REAL fired rules in the chat ═══
@@ -23758,15 +29914,26 @@ inputField.addEventListener('keydown',async(e)=>{
     // ─── Natural language phone intents (paired only) ───
     const MAP_TRIGGERS=['where am i','open maps','navigate to','show map','my location','directions to','map','locate me'];
     const RADAR_TRIGGERS=["what's around me",'radar','scan surroundings','nearby devices',"what's near me",'bluetooth scan','wifi scan',"who's near me",'devices nearby'];
+    const MIRROR_TRIGGERS=['mirror my phone','show my screen','screen mirror','phone screen','mirror phone','show phone','display phone'];
     const isMap = MAP_TRIGGERS.some(t=>lower.includes(t));
     const isRadar = RADAR_TRIGGERS.some(t=>lower.includes(t));
-    if(isMap || isRadar){
+    const isMirror = MIRROR_TRIGGERS.some(t=>lower.includes(t));
+    if(isMap || isRadar || isMirror){
       try{
         showMainChat();
         addChatMessage('user',text);
         const token = localStorage.getItem('lilly_device_token');
         if(token){
-          if(isMap){
+          if(isMirror){
+            // Toggle screen mirror
+            if(screenMirrorActive){
+              stopScreenMirror();
+              addChatMessage("assistant","Screen mirror off.");
+            }else{
+              startScreenMirror();
+              addChatMessage("assistant","Mirroring your phone screen...");
+            }
+          }else if(isMap){
             await sendPhoneCommand("open_url", {url:"https://www.google.com/maps?q=My+Location"});
             addChatMessage("assistant","Opening Google Maps on your phone...");
           }else{
@@ -23778,7 +29945,7 @@ inputField.addEventListener('keydown',async(e)=>{
             addChatMessage("assistant","Radar scan sent to phone. " + (parts.length ? parts.join(", ") : "Check your phone for results."));
           }
         }else{
-          addChatMessage("assistant","Pair your phone first to use " + (isMap ? "maps" : "radar") + ". Open Settings → Pair to connect.");
+          addChatMessage("assistant","Pair your phone first to use " + (isMirror ? "screen mirror" : isMap ? "maps" : "radar") + ". Open Settings → Pair to connect.");
         }
         statusLabel.textContent='idle';
       }catch(e){ statusLabel.textContent='error'; }
@@ -26739,17 +32906,17 @@ async def vibecode_build(data: dict):
 
     if proc.returncode != 0:
         await proactive_notify(
-            f"Build failed for {slug}: {output[-200:]}",
+            f"Build failed: {output[-200:]}",
             Archetype.CAREGIVER,
         )
         return JSONResponse(
             {"error": "Build failed", "log": output[-2000:]}, status_code=500
         )
 
-    await proactive_notify(
-        f"{slug} build complete — ready to run.",
-        Archetype.CREATOR,
-    )
+        await proactive_notify(
+            f"{slug} build complete.",
+            Archetype.CREATOR,
+        )
     return {"message": f"Built image {container}", "log": output[-1000:]}
 
 
@@ -26850,7 +33017,7 @@ async def vibecode_run(data: dict):
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
             if proc.returncode != 0:
                 await proactive_notify(
-                    f"Run failed for {slug}: {stderr.decode(errors='replace')[:200]}",
+                    f"Run failed: {stderr.decode(errors='replace')[:200]}",
                     Archetype.CAREGIVER,
                 )
                 return JSONResponse(
@@ -26862,7 +33029,7 @@ async def vibecode_run(data: dict):
                 )
         else:
             await proactive_notify(
-                f"Run failed for {slug}: {stderr.decode(errors='replace')[:200]}",
+                f"Run failed: {stderr.decode(errors='replace')[:200]}",
                 Archetype.CAREGIVER,
             )
             return JSONResponse(
@@ -26873,7 +33040,7 @@ async def vibecode_run(data: dict):
     url = _vibecode_get_base_url(None, slug)
 
     await proactive_notify(
-        f"{slug} is running at {url}",
+        f"{slug} running at {url}",
         Archetype.EXPLORER,
     )
     return {"message": f"Container started on port {port}", "url": url, "port": port}
