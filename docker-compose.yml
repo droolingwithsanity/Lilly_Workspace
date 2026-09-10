@@ -57,11 +57,20 @@ services:
       - OPENLIVE_AGENT_SECRET=${OPENLIVE_AGENT_SECRET:-lilly-openlive-secret-2026}
       # Vision server — proxy YOLO inference to dedicated container
       - VISION_SERVER_URL=${VISION_SERVER_URL:-http://127.0.0.1:8198}
+      # Unknown-face OSINT ("scrapidy" tier) — see osint_face_lookup.py.
+      # OFF by default; set FACE_OSINT_ENABLED=1 in .env to enable.
+      - FACE_OSINT_ENABLED=${FACE_OSINT_ENABLED:-0}
+      - FACE_OSINT_PROVIDER=${FACE_OSINT_PROVIDER:-yandex}
+      - FACE_OSINT_COOLDOWN=${FACE_OSINT_COOLDOWN:-60}
       # BLE host advertiser HCI device (default: hci0)
       - BLE_HOST_HCI=${BLE_HOST_HCI:-hci0}
       # Public URL embedded in BLE advertisement — must be reachable by
       # nearby devices (NOT the Tailscale intranet IP).
       - BLE_WEB_UI_URL=${BLE_WEB_UI_URL:-https://droolingwithsanity.ca}
+      # Amazon Blink camera integration
+      - BLINK_USERNAME=${BLINK_USERNAME:-}
+      - BLINK_PASSWORD=${BLINK_PASSWORD:-}
+      - BLINK_MANAGED=${BLINK_MANAGED:-false}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -75,9 +84,30 @@ services:
     environment:
       - PORT=8198
       - CONF_THRESHOLD=0.35
-      - YOLO_MODEL=yolov8n.pt
+      - YOLO_MODEL=yolov8n-oiv7.pt  # 601 classes (Open Images V7) for broader detection
+      # Cohesive narration: point the vision server at the same Ollama as lilly
+      - OLLAMA_URL=${OLLAMA_URL:-http://127.0.0.1:11434}
+      - VISION_LLM_MODEL=${VISION_LLM_MODEL:-qwen2.5:3b}
+      # Forward unsolved face crops to lilly-ai's OSINT tier (empty = off).
+      - OSINT_PUSH_URL=${OSINT_PUSH_URL:-}
     volumes:
       - lilly-tts-cache:/tmp/lilly_tts
+      # Share the persistent face database with lilly-ai (enrolled faces must
+      # survive container recreates and both engines must read the same file)
+      - lilly-data:/app/data
+    restart: unless-stopped
+
+  lilly-trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.trainer
+    container_name: lilly-trainer
+    network_mode: host
+    environment:
+      - PORT=8199
+      - BASE_MODEL=yolov8n-oiv7.pt
+    volumes:
+      - lilly-training-data:/app/training_data
     restart: unless-stopped
 
 volumes:
@@ -86,3 +116,4 @@ volumes:
   openlive-data:
   openlive-voice:
   lilly-tts-cache:
+  lilly-training-data:

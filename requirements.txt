@@ -29,7 +29,18 @@ faster-whisper-server==0.0.1
 # ─── Vision / Object Detection (YOLOv8) ───
 ultralytics>=8.1.0
 opencv-python-headless>=4.8.0
-insightface>=0.7.0
+mediapipe>=0.10.0  # For facial landmarks and blink detection
+
+# ─── Face recognition (SCRFD + ArcFace + FAISS) ───
+# Replaces InsightFace; lightweight ONNX CPU stack (yakhyo re-implementation).
+onnxruntime>=1.17.0
+faiss-cpu>=1.7.0
+
+# ─── Web scraping / OSINT (scrapling_engine.py + osint_agents.py) ───
+scrapling>=0.6.0
 
 # ─── BLE advertisement scan (container-direct, via mounted BlueZ D-Bus) ───
 bleak>=0.22.0
+
+# ─── Amazon Blink camera integration ───
+blinkpy>=0.25.0  # For Blink security camera snapshots

@@ -5,11 +5,13 @@ Multiple AI personalities comment on what the camera sees, with unique voices.
 """
 
 import base64
+import json
 import os
 import time
 import random
 import logging
 import asyncio
+import threading
 import tempfile
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -30,12 +32,251 @@ except ImportError:
     FACE_ENGINE = None
     log_face = logging.getLogger("lilly-vision")
 
+# Blink detection (optional — loaded lazily)
+try:
+    from blink_detector import get_blink_detector
+
+    BLINK_DETECTOR = None  # initialized on first use
+except ImportError:
+    BLINK_DETECTOR = None
+    log_blink = logging.getLogger("lilly-vision")
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("lilly-vision")
 
 MODEL: Optional[YOLO] = None
 CONF_THRESHOLD = float(os.environ.get("CONF_THRESHOLD", "0.35"))
-MODEL_NAME = os.environ.get("YOLO_MODEL", "yolov8n.pt")
+# Prefer Open Images V7 (601 classes) over COCO (80 classes) for broader detection
+MODEL_NAME = os.environ.get("YOLO_MODEL", "yolov8n-oiv7.pt")
+MODEL_PATH = os.environ.get("YOLO_MODEL_PATH", "")
+IOU_THRESHOLD = float(os.environ.get("YOLO_IOU_THRESHOLD", "0.45"))
+MAX_DETECTIONS = int(os.environ.get("YOLO_MAX_DETECTIONS", "300"))
+
+# ── Per-frame cost controls ────────────────────────────────────────────
+# The heavy identification stages (InsightFace, MediaPipe blink, the vehicle
+# classifier) only need to run a few times a second — their results are cached
+# and re-applied to boxes in between, so the overlay stays smooth on CPU.
+MAX_INFER_SIDE = int(os.environ.get("MAX_INFER_SIDE", "960"))      # cap YOLO input
+FACE_ENRICH_INTERVAL = float(os.environ.get("FACE_ENRICH_INTERVAL", "2.0"))
+BLINK_INTERVAL = float(os.environ.get("BLINK_INTERVAL", "1.5"))
+CAR_CLASSIFY_INTERVAL = float(os.environ.get("CAR_CLASSIFY_INTERVAL", "2.0"))
+
+# Last-enrichment caches: (ts, items) — items used to keep names on boxes
+# while the expensive engine is on cooldown.
+_face_enrich_cache = {"ts": 0.0, "items": []}
+_vehicle_enrich_cache = {"ts": -10.0, "items": []}
+_blink_ts: float = 0.0
+_face_ts: float = 0.0
+
+# ── Unknown-face OSINT (social-media identification of strangers) ─────────
+# The vision server samples unsolved person crops, hands them to lilly-ai
+# (which runs scrapling reverse-face search + osint_agents), then re-stamps
+# the discovered name back onto the box. Entirely opt-in.
+UNKNOWN_FACE_SAMPLE_INTERVAL = float(os.environ.get("UNKNOWN_FACE_SAMPLE_INTERVAL", "8.0"))
+UNKNOWN_FACE_MAX = int(os.environ.get("UNKNOWN_FACE_MAX", "12"))
+OSINT_PUSH_URL = os.environ.get("OSINT_PUSH_URL", "")  # lilly endpoint (empty = disabled)
+OSINT_PUSH_INTERVAL = float(os.environ.get("OSINT_PUSH_INTERVAL", "15.0"))
+
+_unknown_faces: list[dict] = []   # unsolved people awaiting OSINT (id-stable)
+_osint_results: dict[str, dict] = {}  # id -> {name, social_accounts, sources, confidence, person_box, ts}
+
+
+def _iou(a: dict, b: dict) -> float:
+    ax1, ay1 = a["x"], a["y"]
+    ax2, ay2 = a["x"] + a["w"], a["y"] + a["h"]
+    bx1, by1 = b["x"], b["y"]
+    bx2, by2 = b["x"] + b["w"], b["y"] + b["h"]
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    aa = (ax2 - ax1) * (ay2 - ay1)
+    bb = (bx2 - bx1) * (by2 - by1)
+    denom = aa + bb - inter
+    return inter / denom if denom > 0 else 0.0
+
+
+def _apply_cached_ids(detections: list, cache: dict, enrich_flag: str) -> list:
+    """Re-stamp previously identified names onto boxes while the engine cools down."""
+    for det in detections:
+        if det.get(enrich_flag):
+            continue
+        best, best_iou = None, 0.15
+        for item in cache["items"]:
+            # A label that equals the class means "nothing to rename"; items
+            # without a label (kps-only face restamp) are still usable.
+            if item.get("label") and item["label"].lower() == str(det.get("class", "")).lower():
+                continue
+            if not item.get("label") and "kps" not in item:
+                continue
+            i = _iou(item.get("box", {}), det)
+            if i > best_iou:
+                best, best_iou = item, i
+        if best:
+            for k, v in best.items():
+                if k == "box":
+                    continue
+                if v is not None:
+                    det[k] = v
+            det.setdefault("original_label", det.get("class"))
+    return detections
+
+
+# ── Unknown-face OSINT plumbing ────────────────────────────────────────────
+def _person_box(d: dict) -> dict:
+    return {"x": d.get("x", 0), "y": d.get("y", 0), "w": d.get("w", 0), "h": d.get("h", 0)}
+
+
+def _box_center(box: dict) -> tuple:
+    return (box.get("x", 0) + box.get("w", 0) / 2, box.get("y", 0) + box.get("h", 0) / 2)
+
+
+def _face_cache_items(detections: list) -> list:
+    """Build the restamp cache for person detections (names + kps persist)."""
+    items = []
+    for d in detections:
+        is_person = (
+            d.get("label", "").lower() in PERSON_KEYWORDS
+            or d.get("original_label", "").lower() in PERSON_KEYWORDS
+        )
+        if not is_person:
+            continue
+        item = {"box": _person_box(d), "kps": d.get("kps"), "face_confidence": d.get("face_confidence")}
+        if d.get("original_label") == "person":
+            item["label"] = d.get("label")
+        if d.get("face_source") == "osint":
+            item["face_source"] = "osint"
+            item["social_accounts"] = d.get("social_accounts")
+            item["osint_sources"] = d.get("osint_sources")
+        items.append({k: v for k, v in item.items() if v is not None})
+    return items
+
+
+def _crop_face_b64(frame, box: dict, kps=None) -> str:
+    """Encode a face/upper-body JPEG crop for reverse-face search."""
+    h, w = frame.shape[:2]
+    if kps:
+        pts = np.array([[k[0] * w, k[1] * h] for k in kps], dtype=np.float32)
+        x1, y1 = int(pts[:, 0].min()), int(pts[:, 1].min())
+        x2, y2 = int(pts[:, 0].max()), int(pts[:, 1].max())
+    else:
+        x1, y1 = int(box["x"] * w), int(box["y"] * h)
+        x2, y2 = int((box["x"] + box["w"]) * w), int((box["y"] + box["h"]) * h)
+    pw, ph = max(int((x2 - x1) * 0.3), 4), max(int((y2 - y1) * 0.25), 4)
+    x1, y1 = max(0, x1 - pw), max(0, y1 - ph)
+    x2, y2 = min(w, x2 + pw), min(h, y2 + ph)
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return ""
+    crop = cv2.resize(crop, (256, 256), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+    return base64.b64encode(buf.tobytes()).decode() if ok else ""
+
+
+def _sample_unknown_faces(frame, detections: list, now: float):
+    """Queue unsolved person crops (stable per-identity) for lilly to OSINT."""
+    if not OSINT_PUSH_URL:
+        return
+    for det in detections:
+        if (det.get("label") or "").lower() not in PERSON_KEYWORDS:
+            continue
+        if not det.get("kps") or det.get("face_source") == "osint":
+            continue
+        box = _person_box(det)
+        cx, cy = _box_center(box)
+        entry = next(
+            (e for e in _unknown_faces
+             if abs(_box_center(e["person_box"])[0] - cx) < 0.06
+             and abs(_box_center(e["person_box"])[1] - cy) < 0.06),
+            None,
+        )
+        if entry is None:
+            entry = {
+                "id": "uf_" + hashlib.sha1(json.dumps(box).encode()).hexdigest()[:12],
+                "person_box": box,
+                "kps": det.get("kps"),
+                "crop_b64": "",
+                "sent_ts": 0.0,
+                "osint_ts": 0.0,
+                "resolved": None,
+            }
+            _unknown_faces.append(entry)
+        if now - entry["osint_ts"] >= UNKNOWN_FACE_SAMPLE_INTERVAL:
+            entry["person_box"] = box
+            entry["kps"] = det.get("kps")
+            entry["crop_b64"] = _crop_face_b64(frame, box, det.get("kps"))
+    kept = [e for e in _unknown_faces if e.get("resolved") is not None or now - e.get("osint_ts", 0) < 600]
+    kept.sort(key=lambda e: e.get("ts", 0))
+    _unknown_faces[:] = kept[-UNKNOWN_FACE_MAX:]
+
+
+def _apply_osint_results(detections: list, now: float) -> list:
+    """Rename unsolved persons using results lilly pushed back."""
+    for det in detections:
+        if (det.get("label") or "").lower() not in PERSON_KEYWORDS:
+            continue
+        box = _person_box(det)
+        for res_id, res in list(_osint_results.items()):
+            if now - res.get("ts", 0) > 600:
+                _osint_results.pop(res_id, None)
+                continue
+            if _iou(res.get("person_box", {}), box) >= 0.3:
+                det["label"] = res.get("name") or "unknown"
+                det["original_label"] = "person"
+                det["face_confidence"] = res.get("confidence")
+                det["face_source"] = "osint"
+                det["social_accounts"] = res.get("social_accounts", [])
+                det["osint_sources"] = res.get("sources", [])
+                for e in _unknown_faces:
+                    if e.get("id") == res_id:
+                        e["resolved"] = det["label"]
+                        e["osint_ts"] = now
+                break
+    return detections
+
+
+async def _osint_push_loop():
+    """Push freshly sampled unknown faces to lilly-ai (scrapidy/OSINT tier)."""
+    import httpx
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        while True:
+            try:
+                now = time.time()
+                for e in _unknown_faces:
+                    if e.get("sent_ts") or now - e.get("ts", 0) > 120:
+                        continue
+                    if not e.get("crop_b64"):
+                        continue
+                    try:
+                        r = await client.post(
+                            OSINT_PUSH_URL,
+                            json={
+                                "id": e["id"],
+                                "person_box": e["person_box"],
+                                "kps": e["kps"],
+                                "crop_b64": e["crop_b64"],
+                                "ts": e["ts"],
+                            },
+                        )
+                        e["sent_ts"] = now
+                        if r.status_code == 200 and not r.json().get("handled"):
+                            e["osint_ts"] = now  # OSINT disabled upstream — cooldown instead of spam
+                    except Exception as exc:
+                        log.debug(f"OSINT push failed: {exc}")
+                        e["ts"] = now
+            except Exception as exc:
+                log.debug(f"OSINT push loop error: {exc}")
+            await asyncio.sleep(OSINT_PUSH_INTERVAL)
+
+
+def _resize_for_inference(frame):
+    """Downscale huge camera frames for YOLO; returns (work_frame, sx, sy)."""
+    h, w = frame.shape[:2]
+    if max(h, w) <= MAX_INFER_SIDE:
+        return frame, 1.0, 1.0
+    scale = MAX_INFER_SIDE / max(h, w)
+    nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+    return cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA), w / nw, h / nh
 
 PERSON_KEYWORDS = {"person", "human", "face", "man", "woman"}
 VEHICLE_KEYWORDS = {
@@ -178,18 +419,34 @@ def build_sensor_context(sensors: dict) -> str:
     if not sensors:
         return ""
     parts = []
+    raw = sensors.get("sensors") or {}
     light = sensors.get("light", sensors.get("ambient_light"))
+    if light is None:
+        lux = raw.get("light")
+        light = lux[0] if isinstance(lux, (list, tuple)) and lux else None
     if light is not None:
         if light < 50:
             parts.append("dark room")
+        elif light < 500:
+            parts.append("dim light")
         elif light > 1000:
-            parts.append("bright daylight")
+            parts.append("bright light")
+    prox = raw.get("proximity")
+    if isinstance(prox, (list, tuple)) and prox and prox[0] < 8:
+        parts.append("something right by your hand")
+    accel = raw.get("linear_acceleration") or raw.get("accelerometer")
+    if isinstance(accel, (list, tuple)) and len(accel) >= 3:
+        mag = (accel[0] ** 2 + accel[1] ** 2 + accel[2] ** 2) ** 0.5
+        if mag > 2.0:
+            parts.append("you are moving")
+    steps = sensors.get("step_counter", sensors.get("steps"))
+    if isinstance(steps, (list, tuple)):
+        steps = steps[0] if steps else None
+    if steps and steps > 10000:
+        parts.append(f"{int(steps)} steps today")
     temp = sensors.get("temperature")
     if temp is not None and (temp > 30 or temp < 10):
         parts.append(f"{temp}°C")
-    steps = sensors.get("step_counter", sensors.get("steps"))
-    if steps is not None and steps > 10000:
-        parts.append(f"{steps} steps today")
     motion = sensors.get("significant_motion", sensors.get("motion"))
     if motion and motion > 0:
         parts.append("in motion")
@@ -490,82 +747,233 @@ async def generate_tts(text: str, voice: str, rate: str) -> int:
         return 0
 
 
-def generate_reply(detections: list) -> str:
+# ── Cohesive single-persona narration ───────────────────────────────────
+# The camera always speaks in ONE voice: the active avatar. No round-robin
+# of unrelated "agents". Text is LLM-synthesized per scene so it never
+# repeats canned lines, and deduplicated so the same scene isn't re-narrated.
+
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+VISION_LLM_MODEL = os.environ.get("VISION_LLM_MODEL", "qwen2.5:3b")
+SCENE_TTL_SECS = float(os.environ.get("SCENE_TTL_SECS", "10"))
+SENSOR_URL = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8099")
+
+_phone_sensor_cache: dict = {"ts": 0.0, "data": {}}  # live phone sensor context (always-on, best effort)
+
+
+async def _fetch_phone_sensors() -> dict:
+    """Pull live spatial context from the phone's sensor server (port 8099).
+    Always-on but strictly best-effort: never raises, degrades to {} when the
+    phone is offline, and is cached so it adds no latency at steady state."""
+    global _phone_sensor_cache
+    now = time.time()
+    if _phone_sensor_cache["data"] and now - _phone_sensor_cache["ts"] < 4.0:
+        return _phone_sensor_cache["data"]
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            r = await client.get(f"{SENSOR_URL}/sensors/all")
+            if r.status_code == 200:
+                data = r.json()
+                _phone_sensor_cache = {"ts": now, "data": data}
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+async def _effective_sensors(body_sensors: dict) -> dict:
+    """Merge phone-native sensor data under the caller's own sensor values
+    (if the caller supplied any, theirs wins). No toggle — always enriched,
+    silently empty for sighted/simple use."""
+    phone = await _fetch_phone_sensors()
+    merged = dict(phone)
+    merged.update(body_sensors or {})
+    return merged
+
+AVATAR_STYLE = {
+    "puppy": (
+        "Lilly",
+        "stoic, dry, precise. sharp wit, understated, few words",
+    ),
+    "fox": ("Fox", "sharp, inventive, playful, quick, a little oblique"),
+    "cat": ("Cat", "methodical, precise, dry, no fluff"),
+    "bear": ("Bear", "warm, gentle, thoughtful, unhurried"),
+    "bunny": ("Bunny", "cheerful, friendly, upbeat, curious"),
+    "owl": ("Owl", "measured, wise, observant, a touch dramatic"),
+    "deer": ("Deer", "calm, gentle, soft-spoken, mindful"),
+    "wolf": ("Wolf", "direct, loyal, confident, level"),
+    "raccoon": ("Raccoon", "sly, playful, resourceful, a little mischievous"),
+}
+
+_scene_cache: dict = {"key": None, "avatar": None, "ts": 0.0, "text": ""}
+
+
+def _frame_zone(det: dict) -> str:
+    cx = det.get("x", 0.5) + det.get("w", 0) / 2
+    dist = det.get("distance_desc")
+    meters = det.get("distance_m")
+    if cx < 0.33:
+        phrase = "on the left"
+    elif cx > 0.66:
+        phrase = "on the right"
+    else:
+        phrase = "straight ahead"
+    if meters and 1.0 <= meters <= 30.0:
+        return f"{phrase}, about {int(round(meters))} meters away"
+    if dist and dist not in ("very close", "arm's length"):
+        return f"{phrase}, {dist}"
+    return phrase
+
+
+def build_scene_text(detections: list) -> str:
+    """Structured natural-language description of detections (for LLM prompt + fallback)."""
+    if not detections:
+        return ""
+    groups: dict[str, dict] = {}
+    for d in detections:
+        label = d.get("label", "object")
+        g = groups.setdefault(label, {"count": 0, "zones": []})
+        g["count"] += 1
+        g["zones"].append(_frame_zone(d))
+    rows = []
+    for label, g in sorted(groups.items(), key=lambda kv: -kv[1]["count"]):
+        n = g["count"]
+        zones = list(dict.fromkeys(g["zones"]))
+        zone = zones[0] if len(zones) == 1 else "across the frame"
+        if n == 1:
+            rows.append(f"{label} {zone}")
+        else:
+            rows.append(f"{n} {label}s {zone}")
+    return "; ".join(rows[:8])
+
+
+def scene_key(detections: list) -> str:
+    counts: dict[str, int] = {}
+    for d in detections:
+        label = d.get("label", "object")
+        counts[label] = counts.get(label, 0) + 1
+    return json.dumps(sorted(counts.items()), sort_keys=True)
+
+
+async def _llm_describe(scene: str, sensors: dict, avatar: str) -> str | None:
+    name, style = AVATAR_STYLE.get(avatar or "puppy", AVATAR_STYLE["puppy"])
+    ctx = build_sensor_context(sensors)
+    prompt = (
+        f"You are {name}. Voice: {style}. You narrate live camera scenes — "
+        "once, naturally, like a person glancing at what's in front of you. "
+        "No object lists, no 'detected', no 'targets', no jargon. "
+        "One or two short spoken sentences. Plain text, no markdown, no emoji. "
+        "Only describe what is actually listed in the scene — never invent history, "
+        "age, usage, conversations, or events. If there's little to see, say so plainly. "
+        "Help someone who cannot see: place each thing in space as they face the camera — "
+        "straight ahead, off to the left or right — and say how close it is "
+        "(arm's reach, a few steps away, or meters). Speak as orientation, not inventory.\n\n"
+        f"Scene: {scene}\n"
+        f"Context: {ctx or 'none'}\n"
+        "Describe it:"
+    )
+    try:
+        import httpx
+
+        payload = {
+            "model": VISION_LLM_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.7, "num_ctx": 1024},
+        }
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
+            if r.status_code == 200:
+                text = r.json().get("response", "").strip()
+                if text:
+                    return text.splitlines()[0][:300]
+    except Exception as e:
+        log.debug(f"LLM scene describe failed: {e}")
+    return None
+
+
+def describe_scene_fallback(detections: list) -> str:
+    """Readable fallback that still avoids raw label lists."""
     if not detections:
         return random.choice(
             [
-                "Nothing detected. Either it's dark or you live in a minimalist nightmare.",
-                "Zero targets. Try pointing me at something that isn't a wall.",
-                "I see absolutely nothing. Are you testing me or is this just your life?",
+                "Nothing moving right now. The room's quiet.",
+                "All clear. Empty frame — either calm or very still.",
+                "No action out there. Just space.",
             ]
         )
-    total = len(detections)
-    labels = [d["label"] for d in detections]
-    return f"Detected {total} targets: {', '.join(labels[:5])}"
-
-
-def generate_agent_replies(detections: list, sensors: dict, avatar: str) -> list:
-    if not detections:
-        return []
-
-    detected_set = set(d["label"] for d in detections)
-    categories_hit = set(classify_label(l) for l in detected_set)
-
-    all_agents = list(AGENTS.keys())
-    if avatar in all_agents:
-        all_agents.remove(avatar)
-    random.shuffle(all_agents)
-    speaking = [avatar] + all_agents[:2]
-
-    replies = []
-    for agent_id in speaking:
-        agent = AGENTS[agent_id]
-        lines = agent["lines"]
-
-        if agent_id == "puppy" and "animal" in categories_hit:
-            animal_labels = detected_set & ANIMAL_KEYWORDS
-            animal = list(animal_labels)[0] if animal_labels else "dog"
-            key = "dog" if animal == "dog" else "cat" if animal == "cat" else "animal"
-            line = random.choice(lines.get(key, lines["default"]))
-        elif agent_id == "cat" and "animal" in categories_hit:
-            if detected_set & {"cat"}:
-                line = random.choice(lines["cat"])
-            else:
-                line = random.choice(lines.get("default", ["*stares*"]))
-        elif agent_id == "fox" and "food" in categories_hit:
-            line = random.choice(lines["food"])
+    rows = []
+    groups: dict[str, dict] = {}
+    for d in detections:
+        label = d.get("label", "object")
+        g = groups.setdefault(label, {"count": 0, "zones": []})
+        g["count"] += 1
+        g["zones"].append(_frame_zone(d))
+    for label, g in sorted(groups.items(), key=lambda kv: -kv[1]["count"]):
+        n = g["count"]
+        zones = list(dict.fromkeys(g["zones"]))
+        zone = zones[0] if len(zones) == 1 else "spread across the frame"
+        if n == 1:
+            rows.append(f"{label} {zone}")
         else:
-            for cat in ["person", "food", "fashion", "device", "animal"]:
-                if cat in categories_hit:
-                    line = random.choice(lines.get(cat, lines["default"]))
-                    break
-            else:
-                line = random.choice(lines["default"])
+            rows.append(f"{n} {label}s {zone}")
+    pad = " I recognize a few of you." if any(
+        d.get("label") != "person" and d.get("original_label") == "person"
+        for d in detections
+    ) else ""
+    return "Right now I can see " + ", ".join(rows[:6]) + "." + pad
 
-        sensor_prefix = ""
-        if agent_id == speaking[0]:
-            ctx = build_sensor_context(sensors)
-            if ctx:
-                sensor_prefix = f"[{ctx}] "
 
-        replies.append(
-            {
-                "agent": agent["name"],
-                "emoji": agent["emoji"],
-                "voice": agent["voice"],
-                "text": f"{sensor_prefix}{line}",
-            }
-        )
+async def generate_reply(detections: list, sensors: dict | None = None, avatar: str = "") -> str:
+    """Produce ONE cohesive scene description in the active avatar's voice,
+    de-duplicated so the same scene isn't re-narrated on every frame."""
+    global _scene_cache
+    key = scene_key(detections)
+    if (
+        key == _scene_cache.get("key")
+        and avatar == _scene_cache.get("avatar")
+        and (time.time() - _scene_cache.get("ts", 0)) < SCENE_TTL_SECS
+    ):
+        return _scene_cache["text"]
 
-    return replies
+    scene = build_scene_text(detections)
+    if not scene:
+        text = describe_scene_fallback([])
+    else:
+        text = await _llm_describe(scene, sensors or {}, avatar)
+        if text is None:
+            text = describe_scene_fallback(detections)
+
+    _scene_cache = {"key": key, "avatar": avatar, "ts": time.time(), "text": text}
+    return text
+
+
+def generate_agent_replies(text: str, avatar: str) -> list:
+    """Single speaking agent — the active avatar only."""
+    agent = AGENTS.get(avatar or "puppy", AGENTS["puppy"])
+    return [
+        {
+            "agent": agent["name"],
+            "emoji": agent["emoji"],
+            "voice": agent["voice"],
+            "text": text,
+        }
+    ]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global MODEL, FACE_ENGINE
     log.info(f"Loading YOLO model: {MODEL_NAME}")
-    MODEL = YOLO(MODEL_NAME)
-    log.info(f"YOLO model loaded. Confidence threshold: {CONF_THRESHOLD}")
+
+    # Use MODEL_PATH if specified, otherwise use MODEL_NAME
+    model_to_load = MODEL_PATH if MODEL_PATH else MODEL_NAME
+    MODEL = YOLO(model_to_load)
+    log.info(f"YOLO model loaded: {model_to_load}")
+    log.info(f"Confidence threshold: {CONF_THRESHOLD}")
+    log.info(f"IOU threshold: {IOU_THRESHOLD}")
+    log.info(f"Max detections: {MAX_DETECTIONS}")
 
     # Initialize face recognition engine
     if FACE_ENGINE is None and get_face_engine is not None:
@@ -578,7 +986,24 @@ async def lifespan(app: FastAPI):
             log.warning(f"Face recognition engine failed to load: {e}")
             FACE_ENGINE = False
 
+    # Preload vehicle make/model classifier in the background (downloads on first run)
+    try:
+        import car_classifier
+
+        threading.Thread(target=car_classifier.preload, daemon=True).start()
+        log.info("Vehicle make/model classifier: background load started")
+    except Exception as e:
+        log.warning(f"Vehicle classifier unavailable: {e}")
+
+    # OSINT push loop: forward unsolved face crops to lilly-ai's scrapidy tier.
+    osint_task = None
+    if OSINT_PUSH_URL:
+        osint_task = asyncio.create_task(_osint_push_loop())
+        log.info(f"Unknown-face OSINT push enabled → {OSINT_PUSH_URL}")
+
     yield
+    if osint_task:
+        osint_task.cancel()
     log.info("Shutting down.")
 
 
@@ -622,7 +1047,7 @@ async def vision_detect(request: Request):
         return JSONResponse(status_code=400, content={"error": "Missing image_b64"})
 
     avatar = body.get("avatar", "puppy")
-    sensors = body.get("sensors", {})
+    sensors = await _effective_sensors(body.get("sensors", {}))
     generate_audio = body.get("generate_audio", False)
 
     t0 = time.time()
@@ -644,7 +1069,8 @@ async def vision_detect(request: Request):
         return JSONResponse(status_code=503, content={"error": "YOLO model not loaded"})
 
     try:
-        results = cast(list, MODEL(frame, conf=CONF_THRESHOLD, verbose=False))
+        work, sx, sy = _resize_for_inference(frame)
+        results = cast(list, MODEL(work, conf=CONF_THRESHOLD, verbose=False))
     except Exception as e:
         log.error(f"YOLO inference error: {e}")
         return JSONResponse(status_code=500, content={"error": f"Inference error: {e}"})
@@ -656,6 +1082,8 @@ async def vision_detect(request: Request):
             continue
         for box in r.boxes:
             x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            # Map boxes back to the ORIGINAL frame coordinate space
+            x1, y1, x2, y2 = x1 * sx, y1 * sy, x2 * sx, y2 * sy
             conf = float(box.conf[0])
             cls_id = int(box.cls[0])
             label = MODEL.names[cls_id]
@@ -669,6 +1097,7 @@ async def vision_detect(request: Request):
             detections.append(
                 {
                     "label": label,
+                    "class": label,
                     "x": round(nx, 4),
                     "y": round(ny, 4),
                     "w": round(nw, 4),
@@ -680,42 +1109,111 @@ async def vision_detect(request: Request):
             )
 
     # ── Face recognition: rename "person" → "John" etc. ──────────────
-    global FACE_ENGINE
+    global FACE_ENGINE, _face_enrich_cache, _vehicle_enrich_cache, _blink_ts
     if FACE_ENGINE is None:
         try:
             FACE_ENGINE = get_face_engine()
         except Exception:
             FACE_ENGINE = False  # prevent retry
 
-    if FACE_ENGINE and any(d["label"] == "person" for d in detections):
+    now = time.time()
+    if FACE_ENGINE and any(d.get("label", "").lower() in PERSON_KEYWORDS for d in detections):
+        if now - _face_enrich_cache["ts"] >= FACE_ENRICH_INTERVAL:
+            try:
+                detections = FACE_ENGINE.enrich_person_detections(frame, detections)
+                detections = _apply_osint_results(detections, now)
+                _sample_unknown_faces(frame, detections, now)
+                _face_enrich_cache = {"ts": now, "items": _face_cache_items(detections)}
+            except Exception as e:
+                log.warning(f"Face recognition error: {e}")
+        else:
+            detections = _apply_cached_ids(detections, _face_enrich_cache, "original_label")
+
+    # ── Vehicle make/model: turn "Car" into "2012 BMW X5" ──────────────
+    try:
+        import car_classifier
+
+        if car_classifier.is_ready() and any(
+            d.get("class", "").lower() in car_classifier._VEHICLE_LABELS for d in detections
+        ):
+            if now - _vehicle_enrich_cache["ts"] >= CAR_CLASSIFY_INTERVAL:
+                detections = car_classifier.enrich_vehicle_detections(frame, detections)
+                _vehicle_enrich_cache = {
+                    "ts": now,
+                    "items": [
+                        {"label": d.get("label"),
+                         "make": d.get("make"), "model": d.get("model"),
+                         "year": d.get("year"), "car_conf": d.get("car_conf"),
+                         "box": {"x": d.get("x", 0), "y": d.get("y", 0), "w": d.get("w", 0), "h": d.get("h", 0)}}
+                        for d in detections
+                        if d.get("make")
+                    ],
+                }
+            else:
+                detections = _apply_cached_ids(detections, _vehicle_enrich_cache, "make")
+    except Exception as e:
+        log.debug(f"Vehicle classifier skipped: {e}")
+
+    # ── Blink detection: detect eye blinks in faces ──────────────────
+    global BLINK_DETECTOR
+    if BLINK_DETECTOR is None:
         try:
-            detections = FACE_ENGINE.enrich_person_detections(frame, detections)
+            BLINK_DETECTOR = get_blink_detector()
+        except Exception:
+            BLINK_DETECTOR = False  # prevent retry
+
+    blink_info = None
+    if (
+        BLINK_DETECTOR
+        and any(d.get("label", "").lower() in ["person", "face"] for d in detections)
+        and now - _blink_ts >= BLINK_INTERVAL
+    ):
+        try:
+            blink_result = BLINK_DETECTOR.detect(frame, int(time.time() * 1000))
+            _blink_ts = now
+            if blink_result:
+                blink_info = {
+                    "is_blinking": blink_result.is_blinking,
+                    "ear_score": round(blink_result.ear_score, 4),
+                    "blink_count": blink_result.blink_count,
+                    "eyes_closed_ratio": round(blink_result.eyes_closed_ratio, 4),
+                    "confidence": round(blink_result.confidence, 4),
+                }
+                # Add blink info to person/face detections
+                for det in detections:
+                    if det.get("label", "").lower() in ["person", "face"]:
+                        det["blink"] = blink_info
+                        break
         except Exception as e:
-            log.warning(f"Face recognition error: {e}")
+            log.warning(f"Blink detection error: {e}")
 
     elapsed = round(time.time() - t0, 3)
-    reply = generate_reply(detections)
-    agents = generate_agent_replies(detections, sensors, avatar)
+    reply = await generate_reply(detections, sensors, avatar)
+    agents = generate_agent_replies(reply, avatar)
 
-    # Generate TTS for each agent if requested
     if generate_audio and agents:
-        for agent_reply in agents:
-            agent_cfg = AGENTS.get(agent_reply["agent"].lower(), {})
-            voice = agent_cfg.get("voice", "en-US-JennyNeural")
-            rate = agent_cfg.get("rate", "+0%")
-            audio_id = await generate_tts(reply, voice, rate)
-            agent_reply["audio_id"] = audio_id
+        agent_cfg = AGENTS.get(avatar or "puppy", AGENTS["puppy"])
+        voice = agent_cfg.get("voice", "en-US-JennyNeural")
+        rate = agent_cfg.get("rate", "+0%")
+        audio_id = await generate_tts(reply, voice, rate)
+        agents[0]["audio_id"] = audio_id
 
     log.info(
-        f"Detected {len(detections)} targets in {elapsed}s — {len(agents)} agents responded"
+        f"Detected {len(detections)} targets in {elapsed}s — narrated in a single voice ({avatar or 'puppy'})"
     )
 
-    return {
+    response = {
         "reply": reply,
         "agents": agents,
         "detections": detections,
         "audio_id": 0,
     }
+
+    # Add blink info to response if available
+    if blink_info:
+        response["blink"] = blink_info
+
+    return response
 
 
 # ── Proactive vision state ──────────────────────────────────────────────
@@ -743,7 +1241,7 @@ async def vision_proactive(request: Request):
         return JSONResponse(status_code=400, content={"error": "Missing image_b64"})
 
     avatar = body.get("avatar", "puppy")
-    sensors = body.get("sensors", {})
+    sensors = await _effective_sensors(body.get("sensors", {}))
 
     # Cooldown check — don't nag the user
     now = time.time()
@@ -763,7 +1261,8 @@ async def vision_proactive(request: Request):
         return {"should_speak": False, "reason": "decode_error"}
 
     try:
-        results = cast(list, MODEL(frame, conf=CONF_THRESHOLD, verbose=False))
+        work, _, _ = _resize_for_inference(frame)
+        results = cast(list, MODEL(work, conf=CONF_THRESHOLD, verbose=False))
     except Exception:
         return {"should_speak": False, "reason": "inference_error"}
 
@@ -809,25 +1308,37 @@ async def vision_proactive(request: Request):
             conf = float(box.conf[0])
             cls_id = int(box.cls[0])
             label = MODEL.names[cls_id]
+            est = estimate_distance(label, int(x2 - x1), w)
             detections.append(
                 {
                     "label": label,
+                    "class": label,
                     "x": round(float(x1) / w, 4),
                     "y": round(float(y1) / h, 4),
                     "w": round(float(x2 - x1) / w, 4),
                     "h": round(float(y2 - y1) / h, 4),
                     "conf": round(conf, 4),
+                    "distance_m": est,
+                    "distance_desc": distance_desc(est) if est else None,
                 }
             )
 
-    reply = generate_reply(detections)
-    agents = generate_agent_replies(detections, sensors, avatar)
+    try:
+        import car_classifier
+
+        if car_classifier.is_ready():
+            detections = car_classifier.enrich_vehicle_detections(frame, detections)
+    except Exception as e:
+        log.debug(f"Vehicle classifier skipped: {e}")
+
+    reply = await generate_reply(detections, sensors, avatar)
+    agents = generate_agent_replies(reply, avatar)
 
     # Generate TTS for primary agent
     audio_id = 0
     if agents:
         primary = agents[0]
-        agent_cfg = AGENTS.get(primary["agent"].lower(), {})
+        agent_cfg = AGENTS.get(avatar or "puppy", AGENTS["puppy"])
         voice = agent_cfg.get("voice", "en-US-JennyNeural")
         rate = agent_cfg.get("rate", "+0%")
         audio_id = await generate_tts(reply, voice, rate)
@@ -967,6 +1478,46 @@ async def identify_test(request: Request):
         return {"faces_found": len(results), "results": results}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ── Person Tracker Endpoints ────────────────────────────────────────────
+
+@app.get("/api/vision/unknown_faces")
+async def unknown_faces_list():
+    """Debug: unsolved people queued for OSINT + resolved results map."""
+    return {
+        "count": len(_unknown_faces),
+        "osint_results": len(_osint_results),
+        "faces": [
+            {"id": e["id"], "person_box": e["person_box"], "resolved": e.get("resolved")}
+            for e in _unknown_faces
+        ],
+    }
+
+
+@app.post("/api/vision/face/identify")
+async def push_face_identity(request: Request):
+    """lilly-ai pushes back an OSINT identity for an unknown face."""
+    body = await request.json()
+    res_id = body.get("id")
+    if not res_id:
+        return JSONResponse(status_code=400, content={"error": "id required"})
+
+    entry = next((e for e in _unknown_faces if e.get("id") == res_id), None)
+    _osint_results[res_id] = {
+        "name": body.get("name"),
+        "confidence": body.get("confidence"),
+        "social_accounts": body.get("social_accounts", []),
+        "sources": body.get("sources", []),
+        "person_box": body.get("person_box") or (entry or {}).get("person_box", {}),
+        "ts": time.time(),
+    }
+    if entry:
+        entry["osint_ts"] = time.time()
+        if body.get("name"):
+            entry["resolved"] = body["name"]
+    log.info(f"OSINT identity pushed for {res_id}: {body.get('name')}")
+    return {"ok": True}
 
 
 # ── Person Tracker Endpoints ────────────────────────────────────────────

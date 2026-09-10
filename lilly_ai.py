@@ -148,6 +148,17 @@ except ImportError:
     format_citations = None
     logging.warning("scrapling_engine not found — web scraping disabled")
 
+# OSINT face lookup (unknown faces → reverse-face search → social accounts).
+# Gated by FACE_OSINT_ENABLED — see osint_face_lookup.py.
+try:
+    from osint_face_lookup import handle_unknown_face as _osint_handle_unknown_face
+
+    FACE_OSINT_AVAILABLE = True
+except ImportError:
+    FACE_OSINT_AVAILABLE = False
+    _osint_handle_unknown_face = None
+    logging.warning("osint_face_lookup not found — unknown-face OSINT disabled")
+
 # Agentic orchestration engine (agent_core.py — puzzle master)
 try:
     from agent_core import (
@@ -2698,6 +2709,48 @@ async def _fetch_openhuman_catalog(force_refresh: bool = False) -> list[dict]:
     return []
 
 
+# Curated download_url overrides for high-value community skills whose catalog
+# entry ships no resolvable docs_path/source_url (ClawHub/skills.sh often leave
+# them empty, so execute_openhuman_skill() would refuse them). Keyed by the
+# normalized entry id/name, values are working raw SKILL.md URLs.
+_OPENHUMAN_DL_OVERRIDES = {
+    "creating explainers": (
+        "https://raw.githubusercontent.com/analyticalmonk/explain-this/main/"
+        "skills/creating-explainers/SKILL.md"
+    ),
+    "explaining codebases": (
+        "https://raw.githubusercontent.com/analyticalmonk/explain-this/main/"
+        "skills/explaining-codebases/SKILL.md"
+    ),
+    "fact checking explainers": (
+        "https://raw.githubusercontent.com/analyticalmonk/explain-this/main/"
+        "skills/fact-checking-explainers/SKILL.md"
+    ),
+}
+
+# Extra trigger aliases (normalized) for the same skills so plain-language
+# "explain anything"-style intents hit them.
+_OPENHUMAN_ALIAS_OVERRIDES = {
+    "creating explainers": [
+        "explain anything",
+        "anything to explainer",
+        "anything 2 explainer",
+        "make an explainer",
+        "create an explainer",
+    ],
+    "explaining codebases": [
+        "explain codebase",
+        "explain this repo",
+        "codebase explainer",
+    ],
+    "fact checking explainers": [
+        "fact check explainer",
+        "verify explainer",
+        "check explainer claims",
+    ],
+}
+
+
 def _match_avatar_tags(skill: dict) -> bool:
     """Check if an OpenHuman skill matches the current avatar's tag filter.
 
@@ -2727,18 +2780,25 @@ def _openhuman_to_lilly_skill(entry: dict) -> dict:
     the skill and the bridge executes it via the OpenHuman runtime.
     """
     name = entry.get("name", entry.get("id", "unknown"))
+    ident = normalize_text(entry.get("id", "") or entry.get("name", ""))
     aliases = [normalize_text(name)]
     # Add tags as aliases for better intent matching
     for tag in entry.get("tags", [])[:5]:
         aliases.append(normalize_text(tag))
+    # Curated aliases so high-value community skills trigger by intent
+    for extra in _OPENHUMAN_ALIAS_OVERRIDES.get(ident, []):
+        if extra not in aliases:
+            aliases.append(extra)
+    # Fall back to a curated SKILL.md URL when the catalog entry is unresolvable
+    dl_url = entry.get("download_url", "") or _OPENHUMAN_DL_OVERRIDES.get(ident, "")
 
     return {
         "action_type": "openhuman_skill",
         "type": "openhuman_skill",
         "label": name,
         "source": entry.get("source", "openhuman"),
-        "download_url": entry.get("download_url", ""),
-        "uri_template": entry.get("download_url", entry.get("source_url", "")),
+        "download_url": dl_url,
+        "uri_template": dl_url or entry.get("source_url", ""),
         "intent_action": "openhuman.SKILL_EXECUTE",
         "aliases": aliases,
         "canned_reply": entry.get("description", ""),
@@ -9374,6 +9434,7 @@ class AvatarTask:
     session_id: str = ""  # agent session ID if running via coding agent
     progress: list = _field(default_factory=list)  # progress updates
     question: str = ""  # question the avatar wants to ask
+    discussion: list = _field(default_factory=list)  # group-chat transcript
 
     def __post_init__(self):
         if not self.id:
@@ -9395,6 +9456,7 @@ class AvatarTask:
             "session_id": self.session_id,
             "progress": self.progress[-5:],  # last 5 updates
             "question": self.question,
+            "discussion": self.discussion[-12:],  # last 12 group-chat lines
         }
 
 
@@ -9425,6 +9487,108 @@ def _save_avatar_tasks():
         pass
 
 
+# ─── Notification feed (toasts + hamburger panel) ──────────────────────
+# Backed by a small JSON file in MEMORY_DIR so it survives container recreates.
+# Types: task_complete, task_failed, group_discussion, approval_request, system.
+
+NOTIFICATIONS_FILE = MEMORY_DIR / "notifications.json"
+
+
+def _load_notifications() -> list[dict]:
+    if NOTIFICATIONS_FILE.exists():
+        try:
+            items = json.loads(NOTIFICATIONS_FILE.read_text())
+            if isinstance(items, list):
+                return items
+        except Exception:
+            pass
+    return []
+
+
+def _save_notifications(items: list[dict]):
+    try:
+        NOTIFICATIONS_FILE.write_text(json.dumps(items, indent=2))
+    except Exception:
+        pass
+
+
+# ── Sound-alert identifiers (persistent) ───────────────────────────────
+# Which detected identifiers make Lilly beep in her vision feed. Stored so
+# the user's choices survive reloads and match on class OR make/model.
+DEFAULT_ALERT_OBJECTS = ["person", "dog", "cat"]
+ALERTS_FILE = MEMORY_DIR / "alerts.json"
+
+
+def _load_alert_config() -> dict:
+    cfg = {
+        "objects": list(DEFAULT_ALERT_OBJECTS),
+        "sound_enabled": False,
+        "boxes_enabled": True,
+    }
+    if ALERTS_FILE.exists():
+        try:
+            data = json.loads(ALERTS_FILE.read_text())
+            if isinstance(data, dict):
+                if isinstance(data.get("objects"), list):
+                    cfg["objects"] = [str(o) for o in data["objects"] if str(o).strip()]
+                for k in ("sound_enabled", "boxes_enabled"):
+                    if k in data:
+                        cfg[k] = bool(data[k])
+        except Exception:
+            pass
+    return cfg
+
+
+def _save_alert_config(cfg: dict):
+    try:
+        ALERTS_FILE.write_text(json.dumps(cfg, indent=2))
+    except Exception:
+        pass
+
+
+def push_notification(
+    n_type: str = "info",
+    title: str = "",
+    body: str = "",
+    agent: str = "",
+    task_id: str = "",
+    context: Optional[dict] = None,
+) -> dict:
+    """Append a notification (toast on the web UI, list in the hamburger panel)."""
+    items = _load_notifications()
+    notif = {
+        "id": str(_uuid.uuid4())[:8],
+        "type": n_type,
+        "title": title,
+        "body": body,
+        "agent": agent,
+        "task_id": task_id,
+        "status": "open",  # open | approved | denied | dismissed
+        "created_at": time.time(),
+        "context": context or {},
+    }
+    items.append(notif)
+    items = items[-100:]
+    _save_notifications(items)
+    return notif
+
+
+def _task_lookup(task_id: str) -> Optional[AvatarTask]:
+    """Find a task by id across all avatar queues (safe when queues not loaded)."""
+    for tasks in AVATAR_TASKS.values():
+        for t in tasks:
+            if t.id == task_id:
+                return t
+    return None
+
+
+def _agent_display_name(avatar_key: str) -> str:
+    try:
+        return HIVE_PERSONAS.get(avatar_key, {}).get("name", avatar_key.title())
+    except Exception:
+        return avatar_key.title()
+
+
 def assign_task(
     avatar: str, description: str, assigned_by: str = "admin"
 ) -> AvatarTask:
@@ -9451,11 +9615,17 @@ def get_pending_tasks(avatar: str) -> list[AvatarTask]:
 
 def update_task_status(
     task_id: str, status: str, result: str = "", progress: str = "", question: str = ""
-):
-    """Update a task's status across all avatar queues."""
+) -> Optional[AvatarTask]:
+    """Update a task's status across all avatar queues.
+
+    Also pushes toast notifications: task_complete / task_failed toasts when a
+    task finishes, and an approval_request notification when an avatar asks a
+    question (so the admin can confirm or clarify from the hamburger menu).
+    """
     for avatar_key, tasks in AVATAR_TASKS.items():
         for task in tasks:
             if task.id == task_id:
+                prev_status = task.status
                 task.status = status
                 if result:
                     task.result = result
@@ -9469,6 +9639,39 @@ def update_task_status(
                 if status in ("completed", "failed"):
                     task.completed_at = time.time()
                 _save_avatar_tasks()
+
+                # Toast notifications when the state transitions
+                a_name = _agent_display_name(avatar_key)
+                if task.status == "completed" and prev_status != "completed":
+                    push_notification(
+                        "task_complete",
+                        title="✅ " + a_name + " finished a task",
+                        body=(task.description[:140])
+                        + (" — " + (task.result or "")[:180] if task.result else ""),
+                        agent=avatar_key,
+                        task_id=task.id,
+                        context={"status": "completed"},
+                    )
+                elif task.status == "failed" and prev_status != "failed":
+                    push_notification(
+                        "task_failed",
+                        title="❌ " + a_name + " hit a problem",
+                        body=(task.description[:140])
+                        + (" — " + (task.result or "")[:180] if task.result else ""),
+                        agent=avatar_key,
+                        task_id=task.id,
+                        context={"status": "failed"},
+                    )
+                elif task.status == "needs_input" and prev_status != "needs_input":
+                    push_notification(
+                        "approval_request",
+                        title="🧭 " + a_name + " needs direction",
+                        body=(task.description[:140])
+                        + (" — " + (task.question or "confirm or clarify")[:180]),
+                        agent=avatar_key,
+                        task_id=task.id,
+                        context={"status": "needs_input", "question": task.question},
+                    )
                 return task
     return None
 
@@ -9525,6 +9728,142 @@ def build_task_context_for_avatar(avatar: str) -> str:
             lines.append(f"  [{t.id}] {t.description} — {t.result[:80]}")
 
     return "\n".join(lines) if lines else ""
+
+
+# ─── Team discussion + agent executor ──────────────────────────────────
+# When the admin delegates a task, a small team of avatars "talks it over"
+# (LLM generation in character). Their takes are stored on the task so the
+# web UI can show + speak them in the group-chat style. If any avatar needs
+# more detail, the task goes to needs_input and an approval_request lands in
+# the notification feed for the admin to confirm or clarify.
+
+_DISCUSS_TEAM = ["fox", "cat", "bear", "bunny", "owl", "raccoon", "deer"]
+
+
+async def _run_agent_for_task(task: AvatarTask):
+    """Execute a task via the coding agent (agent_core) in the background."""
+    try:
+        update_task_status(task.id, "running", progress="Coding agent started")
+        from agent_core import execute_task
+
+        agent_prompt = f"[Avatar Task for {task.avatar}] {task.description}\n\nYou are acting as the {task.avatar} avatar agent. Complete this task and report results."
+        result = await execute_task(agent_prompt, user_email=ADMIN_EMAIL)
+        update_task_status(task.id, "completed", result=(result or "")[:2000])
+        logger.info(f"✅ Agent completed task {task.id} for {task.avatar}: {(result or '')[:100]}")
+    except Exception as e:
+        update_task_status(task.id, "failed", result=str(e)[:500])
+        logger.error(f"❌ Agent failed task {task.id}: {e}")
+
+
+async def _discuss_task(task: AvatarTask) -> list[dict]:
+    """Have a small team of avatars discuss the task. Returns transcript lines."""
+    ordered = [task.avatar] if task.avatar in HIVE_PERSONAS else ["puppy"]
+    ordered += [t for t in _DISCUSS_TEAM if t != task.avatar]
+    ordered = ordered[:4]
+
+    roster = "\n".join(
+        f"  - {HIVE_PERSONAS[c]['emoji']} {HIVE_PERSONAS[c]['name']} ({HIVE_PERSONAS[c]['role']})"
+        for c in ordered
+    )
+
+    async def one(char_key: str) -> dict:
+        persona = HIVE_PERSONAS[char_key]
+        system_prompt = (
+            f"{persona['voice_prompt'].strip()}\n"
+            f"You are part of a hive-mind team discussing a shared task together. "
+            f"TEAM:\n{roster}\n"
+            f"Give YOUR quick take on this task in 1-2 sentences, staying in character and speaking as yourself. "
+            f"Build on or gently disagree with your teammates. "
+            f"If you genuinely cannot proceed without more detail, end your reply with a short question. "
+            f"NEVER say 'like and subscribe' or similar."
+        )
+        reply = strip_json_wrapper(
+            await llama_backend.chat(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Task: " + task.description},
+                ],
+                temperature=0.7,
+                max_tokens=70,
+                timeout=20,
+            )
+        )
+        reply = (reply or "").strip()
+        if not reply:
+            reply = "I'm ready when you are."
+        return {
+            "char": char_key,
+            "name": persona["name"],
+            "emoji": persona["emoji"],
+            "text": reply,
+        }
+
+    try:
+        return await asyncio.gather(*[one(c) for c in ordered])
+    except Exception as e:
+        logger.error(f"group discussion error: {e}")
+        return []
+
+
+def _discussion_needs_input(transcript: list[dict]) -> Optional[dict]:
+    """Return the first line that asks a clarifying question, if any."""
+    for line in transcript:
+        text = (line.get("text") or "").strip()
+        if text.endswith("?"):
+            return line
+        lowered = text.lower()
+        if any(
+            kw in lowered
+            for kw in ("clarif", "more detail", "more info", "what do you mean",
+                       "which one", "could you", "should we", "need to know")
+        ):
+            return line
+    return None
+
+
+async def _discuss_assigned_task(task: AvatarTask):
+    """Background: run the team discussion, then set task state + notifications."""
+    try:
+        transcript = await _discuss_task(task)
+        task.discussion.extend(transcript)
+        if transcript:
+            task.progress.append(
+                {
+                    "ts": time.time(),
+                    "text": "Team discussion: "
+                    + ", ".join(f"{line['name']}: {line['text']}" for line in transcript),
+                }
+            )
+        blocker = _discussion_needs_input(transcript)
+        if blocker and task.status == "pending":
+            task.question = blocker["text"]
+            task.status = "needs_input"
+            _save_avatar_tasks()
+            push_notification(
+                "approval_request",
+                title="🧭 " + blocker["name"] + " needs direction",
+                body=(task.description[:140]) + " — " + blocker["text"][:160],
+                agent=blocker["char"],
+                task_id=task.id,
+                context={"status": "needs_input", "question": blocker["text"], "transcript": transcript},
+            )
+        else:
+            if task.status == "pending":
+                task.status = "running"
+            _save_avatar_tasks()
+            agent_name = _agent_display_name(task.avatar)
+            push_notification(
+                "group_discussion",
+                title="🗣️ The team discussed a task",
+                body=(f"{agent_name}: " + (task.description[:120] or ""))
+                + (" — approve to run it, or reply with a correction." if not task.question else ""),
+                agent=task.avatar,
+                task_id=task.id,
+                context={"status": task.status, "transcript": transcript},
+            )
+    except Exception as e:
+        logger.error(f"discuss_assigned_task {task.id}: {e}")
+        update_task_status(task.id, "failed", result=f"Discussion error: {e}"[:500])
 
 
 # Load tasks on startup (deferred — HIVE_PERSONAS not yet defined at import time)
@@ -12803,6 +13142,39 @@ async def _proxy_vision_frame(
     return {}
 
 
+# Extra per-detection fields from the face enrichment engine that must survive
+# the proxy so the Android overlay can draw keypoints and show OSINT results.
+_FACE_EXTRA_KEYS = (
+    "kps",
+    "face_confidence",
+    "original_label",
+    "face_source",
+    "social_accounts",
+    "osint_sources",
+)
+
+
+def _map_vision_detections(proxy_resp: dict) -> list:
+    """Map external-vision detections (normalized) into overlay-ready boxes,
+    passing through face enrichment extras (kps → overlay points, etc.)."""
+    out = []
+    for d in proxy_resp.get("detections") or []:
+        entry = {
+            "label": d.get("label", "object"),
+            "confidence": float(d.get("conf", d.get("confidence", 0))),
+            "x1": float(d.get("x", 0)),
+            "y1": float(d.get("y", 0)),
+            "x2": float(d.get("x", 0)) + float(d.get("w", 0)),
+            "y2": float(d.get("y", 0)) + float(d.get("h", 0)),
+        }
+        for k in _FACE_EXTRA_KEYS:
+            v = d.get(k)
+            if v is not None:
+                entry[k] = v
+        out.append(entry)
+    return out
+
+
 def init_vision():
     global _vision_enabled
     cv2 = _try_import_cv2()
@@ -12939,7 +13311,200 @@ COCO_CLASSES = [
 
 _YOLO_MODEL = None
 _YOLO_MODEL_COCO = None  # COCO model for dual detection (80 classes, high accuracy)
+_YOLO_WORLD = None  # YOLO-World model (open vocabulary, detailed labels)
 _DUAL_DETECTION = True  # Enable dual-model detection by default
+
+# Rich vocabulary for YOLO-World — much more detailed than COCO/OIV7
+_YOLO_WORLD_VOCAB = [
+    # People & body parts
+    "person",
+    "man",
+    "woman",
+    "child",
+    "boy",
+    "girl",
+    "baby",
+    "elderly man",
+    "elderly woman",
+    "face",
+    "Human face",
+    "Human beard",
+    "Human hair",
+    "Human eye",
+    "Human nose",
+    "Human mouth",
+    "Human ear",
+    "Human hand",
+    "Human arm",
+    "Human leg",
+    "Human foot",
+    # Clothing
+    "shirt",
+    "t-shirt",
+    "polo shirt",
+    "blouse",
+    "sweater",
+    "hoodie",
+    "jacket",
+    "coat",
+    "blazer",
+    "dress",
+    "skirt",
+    "pants",
+    "jeans",
+    "shorts",
+    "leggings",
+    "suit",
+    "shoes",
+    "sneakers",
+    "boots",
+    "sandals",
+    "heels",
+    "slippers",
+    "hat",
+    "cap",
+    "beanie",
+    "beret",
+    "sunglasses",
+    "glasses",
+    "goggles",
+    "backpack",
+    "handbag",
+    "purse",
+    "suitcase",
+    "wallet",
+    "watch",
+    "ring",
+    "necklace",
+    "bracelet",
+    "earrings",
+    # Electronics
+    "phone",
+    "smartphone",
+    "iPhone",
+    "Android phone",
+    "laptop",
+    "MacBook",
+    "tablet",
+    "iPad",
+    "headphones",
+    "earbuds",
+    "AirPods",
+    "smartwatch",
+    "Apple Watch",
+    "camera",
+    "DSLR",
+    "webcam",
+    "TV",
+    "monitor",
+    "keyboard",
+    "mouse",
+    # Vehicles
+    "car",
+    "sedan",
+    "SUV",
+    "truck",
+    "van",
+    "bus",
+    "motorcycle",
+    "bicycle",
+    "scooter",
+    "boat",
+    "airplane",
+    "helicopter",
+    "train",
+    "subway",
+    # Animals
+    "dog",
+    "cat",
+    "bird",
+    "fish",
+    "horse",
+    "rabbit",
+    "hamster",
+    "turtle",
+    "golden retriever",
+    "german shepherd",
+    "bulldog",
+    "poodle",
+    "persian cat",
+    "siamese cat",
+    # Food & drink
+    "food",
+    "fruit",
+    "vegetable",
+    "meat",
+    "bread",
+    "pizza",
+    "burger",
+    "sushi",
+    "coffee",
+    "tea",
+    "water bottle",
+    "beer",
+    "wine glass",
+    "cup",
+    "mug",
+    # Furniture & objects
+    "chair",
+    "table",
+    "desk",
+    "sofa",
+    "couch",
+    "bed",
+    "pillow",
+    "blanket",
+    "lamp",
+    "fan",
+    "air conditioner",
+    "refrigerator",
+    "microwave",
+    "oven",
+    "book",
+    "notebook",
+    "pen",
+    "pencil",
+    "paper",
+    "bag",
+    "box",
+    # Outdoor
+    "tree",
+    "flower",
+    "grass",
+    "sky",
+    "cloud",
+    "sun",
+    "moon",
+    "star",
+    "building",
+    "house",
+    "apartment",
+    "office",
+    "store",
+    "restaurant",
+    "street",
+    "sidewalk",
+    "road",
+    "bridge",
+    "park",
+    "playground",
+    # Accessories & misc
+    "umbrella",
+    "key",
+    "keys",
+    "mask",
+    "scarf",
+    "gloves",
+    "belt",
+    "bottle",
+    "can",
+    "glass",
+    "plate",
+    "bowl",
+    "fork",
+    "knife",
+    "spoon",
+]
 
 
 async def capture_vision_frame() -> Optional[bytes]:
@@ -13000,7 +13565,11 @@ def _load_coco_model():
     if not YOLO:
         return None
     search_paths = [
+        WORKSPACE / "yolov8x.pt",
+        WORKSPACE / "yolov8s.pt",
         WORKSPACE / "yolov8n.pt",
+        Path.home() / ".lilly" / "yolov8x.pt",
+        Path.home() / ".lilly" / "yolov8s.pt",
         Path.home() / ".lilly" / "yolov8n.pt",
     ]
     model_path = None
@@ -13009,13 +13578,13 @@ def _load_coco_model():
             model_path = p
             break
     if model_path is None:
-        model_path = Path.home() / ".lilly" / "yolov8n.pt"
+        model_path = Path.home() / ".lilly" / "yolov8x.pt"
         model_path.parent.mkdir(parents=True, exist_ok=True)
-        logger.info("Vision: Downloading YOLOv8n COCO model (80 classes, first run)...")
+        logger.info("Vision: Downloading YOLOv8x COCO model (80 classes, first run)...")
         import urllib.request
 
         urllib.request.urlretrieve(
-            "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt",
+            "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8x.pt",
             str(model_path),
         )
     _YOLO_MODEL_COCO = YOLO(str(model_path))
@@ -13032,10 +13601,16 @@ def _run_dual_detection(frame) -> list[dict]:
     if not YOLO:
         return []
 
-    # Load Open Images V7 model (primary, 601 classes)
+    # Load Open Images V7 model (primary, 601 classes) — prefer yolov8x for max accuracy
     if _YOLO_MODEL is None:
         search_paths = [
+            WORKSPACE / "yolov8x.pt",
+            WORKSPACE / "yolov8l.pt",
+            WORKSPACE / "yolov8m.pt",
+            WORKSPACE / "yolov8s.pt",
             WORKSPACE / "yolov8n-oiv7.pt",
+            Path.home() / ".lilly" / "yolov8x.pt",
+            Path.home() / ".lilly" / "yolov8s.pt",
             Path.home() / ".lilly" / "yolov8n-oiv7.pt",
             WORKSPACE / "yolov8n.pt",
             Path.home() / ".lilly" / "yolov8n.pt",
@@ -13060,7 +13635,7 @@ def _run_dual_detection(frame) -> list[dict]:
                     cls = int(box.cls[0])
                     conf = float(box.conf[0])
                     label = _YOLO_MODEL.names.get(cls, f"obj_{cls}")
-                    if conf > 0.3:
+                    if conf > 0.45:
                         all_detections.append(
                             {
                                 "label": label,
@@ -13087,7 +13662,7 @@ def _run_dual_detection(frame) -> list[dict]:
                     label = (
                         COCO_CLASSES[cls] if cls < len(COCO_CLASSES) else f"obj_{cls}"
                     )
-                    if conf > 0.3:
+                    if conf > 0.45:
                         all_detections.append(
                             {
                                 "label": label,
@@ -13211,7 +13786,13 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
                 # Single model mode (fallback)
                 if _YOLO_MODEL is None:
                     search_paths = [
+                        WORKSPACE / "yolov8x.pt",
+                        WORKSPACE / "yolov8l.pt",
+                        WORKSPACE / "yolov8m.pt",
+                        WORKSPACE / "yolov8s.pt",
                         WORKSPACE / "yolov8n-oiv7.pt",
+                        Path.home() / ".lilly" / "yolov8x.pt",
+                        Path.home() / ".lilly" / "yolov8s.pt",
                         Path.home() / ".lilly" / "yolov8n-oiv7.pt",
                         WORKSPACE / "yolov8n.pt",
                         Path.home() / ".lilly" / "yolov8n.pt",
@@ -13242,7 +13823,18 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
             logger.debug(f"Vision detect error: {e}")
 
     # ── Face recognition: rename "person" → "John" etc. ──────────
-    if _vision_enabled and any(d.get("label") == "person" for d in detections):
+    _person_labels = {
+        "person",
+        "Man",
+        "Woman",
+        "man",
+        "woman",
+        "Boy",
+        "Girl",
+        "boy",
+        "girl",
+    }
+    if _vision_enabled and any(d.get("label") in _person_labels for d in detections):
         try:
             from face_recognition_engine import get_face_engine
 
@@ -13267,7 +13859,8 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
             enriched = face_eng.enrich_person_detections(frame, norm_dets)
             # Merge back — replace label if face engine renamed it
             for i, ed in enumerate(enriched):
-                if ed.get("original_label") == "person" and ed["label"] != "person":
+                orig = ed.get("original_label", "")
+                if orig and orig in _person_labels and ed["label"] != orig:
                     detections[i]["label"] = ed["label"]
                     detections[i]["face_confidence"] = ed.get("face_confidence")
         except Exception as e:
@@ -14395,6 +14988,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Vision alert identifiers (persistent config) ──────────────────────────
+@app.get("/api/alert_objects")
+async def get_alert_objects():
+    return _load_alert_config()
+
+
+@app.put("/api/alert_objects")
+async def put_alert_objects(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    cfg = _load_alert_config()
+    if isinstance(body.get("objects"), list):
+        cfg["objects"] = [str(o) for o in body["objects"] if str(o).strip()]
+    if "sound_enabled" in body:
+        cfg["sound_enabled"] = bool(body["sound_enabled"])
+    if "boxes_enabled" in body:
+        cfg["boxes_enabled"] = bool(body["boxes_enabled"])
+    _save_alert_config(cfg)
+    return cfg
 
 
 # ─── Vision Proxy (port 8098/vision → port 8198) ──────────────────────────
@@ -17350,9 +17966,28 @@ async def agent_undo(request: Request):
 
 
 # ─── Admin API Endpoints ────────────────────────────────────────────────
-# Restricted to OWNER_EMAIL only. All other users get 403.
+# Restricted to OWNER_EMAIL / AUTH0_ADMIN_EMAILS only. All other users get 403.
 
 ADMIN_EMAIL = "laurencekidney@gmail.com"
+
+
+def _admin_email_lookup() -> set:
+    """Return the full set of admin emails (hardcoded + env-configured)."""
+    emails = {ADMIN_EMAIL.strip().lower()}
+    for env_key in ("OWNER_EMAIL", "AUTH0_ADMIN_EMAILS"):
+        try:
+            raw = os.environ.get(env_key, "")
+        except Exception:
+            raw = ""
+        for part in str(raw).replace(";", ",").split(","):
+            part = (part or "").strip().lower()
+            if part:
+                emails.add(part)
+    return emails
+
+
+def _is_admin_email(email: str) -> bool:
+    return ((email or "") .strip().lower()) in _admin_email_lookup()
 
 
 def _require_admin(request: Request) -> Optional[dict]:
@@ -17381,7 +18016,7 @@ async def admin_check(request: Request):
     if not user:
         return {"admin": False, "reason": "not_logged_in"}
     email = (user.get("email", "") or "").strip().lower()
-    is_admin = email == ADMIN_EMAIL.strip().lower()
+    is_admin = _is_admin_email(email)
     return {"admin": is_admin, "email": email}
 
 
@@ -17519,35 +18154,65 @@ async def admin_assign_task(request: Request):
     body = await request.json()
     avatar = body.get("avatar", "").strip().lower()
     description = body.get("description", "").strip()
-    auto_run = body.get("auto_run", True)  # default: auto-trigger coding agent
+    auto_run = body.get("auto_run", False)  # if True, also run via coding agent
     if not avatar or not description:
         return JSONResponse(
             {"error": "avatar and description required"}, status_code=400
         )
+    if avatar not in HIVE_PERSONAS:
+        return JSONResponse(
+            {"error": f"unknown avatar '{avatar}'. Pick from: {', '.join(HIVE_PERSONAS)}"},
+            status_code=400,
+        )
     _ensure_avatar_tasks_loaded()
     task = assign_task(avatar, description, assigned_by="admin")
 
-    # Auto-trigger coding agent in background if agent_core is available
+    # Default flow: the team discusses the task in the background — the group
+    # chat "speaks" their takes, the admin approves/clarifies from the
+    # notification feed, then the coding agent runs it (see approve endpoint).
+    asyncio.create_task(_discuss_assigned_task(task))
+
+    # Optional second path: auto-trigger the coding agent in the background.
     if auto_run and AGENT_CORE_AVAILABLE:
-
-        async def _run_agent_for_task():
-            try:
-                update_task_status(task.id, "running", progress="Agent started")
-                from agent_core import execute_task
-
-                agent_prompt = f"[Avatar Task for {avatar}] {description}\n\nYou are acting as the {avatar} avatar agent. Complete this task and report results."
-                result = await execute_task(agent_prompt, user_email=ADMIN_EMAIL)
-                update_task_status(task.id, "completed", result=result[:2000])
-                logger.info(
-                    f"✅ Agent completed task {task.id} for {avatar}: {result[:100]}"
-                )
-            except Exception as e:
-                update_task_status(task.id, "failed", result=str(e)[:500])
-                logger.error(f"❌ Agent failed task {task.id}: {e}")
-
-        asyncio.create_task(_run_agent_for_task())
+        asyncio.create_task(_run_agent_for_task(task))
 
     return {"ok": True, "task": task.to_dict()}
+
+
+@app.post("/api/admin/tasks/discuss")
+async def admin_task_discuss(request: Request):
+    """(Re)run the team discussion for a task (admin only)."""
+    _ensure_avatar_tasks_loaded()
+    body = await request.json()
+    task_id = body.get("task_id", "")
+    task = _task_lookup(task_id)
+    if not task:
+        return JSONResponse({"error": "task not found"}, status_code=404)
+    transcript = await _discuss_task(task)
+    task.discussion = list(task.discussion) + list(transcript)
+    task.progress.append(
+        {
+            "ts": time.time(),
+            "text": "Team discussion (manual): "
+            + ", ".join(f"{line['name']}: {line['text']}" for line in transcript),
+        }
+    )
+    blocker = _discussion_needs_input(transcript)
+    if blocker and task.status == "pending":
+        task.question = blocker["text"]
+        task.status = "needs_input"
+        push_notification(
+            "approval_request",
+            title="🧭 " + blocker["name"] + " needs direction",
+            body=(task.description[:140]) + " — " + blocker["text"][:160],
+            agent=blocker["char"],
+            task_id=task.id,
+            context={"status": "needs_input", "question": blocker["text"], "transcript": transcript},
+        )
+    elif task.status == "pending":
+        task.status = "running"
+    _save_avatar_tasks()
+    return {"ok": True, "task": task.to_dict(), "transcript": transcript}
 
 
 @app.post("/api/admin/tasks/update")
@@ -17577,6 +18242,103 @@ async def admin_update_task(request: Request):
     if not task:
         return JSONResponse({"error": "task not found"}, status_code=404)
     return {"ok": True, "task": task.to_dict()}
+
+
+# ─── Notification feed (hamburger panel + toasts) ──────────────────────
+
+@app.get("/api/notifications")
+async def list_notifications(request: Request):
+    """List notifications for the current user (newest first)."""
+    if AUTH_AVAILABLE:
+        user = await get_current_user(request)
+        if not user:
+            return JSONResponse({"error": "not_logged_in"}, status_code=401)
+    items = _load_notifications()
+    items.sort(key=lambda n: n.get("created_at", 0), reverse=True)
+    return {"notifications": items, "unread": sum(1 for n in items if n["status"] == "open")}
+
+
+@app.post("/api/notifications/{nid}/approve")
+async def approve_notification(nid: str, request: Request):
+    """Admin approves/clarifies a notification.
+
+    For an approval_request this resolves the avatar's question (optional
+    answer in body) and, when the coding agent is available, kicks the task
+    off — its completion then fires the toast. For a group_discussion notice
+    it confirms the plan and runs the task.
+    """
+    if not AUTH_AVAILABLE:
+        pass
+    else:
+        user = await get_current_user(request)
+        if (
+            not user
+            or not _is_admin_email((user.get("email", "") or "").strip().lower())
+        ):
+            return JSONResponse({"error": "Admin access required"}, status_code=403)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    answer = (body.get("answer") or "").strip()
+    items = _load_notifications()
+    notif = next((n for n in items if n["id"] == nid), None)
+    if not notif:
+        return JSONResponse({"error": "notification not found"}, status_code=404)
+    notif["status"] = "approved"
+    msg = "Approved by admin" + (f": {answer}" if answer else "")
+    task = None
+    if notif.get("task_id"):
+        _ensure_avatar_tasks_loaded()
+        task = _task_lookup(notif["task_id"])
+        if task:
+            if task.status == "needs_input":
+                task.status = "running"
+                task.question = ""
+                task.progress.append({"ts": time.time(), "text": msg})
+            elif task.status == "pending":
+                task.status = "running"
+                task.progress.append({"ts": time.time(), "text": msg})
+            elif task.status == "running":
+                task.progress.append({"ts": time.time(), "text": msg})
+            _save_avatar_tasks()
+    _save_notifications(items)
+
+    # If a coding agent is available and the task isn't already executing, run it.
+    if task and task.status == "running" and not task.session_id and AGENT_CORE_AVAILABLE:
+        asyncio.create_task(_run_agent_for_task(task))
+
+    return {"ok": True, "notification": notif, "task": task.to_dict() if task else None}
+
+
+@app.post("/api/notifications/{nid}/dismiss")
+async def dismiss_notification(nid: str, request: Request):
+    """Dismiss a notification (hides it and marks it seen)."""
+    if AUTH_AVAILABLE:
+        user = await get_current_user(request)
+        if not user:
+            return JSONResponse({"error": "not_logged_in"}, status_code=401)
+    items = _load_notifications()
+    notif = next((n for n in items if n["id"] == nid), None)
+    if not notif:
+        return JSONResponse({"error": "notification not found"}, status_code=404)
+    notif["status"] = "dismissed"
+    _save_notifications(items)
+    return {"ok": True, "notification": notif}
+
+
+@app.post("/api/tts/char")
+async def tts_speak_char(request: Request):
+    """Generate TTS audio for an arbitrary character line (for the discussion
+    transcript play buttons). Returns the audio_id for /api/tts?id=."""
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    char_key = (body.get("char") or "puppy").strip().lower()
+    if not text:
+        return JSONResponse({"error": "text required"}, status_code=400)
+    aid = await generate_tts_for_char(text, char_key)
+    return {"audio_id": aid}
 
 
 @app.get("/api/admin/sessions")
@@ -21135,23 +21897,11 @@ async def ingest_browser_frame(file: UploadFile = File(...)):
                 except Exception:
                     pass
 
-            _browser_vision_detections = [
-                {
-                    "label": d.get("label", "object"),
-                    "confidence": float(d.get("conf", d.get("confidence", 0))),
-                    "x1": float(d.get("x1", d.get("x", 0))) / img_width,
-                    "y1": float(d.get("y1", d.get("y", 0))) / img_height,
-                    "x2": float(
-                        d.get("x2", (float(d.get("x", 0)) + float(d.get("w", 0))))
-                    )
-                    / img_width,
-                    "y2": float(
-                        d.get("y2", (float(d.get("y", 0)) + float(d.get("h", 0))))
-                    )
-                    / img_height,
-                }
-                for d in proxy_resp["detections"]
-            ]
+            # The external vision server (yolov8_vision_server.py) returns
+            # NORMALIZED coordinates already: x,y,w,h in 0-1 range.
+            # Do NOT divide again — doing so (the old bug) shrank every box to a
+            # ~0-size point near the top-left, hiding all detection graphics.
+            _browser_vision_detections = _map_vision_detections(proxy_resp)
             _browser_vision_ts = time.time()
             reply_text = proxy_resp.get("reply", "")
             if not reply_text and _browser_vision_detections:
@@ -21161,17 +21911,7 @@ async def ingest_browser_frame(file: UploadFile = File(...)):
 
             return {
                 "ok": True,
-                "detections": [
-                    {
-                        "label": d["label"],
-                        "confidence": round(d.get("confidence", 0), 2),
-                        "x1": d["x1"],
-                        "y1": d["y1"],
-                        "x2": d["x2"],
-                        "y2": d["y2"],
-                    }
-                    for d in _browser_vision_detections
-                ],
+                "detections": _browser_vision_detections,
                 "description": _browser_vision_description,
             }
 
@@ -21251,6 +21991,23 @@ async def get_webcam_vision():
     }
 
 
+@app.post("/api/vision/faces/osint_unknown")
+async def osint_unknown_face(request: Request):
+    """Vision server pushes an unsolved face crop; the scrapidy tier OSINTs it."""
+    if not FACE_OSINT_AVAILABLE or _osint_handle_unknown_face is None:
+        return {"handled": False, "error": "osint_face_lookup unavailable"}
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    try:
+        result = await _osint_handle_unknown_face(payload)
+        return {"handled": bool(result.get("handled"))}
+    except Exception as e:
+        logger.warning(f"OSINT unknown-face handler failed: {e}")
+        return {"handled": False, "error": str(e)}
+
+
 # ─── NATIVE CAMERA (Android overlay → MJPEG) ───────────────────────
 # Stores the most recent detection result from the native Android camera
 # forwarded through the overlay's MJPEG server (port 8095).
@@ -21277,17 +22034,7 @@ async def ingest_native_frame(file: UploadFile = File(...)):
     if VISION_SERVER_URL:
         proxy_resp = await _proxy_vision_frame(data, avatar=_avatar)
         if proxy_resp and proxy_resp.get("detections"):
-            _native_vision_detections = [
-                {
-                    "label": d.get("label", "object"),
-                    "confidence": float(d.get("conf", d.get("confidence", 0))),
-                    "x1": float(d.get("x", 0)),
-                    "y1": float(d.get("y", 0)),
-                    "x2": (float(d.get("x", 0)) + float(d.get("w", 0))),
-                    "y2": (float(d.get("y", 0)) + float(d.get("h", 0))),
-                }
-                for d in proxy_resp["detections"]
-            ]
+            _native_vision_detections = _map_vision_detections(proxy_resp)
             _native_vision_ts = time.time()
             reply_text = proxy_resp.get("reply", "")
             if not reply_text and _native_vision_detections:
@@ -21296,13 +22043,7 @@ async def ingest_native_frame(file: UploadFile = File(...)):
             _native_vision_description = reply_text
             return {
                 "ok": True,
-                "detections": [
-                    {
-                        "label": d["label"],
-                        "confidence": round(d.get("confidence", 0), 2),
-                    }
-                    for d in _native_vision_detections
-                ],
+                "detections": _native_vision_detections,
                 "description": _native_vision_description,
             }
 
@@ -23040,6 +23781,7 @@ pre{position:relative;overflow-x:auto}
 /* ─── Hamburger Dropdown Menu ─── */
 #hamburgerMenu{animation:hamIn 0.15s ease-out}
 @keyframes hamIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeSlideIn{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:translateX(0)}}
 .ham-icon-btn{width:44px;height:44px;border:none;border-radius:12px;background:rgba(255,255,255,0.4);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s;padding:0;flex-direction:column;gap:2px;outline:none;-webkit-tap-highlight-color:transparent}
 .ham-icon-btn:hover{background:rgba(255,255,255,0.6);transform:scale(1.08)}
 .ham-icon-btn:active{transform:scale(0.92)}
@@ -23465,6 +24207,21 @@ pre{position:relative;overflow-x:auto}
       </button>
       <span class="ham-label">Download</span>
     </div>
+    <!-- Notifications -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="notifications" title="Notifications" onclick="handleHamburgerAction('notifications')" style="position:relative">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <span id="notifBadge" style="display:none;position:absolute;top:-4px;right:-4px;min-width:15px;height:15px;border-radius:8px;background:#e85a6e;color:#fff;font-size:9px;line-height:15px;text-align:center;padding:0 4px;font-weight:700;box-shadow:0 2px 6px rgba(232,90,110,0.4)">0</span>
+      </button>
+      <span class="ham-label">Notifications</span>
+    </div>
+    <!-- Admin (admin-only visibility) -->
+    <div id="adminMenuItem" style="display:none;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="admin" title="Admin Panel" onclick="handleHamburgerAction('admin')">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+      </button>
+      <span class="ham-label">Admin</span>
+    </div>
     <!-- Alerts -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
       <button class="ham-icon-btn" data-action="alerts" title="Alert Settings" onclick="toggleAlertsPanel()">
@@ -23482,6 +24239,23 @@ pre{position:relative;overflow-x:auto}
     </div>
   </div>
 </div>
+
+<!-- Notifications Panel -->
+<div id="notifPanel" style="display:none;position:fixed;top:60px;right:16px;width:320px;max-width:calc(100vw - 32px);z-index:216;background:rgba(255,255,255,0.94);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:14px;box-shadow:0 8px 40px rgba(180,140,180,0.24)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <div style="font-size:13px;font-weight:700;color:#5d4e6d;display:flex;align-items:center;gap:6px">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+      Notifications
+      <span id="notifPanelCount" style="font-size:10px;color:rgba(93,78,109,0.5)"></span>
+    </div>
+    <button onclick="toggleNotificationsPanel()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);font-size:16px;padding:2px 6px">✕</button>
+  </div>
+  <div id="notifList" style="max-height:52vh;overflow-y:auto;display:flex;flex-direction:column;gap:8px"></div>
+  <div style="margin-top:10px;font-size:10px;color:rgba(93,78,109,0.45);text-align:center">Task approvals and team updates land here</div>
+</div>
+
+<!-- Toast stack (task completions, team discussion alerts) -->
+<div id="toastStack" style="position:fixed;bottom:120px;right:14px;z-index:520;display:flex;flex-direction:column;gap:8px;align-items:flex-end;max-width:320px"></div>
 
 <!-- Alerts Panel (popout) -->
 <div id="alertsPanel" style="display:none;position:fixed;top:60px;left:16px;width:280px;max-width:calc(100vw - 32px);z-index:215;background:rgba(255,255,255,0.92);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:16px;box-shadow:0 8px 40px rgba(180,140,180,0.2)">
@@ -23528,14 +24302,8 @@ pre{position:relative;overflow-x:auto}
   <!-- Alert Objects -->
   <div style="padding:10px 12px;background:rgba(139,122,158,0.08);border-radius:10px;margin-bottom:8px">
     <div style="font-size:11px;font-weight:600;color:#5d4e6d;margin-bottom:8px">Alert me when I see:</div>
-    <div style="display:flex;flex-wrap:wrap;gap:6px" id="alertObjectsList">
-      <button class="alert-obj-btn active" data-obj="person" onclick="toggleAlertObject(this)">👤 Person</button>
-      <button class="alert-obj-btn" data-obj="car" onclick="toggleAlertObject(this)">🚗 Car</button>
-      <button class="alert-obj-btn active" data-obj="dog" onclick="toggleAlertObject(this)">🐕 Dog</button>
-      <button class="alert-obj-btn active" data-obj="cat" onclick="toggleAlertObject(this)">🐈 Cat</button>
-      <button class="alert-obj-btn" data-obj="truck" onclick="toggleAlertObject(this)">🚚 Truck</button>
-      <button class="alert-obj-btn" data-obj="bird" onclick="toggleAlertObject(this)">🐦 Bird</button>
-    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px" id="alertObjectsList"></div>
+    <div style="font-size:10px;color:rgba(93,78,109,0.5);margin-top:6px">Matches come from sight: person, car or truck, pets, wildlife, and street signs. Choices are remembered.</div>
   </div>
 
   <!-- Status -->
@@ -23726,6 +24494,10 @@ pre{position:relative;overflow-x:auto}
     <b id="profileName">Lilly</b>
     <span><span class="pf-dot" id="profileStatusDot"></span><span id="profileStatusLabel">here</span></span>
   </div>
+  <button id="adminSquareBtn" onclick="event.stopPropagation();openAdminWindow()" title="Admin panel"
+    style="display:none;flex:0 0 auto;width:38px;height:38px;align-items:center;justify-content:center;margin-left:10px;border-radius:10px;border:1px solid rgba(120,80,200,0.4);background:rgba(120,80,200,0.18);color:#7a5cae;cursor:pointer;box-shadow:0 3px 10px rgba(120,80,200,0.25)">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+  </button>
 </div>
 
 <div id="thinkingDots">
@@ -23840,21 +24612,33 @@ pre{position:relative;overflow-x:auto}
   <iframe id="youtubePiPFrame" style="width:100%;height:100%;border:none;margin-top:32px" src="" allow="autoplay; encrypted-media" allowfullscreen></iframe>
 </div>
 
-<!-- Admin Panel — only visible to admin users -->
-<div id="adminPanel" style="display:none;position:fixed;bottom:calc(72px + var(--kb,0px));left:8px;right:8px;max-width:720px;margin:0 auto;z-index:24;background:rgba(30,30,40,0.92);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(120,80,200,0.3);border-radius:16px;padding:8px 12px;box-shadow:0 4px 30px rgba(120,80,200,0.15)">
-  <div style="display:flex;align-items:center;gap:8px;flex-wrap:nowrap">
-    <span style="color:#c084fc;font-size:11px;font-weight:600;white-space:nowrap">⚡ ADMIN</span>
-    <input type="text" id="adminCmdInput" placeholder="$ shell command..." style="flex:1;background:rgba(255,255,255,0.08);border:1px solid rgba(120,80,200,0.2);border-radius:10px;padding:6px 10px;color:#e0d0f0;font-size:12px;font-family:monospace;outline:none" onkeydown="if(event.key==='Enter'){event.preventDefault();runAdminShell()}">
-    <button onclick="runAdminShell()" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">Run</button>
-    <button onclick="runAdminAgent()" title="Run coding agent task" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">🤖 Agent</button>
-    <button onclick="assignAvatarTask()" title="Assign task to an avatar" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">📋 Tasks</button>
-    <button onclick="viewAdminSessions()" title="Resume previous sessions" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">🔄 Sessions</button>
-    <button onclick="viewAdminLogs()" title="View recent server logs" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">📋 Logs</button>
-    <button onclick="toggleAdminPanel()" title="Toggle admin panel" style="background:none;border:none;color:#888;font-size:14px;cursor:pointer;padding:2px">✕</button>
+<!-- Admin Window — windowed management panel (admin only, drag/minimize/close) -->
+<div id="adminPanel" style="display:none;position:fixed;top:74px;left:8px;width:min(640px,calc(100vw - 16px));z-index:24;background:rgba(30,30,40,0.94);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(120,80,200,0.35);border-radius:14px;box-shadow:0 10px 40px rgba(120,80,200,0.28);overflow:hidden">
+  <div id="adminWindowHeader" style="display:flex;align-items:center;gap:4px;padding:8px 10px;background:rgba(120,80,200,0.24);cursor:move;user-select:none">
+    <span style="color:#c084fc;font-size:11px;font-weight:800;letter-spacing:0.4px;flex:1;white-space:nowrap">⚡ ADMIN</span>
+    <span id="adminWinStatus" style="color:#8f7ab0;font-size:10px;white-space:nowrap">drag to move</span>
+    <button onclick="minimizeAdminWindow()" title="Minimize" style="background:none;border:none;color:#b0a0c8;font-size:13px;cursor:pointer;padding:2px 7px">─</button>
+    <button onclick="toggleAdminPanel()" title="Close" style="background:none;border:none;color:#b0a0c8;font-size:14px;cursor:pointer;padding:2px 7px">✕</button>
   </div>
-  <div id="adminOutput" style="display:none;margin-top:8px;max-height:240px;overflow-y:auto;background:rgba(0,0,0,0.3);border-radius:8px;padding:8px;font-family:monospace;font-size:11px;color:#a0a0b0;white-space:pre-wrap;word-break:break-all"></div>
-</div>
-  <div id="adminOutput" style="display:none;margin-top:8px;max-height:300px;overflow-y:auto;background:rgba(0,0,0,0.3);border-radius:8px;padding:8px;font-family:monospace;font-size:11px;color:#a0a0b0;white-space:pre-wrap;word-break:break-all"></div>
+  <div id="adminBody" style="padding:10px">
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:nowrap;min-width:0">
+      <input type="text" id="adminCmdInput" placeholder="$ shell command..." style="flex:1 1 130px;min-width:0;background:rgba(255,255,255,0.08);border:1px solid rgba(120,80,200,0.2);border-radius:10px;padding:6px 10px;color:#e0d0f0;font-size:12px;font-family:monospace;outline:none" onkeydown="if(event.key==='Enter'){event.preventDefault();runAdminShell()}">
+      <button onclick="runAdminShell()" style="flex:0 0 auto;background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">Run</button>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">
+      <button onclick="runAdminAgent()" title="Run a coding agent task" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">🤖 Agent</button>
+      <button onclick="assignAvatarTask()" title="Assign task to an avatar" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">📋 Tasks</button>
+      <button onclick="adminDiscussTask()" title="Run a team discussion on an assigned task" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">🗣️ Discuss</button>
+      <button onclick="viewAdminSessions()" title="Resume previous sessions" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">🔄 Sessions</button>
+      <button onclick="viewAdminLogs()" title="View recent server logs" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">📋 Logs</button>
+    </div>
+    <div id="adminOutput" style="display:none;margin-top:8px;max-height:240px;overflow-y:auto;background:rgba(0,0,0,0.35);border-radius:8px;padding:8px;font-family:monospace;font-size:11px;color:#a0a0b0;white-space:pre-wrap;word-break:break-all"></div>
+    <div id="adminErrActions" style="display:none;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px">
+      <span style="color:#e8b8c8;font-size:10px;white-space:normal">🤝 Fix or delegate the output above:</span>
+      <button onclick="delegateAdminError()" title="Give this error to the team — they discuss it, you approve it, toasts on completion" style="background:rgba(120,80,200,0.2);border:1px solid rgba(120,80,200,0.35);border-radius:8px;padding:5px 10px;color:#c084fc;font-size:11px;cursor:pointer;white-space:nowrap">🤝 Delegate to team</button>
+      <button onclick="fixAdminError()" title="Have the coding agent fix this right now" style="background:rgba(232,90,110,0.16);border:1px solid rgba(232,90,110,0.35);border-radius:8px;padding:5px 10px;color:#e88aa0;font-size:11px;cursor:pointer;white-space:nowrap">🔧 Fix it</button>
+    </div>
+  </div>
 </div>
 
 <div class="input-panel">
@@ -24614,19 +25398,14 @@ function confirmPicker() {
   localStorage.setItem('lilly_theme',  pickerTheme);
   localStorage.setItem('lilly_picker_done', '1');
   if (previewRaf) { cancelAnimationFrame(previewRaf); previewRaf = null; }
-  // Slide picker out, then start sign-in flow
+  // Slide picker out, then go straight to main UI (skip Auth0 for local access)
   const picker = document.getElementById('avatarPicker');
   picker.style.transition = 'opacity 0.3s, transform 0.3s';
   picker.style.opacity = '0';
   picker.style.transform = 'translateY(-12px)';
-  document.getElementById('startSubtitle').textContent = 'sign in with Google';
-  setTimeout(async () => {
+  setTimeout(() => {
     picker.style.display = 'none';
-    // Check if already authenticated (e.g., returned from Auth0 callback)
-    const alreadyAuthed = await checkAuth();
-    if (!alreadyAuthed) {
-      startAuthFlow();
-    }
+    hideStartScreen();
   }, 320);
 }
 
@@ -25926,6 +26705,7 @@ async function _startPhoneCamera(){
 
   // Poll phone camera frames
   let lastFrameTime = 0;
+  let _pipYoloInFlight = false;
   async function _capturePhoneFrame(){
     if(!_cameraViewActive) return;
     try {
@@ -25934,10 +26714,11 @@ async function _startPhoneCamera(){
       if(data.image_base64 && pipFeed){
         pipFeed.src = 'data:image/jpeg;base64,' + data.image_base64;
         if(pipLabel) pipLabel.textContent = 'Phone camera';
-        // Auto-analyze every 5 seconds
+        // Auto-analyze every 2 seconds (was 5s)
         const now = Date.now();
-        if(now - lastFrameTime > 5000){
+        if(now - lastFrameTime > 2000 && !_pipYoloInFlight){
           lastFrameTime = now;
+          _pipYoloInFlight = true;
           // Send frame to server for YOLO detection
           const byteString = atob(data.image_base64);
           const ab = new ArrayBuffer(byteString.length);
@@ -25953,7 +26734,8 @@ async function _startPhoneCamera(){
                 window._cameraDescription = d.description;
                 if(pipLabel) pipLabel.textContent = d.description;
               }
-            }).catch(()=>{});
+              if(d.detections) _pipDetections = d.detections;
+            }).catch(()=>{}).finally(()=>{ _pipYoloInFlight = false; });
         }
       } else if(data.error){
         if(pipLabel) pipLabel.textContent = 'Camera error: ' + data.error;
@@ -26274,6 +27056,7 @@ async function submitBlink2FA() {
 
 // Add Enter key listener for 2FA input
 document.addEventListener('DOMContentLoaded', () => {
+  _initAlertSettings();
   const input = document.getElementById('cwBlink2faInput');
   if (input) {
     input.addEventListener('keydown', (e) => {
@@ -26397,7 +27180,58 @@ async function _cwStartBlink(){
 // ─── YOLO Detection Features ──────────────────────────────────────
 let _yoloBoxesEnabled = true;
 let _yoloSoundEnabled = false;
-let _yoloSoundObjects = ['person', 'car', 'dog', 'cat'];  // Objects that trigger sound alerts
+let _yoloSoundObjects = ['person', 'dog', 'cat'];  // Alert identifiers (persisted via /api/alert_objects)
+const _yoloAlertCatalog = [
+  {obj:'person',   icon:'👤', label:'Person'},
+  {obj:'dog',      icon:'🐕', label:'Dog'},
+  {obj:'cat',      icon:'🐈', label:'Cat'},
+  {obj:'car',      icon:'🚗', label:'Car'},
+  {obj:'truck',    icon:'🚚', label:'Truck'},
+  {obj:'bicycle',  icon:'🚲', label:'Bike'},
+  {obj:'motorcycle',icon:'🏍️',label:'Motorcycle'},
+  {obj:'train',    icon:'🚆', label:'Train'},
+  {obj:'bird',     icon:'🐦', label:'Bird'},
+  {obj:'stop sign',icon:'🛑', label:'Stop sign'},
+  {obj:'traffic light',icon:'🚦',label:'Traffic light'},
+  {obj:'traffic sign',icon:'🚸',label:'Traffic sign'},
+];
+function _yoloAlertMatch(det){
+  const ids = [det && det.label, det && det.class, det && det.make]
+    .filter(v => v != null).map(v => String(v).toLowerCase());
+  return _yoloSoundObjects.some(o => ids.includes(String(o).toLowerCase()));
+}
+function _renderAlertButtons(){
+  const list = document.getElementById('alertObjectsList');
+  if(!list) return;
+  list.innerHTML = '';
+  for(const it of _yoloAlertCatalog){
+    const b = document.createElement('button');
+    b.className = 'alert-obj-btn' + (_yoloSoundObjects.includes(it.obj) ? ' active' : '');
+    b.dataset.obj = it.obj;
+    b.textContent = it.icon + ' ' + it.label;
+    b.onclick = () => toggleAlertObject(b);
+    list.appendChild(b);
+  }
+}
+async function _saveAlertSettings(){
+  try{
+    await fetch('/api/alert_objects',{method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({objects:_yoloSoundObjects, sound_enabled:_yoloSoundEnabled, boxes_enabled:_yoloBoxesEnabled}),
+      credentials:'include'});
+  }catch(e){}
+}
+async function _initAlertSettings(){
+  try{
+    const r = await fetch('/api/alert_objects',{credentials:'include'});
+    if(r.ok){
+      const cfg = await r.json();
+      if(Array.isArray(cfg.objects)) _yoloSoundObjects = cfg.objects.filter(o => typeof o === 'string');
+      if(typeof cfg.sound_enabled === 'boolean') _yoloSoundEnabled = cfg.sound_enabled;
+      if(typeof cfg.boxes_enabled === 'boolean') _yoloBoxesEnabled = cfg.boxes_enabled;
+    }
+  }catch(e){}
+  _renderAlertButtons();
+}
 const _yoloAudio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVggoKIeGBGP4aQnH9fRECCjZ2Lc11NOYmWpIJlSkJ+jJqQd2BLOIaTo4RuUUp/h5OSfG1RSX2DkJeEfHVdUHh9j5WIfXtiV3V6ipWKf35oW3F3h5OJfH9tX3B0g5CGen1vYm1ygI6EeHxxY2xxf4yDdnt0ZGpwfYqCc3p2Zmlue4eBcXl4aGdseIWAcHd6amZqdIKAcHV8bGRpdH+Bb3N8bmNocn2AbnJ+cGJncXt9bHF/c2FmcHl8a2+AeF9kbnZ6a22De15ianR5aGuEfltfa3B3Z2eCelpcbG52ZmaAeFhZa211ZWWAd1dXamp0ZGSAdlZYaGlzY2KAdVRVZ2hyYmGAdFNTPj03NjQAPj48Ozw9PT4AAQEBAAAAAAABAAAAAQAAAAEAAAABAAAAAQD9/f39/f7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/g==');
 let _yoloLastAlertTime = 0;
 
@@ -26447,20 +27281,64 @@ function _getYoloColor(label) {
 
 // ── Person of Interest Machine-style surveillance overlay ──────────
 let _poiIdCounter = 0;
-const _poiIdMap = new Map();  // label+coords → tracking ID
+const _poiTrackers = new Map();  // trackId → {label, cx, cy, w, h, lastSeen, velocity}
+const _POI_IOU_THRESHOLD = 0.3;  // IoU threshold for matching detections to tracks
+const _POI_MAX_AGE_MS = 1500;    // Remove tracks older than 1.5s
+const _POI_SMOOTHING = 0.35;     // EMA smoothing factor for position (lower = smoother)
+
+function _computeIoU(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) {
+  const ix1 = Math.max(ax1, bx1), iy1 = Math.max(ay1, by1);
+  const ix2 = Math.min(ax2, bx2), iy2 = Math.min(ay2, by2);
+  const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+  const areaA = (ax2 - ax1) * (ay2 - ay1);
+  const areaB = (bx2 - bx1) * (by2 - by1);
+  return inter / (areaA + areaB - inter + 1e-6);
+}
 
 function _getPoiId(label, x1, y1, x2, y2) {
-  const key = `${label}:${Math.round(x1*100)}:${Math.round(y1*100)}:${Math.round(x2*100)}:${Math.round(y2*100)}`;
-  if (!_poiIdMap.has(key)) {
-    _poiIdCounter++;
-    _poiIdMap.set(key, String(_poiIdCounter).padStart(4, '0'));
-    // Evict old entries if map grows too large
-    if (_poiIdMap.size > 200) {
-      const first = _poiIdMap.keys().next().value;
-      _poiIdMap.delete(first);
+  const now = performance.now();
+  const ncx = (x1 + x2) / 2, ncy = (y1 + y2) / 2;
+  const nw = x2 - x1, nh = y2 - y1;
+
+  // Evict stale tracks
+  for (const [id, t] of _poiTrackers) {
+    if (now - t.lastSeen > _POI_MAX_AGE_MS) _poiTrackers.delete(id);
+  }
+
+  // Find best matching track by IoU + label
+  let bestId = null, bestScore = -1;
+  for (const [id, t] of _poiTrackers) {
+    if (t.label !== label) continue;
+    const iou = _computeIoU(x1, y1, x2, y2, t.x1, t.y1, t.x2, t.y2);
+    if (iou > bestScore && iou > _POI_IOU_THRESHOLD) {
+      bestScore = iou;
+      bestId = id;
     }
   }
-  return _poiIdMap.get(key);
+
+  if (bestId) {
+    // Update existing track with EMA smoothing
+    const t = _poiTrackers.get(bestId);
+    const s = _POI_SMOOTHING;
+    t.x1 = t.x1 * (1 - s) + x1 * s;
+    t.y1 = t.y1 * (1 - s) + y1 * s;
+    t.x2 = t.x2 * (1 - s) + x2 * s;
+    t.y2 = t.y2 * (1 - s) + y2 * s;
+    t.lastSeen = now;
+    t.confidence = Math.max(t.confidence || 0, 0.4);
+    return t.id;
+  }
+
+  // Create new track
+  _poiIdCounter++;
+  const id = String(_poiIdCounter).padStart(4, '0');
+  _poiTrackers.set(id, { id, label, x1, y1, x2, y2, lastSeen: now, confidence: 0.4 });
+  // Cap tracker count
+  if (_poiTrackers.size > 100) {
+    const oldest = _poiTrackers.keys().next().value;
+    _poiTrackers.delete(oldest);
+  }
+  return id;
 }
 
 function _drawPoiDetection(ctx, x1, y1, x2, y2, label, confidence, vw, vh) {
@@ -26632,6 +27510,7 @@ async function _cwStartPhone(){
 
   // Track latest detections
   let _cwPhoneDetections = [];
+  let _yoloInFlight = false;  // Dedup: skip if previous request still running
 
   async function _capturePhoneFrame(){
     if(!_cameraWindowActive) return;
@@ -26642,26 +27521,31 @@ async function _cwStartPhone(){
         img.src = 'data:image/jpeg;base64,' + data.image_base64;
         if(label) label.textContent = 'Phone';
 
-        // Send frame to YOLO for detection
-        try {
-          const blob = await fetch('data:image/jpeg;base64,' + data.image_base64).then(r => r.blob());
-          const formData = new FormData();
-          formData.append('file', blob, 'phone_frame.jpg');
-          const yoloResp = await fetch('/api/vision/browser', { method: 'POST', body: formData });
-          const yoloData = await yoloResp.json();
-          if(yoloData && yoloData.detections){
-            _cwPhoneDetections = yoloData.detections;
+        // Send frame to YOLO for detection (skip if previous request still in flight)
+        if(!_yoloInFlight){
+          _yoloInFlight = true;
+          try {
+            const blob = await fetch('data:image/jpeg;base64,' + data.image_base64).then(r => r.blob());
+            const formData = new FormData();
+            formData.append('file', blob, 'phone_frame.jpg');
+            const yoloResp = await fetch('/api/vision/browser', { method: 'POST', body: formData });
+            const yoloData = await yoloResp.json();
+            if(yoloData && yoloData.detections){
+              _cwPhoneDetections = yoloData.detections;
 
-            // Check for alert objects
-            for(const det of _cwPhoneDetections){
-              if(_yoloSoundObjects.includes(det.label)){
-                _playYoloAlert();
-                break;
+              // Check for alert objects
+              for(const det of _cwPhoneDetections){
+                if(_yoloAlertMatch(det)){
+                  _playYoloAlert();
+                  break;
+                }
               }
             }
+          } catch(yoloErr) {
+            // YOLO failed, continue without boxes
+          } finally {
+            _yoloInFlight = false;
           }
-        } catch(yoloErr) {
-          // YOLO failed, continue without boxes
         }
 
         // Draw YOLO detection boxes on overlay canvas (if enabled)
@@ -26693,7 +27577,7 @@ async function _cwStartPhone(){
     }
   }
   _capturePhoneFrame();
-  _cwPhoneInterval = setInterval(_capturePhoneFrame, 2000);
+  _cwPhoneInterval = setInterval(_capturePhoneFrame, 500);  // 4x faster: 500ms vs 2000ms
 }
 
 async function _cwStartWebcam(){
@@ -27011,6 +27895,7 @@ function toggleYoloBoxes(){
     btn.classList.toggle('active', _yoloBoxesEnabled);
     btn.querySelector('.icon').textContent = _yoloBoxesEnabled ? '▢' : '▢';
   }
+  _saveAlertSettings();
   addChatMessage('system', _yoloBoxesEnabled ? 'YOLO boxes enabled' : 'YOLO boxes disabled');
 }
 
@@ -27020,6 +27905,7 @@ function toggleYoloSound(){
   if(btn){
     btn.classList.toggle('active', _yoloSoundEnabled);
   }
+  _saveAlertSettings();
   addChatMessage('system', _yoloSoundEnabled ? 'Sound alerts enabled' : 'Sound alerts disabled');
 }
 
@@ -27046,7 +27932,11 @@ async function checkAdminAccess(){
     const d = await r.json();
     _isAdmin = d.admin === true;
     const panel = document.getElementById('adminPanel');
-    if(panel) panel.style.display = _isAdmin ? 'block' : 'none';
+    if(panel) panel.style.display = 'none';
+    const adminItem = document.getElementById('adminMenuItem');
+    if(adminItem) adminItem.style.display = _isAdmin ? 'flex' : 'none';
+    const squareBtn = document.getElementById('adminSquareBtn');
+    if(squareBtn) squareBtn.style.display = _isAdmin ? 'flex' : 'none';
     // Add admin badge to chat header if admin
     if(_isAdmin){
       const hdr = document.querySelector('.chat-header, .chat-title');
@@ -27059,11 +27949,121 @@ async function checkAdminAccess(){
       }
     }
   } catch(e){ console.log('admin check failed:', e); }
+  _initAdminWindow();
+  startNotifPolling();
 }
 
 function toggleAdminPanel(){
   const panel = document.getElementById('adminPanel');
-  if(panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  if(!panel) return;
+  const open = panel.style.display==='none'||panel.style.display==='';
+  panel.style.display = open ? 'block' : 'none';
+  if(!open) minimizeAdminWindow(false);
+  if(open) openAdminTaskView();
+}
+function openAdminWindow(){
+  const panel = document.getElementById('adminPanel');
+  if(!panel) return;
+  panel.style.display = 'block';
+  const body = document.getElementById('adminBody');
+  if(body) body.style.display = 'block';
+  minimizeAdminWindow(false);
+  openAdminTaskView();
+}
+function minimizeAdminWindow(minimized){
+  const body = document.getElementById('adminBody');
+  if(!body) return;
+  const MARGIN = 8, HEADER = body.offsetParent ? body.offsetHeight : 0;
+  const hidden = minimized===true || (minimized===undefined && body.style.display==='block');
+  body.style.display = hidden ? 'none' : 'block';
+  const status = document.getElementById('adminWinStatus');
+  if(status) status.textContent = hidden ? 'minimized — reopen to expand' : 'drag to move';
+}
+function _grabAdminOutputText(){
+  const out = document.getElementById('adminOutput');
+  return out ? (out.textContent||'').trim() : '';
+}
+function _initAdminWindow(){
+  // Drag-to-move via the window header (mirrors the camera window)
+  const win = document.getElementById('adminPanel');
+  const header = document.getElementById('adminWindowHeader');
+  if(!win || !header || win.__adminDragInit) return;
+  win.__adminDragInit = true;
+  let dragging=false, sx=0, sy=0, ox=0, oy=0;
+  header.addEventListener('mousedown', (e)=>{
+    if(e.target.closest('button')) return;
+    dragging=true; const r=win.getBoundingClientRect();
+    sx=e.clientX; sy=e.clientY; ox=r.left; oy=r.top;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e)=>{
+    if(!dragging) return;
+    const dx=e.clientX-sx, dy=e.clientY-sy;
+    win.style.left=(ox+dx)+'px'; win.style.top=(oy+dy)+'px';
+  });
+  document.addEventListener('mouseup', ()=>{ dragging=false; });
+  // Reveal the Delegate / Fix-it bar whenever the output area has content
+  const out = document.getElementById('adminOutput');
+  const bar = document.getElementById('adminErrActions');
+  if(out && bar && !out.__adminBarInit){
+    out.__adminBarInit = true;
+    const toggle = ()=>{
+      const txt = (out.textContent||'').trim();
+      bar.style.display = txt.length>5 ? 'flex' : 'none';
+    };
+    new MutationObserver(toggle).observe(out,{childList:true,characterData:true,subtree:true});
+    toggle();
+  }
+}
+async function delegateAdminError(){
+  const err = _grabAdminOutputText().replace(/\n{2,}/g,'\n').slice(0,1400);
+  if(!err){ showToast('Nothing to delegate','Run something first — a shell error, agent result, or log line.','info',null); return; }
+  const avatar = (prompt('Delegate to which avatar? (default: raccoon — tech fixer)\nHive: fox cat bear bunny owl deer wolf raccoon')||'').trim().toLowerCase() || 'raccoon';
+  const instruction = (prompt('Instructions for the team (optional). The error text is attached automatically:')||'').trim();
+  const description = (instruction ? instruction+'\n' : 'Resolve the error below.\n') + err;
+  const output = document.getElementById('adminOutput');
+  if(output){ output.style.display='block'; output.textContent = '🤝 Delegating to '+avatar+' — team discussion starting...\n'; }
+  try{
+    const r = await fetch('/api/admin/tasks/assign',{
+      method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include',
+      body: JSON.stringify({avatar, description, auto_run:false})
+    });
+    const d = await r.json();
+    if(d.ok && d.task){
+      addChatMessage('system','🤝 Delegated to '+avatar+': '+(instruction||'resolve the error')+' — team discussion started.');
+      showToast('🤝 Delegated to '+avatar,'The team is discussing how to resolve it — updates will land in Notifications.','group_discussion',()=>{ toggleNotificationsPanel(); });
+      output.textContent = '✅ Delegated to '+avatar+'\nTask id: '+d.task.id+' ['+d.task.status+'] — team discussion started.\nWatch Notifications to approve or clarify.';
+    } else {
+      output.textContent = '❌ Delegate failed: '+(d.error||'server error');
+      showToast('❌ Delegate failed', d.error||'server error','task_failed',null);
+    }
+  }catch(e){
+    output.textContent = '❌ Delegate failed: '+e.message;
+    showToast('❌ Delegate failed', String(e.message||e),'task_failed',null);
+  }
+}
+async function fixAdminError(){
+  const err = _grabAdminOutputText().replace(/\n{2,}/g,'\n').slice(0,1400);
+  if(!err){ showToast('Nothing to fix','Run something first — a shell error, agent result, or log line.','info',null); return; }
+  const output = document.getElementById('adminOutput');
+  if(output){ output.style.display='block'; output.textContent='🔧 Fix-it: handing the error to the coding agent...\n'; }
+  try{
+    const r = await fetch('/api/admin/agent',{
+      method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include',
+      body: JSON.stringify({task:'[Admin fix-it]\n'+err})
+    });
+    const d = await r.json();
+    if(d && d.error){
+      output.textContent='🔧 Fix-it failed: '+d.error;
+      showToast('🔧 Fix it failed', d.error,'task_failed',null);
+    } else {
+      output.textContent='🔧 Coding agent is working on it.\nResult will appear here + a toast when done.';
+      showToast('🔧 Fix it running','The coding agent is working on the error — completion toasts here.','info',()=>{ handleHamburgerAction('admin'); });
+    }
+  }catch(e){
+    output.textContent='🔧 Fix-it failed: '+e.message;
+    showToast('🔧 Fix it failed', String(e.message||e),'task_failed',null);
+  }
 }
 
 async function runAdminShell(){
@@ -27158,14 +28158,262 @@ async function assignAvatarTask(){
     });
     const d = await r.json();
     if(d.ok){
-      output.textContent = '✅ Task assigned!\n' + JSON.stringify(d.task, null, 2);
-      addChatMessage('system', '📋 Task assigned to ' + avatar + ': ' + description);
+      output.textContent = '✅ Task assigned — team discussing!\n' + JSON.stringify(d.task, null, 2);
+      addChatMessage('system', '🗣️ Task assigned to ' + avatar + ': ' + description + ' — team is discussing it.');
+      showToast('🗣️ Discussing now', avatar + ' and the team are talking it over. Updates will land in Notifications.', 'group_discussion', ()=>{ toggleNotificationsPanel(); });
     } else {
       output.textContent = '❌ ' + (d.error || 'Failed');
     }
   } catch(e){
     output.textContent = '❌ ' + e.message;
   }
+}
+
+// ─── Notifications: toast + hamburger panel ───────────────────────────
+function _escHtml(s){
+  return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function _notifIcon(type){
+  return type==='task_complete'?'✅':type==='task_failed'?'❌':type==='approval_request'?'🧭':type==='group_discussion'?'🗣️':'🔔';
+}
+let _notifLastTs = parseFloat(localStorage.getItem('lilly_notif_last')||'0')||0;
+let _notifPollTimer = null;
+let _notifFirstRun = !localStorage.getItem('lilly_notif_last');
+
+function toggleNotificationsPanel(){
+  const panel = document.getElementById('notifPanel');
+  if(!panel) return;
+  const open = panel.style.display==='none'||panel.style.display==='';
+  panel.style.display = open?'block':'none';
+  const menu = document.getElementById('hamburgerMenu');
+  if(open && menu) menu.style.display='none';
+  if(open) paintNotifications();
+}
+async function fetchNotifications(){
+  try{
+    const r = await fetch('/api/notifications', {credentials:'include'});
+    if(!r.ok) return null;
+    return await r.json();
+  }catch(e){ return null; }
+}
+async function paintNotifications(){
+  const list = document.getElementById('notifList');
+  if(!list) return;
+  const data = await fetchNotifications();
+  if(!data){ list.innerHTML='<div style="font-size:12px;color:rgba(93,78,109,0.5)">Could not load</div>'; return; }
+  const items = data.notifications||[];
+  const unread = data.unread||0;
+  const countEl = document.getElementById('notifPanelCount');
+  if(countEl) countEl.textContent = unread ? '('+unread+' new)' : '';
+  const badge = document.getElementById('notifBadge');
+  if(badge){ badge.style.display = unread>0?'block':'none'; badge.textContent = unread>99?'99+':String(unread); }
+  if(!items.length){ list.innerHTML='<div style="font-size:12px;color:rgba(93,78,109,0.5);text-align:center;padding:12px">Nothing yet</div>'; return; }
+  list.innerHTML='';
+  items.forEach(n=>{
+    const card = document.createElement('div');
+    card.id = 'notif-'+n.id;
+    const open = n.status==='open';
+    card.style.cssText = 'background:rgba(139,122,158,0.08);border-radius:12px;padding:10px;border:1px solid '+(open?'rgba(232,90,110,0.4)':'rgba(139,122,158,0.14)');
+    const h = document.createElement('div');
+    h.style.cssText = 'display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:#5d4e6d';
+    h.innerHTML = _notifIcon(n.type)+' '+_escHtml(n.title||'Notification');
+    card.appendChild(h);
+    const b = document.createElement('div');
+    b.style.cssText = 'font-size:11px;color:rgba(93,78,109,0.72);margin-top:4px;line-height:1.45;word-break:break-word';
+    b.textContent = n.body||'';
+    card.appendChild(b);
+    const tx = (n.context && n.context.transcript) || null;
+    if(tx && tx.length){
+      const box = document.createElement('div');
+      box.style.cssText = 'margin-top:7px;border-top:1px dashed rgba(139,122,158,0.25);padding-top:6px;max-height:150px;overflow-y:auto';
+      tx.forEach(line=>{
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;align-items:flex-start;gap:5px;font-size:10.5px;color:rgba(93,78,109,0.8);margin-top:5px';
+        const av = document.createElement('span');
+        av.style.cssText = 'flex:0 0 auto';
+        av.textContent = (line.emoji||'💬')+' '+line.name+':';
+        const txt = document.createElement('span');
+        txt.style.cssText = 'flex:1';
+        txt.textContent = line.text||'';
+        const play = document.createElement('button');
+        play.textContent='▶'; play.title='Speak ('+(line.name||'')+')';
+        play.style.cssText='background:none;border:none;cursor:pointer;color:#8b7a9e;font-size:10px;padding:0 3px;flex:0 0 auto';
+        play.onclick = ()=>{ speakCharLine(line.text, line.char||'puppy'); };
+        row.appendChild(av); row.appendChild(txt); row.appendChild(play);
+        box.appendChild(row);
+      });
+      card.appendChild(box);
+    }
+    if(open){
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:6px;margin-top:8px';
+      if(n.type==='approval_request' || n.type==='group_discussion'){
+        if(_isAdmin){
+          const ok = document.createElement('button');
+          ok.textContent = n.type==='approval_request' ? '✅ Reply / approve' : '▶ Approve & run';
+          ok.style.cssText = 'flex:1;background:rgba(120,80,200,0.18);border:1px solid rgba(120,80,200,0.3);border-radius:8px;padding:5px 6px;color:#6d4a9e;font-size:10.5px;font-weight:600;cursor:pointer';
+          ok.onclick = ()=>{ approveNotif(n.id, n.type==='approval_request'); };
+          const no = document.createElement('button');
+          no.textContent='✕ Dismiss';
+          no.style.cssText = 'flex:1;background:rgba(139,122,158,0.1);border:1px solid rgba(139,122,158,0.2);border-radius:8px;padding:5px 6px;color:rgba(93,78,109,0.6);font-size:10.5px;cursor:pointer';
+          no.onclick = ()=>{ dismissNotif(n.id); };
+          actions.appendChild(ok); actions.appendChild(no);
+        } else {
+          const no = document.createElement('button');
+          no.textContent='Mark seen';
+          no.style.cssText = 'flex:1;background:rgba(139,122,158,0.1);border:1px solid rgba(139,122,158,0.2);border-radius:8px;padding:5px 6px;color:rgba(93,78,109,0.6);font-size:10.5px;cursor:pointer';
+          no.onclick = ()=>{ dismissNotif(n.id); };
+          actions.appendChild(no);
+        }
+      } else {
+        const no = document.createElement('button');
+        no.textContent='✕ Dismiss';
+        no.style.cssText = 'flex:1;background:rgba(139,122,158,0.1);border:1px solid rgba(139,122,158,0.2);border-radius:8px;padding:5px 6px;color:rgba(93,78,109,0.6);font-size:10.5px;cursor:pointer';
+        no.onclick = ()=>{ dismissNotif(n.id); };
+        actions.appendChild(no);
+      }
+      card.appendChild(actions);
+    }
+    const t = document.createElement('div');
+    t.style.cssText = 'font-size:9.5px;color:rgba(93,78,109,0.4);margin-top:6px';
+    t.textContent = new Date((n.created_at||0)*1000).toLocaleTimeString()+' · '+n.status;
+    card.appendChild(t);
+    list.appendChild(card);
+  });
+}
+async function approveNotif(id, askAnswer){
+  let answer='';
+  if(askAnswer && _isAdmin){
+    answer = (prompt('Reply to the avatar (optional, you may leave blank):')||'').trim();
+  }
+  try{
+    const r = await fetch('/api/notifications/'+encodeURIComponent(id)+'/approve',{
+      method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include',
+      body: JSON.stringify({answer})
+    });
+    if(!r.ok) return;
+    const d = await r.json();
+    if(d.task && d.task.status==='needs_input'){
+      showToast('🧭 Clarification sent','Replied to '+(d.task.avatar||'avatar')+'. Task is back in progress.','info',null);
+    } else {
+      showToast('✅ Approved','Task is running — you\u2019ll get a toast when it\u2019s done.','info',()=>{ handleHamburgerAction('admin'); });
+    }
+    paintNotifications();
+  }catch(e){}
+}
+async function dismissNotif(id){
+  try{
+    await fetch('/api/notifications/'+encodeURIComponent(id)+'/dismiss',{method:'POST',credentials:'include'});
+  }catch(e){}
+  paintNotifications();
+}
+async function speakCharLine(text, char){
+  try{
+    const r = await fetch('/api/tts/char',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,char})});
+    const d = await r.json();
+    if(d && d.audio_id) playAudio(d.audio_id);
+  }catch(e){}
+}
+function showToast(title, body, type, onClick){
+  const stack = document.getElementById('toastStack');
+  if(!stack) return;
+  while(stack.children.length>=4) stack.removeChild(stack.firstChild);
+  const t = document.createElement('div');
+  const accent = type==='task_complete'?'rgba(50,200,120,0.35)':type==='task_failed'?'rgba(232,90,110,0.35)':type==='approval_request'?'rgba(120,80,200,0.4)':'rgba(139,122,158,0.3)';
+  t.style.cssText = 'position:relative;width:300px;max-width:calc(100vw - 32px);background:rgba(255,255,255,0.96);backdrop-filter:blur(18px);border:1px solid '+accent+';border-left:4px solid '+(type==='task_complete'?'#32c878':type==='task_failed'?'#e85a6e':type==='approval_request'?'#9f7aea':'#8b7a9e')+';border-radius:12px;padding:10px 28px 10px 12px;box-shadow:0 8px 30px rgba(60,40,80,0.18);cursor:pointer;animation:fadeSlideIn 0.25s ease';
+  const titleEl = document.createElement('div');
+  titleEl.style.cssText='font-size:12px;font-weight:700;color:#5d4e6d';
+  titleEl.innerHTML = _notifIcon(type)+' '+_escHtml(title);
+  const bodyEl = document.createElement('div');
+  bodyEl.style.cssText='font-size:11px;color:rgba(93,78,109,0.72);margin-top:3px;line-height:1.4;word-break:break-word';
+  bodyEl.textContent = body||'';
+  t.appendChild(titleEl); t.appendChild(bodyEl);
+  t.addEventListener('click', ()=>{ if(onClick) onClick(); t.remove(); });
+  const close = document.createElement('span');
+  close.textContent='✕';
+  close.style.cssText='position:absolute;top:6px;right:8px;font-size:11px;color:rgba(93,78,109,0.5);padding:2px';
+  close.onclick = (e)=>{ e.stopPropagation(); t.remove(); };
+  t.appendChild(close);
+  stack.appendChild(t);
+  setTimeout(()=>{ if(t.parentNode) t.remove(); }, 9000);
+}
+async function pollNotifications(){
+  const data = await fetchNotifications();
+  if(!data) return;
+  const items = data.notifications||[];
+  const unread = data.unread||0;
+  const badge = document.getElementById('notifBadge');
+  if(badge){ badge.style.display = unread>0?'block':'none'; badge.textContent = unread>99?'99+':String(unread); }
+  if(_notifFirstRun){
+    _notifFirstRun = false;
+    if(items.length){
+      const top = items.map(n=>n.created_at||0).reduce((a,b)=>Math.max(a,b),0);
+      if(top>0){ _notifLastTs = top; localStorage.setItem('lilly_notif_last', String(top)); }
+    }
+    return;
+  }
+  const fresh = items.filter(n=> (n.created_at||0) > _notifLastTs && n.status==='open');
+  fresh.slice(0,3).forEach(n=>{
+    showToast(n.title||'Notification', n.body||'', n.type, ()=>{
+      toggleNotificationsPanel();
+      const el = document.getElementById('notif-'+n.id);
+      if(el) el.scrollIntoView({behavior:'smooth',block:'nearest'});
+    });
+  });
+  if(items.length){
+    const top = items.map(n=>n.created_at||0).reduce((a,b)=>Math.max(a,b),0);
+    if(top > _notifLastTs){ _notifLastTs = top; localStorage.setItem('lilly_notif_last', String(top)); }
+  }
+  const panel = document.getElementById('notifPanel');
+  if(panel && panel.style.display !== 'none') paintNotifications();
+}
+function startNotifPolling(){
+  if(_notifPollTimer) return;
+  pollNotifications();
+  _notifPollTimer = setInterval(pollNotifications, 7000);
+}
+async function openAdminTaskView(){
+  const output = document.getElementById('adminOutput');
+  if(!output) return;
+  output.style.display='block';
+  output.textContent='📋 Loading tasks...\n';
+  try{
+    const r = await fetch('/api/admin/tasks');
+    const d = await r.json();
+    const tasks = d.tasks||[];
+    if(!tasks.length){ output.textContent='📋 No active tasks.'; return; }
+    let txt='📋 Active Tasks ('+tasks.length+'):\n\n';
+    tasks.forEach((t,i)=>{
+      txt+='['+(i+1)+'] '+String(t.description||'').slice(0,60)+'\n';
+      txt+='    '+t.avatar+' · '+t.status+' · ['+t.id+']\n';
+      if(t.question) txt+='    🧭 '+String(t.question).slice(0,140)+'\n';
+    });
+    txt+='\nUse 🗣️ Discuss with a task id, or 🔄 Approve/run from Notifications.';
+    output.textContent = txt;
+  }catch(e){ output.textContent='❌ '+e.message; }
+}
+async function adminDiscussTask(){
+  const output = document.getElementById('adminOutput');
+  if(!output) return;
+  let id = prompt('Task id to discuss with the team? (see Tasks view)');
+  if(!id) return;
+  id = id.trim();
+  output.style.display='block';
+  output.textContent='🗣️ Running team discussion...\n';
+  try{
+    const r = await fetch('/api/admin/tasks/discuss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_id:id})});
+    const d = await r.json();
+    if(!r.ok){ output.textContent='❌ '+(d.error||'failed'); return; }
+    let txt='🗣️ Team discussion:\n\n';
+    (d.transcript||[]).forEach(l=>{ txt+='  '+l.emoji+' '+l.name+': '+l.text+'\n'; txt+='\n'; });
+    txt+='Status: '+(d.task?d.task.status:'?')+'\n';
+    if(d.task && d.task.discussion && d.task.discussion.length){
+      txt+='\nFull transcript (auto):\n';
+      d.task.discussion.forEach(l=>{ txt+='  '+l.emoji+' '+l.name+': '+l.text+'\n'; });
+    }
+    output.textContent = txt;
+    showToast('🗣️ Team discussion complete','Check the transcript in the admin output — updates will appear in Notifications.','group_discussion',null);
+  }catch(e){ output.textContent='❌ '+e.message; }
 }
 
 async function viewAdminSessions(){
@@ -28464,6 +29712,7 @@ document.getElementById('clearBtn').onclick=async()=>{
       const soundToggle=document.getElementById('alertsSoundToggle');
       if(yoloToggle) yoloToggle.checked=_yoloBoxesEnabled;
       if(soundToggle) soundToggle.checked=_yoloSoundEnabled;
+      _renderAlertButtons();
       updateToggleStyles();
     }
   }
@@ -28495,6 +29744,7 @@ document.getElementById('clearBtn').onclick=async()=>{
     }else{
       _yoloSoundObjects=_yoloSoundObjects.filter(o=>o!==obj);
     }
+    _saveAlertSettings();
   }
   async function isPaired(){
     try{
@@ -28523,6 +29773,8 @@ document.getElementById('clearBtn').onclick=async()=>{
       case 'pair': openPairPanel(); break;
       case 'skills': openSkillsMarket(); break;
        case 'download': openDownloadPanel(); break;
+      case 'notifications': toggleNotificationsPanel(); break;
+      case 'admin': { const _ap=document.getElementById('adminPanel'); if(_ap) _ap.style.display='block'; openAdminTaskView(); break; }
        case 'close': break;
     }
   }

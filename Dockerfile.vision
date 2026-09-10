@@ -5,7 +5,7 @@
 FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg ca-certificates curl && \
+    ffmpeg ca-certificates curl libgl1 libglib2.0-0 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -16,22 +16,28 @@ RUN pip install --no-cache-dir \
     fastapi uvicorn numpy \
     opencv-python-headless \
     ultralytics \
-    insightface \
+    faiss-cpu \
     edge-tts \
-    httpx
+    httpx \
+    mediapipe
 
-# Pre-download InsightFace models (buffalo_l: detection + 512-dim ArcFace embeddings)
-RUN python3 -c "from insightface.app import FaceAnalysis; FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']).prepare(ctx_id=0, det_size=(320, 320))"
+# Runtime ONNX engine for SCRFD + ArcFace (face recognition) and the
+# vehicle make/model classifier (kept separate so the big
+# ultralytics/torch layer stays cached)
+RUN pip install --no-cache-dir onnxruntime
 
-# Copy YOLO model
-COPY yolov8n.pt .
+# Copy YOLO model (prefer Open Images V7 for 601 classes)
+COPY yolov8n-oiv7.pt .
 COPY yunet.onnx .
 
-# Copy vision server + face recognition + person tracker + node registry
+# Copy vision server + face recognition + person tracker + node registry + blink detector
 COPY yolov8_vision_server.py .
 COPY face_recognition_engine.py .
 COPY person_tracker.py .
 COPY node_registry.py .
+COPY blink_detector.py .
+COPY car_classifier.py .
+COPY car_labels.txt .
 
 EXPOSE 8198
 
