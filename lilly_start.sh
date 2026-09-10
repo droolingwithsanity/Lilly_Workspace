@@ -6,7 +6,7 @@ echo "  Lilly AI Startup"
 echo "=========================================="
 
 # ── Clean up stale processes on our ports ──────────────────────────────────
-for port in 3000 3002 8787 8788 8098; do
+for port in 3000 3002 8199 8787 8788 8098; do
     pid=$(lsof -ti :$port 2>/dev/null || true)
     if [ -n "$pid" ]; then
         echo "Killing stale process on :$port (PID: $pid)"
@@ -112,14 +112,31 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
+# ── YOLO Self-Training Agent ──────────────────────────────────────────────
+echo "Starting YOLO Self-Training Agent on :8199..."
+cd /app
+python3 -m uvicorn yolo_trainer_api:app --host 0.0.0.0 --port 8199 &
+TRAINER_PID=$!
+echo "YOLO Trainer PID: $TRAINER_PID"
+
+echo "Waiting for YOLO Trainer..."
+for i in $(seq 1 30); do
+    if curl -sf http://localhost:8199/api/trainer/status > /dev/null 2>&1; then
+        echo "YOLO Trainer is ready."
+        break
+    fi
+    sleep 1
+done
+
 echo ""
 echo "==========================================="
 echo "  All services started:"
-echo "  • Open Connector  : :3002"
-echo "  • OpenLive Agent  : :8787"
-echo "  • OpenLive Web UI : :3000"
-echo "  • Lilly Bridge    : :8788"
-echo "  • Lilly AI        : :8098"
+echo "  • Open Connector      : :3002"
+echo "  • OpenLive Agent      : :8787"
+echo "  • OpenLive Web UI     : :3000"
+echo "  • Lilly Bridge        : :8788"
+echo "  • Lilly AI            : :8098"
+echo "  • YOLO Self-Training  : :8199"
 echo "==========================================="
 echo ""
 
@@ -132,9 +149,9 @@ AI_PID=$!
 # Cleanup on exit
 cleanup() {
     echo "Shutting down services..."
-    kill $AI_PID $AGENT_PID $WEB_PID $BRIDGE_PID $OC_PID 2>/dev/null || true
+    kill $AI_PID $TRAINER_PID $AGENT_PID $WEB_PID $BRIDGE_PID $OC_PID 2>/dev/null || true
     # Final cleanup of any stragglers
-    for port in 3000 3002 8787 8788 8098; do
+    for port in 3000 3002 8199 8787 8788 8098; do
         pid=$(lsof -ti :$port 2>/dev/null || true)
         if [ -n "$pid" ]; then
             kill -9 $pid 2>/dev/null || true

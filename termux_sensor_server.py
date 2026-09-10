@@ -11,11 +11,11 @@ Run:
 Container fetches from http://<termux_ip>:8099/sensors/all
 """
 
-import os, sys, json, re, time, asyncio, logging
+import os, sys, json, re, time, asyncio, logging, subprocess, base64, shutil
 from typing import Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 import uvicorn
 
@@ -1502,6 +1502,333 @@ async def fetch_stop():
         "catches": _FETCH_GAME_CATCHES,
         "score": _FETCH_GAME_SCORE,
     }
+
+
+# ─── SCREEN MIRROR WebSocket ─────────────────────────────────────
+# Streams live screen captures to connected browsers via WebSocket.
+# Uses `screencap -p` (Termux native) or `termux-screenshot` as fallback.
+# Connect: ws://<phone-ip>:8099/ws/screen
+# Sends: raw JPEG binary frames at ~5-7 FPS
+
+_screen_viewers: set[WebSocket] = set()
+_screen_streaming = False
+
+
+async def _capture_screen() -> Optional[bytes]:
+    """Capture a single screen frame as JPEG bytes."""
+    try:
+        # Try Termux native screencap first
+        proc = await asyncio.create_subprocess_exec(
+            "screencap",
+            "-p",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        if proc.returncode == 0 and stdout and len(stdout) > 100:
+            return stdout
+    except (FileNotFoundError, asyncio.TimeoutError):
+        pass
+
+    try:
+        # Fallback: termux-screenshot
+        proc = await asyncio.create_subprocess_exec(
+            "termux-screenshot",
+            "-p",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        if proc.returncode == 0 and stdout and len(stdout) > 100:
+            return stdout
+    except (FileNotFoundError, asyncio.TimeoutError):
+        pass
+
+    try:
+        # Fallback: scrcpy-style (cat from framebuffer)
+        proc = await asyncio.create_subprocess_exec(
+            "cat",
+            "/dev/graphics/fb0",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        if proc.returncode == 0 and stdout:
+            return stdout  # Raw framebuffer (not JPEG, but works)
+    except (FileNotFoundError, asyncio.TimeoutError, PermissionError):
+        pass
+
+    return None
+
+
+async def _screen_broadcast_loop():
+    """Background loop that captures and broadcasts screen frames."""
+    global _screen_streaming
+    _screen_streaming = True
+    logger.info("Screen mirror: broadcast loop started")
+    while _screen_streaming and _screen_viewers:
+        try:
+            frame = await _capture_screen()
+            if frame:
+                dead = set()
+                for ws in _screen_viewers:
+                    try:
+                        await ws.send_bytes(frame)
+                    except Exception:
+                        dead.add(ws)
+                _screen_viewers.difference_update(dead)
+            # ~5 FPS (200ms interval)
+            await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"Screen mirror error: {e}")
+            await asyncio.sleep(1.0)
+    _screen_streaming = False
+    logger.info("Screen mirror: broadcast loop stopped")
+
+
+@app.websocket("/ws/screen")
+async def screen_mirror_ws(websocket: WebSocket):
+    """WebSocket endpoint for live screen mirroring.
+
+    Client connects and receives raw JPEG frames at ~5 FPS.
+    Supports multiple simultaneous viewers.
+    """
+    await websocket.accept()
+
+    # Optional: verify pair token
+    token = websocket.query_params.get("token", "")
+    if PAIR_TOKEN and token != PAIR_TOKEN:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    _screen_viewers.add(websocket)
+    logger.info(f"Screen mirror: viewer connected ({len(_screen_viewers)} total)")
+
+    # Start broadcast loop if not already running
+    global _screen_streaming
+    if not _screen_streaming:
+        asyncio.create_task(_screen_broadcast_loop())
+
+    try:
+        # Keep connection alive, listen for control messages
+        while True:
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                # Client can send: {"fps": 10} to adjust frame rate
+                try:
+                    msg = json.loads(data)
+                    if "fps" in msg:
+                        # Client requesting different FPS (future use)
+                        pass
+                except json.JSONDecodeError:
+                    pass
+            except asyncio.TimeoutError:
+                # Send ping to keep alive
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except Exception:
+                    break
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        _screen_viewers.discard(websocket)
+        logger.info(
+            f"Screen mirror: viewer disconnected ({len(_screen_viewers)} total)"
+        )
+
+
+@app.get("/screen/status")
+async def screen_mirror_status():
+    """Check if screen mirroring is available."""
+    import shutil
+
+    has_screencap = shutil.which("screencap") is not None
+    has_termux_screenshot = shutil.which("termux-screenshot") is not None
+    return {
+        "available": has_screencap or has_termux_screenshot,
+        "screencap": has_screencap,
+        "termux_screenshot": has_termux_screenshot,
+        "viewers": len(_screen_viewers),
+        "streaming": _screen_streaming,
+    }
+
+
+# ─── CAMERA CAPTURE ──────────────────────────────────────────────
+
+_CAMERA_CAPTURE_CACHE: Optional[str] = None
+_CAMERA_CAPTURE_TS: float = 0.0
+_CAMERA_CAPTURE_TTL: float = 2.0  # seconds
+
+
+@app.get("/camera/capture")
+async def camera_capture(force: bool = False):
+    """Capture a photo from the phone camera, return base64 JPEG.
+    Uses termux-camera-photo (Termux:API required)."""
+    global _CAMERA_CAPTURE_CACHE, _CAMERA_CAPTURE_TS
+
+    now = time.time()
+    if (
+        not force
+        and _CAMERA_CAPTURE_CACHE
+        and (now - _CAMERA_CAPTURE_TS) < _CAMERA_CAPTURE_TTL
+    ):
+        return {
+            "image_base64": _CAMERA_CAPTURE_CACHE,
+            "format": "jpeg",
+            "timestamp": _CAMERA_CAPTURE_TS,
+        }
+
+    import base64 as _b64
+
+    jpg = "/tmp/lilly_camera.jpg"
+    # Try termux-camera-photo (front camera by default)
+    await _run_cmd("termux-camera-photo", jpg, timeout=10.0)
+    # _run_cmd returns stdout; if the file wasn't created, it failed
+    if not os.path.exists(jpg):
+        # Fallback: try termux-screenshot (some devices alias camera)
+        await _run_cmd("termux-screenshot", jpg, timeout=8.0)
+        if not os.path.exists(jpg):
+            return {
+                "error": "camera capture failed — ensure termux-api is installed",
+                "image_base64": None,
+            }
+
+    try:
+        with open(jpg, "rb") as f:
+            data = f.read()
+        os.remove(jpg)
+        if data:
+            b64 = _b64.b64encode(data).decode()
+            _CAMERA_CAPTURE_CACHE = b64
+            _CAMERA_CAPTURE_TS = time.time()
+            return {"image_base64": b64, "format": "jpeg", "timestamp": time.time()}
+    except Exception as e:
+        logger.debug(f"camera capture read failed: {e}")
+
+    return {"error": "camera capture failed", "image_base64": None}
+
+
+@app.get("/camera/status")
+async def camera_status():
+    """Check if phone camera is available."""
+    has_termux_api = shutil.which("termux-camera-photo") is not None
+    return {
+        "available": has_termux_api,
+        "termux_api": has_termux_api,
+    }
+
+
+# ─── PHOTO GALLERY ACCESS ────────────────────────────────────────
+# Scan DCIM/Pictures for training photos. Requires storage permission
+# in Termux: `termux-setup-storage` (creates ~/storage/ symlink).
+
+_PHOTO_DIRS = [
+    os.path.expanduser("~/storage/dcim/Camera"),
+    os.path.expanduser("~/storage/dcim"),
+    os.path.expanduser("~/storage/pictures"),
+    os.path.expanduser("/sdcard/DCIM/Camera"),
+    os.path.expanduser("/sdcard/DCIM"),
+    os.path.expanduser("/sdcard/Pictures"),
+]
+_PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+_PHOTO_CACHE: list = []
+_PHOTO_CACHE_TS: float = 0.0
+_PHOTO_CACHE_TTL: float = 60.0  # rescan every 60s
+
+
+def _scan_photos() -> list[dict]:
+    """Scan known photo directories for image files."""
+    global _PHOTO_CACHE, _PHOTO_CACHE_TS
+    now = time.time()
+    if _PHOTO_CACHE and (now - _PHOTO_CACHE_TS) < _PHOTO_CACHE_TTL:
+        return _PHOTO_CACHE
+
+    photos = []
+    seen = set()
+    for d in _PHOTO_DIRS:
+        if not os.path.isdir(d):
+            continue
+        try:
+            for entry in os.scandir(d):
+                if not entry.is_file():
+                    continue
+                ext = os.path.splitext(entry.name)[1].lower()
+                if ext not in _PHOTO_EXTENSIONS:
+                    continue
+                abspath = os.path.abspath(entry.path)
+                if abspath in seen:
+                    continue
+                seen.add(abspath)
+                try:
+                    stat = entry.stat()
+                    photos.append(
+                        {
+                            "name": entry.name,
+                            "path": abspath,
+                            "size": stat.st_size,
+                            "modified": stat.st_mtime,
+                        }
+                    )
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    photos.sort(key=lambda p: p["modified"], reverse=True)
+    _PHOTO_CACHE = photos
+    _PHOTO_CACHE_TS = now
+    return photos
+
+
+@app.get("/photos/list")
+async def list_photos(limit: int = 50, offset: int = 0):
+    """List photos from the phone gallery. Returns name, path, size, modified."""
+    photos = _scan_photos()
+    return {
+        "photos": photos[offset : offset + limit],
+        "total": len(photos),
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+@app.get("/photos/file")
+async def serve_photo(path: str):
+    """Serve a photo file by absolute path. Returns the raw JPEG/PNG bytes.
+    Only serves files from known photo directories."""
+    import os.path
+
+    real = os.path.realpath(path)
+    # Security: only serve from known photo dirs
+    allowed = False
+    for d in _PHOTO_DIRS:
+        if real.startswith(os.path.realpath(d)):
+            allowed = True
+            break
+    if not allowed or not os.path.isfile(real):
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    from fastapi.responses import FileResponse
+
+    ext = os.path.splitext(real)[1].lower()
+    media_map = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".heic": "image/heic",
+        ".heif": "image/heif",
+    }
+    return FileResponse(real, media_type=media_map.get(ext, "application/octet-stream"))
+
+
+@app.get("/photos/count")
+async def photo_count():
+    """Quick count of available photos."""
+    return {"count": len(_scan_photos())}
 
 
 # ─── MAIN ───────────────────────────────────────────────────────

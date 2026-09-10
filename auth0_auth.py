@@ -9,6 +9,7 @@ import os
 import time
 import logging
 import httpx
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -166,6 +167,102 @@ def load_user_memory(user_id: str, avatar: str = "puppy") -> dict:
 def save_user_memory(user_id: str, data: dict):
     path = user_memory_path(user_id, "puppy")
     path.write_text(json.dumps(data, indent=2))
+
+
+# ─── Daily Memory Segmentation ──────────────────────────────────────
+# Each Google account gets per-day memory files so context carries across
+# sessions within a day, but old days are archived and never leaked to
+# other users. Privacy: files live under <user_id>/ — no cross-user access.
+
+DAILY_MEMORY_KEEP_DAYS = 7  # Rolling window: keep last 7 days of daily memory
+
+
+def _today_str() -> str:
+    """Return today's date as YYYY-MM-DD."""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def user_daily_memory_path(user_id: str, avatar: str = "puppy", date: str = "") -> Path:
+    """Path for a specific day's memory file: <user_dir>/memory_puppy_2026-09-08.json"""
+    if not date:
+        date = _today_str()
+    safe = avatar.replace("/", "_").replace("..", "_")
+    return get_user_data_dir(user_id) / f"memory_{safe}_{date}.json"
+
+
+def load_user_daily_memory(user_id: str, avatar: str = "puppy", date: str = "") -> dict:
+    """Load a specific day's memory. Returns empty if no file exists."""
+    path = user_daily_memory_path(user_id, avatar, date)
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            pass
+    return {"entries": [], "summary": ""}
+
+
+def save_user_daily_memory(
+    user_id: str, avatar: str = "puppy", date: str = "", data: dict = None
+):
+    """Save memory for a specific day."""
+    if data is None:
+        data = {"entries": [], "summary": ""}
+    path = user_daily_memory_path(user_id, avatar, date)
+    path.write_text(json.dumps(data, indent=2))
+
+
+def load_user_recent_memory(user_id: str, avatar: str = "puppy", days: int = 7) -> dict:
+    """Load today's memory merged with recent days for context continuity.
+
+    Returns a merged dict with:
+    - 'entries': today's entries (for active conversation)
+    - 'summary': today's summary
+    - 'recent_summaries': list of {date, summary} from recent days
+    - 'recent_entries': last 5 entries from yesterday (for handoff context)
+
+    Privacy: all data stays under this user_id's directory.
+    """
+    today = _today_str()
+    today_mem = load_user_daily_memory(user_id, avatar, today)
+
+    recent_summaries = []
+    recent_entries = []
+
+    for i in range(1, days + 1):
+        day = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+        day_mem = load_user_daily_memory(user_id, avatar, day)
+        if day_mem.get("summary"):
+            recent_summaries.append({"date": day, "summary": day_mem["summary"]})
+        # Grab last 5 entries from yesterday only (for handoff context)
+        if i == 1 and day_mem.get("entries"):
+            recent_entries = day_mem["entries"][-5:]
+
+    return {
+        "entries": today_mem.get("entries", []),
+        "summary": today_mem.get("summary", ""),
+        "recent_summaries": recent_summaries,
+        "recent_entries": recent_entries,
+    }
+
+
+def cleanup_old_daily_memories(
+    user_id: str, avatar: str = "puppy", keep_days: int = DAILY_MEMORY_KEEP_DAYS
+):
+    """Remove daily memory files older than keep_days. Privacy-safe: only touches this user's files."""
+    user_dir = get_user_data_dir(user_id)
+    safe = avatar.replace("/", "_").replace("..", "_")
+    prefix = f"memory_{safe}_"
+    cutoff = datetime.now() - timedelta(days=keep_days)
+    for f in user_dir.glob(f"{prefix}*.json"):
+        try:
+            # Extract date from filename: memory_puppy_2026-09-08.json → 2026-09-08
+            date_str = f.stem.replace(prefix, "")
+            file_date = datetime.strptime(date_str, "%Y-%m-%d")
+            if file_date < cutoff:
+                f.unlink()
+                logger.info(f"Cleaned up old daily memory: {f.name}")
+        except (ValueError, OSError):
+            pass  # Skip malformed filenames
 
 
 def is_owner(user: Optional[Dict[str, Any]]) -> bool:

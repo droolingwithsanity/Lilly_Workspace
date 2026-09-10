@@ -1,0 +1,12 @@
+{
+  "name": "lilly-bridge",
+  "version": "1.0.0",
+  "description": "Lilly AI bridge service (placeholder)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0"
+  }
+}

@@ -1,0 +1,169 @@
+{
+  "summary": {
+    "total_tests": 4,
+    "successful_tests": 4,
+    "failed_tests": 0,
+    "total_detections": 5,
+    "average_detection_time_ms": 206.26,
+    "unique_labels_detected": [
+      "building",
+      "door",
+      "houseplant",
+      "laptop",
+      "tree"
+    ],
+    "success_rate": "100.0%"
+  },
+  "detailed_results": [
+    {
+      "scene": "street_scene",
+      "status": "success",
+      "detection_time_ms": 168.93,
+      "total_detections": 2,
+      "detections": [
+        {
+          "label": "Laptop",
+          "x": 0.0575,
+          "y": 0.1488,
+          "w": 0.6718,
+          "h": 0.7147,
+          "conf": 0.6348,
+          "distance_m": 0.37,
+          "distance_desc": "very close"
+        },
+        {
+          "label": "Houseplant",
+          "x": 0.6212,
+          "y": 0.1685,
+          "w": 0.2179,
+          "h": 0.5378,
+          "conf": 0.503,
+          "distance_m": null,
+          "distance_desc": null
+        }
+      ],
+      "reply": "Detected 2 targets: Laptop, Houseplant",
+      "agents": [
+        {
+          "agent": "Puppy",
+          "emoji": "\ud83d\udc15",
+          "voice": "en-US-AvaNeural",
+          "text": "Laptop and phone? Someone's either working hard or barely working."
+        },
+        {
+          "agent": "Fox",
+          "emoji": "\ud83e\udd8a",
+          "voice": "en-US-AndrewNeural",
+          "text": "I see tech. Screens are just expensive windows to other people's problems."
+        },
+        {
+          "agent": "Bear",
+          "emoji": "\ud83d\udc3b",
+          "voice": "en-US-BrianNeural",
+          "text": "Screens. We built these glowing windows to the world and now we can't stop looking at them."
+        }
+      ],
+      "file_size_kb": 39.05
+    },
+    {
+      "scene": "office_scene",
+      "status": "success",
+      "detection_time_ms": 336.03,
+      "total_detections": 2,
+      "detections": [
+        {
+          "label": "Building",
+          "x": 0.0,
+          "y": 0.0,
+          "w": 0.9996,
+          "h": 0.9864,
+          "conf": 0.4172,
+          "distance_m": null,
+          "distance_desc": null
+        },
+        {
+          "label": "Door",
+          "x": 0.673,
+          "y": 0.3658,
+          "w": 0.1009,
+          "h": 0.3022,
+          "conf": 0.3685,
+          "distance_m": null,
+          "distance_desc": null
+        }
+      ],
+      "reply": "Detected 2 targets: Building, Door",
+      "agents": [
+        {
+          "agent": "Puppy",
+          "emoji": "\ud83d\udc15",
+          "voice": "en-US-AvaNeural",
+          "text": "Detected. I'm going to need more context but I'm intrigued."
+        },
+        {
+          "agent": "Owl",
+          "emoji": "\ud83e\udd89",
+          "voice": "en-US-ChristopherNeural",
+          "text": "Object identified. Every atom in that object was forged in the heart of a dying star. Poetic."
+        },
+        {
+          "agent": "Bear",
+          "emoji": "\ud83d\udc3b",
+          "voice": "en-US-BrianNeural",
+          "text": "I see it. Every object was once just an idea in someone's head. Wild."
+        }
+      ],
+      "file_size_kb": 44.04
+    },
+    {
+      "scene": "park_scene",
+      "status": "success",
+      "detection_time_ms": 175.26,
+      "total_detections": 1,
+      "detections": [
+        {
+          "label": "Tree",
+          "x": 0.0021,
+          "y": 0.0025,
+          "w": 0.9977,
+          "h": 0.8961,
+          "conf": 0.7234,
+          "distance_m": null,
+          "distance_desc": null
+        }
+      ],
+      "reply": "Detected 1 targets: Tree",
+      "agents": [
+        {
+          "agent": "Puppy",
+          "emoji": "\ud83d\udc15",
+          "voice": "en-US-AvaNeural",
+          "text": "I see it. Not sure what to make of it yet but I'm forming an opinion."
+        },
+        {
+          "agent": "Cat",
+          "emoji": "\ud83d\udc31",
+          "voice": "en-US-EmmaNeural",
+          "text": "Detected. I'm acknowledging it. That's the most you're getting from me."
+        },
+        {
+          "agent": "Bunny",
+          "emoji": "\ud83d\udc30",
+          "voice": "en-US-JennyNeural",
+          "text": "I see it! It's interesting. I'm going to need details though."
+        }
+      ],
+      "file_size_kb": 103.76
+    },
+    {
+      "scene": "cafe_scene",
+      "status": "success",
+      "detection_time_ms": 144.81,
+      "total_detections": 0,
+      "detections": [],
+      "reply": "I see absolutely nothing. Are you testing me or is this just your life?",
+      "agents": [],
+      "file_size_kb": 53.04
+    }
+  ]
+}

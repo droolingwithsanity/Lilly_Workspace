@@ -35,6 +35,7 @@ nav a{margin-right:16px;font-size:13px;color:#a78bfa}
   <a href="#avatars">Avatars</a>
   <a href="#sensors">Sensors</a>
   <a href="#vision">Vision</a>
+  <a href="#self-training">Self-Training</a>
   <a href="#automation">Automation</a>
   <a href="#skills">Skills</a>
   <a href="#pairing">Pairing</a>
@@ -55,6 +56,10 @@ nav a{margin-right:16px;font-size:13px;color:#a78bfa}
     <li><b>Notification intelligence</b> — reads and prioritizes Android notifications</li>
     <li><b>Voice interaction</b> — speak to Lilly, she speaks back</li>
     <li><b>Camera vision</b> — YOLOv8 object detection from phone camera or browser webcam</li>
+    <li><b>Face recognition + keypoints</b> — SCRFD + ArcFace + FAISS identifies people; overlay draws eyes/nose/mouth dots</li>
+    <li><b>Unknown-face OSINT</b> — opt-in reverse-face lookup unveils names + social accounts for unrecognized people</li>
+    <li><b>Community skills</b> — 90k+ OpenHuman skills; "explain anything" makes interactive HTML explainers</li>
+    <li><b>Self-training AI</b> — YOLO automatically improves by collecting data and fine-tuning</li>
     <li><b>Picture-in-Picture</b> — YouTube while chatting</li>
   </ul>
 </div>
@@ -103,25 +108,177 @@ nav a{margin-right:16px;font-size:13px;color:#a78bfa}
 </table>
 
 <h2 id="vision">📷 Camera &amp; Vision (YOLO)</h2>
-<p>Lilly can see through your phone camera or browser webcam using YOLOv8 object detection.</p>
+<p>Lilly can see through your phone camera, browser webcam, <b>and</b> Blink home security cameras — all at once in the Camera Window.</p>
 <div class="card">
   <h3>How It Works</h3>
   <p>Camera frames are sent to the backend every 2-3 seconds. YOLOv8 detects 80+ object classes (person, laptop, phone, cup, chair, car, etc.) and returns bounding boxes + labels.</p>
-  <h3>Android Native Camera</h3>
-  <p>The overlay camera captures frames from the phone's camera and POSTs them to <code>POST /api/vision/browser</code>. Detection boxes are drawn on the camera overlay in real-time.</p>
-  <h3>Browser Webcam</h3>
-  <p>The web UI's CameraBridge captures webcam frames via <code>getUserMedia</code> and sends them to the same endpoint. Detection results appear in the UI.</p>
+  <h3>Camera Window</h3>
+  <p>Click the <b>📷 camera button</b> in the toolbar to open the Camera Window — a 3-panel view showing:</p>
+  <ul style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li><b>Blink Cameras</b> (left) — cycles through your Blink security cameras every 8 seconds</li>
+    <li><b>Phone Camera</b> (center) — live feed from your Android phone via Termux sensor server</li>
+    <li><b>Webcam</b> (right) — your browser's webcam feed</li>
+  </ul>
+  <p>The Camera Window is draggable — grab the header bar to move it. All three feeds run simultaneously with YOLO detection in the background.</p>
+  <h3>Camera Sources</h3>
+  <table>
+    <tr><th>Source</th><th>How It Works</th><th>Requires</th></tr>
+    <tr><td>Android Native Camera</td><td>Overlay captures frames from the phone camera</td><td>Hitomi overlay app</td></tr>
+    <tr><td>Browser Webcam</td><td>CameraBridge captures webcam frames via <code>getUserMedia</code></td><td>Camera permission</td></tr>
+    <tr><td>Blink Cameras</td><td>Connects via <code>blinkpy</code> library, cycles through all cameras</td><td><code>BLINK_USERNAME</code> + <code>BLINK_PASSWORD</code> env vars</td></tr>
+  </table>
+  <h3>Single Camera Commands</h3>
+  <p>You can also view individual cameras by name:</p>
+  <p><code>"show me Front Door"</code> — show only the Blink camera named "Front Door"</p>
+  <p><code>"show me phone camera"</code> — show only the phone camera</p>
+  <p><code>"check the doorbell"</code> — show only the doorbell camera with face detection focus</p>
   <h3>Vision Endpoints</h3>
   <table>
     <tr><th>Endpoint</th><th>Method</th><th>Purpose</th></tr>
     <tr><td><code>/api/vision/browser</code></td><td>POST</td><td>Upload JPEG frame → get YOLO detections</td></tr>
     <tr><td><code>/api/vision/browser</code></td><td>GET</td><td>Get latest detection results</td></tr>
+    <tr><td><code>/api/vision/multi</code></td><td>POST</td><td>Collect frames from ALL cameras (phone + Blink + browser), run YOLO, return combined description</td></tr>
+    <tr><td><code>/api/vision/single</code></td><td>POST</td><td>Single camera view — body: <code>{"camera": "phone"/"browser"/"front door"}</code></td></tr>
     <tr><td><code>/api/vision/status</code></td><td>GET</td><td>Vision system status (YOLO, OpenCV)</td></tr>
     <tr><td><code>/api/vision/frame</code></td><td>GET</td><td>Latest annotated frame as JPEG</td></tr>
     <tr><td><code>/api/vision/describe</code></td><td>GET</td><td>Natural language scene description</td></tr>
+    <tr><td><code>/api/blink/status</code></td><td>GET</td><td>Blink camera system status</td></tr>
+    <tr><td><code>/api/blink/cameras</code></td><td>GET</td><td>List all Blink cameras with status</td></tr>
+    <tr><td><code>/api/blink/snapshot</code></td><td>GET</td><td>Snapshot from specific camera: <code>?camera=Front Door</code></td></tr>
+    <tr><td><code>/api/blink/snapshot/all</code></td><td>GET</td><td>Snapshots from all Blink cameras</td></tr>
+    <tr><td><code>/api/phone/camera/status</code></td><td>GET</td><td>Check phone camera availability</td></tr>
+    <tr><td><code>/api/phone/camera/capture</code></td><td>GET</td><td>Capture from phone camera: <code>?force=true</code></td></tr>
   </table>
   <h3>Voice Commands</h3>
-  <p><code>"What do you see?"</code> — describe the current scene · <code>"open camera"</code> — start camera overlay</p>
+  <p><code>"What do you see?"</code> — describe the current scene from all cameras · <code>"open camera"</code> — open Camera Window</p>
+  <p><code>"show me Front Door"</code> — single camera view · <code>"who's at the door?"</code> — doorbell check</p>
+  <h3>Blink Setup</h3>
+  <p>Set your Blink credentials as environment variables before starting the server:</p>
+  <pre>export BLINK_USERNAME="your-email@example.com"
+export BLINK_PASSWORD="your-password"
+# For 2FA accounts:
+export BLINK_MANAGED="true"</pre>
+  <p>If 2FA is required, you'll be prompted for the verification code on first connection.</p>
+  <p>Submit the 2FA code via the API:</p>
+  <pre>curl -X POST "http://localhost:8098/api/blink/2fa?code=123456"</pre>
+  <p>Or say <code>"verify Blink code 123456"</code> to Lilly.</p>
+</div>
+
+<h2 id="self-training">🧠 YOLO Self-Training Agent</h2>
+<p>Lilly can automatically improve its vision by collecting training data and fine-tuning the YOLO model.</p>
+<div class="card">
+  <h3>How It Works</h3>
+  <p>The self-training agent monitors all YOLO detections, collects training samples, and fine-tunes the model to improve accuracy over time.</p>
+  
+  <h3>Features</h3>
+  <ul style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li><b>Real-time monitoring</b> — tracks detection confidence, accuracy, and class distribution</li>
+    <li><b>Auto-collection</b> — saves training samples when confidence is in the "uncertain" range</li>
+    <li><b>User feedback</b> — correct misclassifications to improve future training</li>
+    <li><b>Auto-training</b> — fine-tunes YOLO when enough samples are collected</li>
+    <li><b>Model evaluation</b> — tests new models before deployment</li>
+    <li><b>Auto-deploy</b> — deploys improved models automatically</li>
+  </ul>
+  
+  <h3>Training Data Collection</h3>
+  <p>When YOLO detects an object with confidence between 30% and 70%, the agent automatically saves the image and bounding box as a training sample. This "uncertain" range is where the model needs the most improvement.</p>
+  
+  <h3>Self-Training Process</h3>
+  <ol style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li><b>Monitor</b> — Track all detections in real-time</li>
+    <li><b>Collect</b> — Save training samples (images + labels)</li>
+    <li><b>Correct</b> — Users fix misclassifications via API</li>
+    <li><b>Train</b> — Fine-tune YOLO on collected data</li>
+    <li><b>Evaluate</b> — Test model performance (mAP, precision, recall)</li>
+    <li><b>Deploy</b> — Deploy improved model if better than current</li>
+  </ol>
+  
+  <h3>Trainer Endpoints</h3>
+  <table>
+    <tr><th>Endpoint</th><th>Method</th><th>Purpose</th></tr>
+    <tr><td><code>/api/trainer/status</code></td><td>GET</td><td>Training agent status</td></tr>
+    <tr><td><code>/api/trainer/stats</code></td><td>GET</td><td>Performance statistics</td></tr>
+    <tr><td><code>/api/trainer/history</code></td><td>GET</td><td>Detection history</td></tr>
+    <tr><td><code>/api/trainer/detection</code></td><td>POST</td><td>Record a detection</td></tr>
+    <tr><td><code>/api/trainer/correct</code></td><td>POST</td><td>Correct a misclassification</td></tr>
+    <tr><td><code>/api/trainer/train</code></td><td>POST</td><td>Start training</td></tr>
+    <tr><td><code>/api/trainer/prepare-dataset</code></td><td>POST</td><td>Prepare training dataset</td></tr>
+    <tr><td><code>/api/trainer/evaluate/{model}</code></td><td>GET</td><td>Evaluate a model</td></tr>
+    <tr><td><code>/api/trainer/deploy</code></td><td>POST</td><td>Deploy a model</td></tr>
+    <tr><td><code>/api/trainer/models</code></td><td>GET</td><td>List model versions</td></tr>
+    <tr><td><code>/api/trainer/auto-check</code></td><td>POST</td><td>Check if auto-training needed</td></tr>
+    <tr><td><code>/api/trainer/config</code></td><td>GET/POST</td><td>Get/update configuration</td></tr>
+  </table>
+  
+  <h3>Configuration</h3>
+  <table style="width:100%;font-size:13px">
+    <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
+    <tr><td><code>auto_collect</code></td><td>true</td><td>Automatically collect training data</td></tr>
+    <tr><td><code>collect_threshold</code></td><td>0.3</td><td>Minimum confidence to collect</td></tr>
+    <tr><td><code>correction_threshold</code></td><td>0.7</td><td>Ask for correction below this</td></tr>
+    <tr><td><code>min_samples_for_training</code></td><td>100</td><td>Minimum samples before training</td></tr>
+    <tr><td><code>training_interval_hours</code></td><td>24</td><td>Hours between auto-training</td></tr>
+    <tr><td><code>max_epochs</code></td><td>50</td><td>Maximum training epochs</td></tr>
+    <tr><td><code>auto_deploy_threshold</code></td><td>0.05</td><td>Minimum improvement to auto-deploy</td></tr>
+  </table>
+  
+  <h3>Voice Commands</h3>
+  <p><code>"train yourself"</code> — start training · <code>"training status"</code> — check progress · <code>"how accurate are you?"</code> — show stats</p>
+</div>
+
+<h2 id="faces">😀 Face Recognition &amp; Keypoints</h2>
+<p>Every &ldquo;person&rdquo; detection (oiv7 labels <code>Man</code>, <code>Woman</code>, <code>Human face</code>, <code>person</code>…) gets a face scan: Lilly finds the largest face inside the box, embeds it, and — if the face is enrolled — stamps the box with the person&rsquo;s name. It also publishes 5 face <b>keypoints</b> (👀 left/right eye, 👃 nose, 👄 mouth corners) so the overlay can draw them instantly.</p>
+<div class="card">
+  <h3>How It Works</h3>
+  <ol style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li><b>SCRFD</b> (<code>det_2.5g.onnx</code>) detects faces + keypoints in the frame</li>
+    <li><b>ArcFace</b> (<code>w600k_mbf.onnx</code>) embeds the largest face in each person box → 512-dim vector</li>
+    <li><b>FAISS</b> index looks up the nearest enrolled name above the match threshold</li>
+    <li>Detection is enriched with <code>name</code> (if matched), <code>kps</code> (5 keypoints), and face confidence</li>
+  </ol>
+  <h3>Keypoint Overlay</h3>
+  <p>Vision responses carry <code>kps</code>: an array of 5 normalized <code>[x, y]</code> points. The Android overlay draws them as glow-dots inside each person box — cyan eyes, magenta nose, orange mouth corners — with a dark outline to stay visible. Keypoints persist for 2 seconds between face-scans, so the dots render on <b>every</b> frame without waiting (instant overlay).</p>
+  <h3>Enrollment</h3>
+  <p>Enroll a face once, and Lilly remembers it forever (512-dim vectors persisted to <code>known_faces.json</code>):</p>
+  <pre style="background:rgba(0,0,0,0.05);padding:8px;border-radius:6px;font-size:12px">curl -X POST http://localhost:8098/api/faces/enroll \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Alice","image_b64":"&lt;base64 JPEG&gt;"}'</pre>
+  <p>Say <code>"remember this face as Alice"</code>, or manage via <code>GET /api/faces</code> / <code>DELETE /api/faces/{name}</code>.</p>
+  <h3>Face Endpoints</h3>
+  <table style="width:100%;font-size:13px">
+    <tr><th>Endpoint</th><th>Method</th><th>Purpose</th></tr>
+    <tr><td><code>/api/faces</code></td><td>GET</td><td>List all known faces</td></tr>
+    <tr><td><code>/api/faces/enroll</code></td><td>POST</td><td>Enroll a face: <code>{"name","image_b64"}</code></td></tr>
+    <tr><td><code>/api/faces/{name}</code></td><td>DELETE</td><td>Remove a known face</td></tr>
+    <tr><td><code>/api/vision/face</code></td><td>POST</td><td>Recognize + annotate a frame: <code>{"image_base64"}</code></td></tr>
+    <tr><td><code>/api/vision/unknown_faces</code></td><td>GET</td><td>Debug view of sampled unknown faces</td></tr>
+  </table>
+</div>
+
+<h2 id="osint">🕵️ Unknown-Face OSINT (Opt-in)</h2>
+<p>Tier&nbsp;2 of face recognition: when a face is <b>not</b> enrolled, Lilly can try to figure out who it is via public reverse-image search — and surface social-media accounts.</p>
+<div class="card">
+  <h3>How It Works</h3>
+  <ol style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li>Vision server samples an unsolved person&rsquo;s face every 8s (max 12 buffered)</li>
+    <li>It pushes the face crop to Lilly: <code>POST /api/vision/faces/osint_unknown</code></li>
+    <li>Lilly runs Yandex reverse-face search (default provider) → candidate name (conf &ge; 0.35)</li>
+    <li>Lilly fans the name out to its <b>OSINT stack</b> (osint_agents + scrapling) → social accounts (Facebook, Instagram, LinkedIn, X, TikTok, GitHub, VK, OK, Bluesky…)</li>
+    <li>Lilly pushes the result back to <code>POST /api/vision/face/identify</code>; the box is re-stamped with the matched name + <code>social_accounts</code></li>
+  </ol>
+  <h3>Enable It (off by default)</h3>
+  <p>Set in your <code>.env</code> / docker-compose:</p>
+  <pre style="background:rgba(0,0,0,0.05);padding:8px;border-radius:6px;font-size:12px">FACE_OSINT_ENABLED=1                # turn the tier on
+FACE_OSINT_PROVIDER=yandex          # yandex (default) or test
+FACE_OSINT_COOLDOWN=60              # min seconds between lookups per face
+OSINT_PUSH_URL=http://127.0.0.1:8098/api/vision/faces/osint_unknown</pre>
+  <h3>Endpoints</h3>
+  <table style="width:100%;font-size:13px">
+    <tr><th>Endpoint</th><th>Method</th><th>Purpose</th></tr>
+    <tr><td><code>/api/vision/faces/osint_unknown</code></td><td>POST</td><td>Vision → Lilly: queue an unknown face for OSINT</td></tr>
+    <tr><td><code>/api/vision/face/identify</code></td><td>POST</td><td>Lilly → Vision: re-stamp a box with identity + accounts</td></tr>
+  </table>
+  <p style="font-size:11px;color:#9d8db0;margin-top:10px">⚠️ Reverse-image search results are best-effort and brittle — treat as leads, not verdicts. The tier is fully opt-in and never blocks the live vision loop.</p>
 </div>
 
 <h2 id="automation">⚡ Natural Language Automation</h2>
@@ -159,6 +316,22 @@ nav a{margin-right:16px;font-size:13px;color:#a78bfa}
   <p><code>screenshot</code> — take screenshot · <code>go home</code> — home screen</p>
   <h3>Custom Skills</h3>
   <p>Create custom skills at <a href="/skills-market.html">Skills Market</a></p>
+  <h3>Community Skills (OpenHuman)</h3>
+  <p>Lilly pulls in the OpenHuman community catalog — <b>90,700+ agent skills</b> indexed from ClawHub, skills.sh, LobeHub and more. Anything you describe as a goal can trigger one, e.g.:</p>
+  <ul style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li><b>Explainer suite</b> (pre-wired): <i>&ldquo;make an explainer about RLHF&rdquo;</i>, <i>&ldquo;explain this repo&rdquo;</i>, <i>&ldquo;fact-check that explainer&rdquo;</i> → distill-style self-contained HTML pages</li>
+    <li>Code / error / concept / Quran / fable / Notion explainers, NotebookLM distiller, URL-to-LLM, and more</li>
+  </ul>
+  <h4>Explainer skills (wired in)</h4>
+  <table style="width:100%;font-size:13px">
+    <tr><th>Skill</th><th>Trigger phrases</th><th>Output</th></tr>
+    <tr><td><code>Creating Explainers</code></td><td>explain anything · make an explainer · create an explainer · anything to explainer</td><td>Interactive HTML explainer w/ Canvas figures</td></tr>
+    <tr><td><code>Explaining Codebases</code></td><td>explain this repo · codebase explainer · explain codebase</td><td>Interactive guide to a repo/architecture</td></tr>
+    <tr><td><code>Fact Checking Explainers</code></td><td>fact check explainer · verify explainer · check explainer claims</td><td>Claim-by-claim verification report</td></tr>
+  </table>
+  <h4>Browsing the catalog</h4>
+  <p><code>GET /api/openhuman/skills</code> — list available · <code>GET /api/openhuman/skills/{id}</code> — inspect one · <code>GET /api/openhuman/status</code> — bridge health · <code>POST /api/openhuman/refresh</code> — re-fetch catalog</p>
+  <p style="font-size:11px;color:#9d8db0;margin-top:10px">ℹ Skills land in the global <code>SKILLS</code> dict under the <code>openhuman_</code> prefix and run by downloading their <code>SKILL.md</code> and executing it as an agent task.</p>
 </div>
 
 <h2 id="pairing">🔗 Pairing</h2>
@@ -248,7 +421,14 @@ nav a{margin-right:16px;font-size:13px;color:#a78bfa}
   <tr><td><code>/api/notifications</code></td><td>GET</td><td>Active notification list</td></tr>
   <tr><td><code>/api/vision/browser</code></td><td>POST</td><td>Upload camera frame → YOLO detections</td></tr>
   <tr><td><code>/api/vision/browser</code></td><td>GET</td><td>Latest detection results</td></tr>
+  <tr><td><code>/api/vision/multi</code></td><td>POST</td><td>Multi-camera: phone + Blink + browser → combined description</td></tr>
+  <tr><td><code>/api/vision/single</code></td><td>POST</td><td>Single camera view by name</td></tr>
   <tr><td><code>/api/vision/status</code></td><td>GET</td><td>Vision system status</td></tr>
+  <tr><td><code>/api/blink/status</code></td><td>GET</td><td>Blink camera system status</td></tr>
+  <tr><td><code>/api/blink/cameras</code></td><td>GET</td><td>List all Blink cameras</td></tr>
+  <tr><td><code>/api/blink/snapshot</code></td><td>GET</td><td>Snapshot from Blink camera</td></tr>
+  <tr><td><code>/api/phone/camera/status</code></td><td>GET</td><td>Phone camera availability</td></tr>
+  <tr><td><code>/api/phone/camera/capture</code></td><td>GET</td><td>Capture from phone camera</td></tr>
   <tr><td><code>/api/broker/status</code></td><td>GET</td><td>Broker connection status</td></tr>
   <tr><td><code>/api/broker/automations</code></td><td>GET/POST</td><td>List / create automation rules</td></tr>
   <tr><td><code>/api/lilly_skills</code></td><td>GET</td><td>Available skills</td></tr>
@@ -259,6 +439,23 @@ nav a{margin-right:16px;font-size:13px;color:#a78bfa}
   <tr><td><code>/api/bluetooth/advertise/stop</code></td><td>POST</td><td>Stop BLE advertising</td></tr>
   <tr><td><code>/api/avatars</code></td><td>GET</td><td>List available avatar images for broadcast</td></tr>
   <tr><td><code>/lilly/advertise</code></td><td>GET</td><td>Web UI page served to devices that find the BLE broadcast</td></tr>
+  <tr><td><code>/api/trainer/status</code></td><td>GET</td><td>YOLO training agent status</td></tr>
+  <tr><td><code>/api/trainer/stats</code></td><td>GET</td><td>Detection performance statistics</td></tr>
+  <tr><td><code>/api/trainer/train</code></td><td>POST</td><td>Start YOLO training</td></tr>
+  <tr><td><code>/api/trainer/deploy</code></td><td>POST</td><td>Deploy trained model</td></tr>
+  <tr><td><code>/api/faces</code></td><td>GET</td><td>List enrolled faces</td></tr>
+  <tr><td><code>/api/faces/enroll</code></td><td>POST</td><td>Enroll a face from base64 image</td></tr>
+  <tr><td><code>/api/faces/{name}</code></td><td>DELETE</td><td>Remove an enrolled face</td></tr>
+  <tr><td><code>/api/vision/face</code></td><td>POST</td><td>Recognize + annotate a frame</td></tr>
+  <tr><td><code>/api/vision/faces/osint_unknown</code></td><td>POST</td><td>Queue an unknown face for OSINT lookup</td></tr>
+  <tr><td><code>/api/vision/face/identify</code></td><td>POST</td><td>Re-stamp a box with identity + social accounts</td></tr>
+  <tr><td><code>/api/vision/unknown_faces</code></td><td>GET</td><td>Debug: sampled unknown faces</td></tr>
+  <tr><td><code>/api/openhuman/skills</code></td><td>GET</td><td>List OpenHuman community skills</td></tr>
+  <tr><td><code>/api/openhuman/skills/{id}</code></td><td>GET</td><td>Inspect a community skill</td></tr>
+  <tr><td><code>/api/openhuman/refresh</code></td><td>POST</td><td>Force-refresh the community skill catalog</td></tr>
+  <tr><td><code>/api/openhuman/status</code></td><td>GET</td><td>OpenHuman bridge health + stats</td></tr>
+  <tr><td><code>/api/apk/variants</code></td><td>GET</td><td>Available overlay APK builds</td></tr>
+  <tr><td><code>/api/apk/download?type=light</code></td><td>GET</td><td>Download the latest overlay APK</td></tr>
 </table>
 
 <h2>📚 Quick Reference</h2>

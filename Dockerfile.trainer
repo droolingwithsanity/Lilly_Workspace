@@ -1,0 +1,31 @@
+###############################################
+# YOLO Self-Training Agent
+# Monitors performance, collects data, self-trains
+###############################################
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+    fastapi uvicorn numpy \
+    opencv-python-headless \
+    ultralytics \
+    pyyaml \
+    httpx
+
+# Copy training agent files
+COPY yolo_self_trainer.py .
+COPY yolo_trainer_api.py .
+
+# Create training data directories
+RUN mkdir -p training_data/{samples,images,dataset,models}
+
+EXPOSE 8199
+
+CMD ["python3", "-m", "uvicorn", "yolo_trainer_api:app", "--host", "0.0.0.0", "--port", "8199"]

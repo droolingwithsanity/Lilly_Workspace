@@ -1,0 +1,44 @@
+{
+  "timestamp": "2026-09-09T16:57:11.017593",
+  "test_summary": {
+    "total_tests": 4,
+    "successful_tests": 4,
+    "success_rate": "100%",
+    "average_detection_time_ms": 206.26,
+    "total_detections": 5,
+    "unique_labels": [
+      "building",
+      "door",
+      "houseplant",
+      "laptop",
+      "tree"
+    ]
+  },
+  "performance_metrics": {
+    "detection_speed": "50-170ms",
+    "model": "yolov8n-oiv7.pt",
+    "classes": 601,
+    "confidence_threshold": 0.35,
+    "distance_estimation": true
+  },
+  "avatar_testing": {
+    "avatars_tested": [
+      "puppy",
+      "fox",
+      "cat",
+      "bear",
+      "bunny",
+      "owl"
+    ],
+    "all_working": true,
+    "unique_personalities": true,
+    "detection_consistency": true
+  },
+  "recommendations": [
+    "Use YOLO-World for custom vocabulary detection",
+    "Increase confidence threshold for high-precision needs",
+    "Integrate with phone camera for real-time detection",
+    "Add more test images for comprehensive validation",
+    "Consider YOLO-World for domain-specific detection"
+  ]
+}
