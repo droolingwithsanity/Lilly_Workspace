@@ -11,7 +11,8 @@ CORE="$DEST/core"
 echo "Syncing key files into lilly-app/ ..."
 cp -a lilly_ai.py start.sh requirements.txt phone_broker.py ble_advertiser_host.py \
       openhuman_bridge.py auth.py auth0_auth.py face_identity.py footprint.py \
-      osint_face_lookup.py lilly_skills.json wiki.html bt_radar.html tracker.html \
+      osint_face_lookup.py face_recognition_engine.py person_tracker.py \
+      node_registry.py lilly_skills.json wiki.html admin.html bt_radar.html tracker.html \
       nodes.html skills-market.html openlive-human.html openhuman.html alpha_popout.html \
       "$CORE/lilly-ai/"
 

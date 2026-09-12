@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lilly Eye — webcam UI concept</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0d1117;
+    --panel:#131920;
+    --panel-2:#161d26;
+    --hair:rgba(255,255,255,.07);
+    --ink:#e8edf4;
+    --mist:#8d99ad;
+    --faint:#5a6577;
+    --accent:#ffb454;      /* lens flare — the single pop */
+    --signal:#5ea2ff;      /* steel blue — drive/walk scene markers */
+    --fail:#ff6b6b;
+    --ok:#7ee2a8;
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --disp:"Space Grotesk",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:radial-gradient(1200px 800px at 70% -10%,#141b26 0%,var(--bg) 55%);
+    color:var(--ink);
+    font-family:var(--disp);
+    min-height:100vh;
+    padding:56px 24px 80px;
+    display:flex;flex-direction:column;align-items:center;gap:40px;
+  }
+  .page-head{text-align:center;max-width:560px}
+  .page-head .kicker{font:500 11px/1 var(--mono);letter-spacing:.35em;color:var(--accent);text-transform:uppercase}
+  .page-head h1{font:500 clamp(24px,3vw,34px)/1.1 var(--disp);margin:14px 0 10px;letter-spacing:-.01em}
+  .page-head p{font-size:13.5px;line-height:1.6;color:var(--mist)}
+  .page-head .tokens{display:flex;gap:8px;justify-content:center;margin-top:18px;flex-wrap:wrap}
+  .page-head .tokens span{font:400 10px/1 var(--mono);padding:6px 10px;border:1px solid var(--hair);border-radius:99px;color:var(--mist)}
+  .page-head .tokens b{font-weight:500;color:var(--ink)}
+  .page-head .tokens .acc{color:var(--accent);border-color:rgba(255,180,84,.35)}
+
+  /* ————— the camera window ————— */
+  #camWin{
+    width:min(760px,100%);
+    background:var(--panel);
+    border:1px solid var(--hair);
+    border-radius:16px;
+    overflow:hidden;
+    box-shadow:0 24px 80px -24px rgba(0,0,0,.75),0 0 0 1px rgba(0,0,0,.4);
+    transition:transform .18s ease,width .18s ease;
+    position:relative;
+  }
+  #camWin.maxed{width:min(1040px,100%)}
+  #camWin.min' placeholder
+  #camWin.minimized .cw-body,#camWin.minimized .cw-strip{display:none}
+  #camWin.minimized #camHeader{border-radius:16px}
+
+  /* header */
+  #camHeader{
+    display:flex;align-items:center;gap:14px;
+    padding:0 14px;height:46px;
+    border-bottom:1px solid var(--hair);
+    background:linear-gradient(180deg,rgba(255,255,255,.025),rgba(255,255,255,0));
+  }
+  .eyelogo{display:flex;align-items:center;gap:8px;font:600 11px/1 var(--mono);letter-spacing:.18em;color:var(--ink)}
+  .eyelogo .eye-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px rgba(255,180,84,.18)}
+  .eyelogo small{font-weight:400;color:var(--faint);letter-spacing:.08em;margin-left:2px}
+  #camHeader .spacer{flex:1}
+  .hbtn{
+    width:30px;height:30px;display:grid;place-items:center;
+    background:none;border:none;border-radius:8px;cursor:pointer;color:var(--mist);
+  }
+  .hbtn:hover{background:rgba(255,255,255,.06);color:var(--ink)}
+  .hbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .hbtn svg{width:15px;height:15px}
+
+  /* feed */
+  .cw-body{position:relative;aspect-ratio:16/9;background:#0a0e13;overflow:hidden}
+  .cw-scan{position:absolute;inset:0;background:
+    radial-gradient(120% 120% at 50% 45%,rgba(61,78,102,.55) 0%,rgba(26,35,48,.9) 60%,#0a0e13 100%)}
+  .cw-scan::after{content:"";position:absolute;inset:0;
+    background-image:linear-gradient(rgba(255,255,255,.012) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.012) 1px,transparent 1px);
+    background-size:44px 44px;opacity:.6}
+
+  /* viewfinder corners — the signature */
+  .vf-corners{position:absolute;inset:12px;pointer-events:none}
+  .vf-corners span{position:absolute;width:22px;height:22px;border:2px solid rgba(255,255,255,.5);opacity:.8;transition:border-color .2s}
+  .vf-corners .tl{top:0;left:0;border-right:none;border-bottom:none;border-top-left-radius:6px}
+  .vf-corners .tr{top:0;right:0;border-left:none;border-bottom:none;border-top-right-radius:6px}
+  .vf-corners .bl{bottom:0;left:0;border-right:none;border-top:none;border-bottom-left-radius:6px}
+  .vf-corners .br{bottom:0;right:0;border-left:none;border-top:none;border-bottom-right-radius:6px}
+  body.live .vf-corners span{border-color:rgba(255,255,255,.85)}
+  body.live .vf-corners .tl,body.live .vf-corners .br{border-color:var(--accent)}
+
+  /* crosshair */
+  .xf{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:64px;height:64px;pointer-events:none;opacity:.35}
+  .xf::before,.xf::after{content:"";position:absolute;background:rgba(255,255,255,.4)}
+  .xf::before{left:50%;top:0;width:1px;height:100%}
+  .xf::after{top:50%;left:0;height:1px;width:100%}
+
+  /* REC pulse */
+  .rec{position:absolute;top:16px;right:16px;display:none;align-items:center;gap:7px;font:500 10px/1 var(--mono);letter-spacing:.25em;color:var(--ink)}
+  .rec .led{width:7px;height:7px;border-radius:50%;background:var(--fail);animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+  body.live .rec{display:flex}
+
+  /* detection boxes */
+  .det{position:absolute;border:1.5px solid var(--accent);border-radius:4px;box-shadow:0 0 0 1px rgba(0,0,0,.25);pointer-events:none;display:none}
+  .det .tag{
+    position:absolute;top:-17px;left:-1.5px;display:flex;align-items:center;gap:5px;
+    background:var(--accent);color:#201303;font:500 9.5px/1 var(--mono);letter-spacing:.06em;
+    padding:3px 6px;border-radius:4px 4px 4px 0;white-space:nowrap;
+  }
+  .det .tag i{font-style:normal;opacity:.65;font-weight:500}
+  .det.person .tag{background:var(--signal);color:#06213f}
+  .det.person{border-color:var(--signal)}
+  .det .conf{position:absolute;right:4px;bottom:4px;height:2px;width:34px;background:rgba(255,255,255,.18);border-radius:2px;overflow:hidden}
+  .det .conf::after{content:"";display:block;height:100%;width:84%;background:var(--accent)}
+  .det.person .conf::after{background:var(--signal)}
+  body.showBoxes .det{display:block}
+
+  /* idle hint */
+  .idle-hint{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--mist);pointer-events:none}
+  .idle-hint .glass{font:500 11px/1 var(--mono);letter-spacing:.22em;text-transform:uppercase;color:var(--mist);opacity:.9}
+  body.live .idle-hint{opacity:0;transition:opacity .4s}
+
+  /* bottom instrument strip */
+  .cw-strip{
+    display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+    padding:10px 14px;border-top:1px solid var(--hair);
+    background:linear-gradient(180deg,rgba(255,255,255,.018),rgba(255,255,255,0));
+  }
+  .seg{display:flex;align-items:center;gap:2px;background:rgba(0,0,0,.28);border:1px solid var(--hair);border-radius:10px;padding:3px}
+  .seg button{
+    font:500 10px/1 var(--mono);letter-spacing:.12em;color:var(--faint);
+    background:none;border:none;border-radius:7px;padding:6px 10px;cursor:pointer;transition:color .15s;
+  }
+  .seg button:hover{color:var(--mist)}
+  .seg button.active{color:var(--accent);background:rgba(255,180,84,.1);box-shadow:inset 0 0 0 1px rgba(255,180,84,.25)}
+  .seg button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .seg button.auto.active{color:var(--ink);background:rgba(255,255,255,.08)}
+
+  .rd{display:flex;align-items:baseline;gap:6px}
+  .rd .k{font:400 9px/1 var(--mono);letter-spacing:.2em;color:var(--faint);text-transform:uppercase}
+  .rd .v{font:500 11px/1 var(--mono);color:var(--ink)}
+  .rd .v.acc{color:var(--accent)}
+
+  .toggles{display:flex;align-items:center;gap:4px;margin-left:auto}
+  .tog{
+    display:flex;align-items:center;gap:6px;
+    font:500 10px/1 var(--mono);letter-spacing:.1em;color:var(--faint);
+    background:none;border:1px solid transparent;border-radius:8px;padding:7px 9px;cursor:pointer;transition:all .15s;
+  }
+  .tog svg{width:14px;height:14px}
+  .tog:hover{color:var(--mist)}
+  .tog.on{color:var(--accent);background:rgba(255,180,84,.08);border-color:rgba(255,180,84,.22)}
+  .tog .pill{width:6px;height:6px;border-radius:50%;background:var(--faint)}
+  .tog.on .pill{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+  .tog:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+  /* context menu */
+  #camMenu{
+    position:absolute;top:48px;right:10px;width:212px;z-index:40;
+    background:rgba(17,22,29,.94);backdrop-filter:blur(14px);
+    border:1px solid var(--hair);border-radius:12px;
+    padding:6px;display:none;box-shadow:0 18px 50px -12px rgba(0,0,0,.8);
+  }
+  #camMenu.open{display:block;animation:menuIn .14s ease}
+  @keyframes menuIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  #camMenu .grp{font:400 8.5px/1 var(--mono);letter-spacing:.24em;color:var(--faint);text-transform:uppercase;padding:8px 10px 4px}
+  #camMenu button{
+    width:100%;display:flex;align-items:center;gap:10px;text-align:left;
+    font:400 11.5px/1 var(--disp);color:var(--ink);
+    background:none;border:none;border-radius:8px;padding:8px 10px;cursor:pointer;
+  }
+  #camMenu button:hover{background:rgba(255,255,255,.06)}
+  #camMenu button svg{width:13px;height:13px;color:var(--mist);flex:0 0 auto}
+  #camMenu .sep{height:1px;background:var(--hair);margin:4px 6px}
+  #camMenu button.kbd{margin-left:auto;font:400 9px/1 var(--mono);color:var(--faint)}
+
+  /* toast */
+  #toast{
+    position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);
+    background:rgba(20,26,34,.96);border:1px solid var(--hair);border-radius:12px;
+    padding:10px 16px;font:400 12px/1 var(--mono);color:var(--ink);
+    display:flex;align-items:center;gap:9px;opacity:0;pointer-events:none;transition:all .25s ease;
+    box-shadow:0 14px 40px -10px rgba(0,0,0,.7);z-index:100;
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast .t-dot{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+
+  .caption{font:400 11px/1.7 var(--mono);color:var(--faint);text-align:center;max-width:640px;letter-spacing:.02em}
+  .caption b{color:var(--mist);font-weight:500}
+  .action-row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:8px}
+  .chip-btn{
+    font:500 10.5px/1 var(--mono);letter-spacing:.1em;color:var(--ink);
+    background:rgba(255,255,255,.04);border:1px solid var(--hair);border-radius:10px;padding:9px 14px;cursor:pointer;
+  }
+  .chip-btn:hover{border-color:rgba(255,180,84,.4);color:var(--accent)}
+  .chip-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  @media (max-width:640px){body{padding:32px 14px 60px}.cw-strip{gap:12px}.rd .k{display:none}}
+</style>
+</head>
+<body>
+
+  <header class="page-head">
+    <div class="kicker">Lilly Eye · webcam UI concept</div>
+    <h1>The webcam window, rebuilt as a range-finder.</h1>
+    <p>Camera feed becomes an instrument: corner brackets, a single amber flare for detections, and a mono readout strip instead of emoji buttons. The context menu is real — click the ⋮.</p>
+    <div class="tokens">
+      <span><b>ink</b> #e8edf4</span>
+      <span><b>mist</b> #8d99ad</span>
+      <span class="acc"><b>flare</b> #ffb454</span>
+      <span><b>signal</b> #5ea2ff</span>
+      <span><b>bg</b> #0d1117</span>
+      <span><b>type</b> Space Grotesk / JetBrains Mono</span>
+    </div>
+  </header>
+
+  <div id="camWin">
+    <div id="camHeader">
+      <div class="eyelogo"><span class="eye-dot"></span>LILLY <small>— EYE</small></div>
+      <div class="spacer"></div>
+      <button class="hbtn" id="menuBtn" aria-label="Open menu" onclick="toggleMenu(event)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+      </button>
+      <button class="hbtn" onclick="minMax()" aria-label="Maximize">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="2.5"/></svg>
+      </button>
+      <button class="hbtn" onclick="closeWin()" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <div class="cw-body" oncontextmenu="event.preventDefault();toggleMenu(event)">
+      <div class="cw-scan"></div>
+      <div class="xf"></div>
+      <div class="vf-corners"><span class="tl"></span><span class="tr"></span><span class="bl"></span><span class="br"></span></div>
+
+      <div class="rec"><span class="led"></span>LIVE</div>
+
+      <div class="idle-hint">
+        <span class="glass">Waiting for a signal</span>
+      </div>
+
+      <div class="det person" style="left:16%;top:30%;width:18%;height:46%">
+        <span class="tag">PERSON <i>92%</i></span>
+        <span class="conf"></span>
+      </div>
+      <div class="det" style="left:62%;top:44%;width:24%;height:34%">
+        <span class="tag">BIKE <i>87%</i></span>
+        <span class="conf"></span>
+      </div>
+      <div class="det" style="left:8%;top:12%;width:9%;height:12%">
+        <span class="tag">SIGNAL <i>71%</i></span>
+        <span class="conf"></span>
+      </div>
+    </div>
+
+    <div id="camMenu" role="menu"></div>
+
+    <div class="cw-strip">
+      <div class="seg" id="modeSeg" role="group" aria-label="Vision mode">
+        <button class="auto active" data-m="AUTO">AUTO</button>
+        <button data-m="WALK">WALK</button>
+        <button data-m="DRIVE">DRIVE</button>
+        <button data-m="STILL">STILL</button>
+      </div>
+
+      <div class="rd"><span class="k">mode</span><span class="v acc" id="rdMode">SCENE</span></div>
+      <div class="rd"><span class="k">conf</span><span class="v" id="rdConf">84%</span></div>
+      <div class="rd"><span class="k">fps</span><span class="v" id="rdFps">30</span></div>
+
+      <div class="toggles">
+        <button class="tog on" id="togBoxes" onclick="toggleClass(this,'on');document.body.classList.toggle('showBoxes')" aria-pressed="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg>
+          BOXES
+        </button>
+        <button class="tog on" onclick="toggleClass(this,'on')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="8.5" r="3.4"/><path d="M5.5 19c.8-3.4 3.4-5 6.5-5s5.7 1.6 6.5 5"/></svg>
+          FACES
+        </button>
+        <button class="tog on" onclick="toggleClass(this,'on')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v3M9 6h6M12 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M12 13v4M7.5 21c.8-2 2.3-3 4.5-3s3.7 1 4.5 3" stroke-linecap="round"/></svg>
+          SOUND
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="caption">
+    <b>What changed:</b> emoji chips → stroke-icon toggles · flat status row → segmented mode + mono readouts (mode/conf/fps)
+    · purple glow → corner-bracket viewfinder with one amber flare · empty placeholder menu → real context menu.
+    <div class="action-row">
+      <button class="chip-btn" id="liveBtn">Start live feed</button>
+      <button class="chip-btn" onclick="document.body.classList.add('showBoxes');document.getElementById('togBoxes').classList.add('on')">Show boxes</button>
+      <button class="chip-btn" onclick="closeWin()">Close window → reopen</button>
+    </div>
+  </div>
+
+  <div id="toast"><span class="t-dot"></span><span id="toastMsg">Frame captured</span></div>
+
+<script>
+  const win=document.getElementById('camWin');
+
+  function toggleClass(el,cls){el.classList.toggle(cls)}
+
+  /* live feed */
+  document.getElementById('liveBtn').addEventListener('click',function(){
+    document.body.classList.add('live','showBoxes');
+    vibrate();
+  });
+  function vibrate(){ /* fake shake when a person is detected */
+    win.style.transition='transform .03s';
+    let n=0;
+    const t=setInterval(()=>{win.style.transform=`translate(${Math.sin(n*2.4)*0.6}px,${Math.cos(n*3.1)*0.6}px)`;if(++n>10){clearInterval(t);win.style.transform=''}},30);
+  }
+
+  /* modes */
+  document.getElementById('modeSeg').addEventListener('click',e=>{
+    const b=e.target.closest('button');if(!b)return;
+    document.querySelectorAll('#modeSeg button').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    document.getElementById('rdMode').textContent=b.dataset.m;
+    vibrate();
+  });
+
+  /* menu */
+  const menu=document.getElementById('camMenu');
+  menu.innerHTML=`
+    <div class="grp">Feed</div>
+    <button onclick="toast('Frame captured');closeMenu()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8a2 2 0 0 1 2-2h2l1.6-2h7L17 6h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/></svg>Take snapshot<span class="kbd">S</span></button>
+    <button onclick="toast('Frame saved to gallery');closeMenu()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12M6 9l6 6 6-6M4 21h16"/></svg>Save frame</button>
+    <button onclick="toast('Opened in Picture-in-Picture');closeMenu()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><rect x="13" y="11" width="6" height="5" rx="1"/></svg>Picture-in-Picture</button>
+    <div class="sep"></div>
+    <div class="grp">View</div>
+    <button onclick="toggleClass(this,'on');toast('Crosshair toggled');closeMenu()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="3"/></svg>Crosshair<span class="kbd">C</span></button>
+    <button onclick="toast('Theme cycled');closeMenu()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 5l14 14M19 5L5 19"/></svg>Lens theme</button>
+    <button onclick="toast('Diagnostics toggled');closeMenu()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 16l4-6 3 4 3-7 4 9M4 21h16" /></svg>Diagnostics</button>
+    <div class="sep"></div>
+    <button onclick="toast('Settings');closeMenu()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>Device settings</button>
+  `;
+  function openMenu(){menu.classList.add('open')}
+  function closeMenu(){menu.classList.remove('open')}
+  function toggleMenu(ev){if(ev)ev.stopPropagation();outer:if(menu.classList.contains('open')){closeMenu()}else{openMenu()}}
+  document.addEventListener('click',e=>{if(!menu.contains(e.target)&&e.target.id!=='menuBtn')closeMenu()});
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeMenu();if(e.key.toLowerCase()==='s'&&!e.target.matches('input,textarea,select'))toast('Snapshot captured — S is the shortcut')});
+
+  /* window controls */
+  function minMax(){
+    document.body.requestFullscreen?.(/* fullscreen demo */);
+    win.classList.toggle('maxed');
+    toast(win.classList.contains('maxed')?'Viewfinder expanded':'Viewfinder restored');
+  }
+  function closeWin(){win.style.display='none';toast('Camera window closed');win.scrollIntoView?.();setTimeout(()=>win.style.display='',1400)}
+
+  function toast(m){const t=document.getElementById('toast');document.getElementById('toastMsg').textContent=m;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),1900)}
+
+  /* enter the feed */
+  document.body.classList.add('live','showBoxes');
+</script>
+</body>
+</html>

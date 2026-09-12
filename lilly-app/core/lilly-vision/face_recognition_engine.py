@@ -96,7 +96,9 @@ def _face_crop(frame, bbox):
     return frame[y1:y2, x1:x2]
 
 
-_SFACE_WEIGHT = Path("/app/data/deepface/.deepface/weights/face_recognition_sface_2021dec.onnx")
+_SFACE_WEIGHT = Path(
+    "/app/data/deepface/.deepface/weights/face_recognition_sface_2021dec.onnx"
+)
 _sface_net = None
 
 
@@ -126,8 +128,12 @@ def _sface_embed(crop):
         return None
     img = cv2.resize(crop, (112, 112))
     blob = cv2.dnn.blobFromImage(
-        img, 1.0 / 127.5, (112, 112), (127.5, 127.5, 127.5),
-        swapRB=True, crop=False,
+        img,
+        1.0 / 127.5,
+        (112, 112),
+        (127.5, 127.5, 127.5),
+        swapRB=True,
+        crop=False,
     )
     net.setInput(blob)
     emb = net.forward()  # shape (1, 128)
@@ -857,11 +863,13 @@ class FaceRecognitionEngine:
             mean = mean / norm
         return mean.tolist()
 
-    def auto_enroll_from_osint(self, name: str, live_crop_b64: str,
-                              profile_image_url: str) -> bool:
+    def auto_enroll_from_osint(
+        self, name: str, live_crop_b64: str, profile_image_url: str
+    ) -> bool:
         """Fetch OSINT profile image, SFace-verify against live crop,
         enroll into FAISS if they match. Called from a background thread."""
         import base64, urllib.request
+
         if not name or not live_crop_b64 or not profile_image_url:
             return False
         try:
@@ -892,8 +900,10 @@ class FaceRecognitionEngine:
                 if dets is None or len(dets) == 0:
                     return None
                 bx1, by1, bx2, by2 = dets[0][:4].astype(int)
-                bx1 = max(0, int(bx1)); by1 = max(0, int(by1))
-                bx2 = min(img.shape[1], int(bx2)); by2 = min(img.shape[0], int(by2))
+                bx1 = max(0, int(bx1))
+                by1 = max(0, int(by1))
+                bx2 = min(img.shape[1], int(bx2))
+                by2 = min(img.shape[0], int(by2))
                 crop = img[by1:by2, bx1:bx2]
                 if crop.size == 0:
                     return None
@@ -919,13 +929,13 @@ class FaceRecognitionEngine:
             # Enroll: use the live crop with a full-frame box
             live_box = {"x": 0, "y": 0, "w": float(w1), "h": float(h1)}
             ok = self.add_known_face(
-                name, live_img, live_box,
+                name,
+                live_img,
+                live_box,
                 source="osint_auto",
                 notes=f"auto-enrolled via OSINT profile (sim={sim:.3f})",
             )
-            logger.info(
-                f"OSINT auto-enroll {name}: sim={sim:.3f} enrolled={ok}"
-            )
+            logger.info(f"OSINT auto-enroll {name}: sim={sim:.3f} enrolled={ok}")
             return ok
         except Exception as e:
             logger.debug(f"OSINT auto-enroll failed for {name}: {e}")
@@ -936,6 +946,27 @@ class FaceRecognitionEngine:
             del self.known_faces[name]
             self._save_database()
             logger.info(f"Removed known face: {name}")
+            return True
+        return False
+
+    def rename_known_face(self, name: str, new_name: str) -> bool:
+        """Rename a known face in place, keeping its embeddings/samples."""
+        new_name = (new_name or "").strip()
+        name = (name or "").strip()
+        if not name or not new_name:
+            return False
+        with self._lock:
+            if name not in self.known_faces:
+                return False
+            if new_name == name:
+                return True
+            if new_name in self.known_faces:
+                return False
+            face = self.known_faces.pop(name)
+            face.name = new_name
+            self.known_faces[new_name] = face
+            self._save_database()
+            logger.info(f"Renamed known face {name} -> {new_name}")
             return True
         return False
 
@@ -1149,8 +1180,6 @@ class FaceRecognitionEngine:
         if tracks is not None:
             tracks[:] = [t for t in tracks if t["misses"] <= HOLD_FRAMES * 2]
 
-
-
     # ── DeepFace demography + second-opinion (optional) ────────────────
     _df_cooldowns = {}
     _df_last_boost = {}  # name -> (boosted_conf, verified, dist, ts)
@@ -1197,7 +1226,11 @@ class FaceRecognitionEngine:
             return arcface_conf, None, None
         slug = self._slug(name)
         recent = self._df_last_boost.get(slug)
-        if recent and recent[1] and (time.time() - recent[3]) < DEEPFACE_VERIFY_COOLDOWN * 3:
+        if (
+            recent
+            and recent[1]
+            and (time.time() - recent[3]) < DEEPFACE_VERIFY_COOLDOWN * 3
+        ):
             sim = max(0.0, 1.0 - recent[2])
             fresh = min(0.999, DEEPFACE_MIN_VERIFY + (sim - 0.5) * 0.02)
             return round(fresh, 3), True, recent[2]
@@ -1225,13 +1258,25 @@ class FaceRecognitionEngine:
             verified = sim >= 0.5
             logger.info(
                 "SFace second-opinion %s -> sim=%.4f verified=%s",
-                name, sim, verified,
+                name,
+                sim,
+                verified,
             )
             if verified:
                 boosted = min(0.999, DEEPFACE_MIN_VERIFY + (sim - 0.5) * 0.02)
-                self._df_last_boost[slug] = (boosted, True, round(1.0 - sim, 4), time.time())
+                self._df_last_boost[slug] = (
+                    boosted,
+                    True,
+                    round(1.0 - sim, 4),
+                    time.time(),
+                )
                 return round(boosted, 3), True, round(1.0 - sim, 4)
-            self._df_last_boost[slug] = (arcface_conf, False, round(1.0 - sim, 4), time.time())
+            self._df_last_boost[slug] = (
+                arcface_conf,
+                False,
+                round(1.0 - sim, 4),
+                time.time(),
+            )
             return arcface_conf, False, round(1.0 - sim, 4)
         except Exception as e:
             logger.debug("SFace verify failed: %s", e)

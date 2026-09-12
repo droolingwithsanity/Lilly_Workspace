@@ -4955,6 +4955,92 @@ def _notif_quota_allows(message: str = "") -> bool:
 _load_notif_prefs()
 
 
+# ─── Admin Dashboard — runtime feature toggles ─────────────────────────
+# Persisted to <LILLY_WORKSPACE>/data/admin_features.json (a mounted volume)
+# so toggles survive restarts, and applied live so they take effect at once.
+_ADMIN_FEATURES_FILE = (
+    Path(os.environ.get("LILLY_WORKSPACE", str(WORKSPACE)))
+    / "data"
+    / "admin_features.json"
+)
+_ADMIN_FEATURES_DEFAULTS: dict = {
+    "face_osint": {
+        "enabled": True,
+        "description": "Reverse-face search of unknown people (Yandex URL-flow).",
+    },
+    "face_auto_learn": {
+        "enabled": True,
+        "description": "Auto-enroll familiar faces after repeated sightings.",
+    },
+    "proactive_alerts": {
+        "enabled": True,
+        "description": "Avatar-initiated notification pings (phone).",
+    },
+    "vision_boxes_default": {
+        "enabled": True,
+        "description": "Default for drawing detection boxes on the overlay.",
+    },
+}
+_ADMIN_FEATURES: dict = {
+    k: {"enabled": bool(v["enabled"]), "description": v["description"]}
+    for k, v in _ADMIN_FEATURES_DEFAULTS.items()
+}
+
+
+def _load_admin_features() -> None:
+    global _ADMIN_FEATURES
+    try:
+        if _ADMIN_FEATURES_FILE.exists():
+            data = json.loads(_ADMIN_FEATURES_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for name in _ADMIN_FEATURES:
+                    if name in data:
+                        _ADMIN_FEATURES[name]["enabled"] = bool(data[name])
+    except Exception:
+        pass
+
+
+def _save_admin_features() -> None:
+    try:
+        _ADMIN_FEATURES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {k: bool(v["enabled"]) for k, v in _ADMIN_FEATURES.items()}
+        _ADMIN_FEATURES_FILE.write_text(json.dumps(payload, indent=2))
+    except Exception:
+        pass
+
+
+def _apply_feature(name: str) -> None:
+    enabled = bool(_ADMIN_FEATURES.get(name, {}).get("enabled"))
+    try:
+        if name == "face_osint":
+            from osint_face_lookup import set_runtime_enabled
+
+            set_runtime_enabled(enabled)
+            logger.info(f"[admin] face_osint runtime -> {enabled}")
+        elif name == "face_auto_learn":
+            from face_identity import set_runtime_auto_learn
+
+            set_runtime_auto_learn(enabled)
+            logger.info(f"[admin] face_auto_learn runtime -> {enabled}")
+        elif name == "proactive_alerts":
+            _NOTIF_PREFS["proactive"] = enabled
+            if enabled:
+                _NOTIF_PREFS["paused"] = False
+            _save_notif_prefs()
+            logger.info(f"[admin] proactive_alerts -> {enabled}")
+    except Exception as e:
+        logger.warning(f"apply feature '{name}' failed: {e}")
+
+
+def _apply_all_features() -> None:
+    for k in _ADMIN_FEATURES:
+        _apply_feature(k)
+
+
+_load_admin_features()
+_apply_all_features()
+
+
 async def proactive_notify(message: str, archetype: Archetype, next_step: str = ""):
     """Send a proactive suggestion as a notification with appropriate priority.
 
@@ -18705,6 +18791,67 @@ async def admin_check(request: Request):
     return {"admin": is_admin, "email": email}
 
 
+async def _admin_request_ok(request: Request) -> bool:
+    """Shared admin gate for dashboard endpoints (dev mode: always OK)."""
+    if not AUTH_AVAILABLE:
+        return True
+    try:
+        user = await get_current_user(request)
+        if not user:
+            return False
+        return (
+            user.get("email", "") or ""
+        ).strip().lower() == ADMIN_EMAIL.strip().lower()
+    except Exception:
+        return False
+
+
+@app.get("/api/admin/features")
+async def admin_get_features(request: Request):
+    """List dashboard feature toggles + current runtime state."""
+    if not await _admin_request_ok(request):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+    try:
+        from osint_face_lookup import is_enabled as _osint_enabled
+    except Exception:
+        _osint_enabled = None
+    try:
+        from face_identity import auto_learn_enabled as _auto_learn_enabled
+    except Exception:
+        _auto_learn_enabled = None
+    return {
+        "ok": True,
+        "features": _ADMIN_FEATURES,
+        "runtime": {
+            "face_osint_live": _osint_enabled() if _osint_enabled else None,
+            "face_auto_learn_live": _auto_learn_enabled()
+            if _auto_learn_enabled
+            else None,
+            "notif_proactive": _NOTIF_PREFS.get("proactive", True),
+            "notif_paused": _NOTIF_PREFS.get("paused", False),
+        },
+    }
+
+
+@app.put("/api/admin/features")
+async def admin_put_feature(request: Request):
+    """Set a feature toggle (persisted + applied live)."""
+    if not await _admin_request_ok(request):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    name = (body.get("name") or "").strip()
+    enabled = bool(body.get("enabled"))
+    if name not in _ADMIN_FEATURES:
+        return JSONResponse({"error": f"unknown feature '{name}'"}, status_code=400)
+    _ADMIN_FEATURES[name]["enabled"] = enabled
+    _save_admin_features()
+    _apply_feature(name)
+    return {"ok": True, "name": name, "enabled": enabled}
+
+
 @app.post("/api/admin/shell")
 async def admin_shell(request: Request):
     """Execute a shell command (admin only). Returns stdout + stderr."""
@@ -23212,6 +23359,144 @@ async def api_face_confirm(request: Request):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# ─── Admin dashboard — face management helpers ────────────────────────
+
+
+@app.post("/api/faces/rename")
+async def api_face_rename(request: Request):
+    """Rename a known face, keeping all collected embeddings."""
+    if not await _admin_request_ok(request):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    name = (body.get("name") or "").strip()
+    new_name = (body.get("new_name") or "").strip()
+    if not name or not new_name:
+        return JSONResponse({"error": "name and new_name required"}, status_code=400)
+    try:
+        from face_recognition_engine import get_face_engine
+
+        ok = get_face_engine().rename_known_face(name, new_name)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    if not ok:
+        return JSONResponse(
+            {
+                "error": f"rename failed — '{name}' unknown or '{new_name}' already exists"
+            },
+            status_code=400,
+        )
+    return {"ok": True, "name": new_name}
+
+
+@app.post("/api/faces/enroll/from-frame")
+async def api_face_enroll_from_frame(request: Request):
+    """Enroll the most recent camera frame as a known face.
+
+    Uses the last frame posted to /api/vision/browser (phone overlay or
+    browser camera button). Ideal for registering a person the camera just
+    captured.
+    """
+    if not await _admin_request_ok(request):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+    try:
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    if not name:
+        return JSONResponse({"error": "name required"}, status_code=400)
+    if not _browser_vision_frame_b64:
+        return JSONResponse(
+            {"error": "no camera frame yet — capture one first"}, status_code=404
+        )
+    try:
+        import numpy as _np
+
+        cv2 = _try_import_cv2()
+        if cv2 is None:
+            return JSONResponse(
+                status_code=500, content={"error": "opencv unavailable"}
+            )
+        raw = base64.b64decode(_browser_vision_frame_b64.split(",", 1)[-1])
+        frameb = _np.frombuffer(raw, dtype=_np.uint8)
+        frame = cv2.imdecode(frameb, cv2.IMREAD_COLOR)
+        if frame is None:
+            return JSONResponse(status_code=400, content={"error": "frame undecodable"})
+        from face_recognition_engine import get_face_engine
+
+        engine = get_face_engine()
+        faces = engine.detect_faces(frame)
+        if not faces:
+            return JSONResponse(
+                status_code=400, content={"error": "no face detected in frame"}
+            )
+        largest = max(faces, key=lambda f: f["w"] * f["h"])
+        ok = engine.add_known_face(name, frame, largest, source="frame")
+        if not ok:
+            return JSONResponse(status_code=500, content={"error": "enrollment failed"})
+        return {"ok": True, "name": name, "message": f"Enrolled {name} from frame."}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/faces/sightings")
+async def api_face_sightings(request: Request):
+    """Recent identity sightings with small inline face-crop thumbnails
+    (for the Admin dashboard's register-from-sighting flow)."""
+    if not await _admin_request_ok(request):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+    try:
+        limit = int(request.query_params.get("limit", 20))
+    except Exception:
+        limit = 20
+    limit = max(1, min(limit, 50))
+    try:
+        from face_identity import recent_events, get_crop
+
+        events = recent_events(limit)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    try:
+        import numpy as _np
+
+        cv2 = _try_import_cv2()
+    except Exception:
+        cv2 = None
+    out = []
+    for e in events:
+        item = dict(e)
+        crop = None
+        try:
+            crop = get_crop(e.get("face_id", ""))
+        except Exception:
+            crop = None
+        if crop and cv2 is not None:
+            try:
+                buf = _np.frombuffer(crop, dtype=_np.uint8)
+                img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                if img is not None:
+                    h, w = img.shape[:2]
+                    max_side = 280
+                    if max(h, w) > max_side:
+                        scale = max_side / float(max(h, w))
+                        img = cv2.resize(img, (int(w * scale), int(h * scale)))
+                    ok_jpg, enc = cv2.imencode(
+                        ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80]
+                    )
+                    if ok_jpg:
+                        item["crop_b64"] = (
+                            "data:image/jpeg;base64,"
+                            + base64.b64encode(enc.tobytes()).decode()
+                        )
+            except Exception:
+                pass
+        out.append(item)
+    return {"ok": True, "events": out}
+
+
 # ─── Footprint dossiers (autonomous reports) ────────────────────────
 
 
@@ -25024,41 +25309,72 @@ pre{position:relative;overflow-x:auto}
 #pipContainer .dot{position:absolute;top:4px;right:4px;width:6px;height:6px;border-radius:50%;background:#4caf50;box-shadow:0 0 4px rgba(76,175,80,0.6)}
 #pipContainer .pip-resize{position:absolute;bottom:0;right:0;width:16px;height:16px;cursor:nwse-resize;opacity:0.4;z-index:3}
 #pipContainer .pip-resize::after{content:'';position:absolute;bottom:2px;right:2px;width:8px;height:8px;border-right:2px solid rgba(255,255,255,0.7);border-bottom:2px solid rgba(255,255,255,0.7)}
-/* ─── Camera Window (multi-feed panel) ─── */
-#cameraWindow{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100;display:none;width:min(96vw,960px);height:min(90vh,680px);border-radius:16px;overflow:hidden;border:2px solid rgba(255,255,255,0.35);box-shadow:0 12px 60px rgba(0,0,0,0.6),0 0 0 1px rgba(139,122,158,0.2);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);background:rgba(12,8,20,0.92);flex-direction:column;resize:both;touch-action:none;transition:width 0.3s ease,height 0.3s ease,border-radius 0.3s ease}
-#cameraWindow.cw-minimized{width:280px;height:44px;resize:none;border-radius:12px;overflow:hidden}
+/* ─── Camera Window — "Lilly Eye" range-finder ─── */
+#cameraWindow{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100;display:none;width:min(96vw,960px);height:min(90vh,680px);border-radius:16px;overflow:hidden;border:1px solid rgba(255,255,255,.15);box-shadow:0 24px 80px -24px rgba(0,0,0,.75),0 0 0 1px rgba(0,0,0,.4);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);background:#131920;flex-direction:column;resize:both;touch-action:none;transition:width .3s ease,height .3s ease,border-radius .3s ease}
+#cameraWindow.cw-minimized{width:280px;height:46px;resize:none;border-radius:12px;overflow:hidden}
 #cameraWindow.cw-minimized .cw-grid,#cameraWindow.cw-minimized .cw-desc,#cameraWindow.cw-minimized .cw-status-bar{display:none}
 #cameraWindow.cw-maximized{width:100vw!important;height:calc(100vh - 60px)!important;top:30px;left:0;transform:none;border-radius:0}
-#cameraWindow .cw-header{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:linear-gradient(135deg,rgba(30,20,50,0.9),rgba(20,15,35,0.95));border-bottom:1px solid rgba(255,255,255,0.08);cursor:move;user-select:none;flex-shrink:0}
-#cameraWindow .cw-header-left{display:flex;align-items:center;gap:8px}
-#cameraWindow .cw-title{font-size:12px;font-weight:600;color:#d4c4e8;display:flex;align-items:center;gap:6px}
-#cameraWindow .cw-title .dot{width:7px;height:7px;border-radius:50%;background:#4caf50;box-shadow:0 0 6px rgba(76,175,80,0.7);animation:pulse 2s infinite}
-#cameraWindow .cw-window-controls{display:flex;gap:6px;align-items:center}
-#cameraWindow .cw-win-btn{width:28px;height:28px;border:none;border-radius:8px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.5);font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.2s}
-#cameraWindow .cw-win-btn:hover{background:rgba(255,255,255,0.15);color:#fff}
-#cameraWindow .cw-win-btn.cw-close:hover{background:rgba(232,90,110,0.6);color:#fff}
-#cameraWindow .cw-win-btn.cw-minimize:hover{background:rgba(255,193,7,0.4)}
-#cameraWindow .cw-win-btn.cw-maximize:hover{background:rgba(50,200,120,0.4)}
-#cameraWindow .cw-win-btn.active{background:rgba(50,200,120,0.25);border-color:rgba(50,200,120,0.4);color:#32c878}
-#cameraWindow .cw-controls{display:flex;gap:5px;margin-left:12px}
-#cameraWindow .cw-control-btn{padding:5px 10px;border:1px solid rgba(255,255,255,0.15);border-radius:6px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.5);font-size:10px;cursor:pointer;display:flex;align-items:center;gap:4px;transition:all 0.2s;font-weight:500}
-#cameraWindow .cw-control-btn:hover{background:rgba(255,255,255,0.15);color:rgba(255,255,255,0.8)}
-#cameraWindow .cw-control-btn.active{background:rgba(50,200,120,0.25);border-color:rgba(50,200,120,0.5);color:#32c878}
-#cameraWindow .cw-control-btn .icon{font-size:12px}
-#cameraWindow .cw-mode-sep{width:1px;height:20px;background:rgba(255,255,255,0.15);margin:0 2px}
-#cameraWindow .cw-mode-btn{font-size:9.5px;letter-spacing:0.2px;white-space:nowrap}
-#cameraWindow .cw-mode-btn.active{background:rgba(80,140,255,0.25);border-color:rgba(80,140,255,0.5);color:#7aa8ff}
+#cameraWindow .cw-header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 12px;height:46px;background:linear-gradient(180deg,rgba(255,255,255,.032),rgba(255,255,255,0));border-bottom:1px solid rgba(255,255,255,.08);cursor:move;user-select:none;flex-shrink:0}
+#cameraWindow .cw-header-left{display:flex;align-items:center;gap:10px;min-width:0}
+#cameraWindow .cw-title{font:600 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.18em;color:#e8edf4;display:flex;align-items:center;gap:8px;text-transform:uppercase;white-space:nowrap}
+#cameraWindow .cw-title .dot{width:7px;height:7px;border-radius:50%;background:#ffb454;box-shadow:0 0 8px rgba(255,180,84,.55);animation:pulse 2s infinite;flex:0 0 auto}
+#cameraWindow .cw-window-controls{display:flex;gap:5px;align-items:center}
+#cameraWindow .cw-win-btn{width:28px;height:28px;border:none;border-radius:8px;background:rgba(255,255,255,.05);color:rgba(141,153,173,.85);font-size:13px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
+#cameraWindow .cw-win-btn:hover{background:rgba(255,255,255,.12);color:#fff}
+#cameraWindow .cw-win-btn.cw-close:hover{background:rgba(255,107,107,.45);color:#fff}
+#cameraWindow .cw-win-btn.cw-minimize:hover{background:rgba(255,193,7,.35)}
+#cameraWindow .cw-win-btn.cw-maximize:hover{background:rgba(94,162,255,.3)}
+#cameraWindow .cw-win-btn.cw-fs{font-size:15px;letter-spacing:-1px}
+#cameraWindow .cw-win-btn.cw-fs.sel{background:rgba(255,180,84,.16);color:#ffb454}
+#cameraWindow .cw-win-btn.active{background:rgba(255,180,84,.16);color:#ffb454}
+#cameraWindow .cw-controls{display:flex;gap:4px;align-items:center}
+#cameraWindow .cw-control-btn{padding:5px 9px;border:1px solid rgba(255,255,255,.12);border-radius:8px;background:rgba(255,255,255,.04);color:rgba(141,153,173,.9);font-size:10px;cursor:pointer;display:flex;align-items:center;gap:5px;transition:all .15s;font-weight:500;letter-spacing:.06em;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+#cameraWindow .cw-control-btn:hover{background:rgba(255,255,255,.09);color:#e8edf4}
+#cameraWindow .cw-control-btn.active{background:rgba(255,180,84,.12);border-color:rgba(255,180,84,.35);color:#ffb454}
+#cameraWindow .cw-control-btn .icon{font-size:11px}
+#cameraWindow .cw-mode-sep{width:1px;height:20px;background:rgba(255,255,255,.12);margin:0 4px}
+#cameraWindow .cw-mode-btn{font-size:9px;letter-spacing:.12em}
+#cameraWindow .cw-mode-btn.active{background:rgba(94,162,255,.14);border-color:rgba(94,162,255,.4);color:#5ea2ff}
 .alert-obj-btn{padding:6px 10px;border:1px solid rgba(139,122,158,0.3);border-radius:8px;background:rgba(255,255,255,0.5);color:rgba(93,78,109,0.6);font-size:11px;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:4px}
 .alert-obj-btn:hover{background:rgba(139,122,158,0.15)}
 .alert-obj-btn.active{background:rgba(50,200,120,0.15);border-color:rgba(50,200,120,0.4);color:#32c878}
-#cameraWindow .cw-grid{display:grid;grid-template-columns:1fr;gap:0;padding:6px;flex:1;min-height:0}
-#cameraWindow .cw-feed{position:relative;border-radius:12px;overflow:hidden;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;min-height:0;width:100%;height:100%}
+#cameraWindow .cw-grid{display:grid;grid-template-columns:1fr;gap:0;padding:4px;flex:1;min-height:0;background:#0a0e13}
+#cameraWindow .cw-feed{position:relative;border-radius:12px;overflow:hidden;background:#0a0e13;border:1px solid rgba(255,255,255,.09);display:flex;align-items:center;justify-content:center;min-height:0;width:100%;height:100%}
 #cameraWindow .cw-feed img{width:100%;height:100%;object-fit:contain;display:block;background:#000}
-#cameraWindow .cw-feed .cw-feed-label{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,0.7));color:rgba(255,255,255,0.8);font-size:10px;padding:6px 10px;text-align:left;backdrop-filter:blur(4px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500}
-#cameraWindow .cw-feed .cw-feed-dot{position:absolute;top:8px;right:8px;width:8px;height:8px;border-radius:50%;background:#4caf50;box-shadow:0 0 6px rgba(76,175,80,0.7);animation:pulse 2s infinite}
-#cameraWindow .cw-feed .cw-feed-placeholder{color:rgba(147,130,168,0.3);font-size:12px;text-align:center;padding:16px;font-weight:500}
-#cameraWindow .cw-status-bar{display:flex;align-items:center;justify-content:space-between;padding:6px 14px;background:rgba(0,0,0,0.3);border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0;gap:12px}
-#cameraWindow .cw-desc{padding:0;font-size:10px;color:rgba(147,130,168,0.6);text-align:right;border:none;flex:1;max-height:none;overflow:hidden;text-overflow:ellipsis}
+#cameraWindow .cw-feed .cw-feed-label{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,.75));color:rgba(232,237,244,.85);font-size:10px;padding:7px 12px;text-align:left;backdrop-filter:blur(4px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500;letter-spacing:.04em}
+#cameraWindow .cw-feed .cw-feed-dot{position:absolute;top:10px;right:10px;width:8px;height:8px;border-radius:50%;background:#ffb454;box-shadow:0 0 8px rgba(255,180,84,.7);animation:pulse 2s infinite;display:none}
+#cameraWindow .cw-feed .cw-feed-placeholder{color:rgba(141,153,173,.45);font-size:12px;text-align:center;padding:16px;font-weight:500;letter-spacing:.03em}
+#cameraWindow .cw-status-bar{display:flex;align-items:center;justify-content:space-between;padding:7px 14px;background:rgba(0,0,0,.35);border-top:1px solid rgba(255,255,255,.07);flex-shrink:0;gap:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+#cameraWindow .cw-desc{padding:0;font-size:10px;color:rgba(141,153,173,.6);text-align:right;border:none;flex:1;max-height:none;overflow:hidden;text-overflow:ellipsis;letter-spacing:.03em}
+#cameraWindow .cw-stat{font-size:9px;color:rgba(141,153,173,.75);letter-spacing:.14em;text-transform:uppercase;white-space:nowrap}
+#cameraWindow .cw-stat b{color:#e8edf4;font-weight:500}
+#cameraWindow .cw-stat b.acc{color:#ffb454}
+/* viewfinder corners — the signature */
+#cameraWindow .cw-vf{position:absolute;pointer-events:none;top:10px;right:10px;bottom:10px;left:10px;z-index:3}
+#cameraWindow .cw-vf i{position:absolute;width:18px;height:18px;border:1.5px solid rgba(255,255,255,.5)}
+#cameraWindow .cw-vf .tl{top:0;left:0;border-right:none;border-bottom:none;border-top-left-radius:5px}
+#cameraWindow .cw-vf .tr{top:0;right:0;border-left:none;border-bottom:none;border-top-right-radius:5px}
+#cameraWindow .cw-vf .bl{bottom:0;left:0;border-right:none;border-top:none;border-bottom-left-radius:5px}
+#cameraWindow .cw-vf .br{bottom:0;right:0;border-left:none;border-top:none;border-bottom-right-radius:5px}
+#cameraWindow .cw-vf .tl,#cameraWindow .cw-vf .br{border-color:rgba(255,180,84,.65)}
+#cameraWindow .cw-vf .tr,#cameraWindow .cw-vf .bl{border-color:rgba(255,255,255,.4)}
+/* context menu (populated by toggleCwMenu) */
+#cameraWindow #cwMenu{position:absolute;top:48px;left:10px;z-index:50;display:none;background:rgba(17,22,29,.96);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:6px;min-width:200px;box-shadow:0 18px 50px -12px rgba(0,0,0,.8)}
+#cameraWindow #cwMenu .cwm-item{padding:8px 10px;cursor:pointer;border-radius:8px;font-size:12px;color:#e8edf4;display:flex;align-items:center;gap:9px}
+#cameraWindow #cwMenu .cwm-item:hover{background:rgba(255,255,255,.07)}
+#cameraWindow #cwMenu .cwm-item.lbl{font-size:8.5px;letter-spacing:.22em;color:rgba(90,101,119,.9);text-transform:uppercase;cursor:default;padding:8px 10px 3px}
+#cameraWindow #cwMenu .cwm-item.lbl:hover{background:none}
+/* fullscreen + landscape rotate (phones) */
+#cameraWindow:fullscreen{width:100vw;height:100vh;border-radius:0;border:none;transform:none;top:0;left:0;right:auto;bottom:auto;resize:none;background:#0a0e13}
+#cameraWindow:fullscreen .cw-header{position:fixed;top:0;left:0;right:0;height:42px;z-index:6;background:rgba(10,14,19,.7);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,.07)}
+#cameraWindow:fullscreen .cw-grid{padding:0}
+#cameraWindow:fullscreen .cw-feed{border-radius:0;border:none}
+#cameraWindow:fullscreen .cw-status-bar{position:fixed;bottom:0;left:0;right:0;z-index:6;background:rgba(10,14,19,.7);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-top:1px solid rgba(255,255,255,.07)}
+#cameraWindow:fullscreen .cw-window-controls .cw-win-btn{width:32px;height:32px}
+@media (max-width:560px){
+  #cameraWindow .cw-controls{flex-wrap:wrap}
+  #cameraWindow .cw-mode-sep{display:none}
+}
 /* ─── Blink 2FA Input ─── */
 #cwBlink2fa input:focus{outline:none;border-color:rgba(232,90,110,0.5);box-shadow:0 0 8px rgba(232,90,110,0.2)}
 #cwBlink2fa input::placeholder{color:rgba(93,78,109,0.3);letter-spacing:1px}
@@ -25920,7 +26236,7 @@ pre{position:relative;overflow-x:auto}
   <div class="pip-resize" id="pipResize"></div>
 </div>
 
-<!-- Camera Window (single big panel with window controls) -->
+<!-- Camera Window — "Lilly Eye" range-finder -->
 <div id="cameraWindow">
   <div class="cw-header">
     <div class="cw-header-left">
@@ -25930,33 +26246,35 @@ pre{position:relative;overflow-x:auto}
           <span class="icon">▢</span> YOLO
         </button>
         <button id="cwFaceToggle" class="cw-control-btn" onclick="toggleFaceRecognition()" title="Toggle face recognition">
-          <span class="icon">👤</span> Faces
+          <span class="icon">👤</span> FACES
         </button>
         <button id="cwIdsToggle" class="cw-control-btn" onclick="toggleFacesPanel()" title="Who is recognized — alerts, evidence, remember">
-          <span class="icon">👁</span> IDs
+          <span class="icon">👁</span> IDS
         </button>
         <button id="cwSoundToggle" class="cw-control-btn" onclick="toggleYoloSound()" title="Toggle sound alerts">
-          <span class="icon">🔊</span> Sound
+          <span class="icon">🔊</span> SOUND
         </button>
         <button id="cwGpuToggle" class="cw-control-btn active" onclick="toggleGpuMode()" title="Toggle GPU-accelerated webcam (WebGL)">
           <span class="icon">⚡</span> GPU
         </button>
         <span class="cw-mode-sep"></span>
         <button id="cwModeAuto"  class="cw-control-btn cw-mode-btn active" onclick="setVisionMode('auto')" title="Auto — Lilly picks the mode from the scene">🔄 AUTO</button>
-        <button id="cwModeWalk"  class="cw-control-btn cw-mode-btn" onclick="setVisionMode('walking')" title="Walking mode — people, bikes, curbs, nearby traffic">🚶 Walk</button>
-        <button id="cwModeDrive" class="cw-control-btn cw-mode-btn" onclick="setVisionMode('driving')" title="Driving mode — traffic lights, signs, cars, distance + speed">🚗 Drive</button>
-        <button id="cwModeStop"  class="cw-control-btn cw-mode-btn" onclick="setVisionMode('stationary')" title="Stationary mode — people + animals around you">🚥 Still</button>
+        <button id="cwModeWalk"  class="cw-control-btn cw-mode-btn" onclick="setVisionMode('walking')" title="Walking mode — people, bikes, curbs, nearby traffic">🚶 WALK</button>
+        <button id="cwModeDrive" class="cw-control-btn cw-mode-btn" onclick="setVisionMode('driving')" title="Driving mode — traffic lights, signs, cars, distance + speed">🚗 DRIVE</button>
+        <button id="cwModeStop"  class="cw-control-btn cw-mode-btn" onclick="setVisionMode('stationary')" title="Stationary mode — people + animals around you">🚥 STILL</button>
       </div>
     </div>
     <div class="cw-window-controls">
+      <button id="cwFsBtn" class="cw-win-btn cw-fs" onclick="fsCameraWindow()" title="Fullscreen + rotate phone to landscape">⛶</button>
       <button class="cw-win-btn cw-minimize" onclick="minimizeCameraWindow()" title="Minimize">─</button>
-      <button class="cw-win-btn cw-maximize" onclick="maximizeCameraWindow()" title="Maximize">□</button>
+      <button class="cw-win-btn cw-maximize" onclick="maximizeCameraWindow()" title="Maximize window">□</button>
       <button class="cw-win-btn cw-close" onclick="closeCameraWindow()" title="Close">✕</button>
     </div>
   </div>
-  <div id="cwMenu" style="display:none;position:absolute;top:44px;left:10px;z-index:50;background:rgba(20,16,28,.96);border:1px solid rgba(184,169,201,.4);border-radius:10px;padding:6px;min-width:190px;box-shadow:0 8px 24px rgba(0,0,0,.5)"></div>
+  <div id="cwMenu"></div>
   <div class="cw-grid">
     <div class="cw-feed" id="cwWebcam" title="Click for menu · drop an image to analyze">
+      <div class="cw-vf"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
       <div class="cw-feed-placeholder">Click camera button to start feed · or drop an image here</div>
       <img id="cwWebcamImg" style="display:none" alt="Camera Feed">
       <canvas id="cwOverlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2;border-radius:8px"></canvas>
@@ -25965,11 +26283,12 @@ pre{position:relative;overflow-x:auto}
     </div>
   </div>
   <div class="cw-status-bar" id="cwStatusBar">
-    <span id="cwFaceStatus" style="color:rgba(147,130,168,0.6);font-size:10px">Faces: 0</span>
-    <span id="cwYoloStatus" style="color:rgba(147,130,168,0.6);font-size:10px;margin-left:12px">YOLO: active</span>
+    <span class="cw-stat" id="cwModeReadout">AUTO</span>
+    <span class="cw-stat" id="cwFaceStatus">FACES 0</span>
+    <span class="cw-stat" id="cwYoloStatus">YOLO · ACTIVE</span>
     <span class="cw-desc" id="cwDesc"></span>
   </div>
-  <div id="cwFacesPanel" style="display:none;max-height:220px;overflow-y:auto;padding:8px 10px;border-top:1px solid rgba(184,169,201,0.25);font-size:12px"></div>
+  <div id="cwFacesPanel" style="display:none;max-height:220px;overflow-y:auto;padding:8px 10px;border-top:1px solid rgba(255,255,255,.1);font-size:12px"></div>
 </div>
 
 <div id="chatContainer">
@@ -28283,6 +28602,58 @@ function maximizeCameraWindow(){
   }
 }
 
+// ─── Fullscreen + landscape rotate (phones) ─────────────────────────
+// Takes the camera window to browser fullscreen and locks the screen
+// orientation to landscape so the feed gets the widest view on a phone.
+// Tracking/vision logic is untouched — this only changes viewport chrome.
+function fsCameraWindow(){
+  const cw = document.getElementById('cameraWindow');
+  if(!cw) return;
+  if(document.fullscreenElement || document.webkitFullscreenElement){
+    try{ if(screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); }catch(e){}
+    try{
+      if(document.exitFullscreen) document.exitFullscreen();
+      else if(document.webkitExitFullscreen) document.webkitExitFullscreen();
+    }catch(e){}
+    return;
+  }
+  const enter = () => {
+    if(cw.requestFullscreen) return cw.requestFullscreen({navigationUI:'hide'});
+    if(cw.webkitRequestFullscreen) return new Promise((res,rej)=>cw.webkitRequestFullscreen(res));
+    if(cw.mozRequestFullScreen) return cw.mozRequestFullScreen();
+    return Promise.reject(new Error('fullscreen-unsupported'));
+  };
+  enter().then(()=>{
+    setTimeout(async ()=>{
+      try{
+        if(screen.orientation && screen.orientation.lock){
+          await screen.orientation.lock('landscape');
+        } else if(/Android|iPhone|iPad/i.test(navigator.userAgent||'')){
+          addChatMessage('system','Rotate your phone to landscape for the wide view');
+        }
+      }catch(e){
+        if(/Android|iPhone|iPad/i.test(navigator.userAgent||''))
+          addChatMessage('system','Rotate your phone to landscape for the wide view');
+      }
+    },150);
+  }).catch(()=>{
+    addChatMessage('system','Fullscreen is not supported on this browser');
+  });
+}
+document.addEventListener('fullscreenchange', ()=>{
+  const cw = document.getElementById('cameraWindow');
+  if(!cw) return;
+  const btn = document.getElementById('cwFsBtn');
+  const on = document.fullscreenElement === cw || document.webkitFullscreenElement === cw;
+  if(btn){
+    if(on){ btn.classList.add('sel'); btn.title='Exit fullscreen (back to portrait)'; }
+    else { btn.classList.remove('sel'); btn.title='Fullscreen + rotate phone to landscape'; }
+  }
+  if(!on){
+    try{ if(screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); }catch(e){}
+  }
+});
+
 // ─── Blink 2FA Handling ────────────────────────────────────────
 let _cwBlinkCountdownTimer = null;
 
@@ -28719,6 +29090,8 @@ function setVisionMode(mode){
     const b = document.getElementById(id);
     if(b) b.classList.toggle('active', m === mode);
   }
+  const md = document.getElementById('cwModeReadout');
+  if(md) md.textContent = (_MODE_META[mode] || _MODE_META.auto).name;
   addChatMessage('system', 'Vision mode: ' + (_MODE_META[mode] || _MODE_META.auto).icon + ' ' + (_MODE_META[mode] || _MODE_META.auto).name);
 }
 function _initVisionMode(){
@@ -30123,18 +30496,32 @@ function toggleCwMenu(){
   const menu = document.getElementById('cwMenu');
   if(!menu) return;
   if(menu.style.display === 'block'){ menu.style.display = 'none'; return; }
-  const items = [
-    ['👤 Faces on/off', ()=>toggleFaceRecognition()],
-    ['👁 IDs (who + evidence)', ()=>{ if(!_cwFacesOpen) toggleFacesPanel(); }],
-    ['📝 Enroll this frame', ()=>enrollFaceFromWindow()],
-    ['🔍 Analyze this frame', ()=>analyzeWindowFrame()],
-    ['─ Minimize', ()=>minimizeCameraWindow()],
-    ['□ Maximize', ()=>maximizeCameraWindow()],
-    ['✕ Close', ()=>closeCameraWindow()],
+  const groups = [
+    {label:'View', items:[
+      ['⛶ Fullscreen + landscape', ()=>fsCameraWindow()],
+      ['▢ Detection boxes', ()=>toggleYoloBoxes()],
+      ['👤 Faces on/off', ()=>toggleFaceRecognition()],
+      ['👁 IDs (who + evidence)', ()=>{ if(!_cwFacesOpen) toggleFacesPanel(); }],
+    ]},
+    {label:'This frame', items:[
+      ['📝 Enroll face from frame', ()=>enrollFaceFromWindow()],
+      ['🔍 Analyze this frame', ()=>analyzeWindowFrame()],
+    ]},
+    {label:'Window', items:[
+      ['─ Minimize', ()=>minimizeCameraWindow()],
+      ['□ Maximize', ()=>maximizeCameraWindow()],
+      ['✕ Close', ()=>closeCameraWindow()],
+    ]},
   ];
-  menu.innerHTML = items.map((it,i)=>'<div data-mi="'+i+'" style="padding:7px 10px;cursor:pointer;border-radius:6px;font-size:13px;color:#e6dcf5" onmouseover="this.style.background=\'rgba(139,122,158,.25)\'" onmouseout="this.style.background=\'\'">'+it[0]+'</div>').join('');
+  menu.innerHTML = groups.map(g=>
+    '<div class="cwm-item lbl">'+g.label+'</div>' +
+    g.items.map(it=>'<div class="cwm-item" data-mi="'+encodeURIComponent(it[0])+'">'+it[0]+'</div>').join('')
+  ).join('');
   menu.querySelectorAll('[data-mi]').forEach(el=>{
-    el.onclick = ()=>{ menu.style.display='none'; items[+el.dataset.mi][1](); };
+    el.onclick = ()=>{
+      menu.style.display = 'none';
+      for(const g of groups) for(const it of g.items){ if(it[0]===decodeURIComponent(el.dataset.mi)){ it[1](); return; } }
+    };
   });
   menu.style.display = 'block';
 }
@@ -33986,6 +34373,24 @@ async def serve_wiki():
     page_path = WORKSPACE / "wiki.html"
     if not page_path.exists():
         return Response("Wiki page not found", status_code=404, media_type="text/html")
+    content = page_path.read_text(encoding="utf-8")
+    return Response(
+        content=content,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@app.get("/admin")
+async def serve_admin_dashboard():
+    """Serve the Admin Dashboard page (feature toggles, faces, users/devices)."""
+    page_path = WORKSPACE / "admin.html"
+    if not page_path.exists():
+        return Response("Admin page not found", status_code=404, media_type="text/html")
     content = page_path.read_text(encoding="utf-8")
     return Response(
         content=content,

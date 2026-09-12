@@ -111,3 +111,18 @@ lilly-app/options/figranium/data/
 # App-regenerated skills config (re-synced by deploy.sh)
 lilly_skills.json
 *.bak
+
+# Runtime data / local artifacts (not source)
+*.jsonl
+conversation_history*.jsonl
+session_history/
+user_facts.json
+alerts.json
+avatar_tasks.json
+.proximity_greeting.json
+notif_prefs.json
+*.pt
+training_data/
+weights/
+test_real_world.jpg
+hitomi-android/

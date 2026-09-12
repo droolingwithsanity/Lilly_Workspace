@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lilly Admin Dashboard</title>
+<style>
+  :root{
+    --bg:#14111c; --panel:#1e1826; --panel2:#241d31; --line:#352b47;
+    --txt:#e8e2f4; --dim:#9a8fb5; --acc:#b98aff; --pink:#ff8ac2; --grn:#5fe0a8;
+    --red:#ff7a90; --amb:#ffce73;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  body{background:var(--bg); color:var(--txt); font-family:'Segoe UI',system-ui,sans-serif; min-height:100vh;}
+  a{color:var(--acc); text-decoration:none}
+  .wrap{max-width:1180px; margin:0 auto; padding:20px 16px 60px}
+  header{display:flex; align-items:center; gap:14px; padding:14px 0 18px; border-bottom:1px solid var(--line); margin-bottom:20px; flex-wrap:wrap}
+  header h1{font-size:22px; font-weight:700; letter-spacing:.4px}
+  header h1 span{color:var(--acc)}
+  .badge{font-size:12px; padding:4px 10px; border-radius:20px; border:1px solid var(--line); color:var(--dim)}
+  .badge.ok{color:var(--grn); border-color:var(--grn)}
+  .badge.bad{color:var(--red); border-color:var(--red)}
+  .spacer{flex:1}
+  .btn{background:var(--panel2); border:1px solid var(--line); color:var(--txt); padding:8px 14px; border-radius:8px; cursor:pointer; font-size:13px; transition:.15s}
+  .btn:hover{border-color:var(--acc); color:var(--acc)}
+  .btn.primary{background:var(--acc); border-color:var(--acc); color:#1c1428; font-weight:600}
+  .btn.danger{border-color:var(--red); color:var(--red)}
+  .btn.small{padding:4px 10px; font-size:12px}
+  .cards{display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; margin-bottom:24px}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px 16px}
+  .card .t{font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--dim); margin-bottom:6px}
+  .card .v{font-size:22px; font-weight:700}
+  .card .v small{font-size:12px; color:var(--dim); font-weight:400}
+  .card .sub{font-size:12px; color:var(--dim); margin-top:4px}
+  section{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:20px}
+  section h2{font-size:15px; font-weight:700; margin-bottom:4px; display:flex; align-items:center; gap:8px}
+  section .desc{font-size:12px; color:var(--dim); margin-bottom:14px}
+  .switch-row{display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid var(--line)}
+  .switch-row:last-child{border-bottom:none}
+  .switch-row .lbl{flex:1}
+  .switch-row .lbl b{font-size:14px; display:block}
+  .switch-row .lbl span{font-size:12px; color:var(--dim)}
+  .switch{position:relative; width:44px; height:24px; flex:none}
+  .switch input{opacity:0; width:0; height:0}
+  .slider{position:absolute; inset:0; background:var(--panel2); border:1px solid var(--line); border-radius:20px; transition:.15s; cursor:pointer}
+  .slider::before{content:""; position:absolute; width:16px; height:16px; left:3px; top:3px; background:var(--dim); border-radius:50%; transition:.15s}
+  .switch input:checked + .slider{background:var(--acc); border-color:var(--acc)}
+  .switch input:checked + .slider::before{transform:translateX(20px); background:#1c1428}
+  .live{font-size:11px; color:var(--dim)}
+  .live b{color:var(--grn)}
+  .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:12px}
+  .face{background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:12px; display:flex; flex-direction:column; gap:6px}
+  .face .nm{font-weight:700; font-size:14px; display:flex; align-items:center; gap:8px}
+  .face .meta{font-size:11px; color:var(--dim); line-height:1.5}
+  .face .row{display:flex; gap:6px; flex-wrap:wrap; margin-top:auto}
+  .reg{display:flex; gap:8px; flex-wrap:wrap; align-items:center}
+  .reg input[type=text]{background:var(--panel2); border:1px solid var(--line); color:var(--txt); padding:8px 12px; border-radius:8px; font-size:13px; flex:1; min-width:160px}
+  .reg input[type=file]{font-size:12px; color:var(--dim)}
+  input[type=text]:focus{outline:none; border-color:var(--acc)}
+  .sighting{display:flex; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); align-items:flex-start}
+  .sighting:last-child{border-bottom:none}
+  .sighting img{width:64px; height:64px; object-fit:cover; border-radius:8px; border:1px solid var(--line); background:#000}
+  .sighting .info{flex:1; font-size:13px}
+  .sighting .info .nm{font-weight:700}
+  .sighting .meta{font-size:11px; color:var(--dim); margin-top:2px}
+  .sighting .reg{flex:2}
+  .empty{color:var(--dim); font-size:13px; padding:12px 0}
+  .toast{position:fixed; bottom:20px; right:20px; background:var(--panel2); border:1px solid var(--acc); color:var(--txt); padding:12px 18px; border-radius:10px; font-size:13px; opacity:0; transform:translateY(10px); transition:.2s; z-index:99; max-width:340px}
+  .toast.show{opacity:1; transform:translateY(0)}
+  .toast.err{border-color:var(--red)}
+  .tools{display:flex; gap:8px; flex-wrap:wrap}
+  .tool-btn{background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:12px 14px; cursor:pointer; color:var(--txt); text-align:left; min-width:170px}
+  .tool-btn:hover{border-color:var(--acc)}
+  .tool-btn b{font-size:13px; display:block}
+  .tool-btn span{font-size:11px; color:var(--dim)}
+  .node{display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--line); font-size:13px}
+  .node:last-child{border-bottom:none}
+  .node .st{color:var(--grn)}
+  .node .st.off{color:var(--red)}
+  pre.dump{background:#0e0b14; border:1px solid var(--line); border-radius:8px; padding:12px; font-size:12px; max-height:300px; overflow:auto; margin-top:10px; white-space:pre-wrap; color:var(--dim)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Lilly <span>Admin</span></h1>
+    <span id="authBadge" class="badge">checking…</span>
+    <span class="spacer"></span>
+    <button class="btn" onclick="location.href='/'">← Back to chat</button>
+    <button class="btn" onclick="loadAll()">↻ Refresh</button>
+  </header>
+
+  <div class="cards" id="statusCards">
+    <div class="card"><div class="t">Phone (sensors)</div><div class="v" id="stPhone">…</div><div class="sub" id="stPhoneSub"></div></div>
+    <div class="card"><div class="t">Vision (YOLO)</div><div class="v" id="stVision">…</div><div class="sub" id="stVisionSub"></div></div>
+    <div class="card"><div class="t">Registered people</div><div class="v" id="stFaces">…</div><div class="sub">known faces enrolled</div></div>
+    <div class="card"><div class="t">Devices / nodes</div><div class="v" id="stNodes">…</div><div class="sub" id="stNodesSub"></div></div>
+  </div>
+
+  <section id="featSec">
+    <h2>⚙ Feature toggles</h2>
+    <div class="desc">Persisted instantly; applied without a restart.</div>
+    <div id="featList"></div>
+  </section>
+
+  <section id="toolSec">
+    <h2>⌘ Quick actions</h2>
+    <div class="desc">One-click mode switches that use the chat's own endpoints.</div>
+    <div class="tools" id="toolsBox"></div>
+  </section>
+
+  <section>
+    <h2>👤 Known people</h2>
+    <div class="desc">Enrolled faces Lilly will recognize by name.</div>
+    <div class="reg" style="margin-bottom:14px">
+      <input type="text" id="regName" placeholder="Name for this person…">
+      <button class="btn primary" onclick="enrollFromFrame()">📷 Enroll from last camera frame</button>
+      <span style="color:var(--dim); font-size:12px">or</span>
+      <input type="file" id="regFile" accept="image/*">
+      <button class="btn" onclick="enrollFromFile()">🖼 Upload photo</button>
+    </div>
+    <div id="facesGrid" class="grid"></div>
+  </section>
+
+  <section>
+    <h2>📡 Recent sightings</h2>
+    <div class="desc">Unknown faces the camera captured — give one a name to register it. (Also shows OSINT-enriched names.)</div>
+    <div id="sightings"></div>
+  </section>
+
+  <section>
+    <h2>🔌 Devices</h2>
+    <div class="desc">Paired phones and connected web UIs from the broker + node registry.</div>
+    <div id="devices"></div>
+  </section>
+
+  <section>
+    <h2>🩺 Diagnostics</h2>
+    <div class="desc">Raw API results for debugging.</div>
+    <div class="tools" id="diagTools"></div>
+    <pre class="dump" id="diagDump" style="display:none"></pre>
+  </section>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+let admin = false;
+
+function toast(msg, err){
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (err ? ' err' : '');
+  clearTimeout(t._h);
+  t._h = setTimeout(()=> t.className='toast', 2600);
+}
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  let j = null;
+  try { j = await r.json(); } catch(e){}
+  if (!r.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+  return j;
+}
+
+const FEAT_META = {
+  face_osint: 'Reverse-face search of unknown people (Yandex URL-flow).',
+  face_auto_learn: 'Auto-enroll familiar faces after repeated sightings.',
+  proactive_alerts: 'Avatar-initiated notification pings on the phone.',
+  vision_boxes_default: 'Default for drawing detection boxes on the overlay.'
+};
+
+async function loadAll(){
+  await Promise.all([loadStatus(), loadFeatures(), loadFaces(), loadSightings(), loadDevices(), loadTools()]);
+}
+async function loadStatus(){
+  try{
+    const f = await api('/api/admin/features');
+    admin = true;
+    const b = $('#authBadge');
+    b.textContent = 'admin ✓';
+    b.className = 'badge ok';
+    b.title = 'Admin session confirmed.';
+  }catch(e){
+    const b = $('#authBadge');
+    b.textContent = 'admin access required';
+    b.className = 'badge bad';
+    toast('Admin access required – ' + e.message, true);
+  }
+  // Phone
+  try{
+    const r = await fetch('http://100.115.234.87:8099/health');
+    if (r.ok){
+      const j = await r.json();
+      $('#stPhone').textContent = 'online';
+      $('#stPhone').style.color = 'var(--grn)';
+      $('#stPhoneSub').textContent = (j.status || 'ok') + ' · sensor server';
+    }else throw 0;
+  }catch(e){
+    $('#stPhone').textContent = 'offline';
+    $('#stPhone').style.color = 'var(--red)';
+    $('#stPhoneSub').textContent = 'pixel 10 · 100.115.234.87:8099';
+  }
+  // Vision
+  try{
+    const v = await api('/api/vision/status');
+    $('#stVision').textContent = (v.yolo ? 'YOLO ✓' : 'disabled');
+    $('#stVision').style.color = v.yolo ? 'var(--grn)' : 'var(--amb)';
+    $('#stVisionSub').textContent = (v.model || '') + ' · conf ' + (v.confidence ?? '?');
+  }catch(e){
+    $('#stVision').textContent = 'unknown';
+    $('#stVisionSub').textContent = e.message;
+  }
+  // Nodes
+  try{
+    const n = await api('/api/nodes');
+    const arr = Array.isArray(n.nodes) ? n.nodes : [];
+    $('#stNodes').textContent = arr.length;
+    $('#stNodesSub').textContent = arr.map(x => x.name || x.host || x.id).filter(Boolean).slice(0,3).join(', ') || 'no registered nodes';
+  }catch(e){
+    $('#stNodes').textContent = '—';
+    $('#stNodesSub').textContent = 'registry unavailable';
+  }
+}
+async function loadFeatures(){
+  try{
+    const j = await api('/api/admin/features');
+    const box = $('#featList');
+    box.innerHTML = '';
+    for (const [name, f] of Object.entries(j.features || {})){
+      const live = (j.runtime||{});
+      let liveTxt = '';
+      if (name === 'face_osint') liveTxt = live.face_osint_live ? 'live: on' : 'live: off';
+      if (name === 'face_auto_learn') liveTxt = live.face_auto_learn_live ? 'live: on' : 'live: off';
+      if (name === 'proactive_alerts') liveTxt = 'proactive:' + (live.notif_proactive ? 'on' : 'off') + (live.notif_paused ? ' · paused' : '');
+      const row = document.createElement('div');
+      row.className = 'switch-row';
+      row.innerHTML = `
+        <div class="lbl"><b>${name.replace(/_/g,' ')}</b><span>${f.description || ''}</span>
+          ${liveTxt ? `<div class="live">${liveTxt}</div>` : ''}</div>
+        <label class="switch"><input type="checkbox" ${f.enabled ? 'checked' : ''} data-f="${name}"><span class="slider"></span></label>`;
+      box.appendChild(row);
+    }
+    box.querySelectorAll('input[data-f]').forEach(inp => {
+      inp.addEventListener('change', async ()=>{
+        try{
+          await api('/api/admin/features', {
+            method:'PUT', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({name: inp.dataset.f, enabled: inp.checked})
+          });
+          toast(`feature "${inp.dataset.f}" → ${inp.checked ? 'on' : 'off'}`);
+          loadFeatures();
+        }catch(e){ toast('toggle failed: ' + e.message, true); loadFeatures(); }
+      });
+    });
+  }catch(e){ $('#featList').innerHTML = `<div class="empty">${e.message}</div>`; }
+}
+async function loadFaces(){
+  try{
+    const j = await api('/api/faces/list');
+    const arr = Array.isArray(j.faces) ? j.faces : j.faces?.faces || [];
+    $('#stFaces').textContent = arr.length;
+    const grid = $('#facesGrid');
+    grid.innerHTML = arr.length ? '' : '<div class="empty" style="grid-column:1/-1">No known faces yet — register one above.</div>';
+    for (const f of arr){
+      const d = document.createElement('div');
+      d.className = 'face';
+      d.innerHTML = `
+        <div class="nm">${esc(f.name || '?')}</div>
+        <div class="meta">
+          source: ${esc(f.source || 'manual')}<br>
+          samples: ${f.sample_count ?? '?'} · sightings: ${f.sightings ?? '—'}<br>
+          first: ${esc(f.first_seen || '—')} · last: ${esc(f.last_seen || '—')}
+        </div>
+        <div class="row">
+          <input type="text" placeholder="new name" class="rn" style="background:var(--panel);border:1px solid var(--line);color:var(--txt);border-radius:6px;padding:5px 8px;font-size:12px;flex:1;min-width:90px">
+          <button class="btn small" onclick="renameFace('${escJs(f.name)}', this)">rename</button>
+          <button class="btn small danger" onclick="deleteFace('${escJs(f.name)}')">✕</button>
+        </div>`;
+      grid.appendChild(d);
+    }
+  }catch(e){
+    $('#facesGrid').innerHTML = `<div class="empty">faces unavailable: ${e.message}</div>`;
+    $('#stFaces').textContent = '—';
+  }
+}
+async function loadSightings(){
+  const box = $('#sightings');
+  box.innerHTML = '<div class="empty">loading…</div>';
+  try{
+    const j = await api('/api/faces/sightings?limit=20');
+    const evs = Array.isArray(j.events) ? j.events : [];
+    if (!evs.length){ box.innerHTML = '<div class="empty">No sightings yet — show someone to the camera.</div>'; return; }
+    box.innerHTML = '';
+    for (const e of evs){
+      const d = document.createElement('div');
+      d.className = 'sighting';
+      d.innerHTML = `
+        ${e.crop_b64 ? `<img src="${e.crop_b64}" alt="face crop">` : '<img src="" alt="no crop" style="opacity:.15">'}
+        <div class="info">
+          <div class="nm">${esc(e.name || 'unknown')}</div>
+          <div class="meta">${esc(e.source || '')} · conf ${e.confidence != null ? e.confidence : '?'} · ${timeAgo(e.ts)}
+            ${e.remembered ? ' · <b style="color:var(--grn)">remembered</b>' : ''}</div>
+          ${(e.social_accounts && e.social_accounts.length) ? '<div class="meta">socials: ' + e.social_accounts.slice(0,3).join(', ') + '</div>' : ''}
+        </div>
+        <div class="reg">
+          <input type="text" placeholder="remember as…" class="rnm" style="flex:1;min-width:120px">
+          <button class="btn small primary" ${e.remembered ? 'disabled' : ''} onclick="confirmSighting('${escJs(e.face_id || e.id || '')}', this)">remember</button>
+        </div>`;
+      box.appendChild(d);
+    }
+  }catch(e){ box.innerHTML = `<div class="empty">${e.message}</div>`; }
+}
+async function loadDevices(){
+  const box = $('#devices');
+  box.innerHTML = '<div class="empty">loading…</div>';
+  let html = '';
+  try{
+    const n = await api('/api/nodes');
+    const arr = Array.isArray(n.nodes) ? n.nodes : [];
+    html += arr.length
+      ? arr.map(x => `<div class="node"><span>${esc(x.name || x.host || x.id || 'node')}</span><span class="st">${x.online ? 'online' : 'offline'}</span></div>`).join('')
+      : '<div class="empty">No registered nodes.</div>';
+  }catch(e){ html += `<div class="empty">nodes: ${e.message}</div>`; }
+  box.innerHTML = html;
+}
+async function loadTools(){
+  const tools = [
+    ['🧒 Kid mode', 'Socratic learning mode for kids', '/api/child_mode'],
+    ['💬 Conversation mode', 'Switch chat reply style', '/api/conversation_mode'],
+    ['🎙 Microphone', 'Toggle mic streaming', '/api/toggle_mic'],
+    ['📋 Tasks', 'Avatar task queue', '/api/admin/tasks'],
+    ['📜 Logs', 'Recent server log dump', '/api/admin/logs'],
+    ['💾 Sessions', 'Active chat sessions', '/api/admin/sessions'],
+  ];
+  $('#toolsBox').innerHTML = tools.map(([t,d,p]) =>
+    `<button class="tool-btn" onclick="quickAction('${p}')"><b>${t}</b><span>${d}</span></button>`
+  ).join('');
+  $('#diagTools').innerHTML = (
+    ['/api/vision/status','/api/broker/status','/api/phone_status','/api/faces/osint_results']
+  ).map(p => `<button class="tool-btn" onclick="diag('${p}')"><b>${p}</b><span>fetch raw</span></button>`).join('');
+}
+async function quickAction(p){
+  try{
+    const j = await api(p, {method: p.includes('/api/admin/tasks') || p === '/api/admin/logs' ? 'GET' : 'POST'});
+    toast(`ok: ${JSON.stringify(j).slice(0,120)}`);
+    $('#diagDump').textContent = JSON.stringify(j, null, 2);
+    $('#diagDump').style.display = 'block';
+  }catch(e){ toast('action failed: ' + e.message, true); }
+}
+async function diag(p){
+  try{
+    const j = await api(p);
+    const d = $('#diagDump');
+    d.textContent = JSON.stringify(j, null, 2);
+    d.style.display = 'block';
+  }catch(e){ toast('diag failed: ' + e.message, true); }
+}
+async function enrollFromFrame(){
+  const name = $('#regName').value.trim();
+  if (!name) return toast('enter a name first', true);
+  try{
+    const j = await api('/api/faces/enroll/from-frame', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name})
+    });
+    toast('enrolled: ' + name);
+    $('#regName').value = ''; loadFaces();
+  }catch(e){ toast('enroll failed: ' + e.message, true); }
+}
+async function enrollFromFile(){
+  const name = $('#regName').value.trim();
+  const file = $('#regFile').files[0];
+  if (!name) return toast('enter a name first', true);
+  if (!file) return toast('choose a photo first', true);
+  const b64 = await fileToDataURL(file);
+  try{
+    const j = await api('/api/faces/enroll', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name, image_b64: b64})
+    });
+    toast('enrolled: ' + name);
+    $('#regName').value = ''; $('#regFile').value = ''; loadFaces();
+  }catch(e){ toast('enroll failed: ' + e.message, true); }
+}
+async function renameFace(name, btn){
+  const input = btn.parentElement.querySelector('.rn');
+  const newName = input.value.trim();
+  if (!newName) return toast('enter a new name', true);
+  try{
+    await api('/api/faces/rename', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name, new_name: newName})
+    });
+    toast(`renamed → ${newName}`); loadFaces();
+  }catch(e){ toast('rename failed: ' + e.message, true); }
+}
+async function deleteFace(name){
+  if (!confirm(`Delete known face "${name}"?`)) return;
+  try{
+    await api('/api/faces/' + encodeURIComponent(name), {method:'DELETE'});
+    toast('deleted: ' + name); loadFaces();
+  }catch(e){ toast('delete failed: ' + e.message, true); }
+}
+async function confirmSighting(faceId, btn){
+  const input = btn.parentElement.querySelector('.rnm');
+  const name = input.value.trim();
+  if (!faceId) return toast('no face_id on this sighting', true);
+  if (!name) return toast('enter a name to remember them as', true);
+  try{
+    await api('/api/faces/confirm', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({face_id: faceId, name})
+    });
+    toast(`remembered as ${name}`); loadSightings(); loadFaces();
+  }catch(e){ toast('confirm failed: ' + e.message, true); }
+}
+function fileToDataURL(file){
+  return new Promise((res, rej)=>{
+    const r = new FileReader();
+    r.onload = () => res(String(r.result).split(',')[1]);
+    r.onerror = rej; r.readAsDataURL(file);
+  });
+}
+function timeAgo(ts){
+  if (!ts) return '';
+  const s = Math.floor((Date.now()/1000) - ts);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  return Math.floor(s/3600) + 'h ago';
+}
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function escJs(s){ return String(s == null ? '' : s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"'); }
+loadAll();
+</script>
+</body>
+</html>

@@ -37,6 +37,22 @@ FACE_CROP_TTL = float(os.environ.get("FACE_CROP_TTL", "86400"))
 FACE_AUTO_LEARN = os.environ.get("FACE_AUTO_LEARN", "1") == "1"
 FACE_AUTO_LEARN_SIGHTINGS = int(os.environ.get("FACE_AUTO_LEARN_SIGHTINGS", "5"))
 
+# Runtime override (Admin Dashboard toggle) — None means "follow env var".
+_RUNTIME_AUTO_LEARN: bool | None = None
+
+
+def set_runtime_auto_learn(enabled: bool | None) -> None:
+    """Admin-dashboard toggle: override the env-gated auto-learn default."""
+    global _RUNTIME_AUTO_LEARN
+    _RUNTIME_AUTO_LEARN = enabled
+
+
+def auto_learn_enabled() -> bool:
+    if _RUNTIME_AUTO_LEARN is not None:
+        return _RUNTIME_AUTO_LEARN
+    return FACE_AUTO_LEARN
+
+
 _events: deque = deque(maxlen=FACE_IDENTITY_MAX)
 _last_alert: dict[str, float] = {}
 _sightings: dict[str, int] = {}
@@ -190,7 +206,7 @@ def emit_identity_event(
     # Familiar-face auto-learn: repeated Yandex ID + stored crop → FAISS.
     force_alert = False
     if (
-        FACE_AUTO_LEARN
+        auto_learn_enabled()
         and source.startswith("osint")
         and _sightings[key] >= FACE_AUTO_LEARN_SIGHTINGS
         and not _is_known_face(name.strip())

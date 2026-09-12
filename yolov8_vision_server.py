@@ -1317,8 +1317,22 @@ async def generate_tts(text: str, voice: str, rate: str) -> int:
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 VISION_LLM_MODEL = os.environ.get("VISION_LLM_MODEL", "qwen2.5:3b")
+# True vision-LLM (image-in) — moondream:latest (Apache 2.0) via Ollama.
+# Describes the actual pixels when enabled; falls back to VISION_LLM_MODEL
+# (scene-text LLM) and then templates if it fails or is disabled.
+VISION_LLM_VISION_MODEL = os.environ.get("VISION_LLM_VISION_MODEL", "moondream:latest")
+VISION_MOONDREAM_ENABLED = os.environ.get("VISION_MOONDREAM_ENABLED", "1") not in (
+    "0",
+    "false",
+    "no",
+    "",
+)
+VISION_MOONDREAM_TIMEOUT = float(os.environ.get("VISION_MOONDREAM_TIMEOUT", "30.0"))
 SCENE_TTL_SECS = float(os.environ.get("SCENE_TTL_SECS", "10"))
 SENSOR_URL = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8099")
+
+_moondream_lock = None  # asyncio.Semaphore(1) — one image describe at a time
+_moondream_available = True  # set False on first failure to skip retries per call
 
 _phone_sensor_cache: dict = {
     "ts": 0.0,
@@ -1472,6 +1486,61 @@ async def _llm_describe(scene: str, sensors: dict, avatar: str) -> str | None:
     return None
 
 
+async def _moondream_describe(
+    frame_b64: str, scene: str, sensors: dict, avatar: str
+) -> str | None:
+    """True vision-LLM description: moondream (Apache 2.0) sees the actual
+    frame via Ollama /api/generate with the image attached. Prefers this over
+    the scene-text LLM when the caller supplied a frame. Falls back silently."""
+    global _moondream_available, _moondream_lock
+    if not VISION_MOONDREAM_ENABLED or not frame_b64 or not _moondream_available:
+        return None
+    try:
+        import asyncio
+
+        if _moondream_lock is None:
+            _moondream_lock = asyncio.Semaphore(1)  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    name, style = AVATAR_STYLE.get(avatar or "puppy", AVATAR_STYLE["puppy"])
+    ctx = build_sensor_context(sensors)
+    prompt = (
+        f"You are {name}. Voice: {style}. You are looking at a live photo "
+        "from a phone camera. Tell me, in one or two short spoken sentences, "
+        "what is actually in front of you right now. "
+        "No object lists, no 'detected', no jargon, no markdown, no emoji. "
+        "Say what kind of place it looks like and the specific things you can "
+        "actually see, placed in space: straight ahead, off to the left or "
+        "right — and roughly how close they are (arm's reach, a few steps "
+        "away, or meters). Help someone who cannot see. "
+        "Never invent people, history, events, or labels that are not visible. "
+        f"{('A detector also flagged: ' + scene) if scene else ''}\n"
+        f"{f'Context: {ctx}' if ctx else ''}\n"
+        "What do you see?"
+    )
+    try:
+        import httpx
+
+        payload = {
+            "model": VISION_LLM_VISION_MODEL,
+            "prompt": prompt,
+            "images": [frame_b64],  # Ollama accepts base64 jpeg/png
+            "stream": False,
+            "options": {"temperature": 0.6, "num_ctx": 1024},
+        }
+        async with _moondream_lock:  # type: ignore[union-attr]
+            async with httpx.AsyncClient(timeout=VISION_MOONDREAM_TIMEOUT) as client:
+                r = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
+                if r.status_code == 200:
+                    text = r.json().get("response", "").strip()
+                    if text:
+                        return text.splitlines()[0][:400]
+    except Exception as e:
+        log.warning(f"Moondream describe failed: {e}")
+        _moondream_available = False  # don't hammer on every frame
+    return None
+
+
 def describe_scene_fallback(detections: list) -> str:
     """Readable fallback that still avoids raw label lists."""
     if not detections:
@@ -1509,10 +1578,14 @@ def describe_scene_fallback(detections: list) -> str:
 
 
 async def generate_reply(
-    detections: list, sensors: dict | None = None, avatar: str = ""
+    detections: list,
+    sensors: dict | None = None,
+    avatar: str = "",
+    frame_b64: str | None = None,
 ) -> str:
     """Produce ONE cohesive scene description in the active avatar's voice,
-    de-duplicated so the same scene isn't re-narrated on every frame."""
+    de-duplicated so the same scene isn't re-narrated on every frame.
+    Description chain: moondream (actual pixels) → scene-text LLM → template."""
     global _scene_cache
     key = scene_key(detections)
     if (
@@ -1524,9 +1597,18 @@ async def generate_reply(
 
     scene = build_scene_text(detections)
     if not scene:
-        text = describe_scene_fallback([])
+        # YOLO saw nothing — a quiet frame is still a scene worth seeing.
+        # Moondream describes the actual pixels; template only as last resort.
+        text = await _moondream_describe(frame_b64 or "", scene, sensors or {}, avatar)
+        if text is None:
+            text = describe_scene_fallback([])
     else:
-        text = await _llm_describe(scene, sensors or {}, avatar)
+        # 1) true vision-LLM on the real frame when we have one
+        text = await _moondream_describe(frame_b64 or "", scene, sensors or {}, avatar)
+        # 2) scene-text LLM over the YOLO labels
+        if text is None:
+            text = await _llm_describe(scene, sensors or {}, avatar)
+        # 3) read template
         if text is None:
             text = describe_scene_fallback(detections)
 
@@ -1589,6 +1671,41 @@ async def lifespan(app: FastAPI):
         log.info("Vehicle make/model classifier: background load started")
     except Exception as e:
         log.warning(f"Vehicle classifier unavailable: {e}")
+
+    # Moondream availability check (best-effort, async so boot isn't blocked)
+    async def _check_moondream():
+        global _moondream_available
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                r = await client.get(f"{OLLAMA_URL}/api/tags")
+                if r.status_code == 200:
+                    names = [m.get("name", "") for m in r.json().get("models", [])]
+                    hit = any(
+                        n.startswith(VISION_LLM_VISION_MODEL.split(":")[0])
+                        for n in names
+                    )
+                    if hit:
+                        log.info(
+                            f"Vision LLM available: {VISION_LLM_VISION_MODEL} "
+                            f"({'ON' if VISION_MOONDREAM_ENABLED else 'disabled by env'}) — "
+                            "describes actual pixels, falls back to "
+                            f"{VISION_LLM_MODEL} → template on failure"
+                        )
+                    else:
+                        log.warning(
+                            f"Vision LLM {VISION_LLM_VISION_MODEL} not found in Ollama — "
+                            f"falling back to {VISION_LLM_MODEL} for descriptions"
+                        )
+                        _moondream_available = False
+        except Exception as e:
+            log.warning(f"Moondream check skipped: {e}")
+
+    try:
+        app.state.moondream_task = asyncio.create_task(_check_moondream())
+    except Exception:
+        pass
 
     # OSINT push loop: forward unsolved face crops to lilly-ai's scrapidy tier.
     osint_task = None
@@ -1829,7 +1946,7 @@ async def vision_detect(request: Request):
 
     elapsed = round(time.time() - t0, 3)
     if generate_audio:
-        reply = await generate_reply(detections, sensors, avatar)
+        reply = await generate_reply(detections, sensors, avatar, frame_b64=image_b64)
     else:
         scene_txt = build_scene_text(detections)
         reply = describe_scene_fallback(detections) if not scene_txt else scene_txt
@@ -1983,7 +2100,7 @@ async def vision_proactive(request: Request):
     except Exception as e:
         log.debug(f"Vehicle classifier skipped: {e}")
 
-    reply = await generate_reply(detections, sensors, avatar)
+    reply = await generate_reply(detections, sensors, avatar, frame_b64=image_b64)
     agents = generate_agent_replies(reply, avatar)
 
     # Generate TTS for primary agent

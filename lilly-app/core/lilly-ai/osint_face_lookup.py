@@ -83,14 +83,26 @@ def get_cached_result(res_id: str) -> dict | None:
         return None
 
 
+# Runtime override (Admin Dashboard toggle) — None means "follow env var".
+_RUNTIME_ENABLED: bool | None = None
+
+
+def set_runtime_enabled(enabled: bool | None) -> None:
+    """Admin-dashboard toggle: override the env-gated default at runtime."""
+    global _RUNTIME_ENABLED
+    _RUNTIME_ENABLED = enabled
+
+
 def is_enabled() -> bool:
     """Whether autonomous unknown-face reverse search is configured."""
+    if _RUNTIME_ENABLED is not None:
+        return _RUNTIME_ENABLED
     return FACE_OSINT_ENABLED
 
 
 async def handle_unknown_face(payload: dict) -> dict:
     """Entry point (called by lilly-ai). Returns {"handled": …}."""
-    if not FACE_OSINT_ENABLED:
+    if not is_enabled():
         return {"handled": False}
     if not FACE_OSINT_CACHE_DIR:
         pass
