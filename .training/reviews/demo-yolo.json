@@ -1,0 +1,32 @@
+[
+  {
+    "ts": "2026-09-12T13:18:52.010784+00:00",
+    "job": "demo-yolo",
+    "type": "yolo",
+    "stage": "result",
+    "avatar": null,
+    "metrics": {
+      "mAP50": 0.61,
+      "mAP50-95": 0.34,
+      "epochs": 50,
+      "samples": 24,
+      "model": "trained_models/demo/best.pt"
+    },
+    "verdict": "PASS",
+    "reason": "24 samples (sufficient); 50 epochs; mAP50 0.61. Good to promote: stable training signal, sane metrics, deployable.",
+    "thought": "\ud83e\udde0 Orchestrator review \u2014 yolo training run.\nVerdict: PASS. 24 samples (sufficient); 50 epochs; mAP50 0.61. Good to promote: stable training signal, sane metrics, deployable.\nDetection mAP50 0.61 \u2014 field-worthy.\nDataset: 24 samples."
+  },
+  {
+    "ts": "2026-09-12T13:18:52.011285+00:00",
+    "job": "demo-yolo",
+    "type": "yolo",
+    "stage": "result",
+    "avatar": null,
+    "metrics": {
+      "error": "CUDA OOM"
+    },
+    "verdict": "FAIL",
+    "reason": "YOLO training run failed. CUDA OOM",
+    "thought": "\ud83e\udde0 Orchestrator review \u2014 yolo training run.\nVerdict: FAIL. YOLO training run failed. CUDA OOM"
+  }
+]

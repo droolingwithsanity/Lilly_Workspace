@@ -15760,6 +15760,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Training dashboard (training_control.py) ────────────────────────────
+# Served at /training, gated to the owner email (laurencekidney@gmail.com).
+try:
+    from training_control import router as _training_router
+
+    app.include_router(_training_router)
+    logging.info("training_control router mounted at /training")
+except ImportError as _e:
+    logging.warning(f"training_control router not loaded: {_e}")
+
 
 # ── Vision alert identifiers (persistent config) ──────────────────────────
 @app.get("/api/alert_objects")

@@ -14,9 +14,15 @@ cp -a lilly_ai.py start.sh requirements.txt phone_broker.py ble_advertiser_host.
       osint_face_lookup.py face_recognition_engine.py person_tracker.py \
       node_registry.py lilly_skills.json wiki.html admin.html bt_radar.html tracker.html \
       nodes.html skills-market.html openlive-human.html openhuman.html alpha_popout.html \
+      training_control.py training.html training_manager.sh \
       "$CORE/lilly-ai/"
 
 rsync -a --delete --exclude='models' lillyos/ "$CORE/lilly-ai/lillyos/"
+
+rsync -a --exclude='__pycache__' --exclude='dataset_cache' \
+      trainer/ "$CORE/lilly-ai/trainer/"
+
+rsync -a .training/ "$CORE/lilly-ai/.training/"
 
 rsync -a --delete --exclude='node_modules' --exclude='.git' --exclude='.env*' \
       open-connector/ "$CORE/lilly-ai/open-connector/"
@@ -27,6 +33,7 @@ cp -a yolov8_vision_server.py face_recognition_engine.py person_tracker.py \
       node_registry.py blink_detector.py car_classifier.py car_labels.txt \
       yunet.onnx yolov8n-oiv7.pt requirements.txt "$CORE/lilly-vision/"
 
-cp -a yolo_self_trainer.py yolo_trainer_api.py requirements.txt "$CORE/lilly-trainer/"
+cp -a yolo_self_trainer.py yolo_trainer_api.py photo_training_bridge.py \
+      requirements.txt "$CORE/lilly-trainer/"
 
 echo "Done. Rebuild images with:  docker compose up -d --build"

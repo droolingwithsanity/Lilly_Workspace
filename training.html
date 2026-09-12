@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lilly · Training Control</title>
+<style>
+  :root{
+    --bg:#0b0e14; --bg2:#11151f; --panel:#141a26; --panel2:#0f1420;
+    --line:#232b3b; --line2:#2e3950;
+    --txt:#e8eef7; --dim:#8b98ad; --faint:#5c6a80;
+    --grn:#34d399; --grn-dim:#0d3b31;
+    --red:#f87171; --red-dim:#3b1616;
+    --amb:#fbbf24; --amb-dim:#3b2f10;
+    --acc:#a78bfa; --pur:#a78bfa;
+    --mono:'JetBrains Mono','Fira Code',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:
+      radial-gradient(1200px 500px at 80% -10%, rgba(167,139,250,.08), transparent 60%),
+      radial-gradient(900px 400px at 10% 110%, rgba(167,139,250,.07), transparent 60%),
+      var(--bg);
+    color:var(--txt);
+    font-family:var(--sans);
+    font-size:14px;
+    line-height:1.5;
+    padding:22px;
+  }
+  header{
+    display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    padding-bottom:18px;border-bottom:1px solid var(--line);margin-bottom:20px;
+  }
+  header .logo{font-size:22px;font-weight:800;letter-spacing:-.02em}
+  header .logo span{color:var(--acc)}
+  header .sub{color:var(--dim);font-size:12px;margin-left:6px}
+  header .spacer{flex:1}
+  .badge{
+    font-size:12px;font-weight:600;padding:6px 12px;border-radius:999px;
+    border:1px solid var(--line2);
+  }
+  .badge.ok{color:var(--grn);background:rgba(52,211,153,.08);border-color:rgba(52,211,153,.35)}
+  .badge.bad{color:var(--red);background:rgba(248,113,113,.08);border-color:rgba(248,113,113,.35)}
+  .badge.idle{color:var(--dim);background:transparent}
+  button{
+    font-family:var(--sans);font-size:13px;font-weight:600;
+    color:var(--txt);background:var(--panel);
+    border:1px solid var(--line2);border-radius:9px;
+    padding:8px 14px;cursor:pointer;
+    transition:all .15s ease;white-space:nowrap;
+  }
+  button:hover{border-color:var(--acc);color:var(--acc);transform:translateY(-1px)}
+  button:active{transform:translateY(0)}
+  button:disabled{opacity:.45;cursor:not-allowed;transform:none}
+  button.primary{background:linear-gradient(135deg,rgba(167,139,250,.18),rgba(167,139,250,.15));border-color:rgba(167,139,250,.45)}
+  button.primary:hover{background:linear-gradient(135deg,rgba(167,139,250,.28),rgba(167,139,250,.24))}
+  button.danger:hover{color:var(--red);border-color:var(--red)}
+  button.sm{padding:5px 10px;font-size:12px;border-radius:7px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin-bottom:20px}
+  .card{
+    background:linear-gradient(180deg,var(--panel),var(--panel2));
+    border:1px solid var(--line);border-radius:14px;padding:16px;
+    position:relative;overflow:hidden;
+  }
+  .card::before{
+    content:'';position:absolute;inset:0 0 auto 0;height:2px;
+    background:linear-gradient(90deg,var(--acc),var(--pur));
+    opacity:0;transition:opacity .2s;
+  }
+  .card.live::before{opacity:.6}
+  .card h3{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--faint);margin-bottom:10px}
+  .card .big{font-size:26px;font-weight:800;letter-spacing:-.02em}
+  .card .sub{color:var(--dim);font-size:12px;margin-top:4px;word-break:break-all}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:1px}
+  .dot.running{background:var(--grn);box-shadow:0 0 10px rgba(52,211,153,.8);animation:pulse 1.6s infinite}
+  .dot.idle{background:var(--dim)}
+  .dot.down{background:var(--red)}
+  .dot.training{background:var(--amb);box-shadow:0 0 10px rgba(251,191,36,.8);animation:pulse .8s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+  .row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .panel{
+    background:linear-gradient(180deg,var(--panel),var(--panel2));
+    border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:20px;
+  }
+  .panel h2{font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin-bottom:14px}
+  .panel h2 .hint{font-weight:500;color:var(--faint);text-transform:none;letter-spacing:0;font-size:11px;margin-left:8px}
+  input,select{
+    font-family:var(--sans);font-size:13px;color:var(--txt);
+    background:#0d1320;border:1px solid var(--line2);border-radius:8px;
+    padding:8px 10px;outline:none;transition:border-color .15s;
+  }
+  input:focus,select:focus{border-color:var(--acc)}
+  input::placeholder{color:var(--faint)}
+  label{display:flex;flex-direction:column;gap:5px;font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em}
+  .formgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px}
+  .check{display:flex;flex-direction:row;align-items:center;gap:7px;text-transform:none;letter-spacing:0;font-size:13px;color:var(--txt);cursor:pointer}
+  .check input{accent-color:var(--acc);width:15px;height:15px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{text-align:left;color:var(--faint);font-size:10.5px;text-transform:uppercase;letter-spacing:.1em;padding:8px 10px;border-bottom:1px solid var(--line2)}
+  td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top;color:var(--txt)}
+  tr:last-child td{border-bottom:none}
+  td.mono, .mono{font-family:var(--mono);font-size:11.5px;color:var(--dim);word-break:break-all}
+  .pills{display:flex;gap:6px;flex-wrap:wrap}
+  .pill{font-size:10.5px;padding:2px 8px;border-radius:999px;border:1px solid var(--line2);color:var(--dim)}
+  .pill.y{color:var(--amb);border-color:rgba(251,191,36,.3)}
+  .pill.g{color:var(--grn);border-color:rgba(52,211,153,.3)}
+  .pill.r{color:var(--red);border-color:rgba(248,113,113,.3)}
+  .tabs{display:flex;gap:4px;margin-bottom:12px}
+  .tabs button{border-radius:8px 8px 0 0;border-bottom:none}
+  .tabs button.on{background:var(--panel2);color:var(--acc);border-color:var(--line2)}
+  pre.logbox{
+    background:#070b12;border:1px solid var(--line);border-radius:10px;
+    padding:14px;font-family:var(--mono);font-size:11.5px;line-height:1.6;
+    height:360px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+    color:#aab8cf;tab-size:4;
+  }
+  pre.logbox .dimline{color:#55627a}
+  .logmeta{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;color:var(--dim);font-size:12px}
+  .logmeta .file{font-family:var(--mono);color:var(--faint);font-size:10.5px}
+  .switchrow{display:flex;align-items:center;gap:10px}
+  .switch{position:relative;width:38px;height:21px;cursor:pointer}
+  .switch input{opacity:0;width:0;height:0}
+  .slider{position:absolute;inset:0;border-radius:999px;background:#232b3b;transition:.2s}
+  .slider:before{content:'';position:absolute;width:15px;height:15px;border-radius:50%;background:#8b98ad;top:3px;left:3px;transition:.2s}
+  .switch input:checked + .slider{background:rgba(167,139,250,.45)}
+  .switch input:checked + .slider:before{transform:translateX(17px);background:var(--acc)}
+  #toast{
+    position:fixed;bottom:22px;right:22px;z-index:99;
+    max-width:420px;padding:13px 18px;border-radius:12px;
+    background:var(--panel);border:1px solid var(--line2);
+    box-shadow:0 12px 40px rgba(0,0,0,.5);
+    font-size:13px;transform:translateY(200%);transition:transform .3s ease;display:none;
+  }
+  #toast.show{transform:translateY(0);display:block}
+  #toast.err{border-color:rgba(248,113,113,.5)}
+  .empty{color:var(--faint);font-style:italic;padding:10px}
+  .btnrow{margin-top:12px}
+  .spin{display:inline-block;width:11px;height:11px;border:2px solid var(--line2);border-top-color:var(--acc);border-radius:50%;animation:rot .7s linear infinite;vertical-align:-1px}
+  @keyframes rot{to{transform:rotate(360deg)}}
+  .review{border:1px solid var(--line2);border-radius:10px;padding:10px;margin-bottom:10px;background:rgba(255,255,255,.015)}
+  .reviewHead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .thought{white-space:pre-wrap;font-size:12px;line-height:1.5;color:var(--acc);background:rgba(0,0,0,.25);border-radius:8px;padding:8px;margin:6px 0 0;max-height:180px;overflow:auto;opacity:.92}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Lilly<span>·</span>Train</div>
+  <div class="sub">persona &amp; vision training control</div>
+  <div class="spacer"></div>
+  <span id="authBadge" class="badge idle">checking access…</span>
+</header>
+
+<div class="grid" id="statusGrid">
+  <div class="card" id="cardPersona">
+    <h3>Persona Trainer</h3>
+    <div class="big"><span class="dot idle" id="pDot"></span><span id="pState">…</span></div>
+    <div class="sub" id="pSub"></div>
+  </div>
+  <div class="card" id="cardYolo">
+    <h3>YOLO Vision Trainer</h3>
+    <div class="big"><span class="dot idle" id="yDot"></span><span id="yState">…</span></div>
+    <div class="sub" id="ySub"></div>
+  </div>
+  <div class="card">
+    <h3>Training Data</h3>
+    <div class="big" id="dSamples">–</div>
+    <div class="sub" id="dModelCount"></div>
+  </div>
+  <div class="card">
+    <h3>Latest YOLO Model</h3>
+    <div class="big" style="font-size:17px" id="mBest">–</div>
+    <div class="sub" id="mMeta"></div>
+  </div>
+</div>
+
+<div class="row">
+  <button class="primary" id="btnPStart"    onclick="doAction('start','persona')">▶ Start persona</button>
+  <button class="danger"   id="btnPStop"    onclick="confirmAction('stop','persona')" disabled>■ Stop persona</button>
+  <button class="primary" id="btnYStart"    onclick="doAction('start','yolo')">▶ Start yolo</button>
+  <button class="danger"   id="btnYStop"    onclick="confirmAction('stop','yolo')" disabled>■ Stop yolo</button>
+  <button id="btnRefresh" onclick="refreshAll(this)">⟳ Refresh</button>
+  <button id="btnDeployY" onclick="deployModel('yolo')">🔺 Deploy yolo</button>
+</div>
+
+<div class="panel">
+  <h2>Create new training job</h2>
+  <div class="formgrid">
+    <label>Type
+      <select id="crType">
+        <option value="persona">Persona (LLM LoRA)</option>
+        <option value="yolo">YOLO (vision)</option>
+      </select>
+    </label>
+    <label>Job name
+      <input id="crName" placeholder="auto-generated">
+    </label>
+    <label id="crAvatarLbl">Avatar
+      <select id="crAvatar">
+        <option value="">all 9 avatars</option>
+        <option>puppy</option><option>fox</option><option>cat</option><option>bear</option>
+        <option>bunny</option><option>owl</option><option>deer</option><option>wolf</option><option>raccoon</option>
+      </select>
+    </label>
+    <label>Epochs / steps
+      <input id="crEpochs" type="number" min="1" placeholder="50">
+    </label>
+    <label>Batch size
+      <input id="crBatch" type="number" min="1" placeholder="8">
+    </label>
+    <label>Learning rate
+      <input id="crLr" placeholder="0.001">
+    </label>
+    <label>Output dir
+      <input id="crOut" placeholder="default">
+    </label>
+    <label id="crPhotosLbl">Import phone photos
+      <input id="crPhotos" type="number" min="0" placeholder="0">
+    </label>
+  </div>
+  <div class="row" style="margin:0">
+    <label class="check"><input type="checkbox" id="crQuick"> quick (fewer steps)</label>
+    <label class="check"><input type="checkbox" id="crGpu"> GPU / Unsloth / GGUF</label>
+    <label class="check"><input type="checkbox" id="crLlm"> orchestrator LLM review</label>
+  </div>
+  <div class="btnrow">
+    <button class="primary" onclick="createJob()">＋ Create &amp; start job</button>
+  </div>
+</div>
+
+<div class="grid" style="grid-template-columns:1.3fr 1fr">
+  <div class="panel" style="margin:0">
+    <h2>Recent jobs <span class="hint">from jobs registry</span></h2>
+    <table>
+      <thead><tr><th>When</th><th>Type</th><th>Name</th><th>Status</th></tr></thead>
+      <tbody id="jobsBody"><tr><td colspan="4" class="empty">No jobs yet — start or create one.</td></tr></tbody>
+    </table>
+  </div>
+  <div class="panel" style="margin:0">
+    <h2>Deep refresh <span class="hint">stop → rebuild → restart</span></h2>
+    <div class="formgrid">
+      <label id="refPhotosLbl">Import phone photos
+        <input id="refPhotos" type="number" min="0" placeholder="0">
+      </label>
+      <label id="refEpochsLbl">Epochs
+        <input id="refEpochs" type="number" min="1" placeholder="keep current">
+      </label>
+    </div>
+    <div class="row" style="margin:0">
+      <label class="check"><input type="checkbox" id="refForce"> wipe old models first</label>
+      <label class="check"><input type="checkbox" id="refReset"> forget imported photos (yolo)</label>
+    </div>
+    <div class="btnrow">
+      <button class="danger" id="btnPRef"  onclick="confirmRefresh('persona')">⟳ Refresh persona</button>
+      <button class="danger" id="btnYRef"  onclick="confirmRefresh('yolo')">⟳ Refresh yolo</button>
+    </div>
+  </div>
+</div>
+
+<div class="grid" style="grid-template-columns:1.3fr 1fr">
+  <div class="panel" style="margin:0">
+    <h2>Persona models</h2>
+    <div id="personaModels"><div class="empty">No trained personas yet.</div></div>
+  </div>
+  <div class="panel" style="margin:0">
+    <h2>YOLO models <span class="hint">trained_models/</span></h2>
+    <div id="yoloModels"><div class="empty">No trained YOLO models yet.</div></div>
+  </div>
+</div>
+
+<div class="grid" style="grid-template-columns:1.3fr 1fr">
+  <div class="panel" style="margin:0">
+    <h2>🧠 Orchestrator Review <span class="hint">thought + verdict per run</span></h2>
+    <div class="tabs">
+      <button id="rvAll" class="on" onclick="setRevFilter('all')">all</button>
+      <button id="rvPersona" onclick="setRevFilter('persona')">persona</button>
+      <button id="rvYolo" onclick="setRevFilter('yolo')">yolo</button>
+    </div>
+    <div id="reviewsBox"><div class="empty">No reviews yet — train something, or run a review from the side panel.</div></div>
+  </div>
+  <div class="panel" style="margin:0">
+    <h2>Run a review</h2>
+    <div class="formgrid">
+      <label>Type
+        <select id="rvType">
+          <option value="persona">Persona</option>
+          <option value="yolo">YOLO</option>
+        </select>
+      </label>
+      <label id="rvAvatarLbl">Avatar
+        <select id="rvAvatar">
+          <option value="">latest / all</option>
+          <option>puppy</option><option>fox</option><option>cat</option><option>bear</option>
+          <option>bunny</option><option>owl</option><option>deer</option><option>wolf</option><option>raccoon</option>
+        </select>
+      </label>
+    </div>
+    <div class="row" style="margin:0">
+      <label class="check"><input type="checkbox" id="rvLlm"> remote LLM second opinion</label>
+    </div>
+    <div class="btnrow">
+      <button class="primary" onclick="reviewNow(this)">⏎ Run orchestrator review</button>
+    </div>
+    <div class="hint" style="margin-top:8px">
+      Reviews are logged to <span class="mono">.training/reviews/</span> and posted
+      to the Lilly orchestrator group chat.
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Live training logs</h2>
+  <div class="tabs">
+    <button id="tabPersona" class="on"  onclick="setTab('persona')">persona</button>
+    <button id="tabYolo"    onclick="setTab('yolo')">yolo</button>
+  </div>
+  <div class="logmeta">
+    <div class="switchrow">
+      <label class="switch"><input type="checkbox" id="logAuto" checked onchange="toggleLogs()"><span class="slider"></span></label>
+      <span style="font-size:12px">auto-scroll</span>
+    </div>
+    <span class="file" id="logFile"></span>
+    <span id="logTs"></span>
+    <span style="flex:1"></span>
+    <input id="logLines" type="number" min="10" max="2000" step="10" value="120" style="width:76px" onchange="reloadLogs()">
+  </div>
+  <pre class="logbox" id="logBox"><span class="dimline">Loading log…</span></pre>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let ALLOWED = false;
+let TAB = 'persona';
+let REV_FILTER = 'all';
+let statusTimer = null, logTimer = null, reviewTimer = null;
+
+function toast(msg, err){
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (err ? ' err' : '');
+  clearTimeout(t._h);
+  t._h = setTimeout(()=> t.className = 'toast', 3200);
+}
+
+async function api(path, opts){
+  const r = await fetch(path, opts);
+  let j = null;
+  try{ j = await r.json(); }catch(e){}
+  if (!r.ok) throw new Error((j && (j.error || j.message)) || ('HTTP ' + r.status));
+  return j;
+}
+
+/* ── auth ── */
+async function checkAuth(){
+  try{
+    const j = await api('/api/training/auth');
+    ALLOWED = true;
+    const b = $('authBadge');
+    b.textContent = 'access granted · ' + j.email;
+    b.className = 'badge ok';
+    startPolling();
+  }catch(e){
+    const b = $('authBadge');
+    b.textContent = 'restricted — sign in as owner';
+    b.className = 'badge bad';
+    toast('Access restricted to laurencekidney@gmail.com', true);
+  }
+}
+
+/* ── status poll ── */
+function startPolling(){
+  loadStatus();
+  statusTimer = setInterval(loadStatus, 3000);
+  reloadLogs();
+  logTimer = setInterval(()=>{ if($('logAuto').checked) reloadLogs(); }, 2500);
+  loadReviews();
+  reviewTimer = setInterval(loadReviews, 5000);
+}
+
+async function loadStatus(){
+  try{
+    const s = await api('/api/training/status');
+    renderStatus(s);
+    renderJobs(s.jobs || []);
+    await loadModels();
+  }catch(e){
+    if(e.message.includes('403')){ ALLOWED=false; $('authBadge').textContent='restricted'; $('authBadge').className='badge bad'; }
+  }
+}
+
+function renderStatus(s){
+  // persona
+  const p = s.persona || {};
+  const pRunning = p.state === 'running';
+  paintDot('pDot', pRunning ? 'running' : 'idle');
+  $('pState').textContent = pRunning ? 'RUNNING' : 'IDLE';
+  $('pState').style.color = pRunning ? 'var(--grn)' : 'var(--dim)';
+  $('pSub').textContent = pRunning ? ('pid ' + p.pid) : 'no active process';
+  $('cardPersona').className = 'card' + (pRunning ? ' live' : '');
+
+  // yolo
+  const y = s.yolo || {};
+  const yTraining = y.api_up && y.state === 'training';
+  const yState = y.api_up ? (y.state || 'idle') : 'down';
+  paintDot('yDot', yTraining ? 'training' : (y.api_up ? 'idle' : 'down'));
+  $('yState').textContent = yState.toUpperCase();
+  $('yState').style.color = yTraining ? 'var(--amb)' : (y.api_up ? 'var(--dim)' : 'var(--red)');
+  $('ySub').textContent = y.api_up ? 'api :8199 · ' + (y.state || 'idle') : ('api down' + (y.error ? ' — ' + y.error : ''));
+  $('cardYolo').className = 'card' + (yTraining ? ' live' : '');
+
+  // data
+  const d = s.data || {};
+  $('dSamples').textContent = (d.samples ?? 0) + ' samples';
+  $('dModelCount').textContent = (d.persona_models ?? 0) + ' persona models · ' + Object.keys(d.sample_labels||{}).length + ' classes';
+
+  // model
+  const m = s.model || {};
+  if (m && m.best){
+    $('mBest').textContent = m.best.split('/').pop();
+    $('mMeta').textContent = fmtSize(m.size) + ' · ' + fmtAge(m.age) + ' · ' + m.best.split('/').slice(0,-1).join('/');
+  }else{
+    $('mBest').textContent = 'none trained yet';
+    $('mMeta').textContent = '';
+  }
+
+  // buttons
+  $('btnPStop').disabled = !pRunning;
+  $('btnPStart').disabled = pRunning;
+  $('btnYStop').disabled = !(y.api_up && y.state === 'training');
+  $('btnYStart').disabled = (y.api_up && y.state === 'training');
+  $('btnPRef').disabled = pRunning;
+  $('btnYRef').disabled = (y.api_up && y.state === 'training');
+}
+
+function paintDot(id, state){
+  const el = $(id);
+  el.className = 'dot ' + state;
+}
+
+function renderJobs(jobs){
+  const b = $('jobsBody');
+  if (!jobs.length){ b.innerHTML = '<tr><td colspan="4" class="empty">No jobs yet — start or create one.</td></tr>'; return; }
+  b.innerHTML = jobs.map(j => {
+    const st = String(j.status||'').toLowerCase();
+    const pill = st.includes('fail') || st.includes('error') ? 'pill r'
+               : st.includes('run') || st.includes('start') ? 'pill g' : 'pill y';
+    return `<tr>
+      <td class="mono">${esc(j.started_at||'').replace('T',' ').slice(5,19)}</td>
+      <td>${esc(j.type||'')}</td>
+      <td class="mono">${esc(j.name||'')}</td>
+      <td><span class="pill ${pill}">${esc(j.status||'')}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadModels(){
+  try{
+    const l = await api('/api/training/list');
+    renderPersonaModels(l.persona || []);
+    renderYoloModels(l.yolo || [], l.samples || {});
+  }catch(e){ /* status poll already covers auth */ }
+}
+
+function renderPersonaModels(models){
+  const box = $('personaModels');
+  if (!models.length){ box.innerHTML = '<div class="empty">No trained personas yet.</div>'; return; }
+  box.innerHTML = '<table><tbody>' + models.map(m => {
+    const kind = m.kind === 'adapter' ? 'pill g' : (m.kind.includes('gguf') ? 'pill y' : 'pill');
+    return `<tr>
+      <td class="mono">${esc(m.name)}</td>
+      <td>${esc(m.kind.replace('+',' + '))}</td>
+      <td class="mono">${m.size ? fmtSize(m.size) : '—'}</td>
+    </tr>`;
+  }).join('') + '</tbody></table>';
+}
+
+function renderYoloModels(models, samples){
+  const box = $('yoloModels');
+  if (!models.length){ box.innerHTML = '<div class="empty">No trained YOLO models yet.</div>'; return; }
+  box.innerHTML = '<table><tbody>' + models.slice(0,12).map(m =>
+    `<tr><td class="mono">${esc(m.path.split('/').slice(-2).join('/'))}</td><td class="mono">${fmtSize(m.size)}</td></tr>`
+  ).join('') + '</tbody></table>';
+  const lbls = Object.entries(samples);
+  if (lbls.length){
+    box.innerHTML += '<div class="pills" style="margin-top:10px">' +
+      lbls.map(([k,v]) => `<span class="pill">${esc(k)} · ${v}</span>`).join('') + '</div>';
+  }
+}
+
+/* ── orchestrator reviews ── */
+function setRevFilter(f){
+  REV_FILTER = f;
+  ['All','Persona','Yolo'].forEach(n => $('rv'+n).className = '');
+  $('rv' + f.charAt(0).toUpperCase() + f.slice(1)).className = 'on';
+  loadReviews();
+}
+
+async function loadReviews(){
+  if (!ALLOWED) return;
+  try{
+    const j = await api('/api/training/reviews?type=' + REV_FILTER + '&limit=8');
+    renderReviews(j.reviews || []);
+  }catch(e){ /* transient — status poll covers auth */ }
+}
+
+function renderReviews(list){
+  const box = $('reviewsBox');
+  if (!list.length){
+    box.innerHTML = '<div class="empty">No reviews match this filter yet.</div>';
+    return;
+  }
+  box.innerHTML = list.map(rv => {
+    const pill = rv.verdict === 'PASS' ? 'g' : (rv.verdict === 'WARN' ? 'y' : 'r');
+    const mets = rv.metrics || {};
+    const mRow = Object.entries(mets)
+      .filter(([k,v]) => v != null && v !== '')
+      .map(([k,v]) => `<span class="pill">${esc(k)}: ${esc(v)}</span>`).join(' ');
+    return `<div class="review">
+      <div class="reviewHead">
+        <span class="pill ${pill}">${esc(rv.verdict || '?')}</span>
+        <b>${esc(rv.type)}</b>
+        <span class="dim">· ${esc(rv.stage)}</span>
+        ${rv.avatar ? '<span class="pill">' + esc(rv.avatar) + '</span>' : ''}
+        <span class="dim" style="margin-left:auto">${esc(rv.ts || '').replace('T',' ').slice(5,19)}</span>
+      </div>
+      <div class="dim" style="margin:2px 0">${esc(rv.reason || '')}</div>
+      <div class="pills" style="margin:4px 0">${mRow}</div>
+      <pre class="thought">${esc(rv.thought || '')}</pre>
+    </div>`;
+  }).join('');
+}
+
+async function reviewNow(btn){
+  const body = { type: $('rvType').value, llm: $('rvLlm').checked || undefined };
+  const av = $('rvAvatar').value;
+  if (av) body.avatar = av;
+  btn.disabled = true;
+  try{
+    const r = await api('/api/training/review', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    const v = r.review && r.review.verdict;
+    toast(r.ok ? ('Review complete — verdict ' + (v || 'ok')) : 'Review failed', !r.ok);
+    outputLines(r.output || []);
+    await loadReviews();
+  }catch(e){ toast('Review error – ' + e.message, true); }
+  finally{ btn.disabled = false; }
+}
+
+/* ── actions ── */
+async function doAction(action, type, extra={}){
+  const btn = (action==='start') ? (type==='persona' ? 'btnPStart' : 'btnYStart') : null;
+  try{
+    if (btn) $('stSpin' + type)?.remove();
+    const r = await api('/api/training/' + action, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({type, ...extra})
+    });
+    if (r.ok){
+      toast(cap(action) + ' ' + type + ' accepted');
+      outputLines(r.output || r.stdout || []);
+    } else {
+      toast('failed: ' + cap(action) + ' ' + type, true);
+      outputLines(r.output || []);
+    }
+    await loadStatus();
+  }catch(e){ toast('Action failed – ' + e.message, true); }
+}
+
+function confirmAction(action, type){
+  if (confirm('Stop ' + type + ' training? This kills the active training process.'))
+    doAction(action, type);
+}
+
+async function refreshAll(btn){
+  btn.disabled = true;
+  try{ await loadStatus(); await loadModels(); await reloadLogs(); await loadReviews(); }
+  finally{ btn.disabled = false; }
+  toast('Status refreshed');
+}
+
+async function createJob(){
+  const type = $('crType').value;
+  const body = {
+    type,
+    name: $('crName').value.trim() || undefined,
+    avatar: type==='persona' && $('crAvatar').value ? $('crAvatar').value : undefined,
+    quick: $('crQuick').checked || undefined,
+    gpu: $('crGpu').checked || undefined,
+    epochs: $('crEpochs').value || undefined,
+    batch_size: $('crBatch').value || undefined,
+    lr: $('crLr').value || undefined,
+    output_dir: $('crOut').value || undefined,
+    import_photos: $('crPhotos').value || undefined,
+    llm: $('crLlm').checked || undefined,
+  };
+  Object.keys(body).forEach(k => body[k]===undefined && delete body[k]);
+  try{
+    const r = await api('/api/training/create', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)
+    });
+    toast(r.ok ? 'Job created & started' : 'Failed to create job', !r.ok);
+    outputLines(r.output || []);
+    await loadStatus();
+  }catch(e){ toast('Error – ' + e.message, true); }
+}
+
+function confirmRefresh(type){
+  const body = {
+    type,
+    force: $('refForce').checked || undefined,
+    reset_progress: $('refReset').checked && type==='yolo' || undefined,
+    import_photos: $('refPhotos').value || undefined,
+    epochs: $('refEpochs').value || undefined,
+  };
+  Object.keys(body).forEach(k => body[k]===undefined && delete body[k]);
+  const extra = ' (import ' + body.import_photos + ' photos' + (body.force ? ', wipe models' : '') + (body.reset_progress ? ', reset progress' : '') + ')';
+  if (!confirm('Full refresh ' + type + extra + '? Current training will be stopped.')) return;
+  doAction('refresh', type, body);
+}
+
+async function deployModel(type){
+  try{
+    const r = await api('/api/training/deploy', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({type})
+    });
+    toast(r.ok ? 'Deploy accepted' : 'Deploy failed', !r.ok);
+    outputLines(r.output || []);
+  }catch(e){ toast('Deploy error – ' + e.message, true); }
+}
+
+function outputLines(lines){
+  if (!lines || !lines.length) return;
+  const box = $('logBox');
+  box.textContent = lines.map(l => (l.match(/^✓|^!|^✗|^•/) ? l : '  ' + l)).join('\n');
+}
+
+/* ── logs ── */
+function setTab(t){
+  TAB = t;
+  $('tabPersona').className = t==='persona' ? 'on' : '';
+  $('tabYolo').className = t==='yolo' ? 'on' : '';
+  reloadLogs();
+}
+
+async function reloadLogs(){
+  if (!ALLOWED) return;
+  const lines = parseInt($('logLines').value || '120', 10);
+  try{
+    const j = await api('/api/training/logs?type=' + TAB + '&lines=' + lines);
+    const box = $('logBox');
+    const l = (j.logs || {})[TAB];
+    if (!l || !l.lines){
+      box.innerHTML = '<span class="dimline">No recent ' + TAB + ' log file found.</span>';
+      $('logFile').textContent = '';
+      $('logTs').textContent = '';
+      return;
+    }
+    $('logFile').textContent = l.file.split('/').pop();
+    $('logTs').textContent = j.ts ? (j.ts.replace('T',' ').slice(5,19)) : '';
+    box.textContent = l.lines.join('');
+    box.scrollTop = box.scrollHeight;
+  }catch(e){ /* ignore transient */ }
+}
+
+function toggleLogs(){
+  if ($('logAuto').checked) reloadLogs();
+}
+
+function cap(s){ return s.charAt(0).toUpperCase() + s.slice(1); }
+function esc(s){ const d=document.createElement('div'); d.textContent = s==null?'':String(s); return d.innerHTML; }
+function fmtSize(n){
+  if (!n) return '—';
+  if (n > 1e9) return (n/1e9).toFixed(2) + ' GB';
+  if (n > 1e6) return (n/1e6).toFixed(1) + ' MB';
+  if (n > 1e3) return (n/1e3).toFixed(1) + ' KB';
+  return n + ' B';
+}
+function fmtAge(sec){
+  if (sec == null) return '';
+  sec = Math.round(sec);
+  if (sec < 60) return sec + 's old';
+  if (sec < 3600) return Math.round(sec/60) + 'm old';
+  if (sec < 86400) return Math.round(sec/3600) + 'h old';
+  return Math.round(sec/86400) + 'd old';
+}
+
+/* live-update the create form when toggling type */
+$('crType').addEventListener('change', ()=>{
+  const persona = $('crType').value === 'persona';
+  $('crAvatarLbl').style.display = persona ? '' : 'none';
+  $('crPhotosLbl').style.display = persona ? 'none' : '';
+  $('crOut').placeholder = persona ? 'default' : 'unused for yolo';
+});
+$('refPhotosLbl').style.display='none';  // shown only for yolo refresh
+
+checkAuth();
+</script>
+</body>
+</html>

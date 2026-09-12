@@ -207,6 +207,26 @@ async def start_training(request: Request, background_tasks: BackgroundTasks):
             batch_size=body.get("batch_size", 8),
             learning_rate=body.get("learning_rate", 0.001),
         )
+        # Orchestrator review of the run (best-effort, never affects training)
+        try:
+            from trainer.orchestrator_review import review_yolo_result
+
+            failed = job.status.name == "ERROR" or job.status.value == "error"
+            review_yolo_result(
+                job="yolo_api",
+                metrics={
+                    **(job.metrics or {}),
+                    "epochs": job.epochs,
+                    "batch_size": job.batch_size,
+                    "learning_rate": job.learning_rate,
+                },
+                model_path=job.model_path,
+                llm=os.environ.get("TRAINING_LLM_REVIEW", "0") == "1",
+                succeeded=not failed,
+                error=job.error,
+            )
+        except Exception:
+            pass
         return job
 
     background_tasks.add_task(run_training)

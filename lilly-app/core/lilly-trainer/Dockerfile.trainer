@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir \
 # Copy training agent files
 COPY core/lilly-trainer/yolo_self_trainer.py .
 COPY core/lilly-trainer/yolo_trainer_api.py .
+COPY core/lilly-trainer/photo_training_bridge.py .
 
 # Create training data directories
 RUN mkdir -p training_data/{samples,images,dataset,models}

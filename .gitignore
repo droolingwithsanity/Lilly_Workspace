@@ -126,3 +126,7 @@ training_data/
 weights/
 test_real_world.jpg
 hitomi-android/
+
+# Training runtime state (reviews are committed; pids/jobs are ephemeral)
+.training/pids/
+.training/jobs.json
