@@ -550,14 +550,9 @@ def add_auth0_routes(app: FastAPI):
     async def auth_me(request: Request):
         user = await get_current_user(request)
         if not user:
-            if AUTH_AVAILABLE:
-                return JSONResponse(
-                    status_code=401, content={"error": "Not authenticated"}
-                )
-            return JSONResponse(
-                status_code=503, content={"error": "Auth not available"}
-            )
-        return {"user": user}
+            # Return 200 with auth status instead of 401 to reduce console noise
+            return {"authenticated": False, "user": None}
+        return {"authenticated": True, "user": user}
 
     @app.post("/api/auth/logout")
     async def auth_logout():

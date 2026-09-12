@@ -35,6 +35,9 @@ nav a{margin-right:16px;font-size:13px;color:#a78bfa}
   <a href="#avatars">Avatars</a>
   <a href="#sensors">Sensors</a>
   <a href="#vision">Vision</a>
+  <a href="#faces">Faces</a>
+  <a href="#osint">OSINT</a>
+  <a href="#dossiers">Dossiers</a>
   <a href="#self-training">Self-Training</a>
   <a href="#automation">Automation</a>
   <a href="#skills">Skills</a>
@@ -120,6 +123,13 @@ nav a{margin-right:16px;font-size:13px;color:#a78bfa}
     <li><b>Webcam</b> (right) — your browser's webcam feed</li>
   </ul>
   <p>The Camera Window is draggable — grab the header bar to move it. All three feeds run simultaneously with YOLO detection in the background.</p>
+  <h3>Window Tricks</h3>
+  <ul style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li><b>Click the feed</b> — full menu: Faces on/off, IDs panel, enroll frame, analyze frame, minimize, maximize, close</li>
+    <li><b>Drop any image</b> onto the feed — instant face analysis with named boxes</li>
+    <li><b>Click the title / ─ button</b> — minimize to a pill, click again to expand</li>
+    <li><b>👁 IDs button</b> — who is recognized right now, with photo evidence, source links, Remember + Dossier buttons</li>
+  </ul>
   <h3>Camera Sources</h3>
   <table>
     <tr><th>Source</th><th>How It Works</th><th>Requires</th></tr>
@@ -244,6 +254,17 @@ export BLINK_MANAGED="true"</pre>
   -H "Content-Type: application/json" \
   -d '{"name":"Alice","image_b64":"&lt;base64 JPEG&gt;"}'</pre>
   <p>Say <code>"remember this face as Alice"</code>, or manage via <code>GET /api/faces</code> / <code>DELETE /api/faces/{name}</code>.</p>
+  <h3>Identity Alerts &amp; Remember Flow</h3>
+  <p>When a face is recognized (enrolled match) or newly identified (face-search resolve), Lilly <b>alerts you</b> — phone notification naming the person and where the photos matched, plus the full evidence in web chat. Cooldown 15 min per name, 10 alerts/day (tune via <code>FACE_ALERT_COOLDOWN</code> / <code>FACE_ALERT_DAILY_CAP</code>).</p>
+  <ul style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li>The person&rsquo;s box keeps their <b>name</b> on web + Android overlay</li>
+    <li>Say <code>"remember them as Alice"</code> (or tap <b>Remember</b>) — the crop enrolls into FAISS, recognized forever</li>
+    <li>After 5 sightings of the same face-search name, Lilly <b>auto-learns</b> them (<code>FACE_AUTO_LEARN=0</code> to disable)</li>
+    <li>Sightings are <b>geo-tagged</b> — taught place labels win, so alerts say "at home"</li>
+    <li><b>Known faces are never re-searched</b> — unless you explicitly say <code>"research Alice"</code></li>
+  </ul>
+  <h3>Face Chat Commands</h3>
+  <p><code>"who do you see"</code> · <code>"results for Alice"</code> (evidence links) · <code>"remember him as Bob"</code> · <code>"research Alice"</code> (fresh search) · <code>"footprint Alice"</code> (full dossier) · <code>"forget Alice"</code></p>
   <h3>Face Endpoints</h3>
   <table style="width:100%;font-size:13px">
     <tr><th>Endpoint</th><th>Method</th><th>Purpose</th></tr>
@@ -252,33 +273,69 @@ export BLINK_MANAGED="true"</pre>
     <tr><td><code>/api/faces/{name}</code></td><td>DELETE</td><td>Remove a known face</td></tr>
     <tr><td><code>/api/vision/face</code></td><td>POST</td><td>Recognize + annotate a frame: <code>{"image_base64"}</code></td></tr>
     <tr><td><code>/api/vision/unknown_faces</code></td><td>GET</td><td>Debug view of sampled unknown faces</td></tr>
+    <tr><td><code>/api/faces/events</code></td><td>POST</td><td>Vision → Lilly identity sighting (alerts + remember flow)</td></tr>
+    <tr><td><code>/api/faces/identity_events</code></td><td>GET</td><td>Recent alerts: name, source, confidence, socials, photos, geo</td></tr>
+    <tr><td><code>/api/faces/osint_results</code></td><td>GET</td><td>Raw reverse-search evidence per face id</td></tr>
+    <tr><td><code>/api/faces/confirm</code></td><td>POST</td><td>Enroll a sighted face permanently: <code>{"face_id","name"}</code></td></tr>
   </table>
 </div>
 
 <h2 id="osint">🕵️ Unknown-Face OSINT (Opt-in)</h2>
-<p>Tier&nbsp;2 of face recognition: when a face is <b>not</b> enrolled, Lilly can try to figure out who it is via public reverse-image search — and surface social-media accounts.</p>
+<p>Tier&nbsp;2 of face recognition: when a face is <b>not</b> enrolled, Lilly figures out who it is via public reverse-image search — name, matching photos with their sources, and social-media accounts (incl. fans/dating platforms).</p>
 <div class="card">
   <h3>How It Works</h3>
   <ol style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
     <li>Vision server samples an unsolved person&rsquo;s face every 8s (max 12 buffered)</li>
     <li>It pushes the face crop to Lilly: <code>POST /api/vision/faces/osint_unknown</code></li>
-    <li>Lilly runs Yandex reverse-face search (default provider) → candidate name (conf &ge; 0.35)</li>
-    <li>Lilly fans the name out to its <b>OSINT stack</b> (osint_agents + scrapling) → social accounts (Facebook, Instagram, LinkedIn, X, TikTok, GitHub, VK, OK, Bluesky…)</li>
-    <li>Lilly pushes the result back to <code>POST /api/vision/face/identify</code>; the box is re-stamped with the matched name + <code>social_accounts</code></li>
+    <li>Lilly publishes the crop briefly at <code>/osint_tmp/&lt;token&gt;.jpg</code> and runs Yandex <b>URL-flow</b> image search → candidate name (conf 0.35 lead, not verdict)</li>
+    <li>Similar <b>photos are kept with thumbnails + source pages</b> (YouTube, Wikipedia, news…), spoken aloud by the avatar and shown in the IDs panel</li>
+    <li>Lilly fans the name out to its <b>OSINT stack</b> (osint_agents + scrapling) → social accounts: Facebook, Instagram, LinkedIn, X, TikTok, GitHub, VK, OK, Bluesky, <b>OnlyFans, Fansly, Tinder, Bumble, Hinge, OkCupid, Grindr, Feeld…</b></li>
+    <li>Lilly pushes the result back to <code>POST /api/vision/face/identify</code>; the box is re-stamped with the matched name + accounts + photos</li>
+    <li>An <b>autonomous footprint dossier</b> starts in the background (see below) — you get notified when it&rsquo;s ready</li>
   </ol>
-  <h3>Enable It (off by default)</h3>
+  <h3>Enable It</h3>
   <p>Set in your <code>.env</code> / docker-compose:</p>
   <pre style="background:rgba(0,0,0,0.05);padding:8px;border-radius:6px;font-size:12px">FACE_OSINT_ENABLED=1                # turn the tier on
 FACE_OSINT_PROVIDER=yandex          # yandex (default) or test
 FACE_OSINT_COOLDOWN=60              # min seconds between lookups per face
-OSINT_PUSH_URL=http://127.0.0.1:8098/api/vision/faces/osint_unknown</pre>
+FACE_OSINT_PUBLIC_BASE=https://droolingwithsanity.ca
+OSINT_PUSH_URL=http://127.0.0.1:8098/api/vision/faces/osint_unknown
+FACE_ALERT_COOLDOWN=900             # min seconds between alerts per name
+FACE_ALERT_DAILY_CAP=10             # max face alerts per day
+FACE_AUTO_LEARN=1                   # auto-enroll familiar faces after 5 sightings
+FACE_ALERT_TTS=0                    # set 1 to speak alerts aloud on the phone</pre>
   <h3>Endpoints</h3>
   <table style="width:100%;font-size:13px">
     <tr><th>Endpoint</th><th>Method</th><th>Purpose</th></tr>
     <tr><td><code>/api/vision/faces/osint_unknown</code></td><td>POST</td><td>Vision → Lilly: queue an unknown face for OSINT</td></tr>
-    <tr><td><code>/api/vision/face/identify</code></td><td>POST</td><td>Lilly → Vision: re-stamp a box with identity + accounts</td></tr>
+    <tr><td><code>/api/vision/face/identify</code></td><td>POST</td><td>Lilly → Vision: re-stamp a box with identity + accounts + photos</td></tr>
+    <tr><td><code>/osint_tmp/{token}.jpg</code></td><td>GET</td><td>Short-lived public crop for the search engine (auto-deleted)</td></tr>
   </table>
-  <p style="font-size:11px;color:#9d8db0;margin-top:10px">⚠️ Reverse-image search results are best-effort and brittle — treat as leads, not verdicts. The tier is fully opt-in and never blocks the live vision loop.</p>
+  <p style="font-size:11px;color:#9d8db0;margin-top:10px">⚠️ Reverse-image search results are best-effort — treat as leads, not verdicts. Photo-verified matches (same ArcFace face) are marked ✅; everything else is a lead. The tier is opt-in and never blocks the live vision loop.</p>
+</div>
+
+<h2 id="dossiers">📄 Footprint Dossiers (Autonomous)</h2>
+<p>Say <code>"footprint Alice"</code> — or let it happen on its own: every face-search ID kicks off a background dossier across thousands of sites. Lilly notifies you when it&rsquo;s ready, posts the full human-readable report in chat, and speaks the summary.</p>
+<div class="card">
+  <h3>What&rsquo;s Inside</h3>
+  <ol style="margin:8px 0 8px 20px;color:#c4b5fd;font-size:14px">
+    <li><b>Username variants</b> (firstlast, first.last, first_last) scanned with <b>Sherlock + Maigret</b> — 3,000+ sites, ~20–40s</li>
+    <li><b>About + news</b> via Wikipedia + GDELT APIs (scraped engines bot-block datacenters)</li>
+    <li><b>Photo verification</b> — candidate profile photos are ArcFace-compared to the camera crop; same face = ✅ verified, same handle on 3+ sites = 👤 likely, rest = leads</li>
+  </ol>
+  <h3>Report Sections</h3>
+  <p>✅ Photo-verified · 👤 Likely handles · 📣 Social · 💘 Fans/dating · 📖 About · 📰 News · ⚠️ honesty footer when nothing is proven.</p>
+  <h3>Endpoints &amp; Env</h3>
+  <table style="width:100%;font-size:13px">
+    <tr><th>Endpoint</th><th>Method</th><th>Purpose</th></tr>
+    <tr><td><code>/api/faces/footprint</code></td><td>POST</td><td>Start/reuse a dossier: <code>{"name"}</code> or <code>{"face_id"}</code></td></tr>
+    <tr><td><code>/api/faces/footprints</code></td><td>GET</td><td>Recent dossier jobs + progress</td></tr>
+    <tr><td><code>/api/faces/footprint/{id}</code></td><td>GET</td><td>Full dossier with report</td></tr>
+  </table>
+  <pre style="background:rgba(0,0,0,0.05);padding:8px;border-radius:6px;font-size:12px">FACE_FOOTPRINT_AUTO=1               # auto-start on every face-search ID
+FACE_FOOTPRINT_COOLDOWN=86400       # seconds between dossiers per name
+FOOTPRINT_PHOTO_VERIFY=1            # ArcFace photo matching
+FOOTPRINT_PHOTO_THRESHOLD=0.45</pre>
 </div>
 
 <h2 id="automation">⚡ Natural Language Automation</h2>
@@ -448,8 +505,16 @@ OSINT_PUSH_URL=http://127.0.0.1:8098/api/vision/faces/osint_unknown</pre>
   <tr><td><code>/api/faces/{name}</code></td><td>DELETE</td><td>Remove an enrolled face</td></tr>
   <tr><td><code>/api/vision/face</code></td><td>POST</td><td>Recognize + annotate a frame</td></tr>
   <tr><td><code>/api/vision/faces/osint_unknown</code></td><td>POST</td><td>Queue an unknown face for OSINT lookup</td></tr>
-  <tr><td><code>/api/vision/face/identify</code></td><td>POST</td><td>Re-stamp a box with identity + social accounts</td></tr>
+  <tr><td><code>/api/vision/face/identify</code></td><td>POST</td><td>Re-stamp a box with identity + social accounts + photos</td></tr>
   <tr><td><code>/api/vision/unknown_faces</code></td><td>GET</td><td>Debug: sampled unknown faces</td></tr>
+  <tr><td><code>/api/faces/events</code></td><td>POST</td><td>Vision → Lilly identity sighting (fires alerts)</td></tr>
+  <tr><td><code>/api/faces/identity_events</code></td><td>GET</td><td>Recent alerts with photos, socials, geo</td></tr>
+  <tr><td><code>/api/faces/osint_results</code></td><td>GET</td><td>Raw search evidence per face id</td></tr>
+  <tr><td><code>/api/faces/confirm</code></td><td>POST</td><td>Remember a sighted face permanently</td></tr>
+  <tr><td><code>/api/faces/footprint</code></td><td>POST</td><td>Start a dossier: <code>{"name"}</code> or <code>{"face_id"}</code></td></tr>
+  <tr><td><code>/api/faces/footprints</code></td><td>GET</td><td>Dossier jobs + progress</td></tr>
+  <tr><td><code>/api/faces/footprint/{id}</code></td><td>GET</td><td>Full dossier with report</td></tr>
+  <tr><td><code>/osint_tmp/{token}.jpg</code></td><td>GET</td><td>Short-lived public face crop (auto-deleted)</td></tr>
   <tr><td><code>/api/openhuman/skills</code></td><td>GET</td><td>List OpenHuman community skills</td></tr>
   <tr><td><code>/api/openhuman/skills/{id}</code></td><td>GET</td><td>Inspect a community skill</td></tr>
   <tr><td><code>/api/openhuman/refresh</code></td><td>POST</td><td>Force-refresh the community skill catalog</td></tr>
@@ -466,6 +531,8 @@ OSINT_PUSH_URL=http://127.0.0.1:8098/api/vision/faces/osint_unknown</pre>
   <p>💬 Chat · 🎤 Voice · 🐾 Agents · 🛠️ Skills · ⚡ Auto · 📖 Wiki · 📡 Around · ⚙️ Config</p>
   <h3>Voice Commands</h3>
   <p>"What do you sense" · "How's my battery" · "What do you see" · "Tell me a story" · "Start a walk" · "Open YouTube"</p>
+  <h3>Face Commands</h3>
+  <p>"Who do you see" · "Results for Alice" · "Remember him as Bob" · "Research Alice" · "Footprint Alice" · "Forget Alice"</p>
 </div>
 
 <p style="margin-top:40px;text-align:center;color:rgba(167,139,250,0.4);font-size:12px">Lilly AI · Built with ❤️</p>

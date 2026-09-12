@@ -159,6 +159,26 @@ except ImportError:
     _osint_handle_unknown_face = None
     logging.warning("osint_face_lookup not found — unknown-face OSINT disabled")
 
+# Face identity events (Tier1 FAISS + Tier2 OSINT → alert, remember, results).
+try:
+    import face_identity
+
+    FACE_IDENTITY_AVAILABLE = True
+except ImportError:
+    FACE_IDENTITY_AVAILABLE = False
+    face_identity = None  # type: ignore
+    logging.warning("face_identity not found — face alerts disabled")
+
+# Footprint dossiers (name → cross-site verified report, background job).
+try:
+    import footprint
+
+    FOOTPRINT_AVAILABLE = True
+except ImportError:
+    FOOTPRINT_AVAILABLE = False
+    footprint = None  # type: ignore
+    logging.warning("footprint not found — dossier reports disabled")
+
 # Agentic orchestration engine (agent_core.py — puzzle master)
 try:
     from agent_core import (
@@ -1759,9 +1779,51 @@ class LlamaBackend:
 class TwoTierLLM:
     """Baton-race LLM: fast model answers immediately, quality model caches in background."""
 
+    # Small-model failure signatures: base-assistant leakage + false refusals.
+    # When the fast reply matches and the query is benign, skip it and use
+    # the quality model synchronously instead of serving garbage.
+    _REFUSAL_PATTERNS = (
+        "as an ai companion",
+        "as an ai language model",
+        "as a language model",
+        "as an ai assistant",
+        "i'm sorry, but i can't assist",
+        "i am sorry, but i can't assist",
+        "i'm sorry, but i cannot assist",
+        "i don't have personal beliefs",
+        "i do not have personal beliefs",
+        "i don't have personal opinions",
+    )
+    # Genuinely sensitive topics where a refusal may be legitimate.
+    _SENSITIVE_HINTS = (
+        "password",
+        "hack into",
+        "break into",
+        "steal",
+        "weapon",
+        "bomb",
+        "credit card",
+        "ssn ",
+        "social security",
+    )
+
     def __init__(self, fast_model: str, quality_model: str):
         self.fast_model = fast_model
         self.quality_model = quality_model
+
+    @classmethod
+    def _fast_reply_usable(cls, reply: str, messages: list[dict]) -> bool:
+        if not reply:
+            return False
+        low = reply.lower()
+        if not any(p in low for p in cls._REFUSAL_PATTERNS):
+            return True
+        user_text = " ".join(
+            m.get("content", "") for m in messages if m.get("role") == "user"
+        ).lower()
+        if any(h in user_text for h in cls._SENSITIVE_HINTS):
+            return True  # legitimate refusal — keep it
+        return False
 
     async def chat(
         self,
@@ -1790,7 +1852,7 @@ class TwoTierLLM:
             logger.debug(f"TwoTier fast model failed: {e}")
 
         # Background: warm up quality model and cache result
-        if fast_reply:
+        if fast_reply and self._fast_reply_usable(fast_reply, messages):
             asyncio.create_task(
                 self._warm_quality_model(
                     messages=messages,
@@ -1957,6 +2019,18 @@ def normalize_text(text: str) -> str:
     text = re.sub(r"\[.*?\]|\(.*?\)", "", text)
     text = re.sub(r"[^\w\s]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def trig_in(cmd: str, *phrases: str) -> bool:
+    """Substring trigger match robust to STT punctuation loss.
+
+    normalize_text() strips apostrophes ("what's" → "what s"), so raw
+    triggers containing punctuation can never match normalized input.
+    Normalize both sides here — normalizing twice is idempotent, so `cmd`
+    may be raw or pre-normalized.
+    """
+    p = normalize_text(cmd)
+    return any(normalize_text(t) in p for t in phrases if t)
 
 
 def is_self_echo(text: str) -> bool:
@@ -4904,6 +4978,176 @@ async def proactive_notify(message: str, archetype: Archetype, next_step: str = 
     return True
 
 
+async def _face_identity_alert(event: dict):
+    """Alert sender for face_identity events: phone notify + web UI chat.
+
+    Registered via face_identity.init() at startup. Fires at most once per
+    FACE_ALERT_COOLDOWN per name (enforced in face_identity).
+    """
+    name = (event.get("name") or "?").strip()
+    source = event.get("source", "")
+    conf = event.get("confidence", 0) or 0
+    socials = event.get("social_accounts") or []
+    images = event.get("images") or []
+    sightings = event.get("sightings", 1) or 1
+    remembered = bool(event.get("remembered"))
+
+    sites = []
+    for im in images[:8]:
+        s = (im.get("site") or "").strip()
+        if s and s not in sites:
+            sites.append(s)
+    sites = sites[:4]
+
+    if source == "osint" or source.startswith("osint"):
+        message = f"I see {name} — face search match ({conf:.0%} lead)"
+        if sites:
+            spoken_sites = ", ".join(sites[:3])
+            message += f" — matching photos on {spoken_sites}"
+            if len(sites) > 3 or len(images) > 3:
+                message += f" and more ({len(images)} photos on screen)"
+        if socials:
+            message += f" — {len(socials)} social profile(s) found"
+    else:
+        message = f"I see {name} — recognized face"
+
+    # Geo-tag the sighting (best-effort): taught place labels win.
+    try:
+        loc = await asyncio.wait_for(current_location(), timeout=12.0)
+        if loc:
+            lat, lon, loc_name, *_ = loc
+            label = ""
+            try:
+                places = load_places()
+                key = place_key(lat, lon)
+                if key in places and places[key].get("user_label"):
+                    label = places[key].get("name", "")
+            except Exception:
+                pass
+            event["geo"] = {
+                "lat": round(lat, 5),
+                "lon": round(lon, 5),
+                "label": label or loc_name,
+            }
+            if label:
+                message += f" at {label}"
+    except Exception:
+        pass
+
+    if event.get("auto_learned"):
+        next_step = (
+            f"I'm learning to recognize {name} — correct me if I'm wrong. "
+            f"Say 'results for {name}' to see the photos."
+        )
+    elif remembered:
+        next_step = f"Say 'results for {name}' to see the evidence."
+    elif sightings >= int(os.environ.get("FACE_ALERT_REPEAT_SUGGEST", "3")):
+        next_step = (
+            f"I've seen {name} {sightings}x — say 'remember {name}' to keep "
+            f"them saved, or 'results for {name}' to see the evidence."
+        )
+    else:
+        next_step = (
+            f"Say 'results for {name}' for the evidence, "
+            f"or 'remember {name}' to always recognize them."
+        )
+    try:
+        await proactive_notify(message, Archetype.OBSERVER, next_step)
+    except Exception as e:
+        logger.debug(f"face phone alert failed: {e}")
+    try:
+        await _automation_deliver(
+            "chat",
+            {"text": f"👁 {message}\n→ {next_step}"},
+            {"type": "face_identity", "data": event},
+        )
+    except Exception as e:
+        logger.debug(f"face web alert failed: {e}")
+    tts_on = os.environ.get("FACE_ALERT_TTS", "0") == "1"
+    if tts_on and phone_broker is not None:
+        try:
+            for pid in list(phone_broker.get_phone_ids()):
+                await phone_broker.push_tts(pid, {"text": message})  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
+async def _footprint_announce(job: dict):
+    """Footprint job finished → phone notify + full report in web chat + speak."""
+    name = job.get("name", "?")
+    report = job.get("report") or "Footprint failed."
+    verified = len(job.get("verified", []) or [])
+    likely = len(job.get("likely", []) or [])
+    if job.get("status") == "done":
+        short = (
+            f"Footprint on {name} is ready: {verified} photo-verified, "
+            f"{likely} likely handles. Full dossier is on screen."
+        )
+        spoken = (
+            f"Footprint on {name} is ready. "
+            + (
+                f"{verified} photo-verified profiles"
+                if verified
+                else (
+                    f"{likely} likely handles"
+                    if likely
+                    else "thin footprint, nothing solid"
+                )
+            )
+            + ". Details are in chat."
+        )
+    else:
+        short = f"Footprint on {name} failed — I'll keep the face search evidence."
+        spoken = short
+    try:
+        await proactive_notify(
+            f"📄 {short}", Archetype.OBSERVER, f"Say 'footprint {name}' to re-run."
+        )
+    except Exception as e:
+        logger.debug(f"footprint notify failed: {e}")
+    try:
+        await _automation_deliver(
+            "chat",
+            {"text": report},
+            {"type": "footprint", "data": {"name": name, "job_id": job.get("id")}},
+        )
+    except Exception as e:
+        logger.debug(f"footprint chat failed: {e}")
+    try:
+        await speak(spoken)
+    except Exception as e:
+        logger.debug(f"footprint speak failed: {e}")
+
+
+def _init_face_identity():
+    """Wire face_identity alerts + Tier1 engine callback (once, at startup)."""
+    if not FACE_IDENTITY_AVAILABLE or face_identity is None:
+        return
+    try:
+        face_identity.init(_face_identity_alert)
+        logger.info("face_identity alerts wired (phone + web UI)")
+    except Exception as e:
+        logger.warning(f"face_identity init failed: {e}")
+    try:
+        from face_recognition_engine import on_identity_confirmed
+
+        def _tier1(name, conf, source, extra):
+            try:
+                face_identity.emit_identity_event(
+                    name,
+                    source=f"faiss:{source}",
+                    confidence=conf,
+                    face_id=(extra or {}).get("face_id", ""),
+                )
+            except Exception:
+                pass
+
+        on_identity_confirmed(_tier1)
+        logger.info("face_identity Tier1 (FAISS) hook registered")
+    except Exception as e:
+        logger.debug(f"Tier1 face hook unavailable: {e}")
+
+
 async def background_mic_loop():
     """Continuous microphone capture + wake-word detection via SSH to phone."""
     global LILLY_IS_SPEAKING, BACKGROUND_MIC_ACTIVE, LAST_HEARD, WAKE_STATE
@@ -6380,9 +6624,68 @@ def snapshot_to_narrative(snapshot: dict) -> str:
     return " ".join(parts)
 
 
+def _broker_last_readings(want: tuple = (), max_age: float = 180.0) -> str:
+    """Compact human summary of the broker's retained last-known state.
+
+    `want`: topic substrings to prefer (e.g. ("location", "gps")). Empty =
+    newest few topics. Returns "" when nothing fresh exists.
+    """
+    try:
+        broker = globals().get("phone_broker")
+        if broker is None or not getattr(broker, "last_state", None):
+            return ""
+        now = time.time()
+        entries = []
+        for did, topics in broker.last_state.items():
+            for t, entry in (topics or {}).items():
+                age = now - entry.get("ts", 0)
+                if age > max_age:
+                    continue
+                entries.append((entry.get("ts", 0), did, t, entry.get("data")))
+        if not entries:
+            return ""
+        if want:
+            filt = [e for e in entries if any(w in e[2].lower() for w in want)]
+            if filt:
+                entries = filt
+        entries.sort(reverse=True)
+        bits = []
+        for _ts, did, t, data in entries[:3]:
+            if isinstance(data, dict):
+                kv = [f"{k}={v}" for k, v in list(data.items())[:4]]
+                bits.append(f"{t} ({', '.join(kv)})")
+            else:
+                bits.append(f"{t}: {str(data)[:80]}")
+        return "; ".join(bits)
+    except Exception:
+        return ""
+
+
 async def query_sensor(phrase: str) -> Optional[str]:
     """Query Termux sensors with fallbacks. Returns response string or None."""
     p = normalize_text(phrase)
+
+    # ── General sensor data (snapshot narrative, broker fallback) ──
+    if trig_in(
+        p,
+        "sensor data",
+        "check my sensors",
+        "read my sensors",
+        "my sensors",
+        "sensor readings",
+        "sensor status",
+    ):
+        try:
+            snapshot = await get_sensor_snapshot()
+            narrative = snapshot_to_narrative(snapshot)
+            if narrative and "not connected" not in narrative.lower():
+                return narrative
+        except Exception:
+            pass
+        fb = _broker_last_readings()
+        if fb:
+            return f"Direct sensors aren't reachable, but the broker last saw: {fb}"
+        return "I don't have access to the sensors right now — maybe they're not connected?"
 
     # ── List all sensors ──
     if "list all sensors" in p or "all sensors" in p or "every sensor" in p:
@@ -6402,7 +6705,7 @@ async def query_sensor(phrase: str) -> Optional[str]:
         return "I don't have access to the sensors right now — maybe they're not connected?"
 
     # ── Battery ──
-    if any(w in p for w in SENSOR_TRIGGERS["battery"]):
+    if trig_in(p, *SENSOR_TRIGGERS["battery"]):
         try:
             c = await _get_sensor_client()
             r = await c.get(f"{SENSOR_SERVER_URL}/battery/live", timeout=5.0)
@@ -6446,7 +6749,7 @@ async def query_sensor(phrase: str) -> Optional[str]:
             pass
 
     # ── Bluetooth Devices ──
-    if any(w in p for w in SENSOR_TRIGGERS["bluetooth"]):
+    if trig_in(p, *SENSOR_TRIGGERS["bluetooth"]):
         devices = await read_bluetooth_devices()
         if devices:
             bt_map = _load_bt_device_map()
@@ -6528,8 +6831,30 @@ async def query_sensor(phrase: str) -> Optional[str]:
                 ]
             )
 
+    # ── Location (GPS + taught place labels, broker fallback) ──
+    if trig_in(p, *SENSOR_TRIGGERS["location"]):
+        try:
+            loc = await current_location()
+        except Exception:
+            loc = None
+        if loc:
+            lat, lon, name, _addr, _sp, _br, _alt = loc
+            try:
+                places = load_places()
+                key = place_key(lat, lon)
+                if key in places and places[key].get("user_label"):
+                    name = places[key].get("name", name)
+            except Exception:
+                pass
+            archetype_inferrer.record_sensor_query("location")
+            return f"We're at {name} ({lat:.4f}, {lon:.4f})."
+        fb = _broker_last_readings(want=("location", "gps"))
+        if fb:
+            return f"Live GPS isn't reachable, but the broker last saw: {fb}"
+        return "I can't get your location right now. Try again when you have a GPS fix."
+
     # ── Surroundings Awareness ──
-    if any(w in p for w in SENSOR_TRIGGERS["surroundings"]):
+    if trig_in(p, *SENSOR_TRIGGERS["surroundings"]):
         # Check if this is a "find my device" request
         find_device_patterns = [
             "find my device",
@@ -6540,7 +6865,7 @@ async def query_sensor(phrase: str) -> Optional[str]:
             "air tag",
             "track my things",
         ]
-        if any(pattern in p for pattern in find_device_patterns):
+        if trig_in(p, *find_device_patterns):
             # Extract device name if provided
             device_name_match = re.search(
                 r"(?:find|locate|where(?:'s| is))\s+(?:my\s+)?(.+?)(?:\s*$)", p
@@ -6567,7 +6892,7 @@ async def query_sensor(phrase: str) -> Optional[str]:
             return f"I'm having trouble scanning the surroundings right now. Error: {str(e)}"
 
     # ── Find My Device (specific pattern) ──
-    if any(w in p for w in ["find my", "locate my", "where is my", "where's my"]):
+    if trig_in(p, "find my", "locate my", "where is my", "where's my"):
         # Extract device name
         device_name_match = re.search(
             r"(?:find|locate|where(?:'s| is))\s+(?:my\s+)?(.+?)(?:\s*$)", p
@@ -6585,7 +6910,7 @@ async def query_sensor(phrase: str) -> Optional[str]:
         return await find_my_device("phone")
 
     # ── Weather ──
-    if any(w in p for w in SENSOR_TRIGGERS["weather"]):
+    if trig_in(p, *SENSOR_TRIGGERS["weather"]):
         try:
             # Get user's location from sensor server for localized weather
             loc = await current_location()
@@ -6653,7 +6978,7 @@ async def query_sensor(phrase: str) -> Optional[str]:
                 pass
 
     # ── Notifications ──
-    if any(w in p for w in SENSOR_TRIGGERS["notifications"]):
+    if trig_in(p, *SENSOR_TRIGGERS["notifications"]):
         try:
             c = await _get_sensor_client()
             r = await c.get(f"{SENSOR_SERVER_URL}/notification/list", timeout=5.0)
@@ -8730,6 +9055,35 @@ async def _create_automation_from_confirm(rule_json: str) -> str:
         return "Something went wrong creating that automation."
 
 
+# ─── Notification pacing ─────────────────────────────────────────
+# Poll the phone on a fast cadence so nothing is missed, but throttle how
+# many announcements actually get spoken so a burst of Slack/Email doesn't
+# become a wall of TTS. Urgent (high/max) notifications bypass the cap.
+_NOTIF_ANNOUNCE_WINDOW_S = 60.0  # rolling window for the rate cap
+_NOTIF_ANNOUNCE_MAX_PER_WINDOW = 4  # max announced per window (non-urgent)
+_NOTIF_ANNOUNCE_TIMES: list[float] = []
+
+
+def _notif_announce_allowed(urgent: bool) -> bool:
+    """True if an announcement may be spoken right now.
+
+    Urgent (high/max) notifications always pass. Non-urgent ones are capped
+    to `_NOTIF_ANNOUNCE_MAX_PER_WINDOW` per rolling 60s so chatter doesn't
+    pile up on screen.
+    """
+    if urgent:
+        return True
+    now = time.time()
+    # Drop timestamps that fell out of the window.
+    _NOTIF_ANNOUNCE_TIMES[:] = [
+        ts for ts in _NOTIF_ANNOUNCE_TIMES if now - ts < _NOTIF_ANNOUNCE_WINDOW_S
+    ]
+    if len(_NOTIF_ANNOUNCE_TIMES) >= _NOTIF_ANNOUNCE_MAX_PER_WINDOW:
+        return False
+    _NOTIF_ANNOUNCE_TIMES.append(now)
+    return True
+
+
 async def notification_monitor_loop():
     """Background task: reads HIGH/URGENT notifications in a natural, contextual way.
 
@@ -8745,8 +9099,9 @@ async def notification_monitor_loop():
     global _NOTIFICATION_SEEN, PENDING_CONFIRM, PENDING_OPEN_URL
     while True:
         await asyncio.sleep(4)
-        if LILLY_IS_SPEAKING or LILLY_IS_THINKING:
-            continue
+        # NOTE: no LILLY_IS_SPEAKING/THINKING gate here anymore — we always
+        # poll so pickup stays snappy. Announcements still respect the flag
+        # below, but the fetch itself must never be skipped.
         try:
             c = await _get_sensor_client()
             r = await c.get(f"{SENSOR_SERVER_URL}/notification/list", timeout=5.0)
@@ -9081,6 +9436,27 @@ _LAST_PROXIMITY_GREETING = 0.0
 # Approach greetings should be rare — the proximity sensor flaps constantly,
 # and a 60s cooldown meant the same "I felt you were near" lines fired all day.
 _PROXIMITY_GREETING_COOLDOWN = 1800.0  # 30 minutes between approach greetings
+# Persisted so container restarts don't reset the cooldown and re-greet.
+_PROXIMITY_GREETING_FILE = WORKSPACE / ".proximity_greeting.json"
+
+
+def _load_proximity_greeting_ts() -> float:
+    try:
+        if _PROXIMITY_GREETING_FILE.exists():
+            return float(json.loads(_PROXIMITY_GREETING_FILE.read_text()).get("ts", 0))
+    except Exception:
+        pass
+    return 0.0
+
+
+def _save_proximity_greeting_ts(ts: float) -> None:
+    try:
+        _PROXIMITY_GREETING_FILE.write_text(json.dumps({"ts": ts}))
+    except Exception:
+        pass
+
+
+_LAST_PROXIMITY_GREETING = _load_proximity_greeting_ts()
 _PROXIMITY_GREETINGS = [
     "Hey, good to see you.",
     "Oh — hi. What's up?",
@@ -9139,6 +9515,7 @@ async def proximity_monitor_loop():
                     and not recently_active
                 ):
                     _LAST_PROXIMITY_GREETING = now
+                    _save_proximity_greeting_ts(now)
                     LILLY_MOOD = "warm"
                     await speak(_pick_fresh("proximity", _PROXIMITY_GREETINGS))
             elif not near and _USER_NEAR:
@@ -9242,8 +9619,249 @@ def fuzzy_nav(text: str) -> str | None:
     text_clean = normalize_text(text)
     for action_name, triggers in NAV_MAP.items():
         for trigger in triggers:
-            if trigger in text_clean:
+            if normalize_text(trigger) in text_clean:
                 return action_name
+    return None
+
+
+async def _handle_face_command(cmd: str):
+    """Face identity commands: remember / results / who / forget.
+
+    Returns {"action": "handled", "text": ...} or None if no match.
+    """
+    if not FACE_IDENTITY_AVAILABLE or face_identity is None:
+        return None
+    text = (cmd or "").strip()
+    low = text.lower()
+
+    m = re.match(
+        r"^(?:please\s+)?remember\s+(?:him|her|them|this(?:\s+face|person)?|that(?:\s+face|person)?)(?:\s+as\s+(.+))?$",
+        low,
+    )
+    remember_name = None
+    if m:
+        remember_name = (m.group(1) or "").strip()
+    else:
+        m2 = re.match(
+            r"^(?:please\s+)?remember\s+(?:this\s+face\s+as\s+|him\s+as\s+|her\s+as\s+)?(.+)$",
+            low,
+        )
+        if m2 and any(k in low for k in ("face", "him", "her", "them", " as ")):
+            remember_name = m2.group(1).strip()
+    if remember_name is not None:
+        if not remember_name:
+            reply = (
+                "Who should I remember them as? Say 'remember them as' plus their name."
+            )
+            await speak(reply)
+            return {"action": "handled", "text": reply}
+        # most recent unremembered event first, else most recent overall
+        events = face_identity.recent_events(10)
+        target = next((e for e in events if not e.get("remembered")), None) or (
+            events[0] if events else None
+        )
+        if not target:
+            reply = "I haven't seen any new faces lately — show me one first."
+            await speak(reply)
+            return {"action": "handled", "text": reply}
+        try:
+            import httpx as _hx
+
+            async with _hx.AsyncClient(timeout=30.0) as _c:
+                r = await _c.post(
+                    "http://127.0.0.1:8098/api/faces/confirm",
+                    json={
+                        "face_id": target.get("face_id") or target.get("id"),
+                        "name": remember_name,
+                    },
+                )
+                data = r.json()
+        except Exception as e:
+            data = {"ok": False, "error": str(e)}
+        if data.get("ok"):
+            reply = f"Got it — I'll always recognize {data.get('name')} now."
+        else:
+            reply = f"Couldn't save them: {data.get('error', 'unknown error')}"
+        await speak(reply)
+        try:
+            await memory.add("user", cmd)
+            await memory.add("assistant", reply)
+        except Exception:
+            pass
+        return {"action": "handled", "text": reply}
+
+    m = re.match(
+        r"^(?:please\s+)?footprint(?:\s+(?:on|for|of))?\s+(.+?)(?:\s+please)?$",
+        low,
+    )
+    if m and FOOTPRINT_AVAILABLE and footprint is not None:
+        q = m.group(1).strip()
+        ev = (
+            face_identity.find_event(q)
+            if FACE_IDENTITY_AVAILABLE and face_identity
+            else None
+        )
+        face_id, crop_b64 = "", ""
+        if ev:
+            face_id = ev.get("face_id", "")
+            if face_id:
+                crop = face_identity.get_crop(face_id)
+                if crop:
+                    import base64 as _b64fp
+
+                    crop_b64 = _b64fp.b64encode(crop).decode()
+        await speak(
+            f"Building a footprint dossier on {q} — I'll report back when it's ready."
+        )
+        try:
+            res = await footprint.start_footprint(q, face_id=face_id, crop_b64=crop_b64)
+            job = res.get("job", {})
+            if res.get("reused") and job.get("status") == "done" and job.get("report"):
+                reply = job["report"]
+            else:
+                reply = (
+                    f"Footprint on {q} is running ({job.get('progress', 'starting')}… ). "
+                    f"I'll notify you the moment it's ready."
+                )
+        except Exception as e:
+            reply = f"Couldn't start the footprint: {e}"
+        try:
+            await memory.add("user", cmd)
+            await memory.add("assistant", reply)
+        except Exception:
+            pass
+        return {"action": "handled", "text": reply}
+
+    m = re.match(
+        r"^(?:please\s+)?(?:research|look\s+up|search\s+for)\s+(.+?)(?:\s+please)?$",
+        low,
+    )
+    if m and FACE_OSINT_AVAILABLE:
+        q = m.group(1).strip()
+        # Only hijack face queries — fall through to web search otherwise.
+        is_face_q = face_identity.find_event(q) is not None
+        if not is_face_q:
+            try:
+                from face_recognition_engine import get_face_engine
+
+                known = get_face_engine().known_faces or {}
+                is_face_q = any(
+                    q.lower() in n.lower() or n.lower() in q.lower()
+                    for n in known.keys()
+                )
+            except Exception:
+                pass
+        if not is_face_q:
+            return None
+        await speak(f"Researching {q} — give me a moment.")
+        try:
+            from osint_face_lookup import research_face
+
+            res = await research_face(q)
+        except Exception as e:
+            res = {"name": None, "error": str(e)}
+        if res.get("name"):
+            imgs = res.get("images") or []
+            sites = []
+            for im in imgs:
+                s = im.get("site") or ""
+                if s and s not in sites:
+                    sites.append(s)
+            reply = (
+                f"{res.get('name')} — {len(imgs)} matching photos"
+                + (f" on {', '.join(sites[:3])}" if sites else "")
+                + f", {len(res.get('social_accounts', []))} social profiles. "
+                f"Say 'results for {res.get('name')}' for the links."
+            )
+        else:
+            reply = f"Couldn't research {q}: {res.get('error', 'no match')}"
+        await speak(reply)
+        try:
+            await memory.add("user", cmd)
+            await memory.add("assistant", reply)
+        except Exception:
+            pass
+        return {"action": "handled", "text": reply}
+
+    m = re.match(
+        r"^(?:show(?:\s+me)?\s+)?(?:search\s+)?results\s+(?:for\s+)?(.+?)(?:\s+please)?$",
+        low,
+    )
+    m = m or re.match(r"^evidence\s+(?:for\s+)?(.+?)(?:\s+please)?$", low)
+    if m:
+        q = m.group(1).strip()
+        event = face_identity.find_event(q)
+        if not event:
+            reply = f"No search results for {q} yet."
+            await speak(reply)
+            return {"action": "handled", "text": reply}
+        socials = event.get("social_accounts") or []
+        sources = event.get("sources") or []
+        lines = [
+            f"Evidence for {event.get('name')} ({event.get('source')}, {float(event.get('confidence') or 0):.0%}):"
+        ]
+        for u in socials[:6]:
+            lines.append(f"• {u}")
+        for u in sources[:6]:
+            if u and u not in socials:
+                lines.append(f"• {u if len(u) < 120 else u[:120]}")
+        if len(lines) == 1:
+            lines.append("No links saved — low-confidence lead only.")
+        short = f"{event.get('name')}: {len(socials)} social profiles, {len(sources)} sources. Links are on screen."
+        await speak(short)
+        try:
+            await memory.add("user", cmd)
+            await memory.add("assistant", short)
+        except Exception:
+            pass
+        return {"action": "handled", "text": "\n".join(lines)}
+
+    if re.match(
+        r"^(who\s+do\s+you\s+see|who('s|\s+is)\s+(on\s+camera|there|this|that)|who\s+is\s+in\s+front)",
+        low,
+    ):
+        cutoff = time.time() - 900
+        seen = [e for e in face_identity.recent_events(10) if e.get("ts", 0) >= cutoff]
+        if not seen:
+            reply = "No fresh faces in the last few minutes."
+        else:
+            bits = []
+            for e in seen:
+                tag = (
+                    "recognized"
+                    if str(e.get("source", "")).startswith("faiss")
+                    else "face-search lead"
+                )
+                bits.append(f"{e.get('name')} ({tag})")
+            reply = "I see " + ", ".join(bits) + "."
+        await speak(reply)
+        try:
+            await memory.add("user", cmd)
+            await memory.add("assistant", reply)
+        except Exception:
+            pass
+        return {"action": "handled", "text": reply}
+
+    m = re.match(
+        r"^(?:please\s+)?forget\s+(?:the\s+face\s+(?:of\s+|called\s+)?)?(.+?)(?:\s+please)?$",
+        low,
+    )
+    if m:
+        who = m.group(1).strip()
+        try:
+            from face_recognition_engine import get_face_engine
+
+            ok = get_face_engine().remove_known_face(who)
+        except Exception:
+            ok = False
+        reply = f"Forgot {who}." if ok else f"I don't have {who} saved."
+        await speak(reply)
+        try:
+            await memory.add("user", cmd)
+            await memory.add("assistant", reply)
+        except Exception:
+            pass
+        return {"action": "handled", "text": reply}
     return None
 
 
@@ -9749,7 +10367,9 @@ async def _run_agent_for_task(task: AvatarTask):
         agent_prompt = f"[Avatar Task for {task.avatar}] {task.description}\n\nYou are acting as the {task.avatar} avatar agent. Complete this task and report results."
         result = await execute_task(agent_prompt, user_email=ADMIN_EMAIL)
         update_task_status(task.id, "completed", result=(result or "")[:2000])
-        logger.info(f"✅ Agent completed task {task.id} for {task.avatar}: {(result or '')[:100]}")
+        logger.info(
+            f"✅ Agent completed task {task.id} for {task.avatar}: {(result or '')[:100]}"
+        )
     except Exception as e:
         update_task_status(task.id, "failed", result=str(e)[:500])
         logger.error(f"❌ Agent failed task {task.id}: {e}")
@@ -9814,8 +10434,16 @@ def _discussion_needs_input(transcript: list[dict]) -> Optional[dict]:
         lowered = text.lower()
         if any(
             kw in lowered
-            for kw in ("clarif", "more detail", "more info", "what do you mean",
-                       "which one", "could you", "should we", "need to know")
+            for kw in (
+                "clarif",
+                "more detail",
+                "more info",
+                "what do you mean",
+                "which one",
+                "could you",
+                "should we",
+                "need to know",
+            )
         ):
             return line
     return None
@@ -9831,7 +10459,9 @@ async def _discuss_assigned_task(task: AvatarTask):
                 {
                     "ts": time.time(),
                     "text": "Team discussion: "
-                    + ", ".join(f"{line['name']}: {line['text']}" for line in transcript),
+                    + ", ".join(
+                        f"{line['name']}: {line['text']}" for line in transcript
+                    ),
                 }
             )
         blocker = _discussion_needs_input(transcript)
@@ -9845,7 +10475,11 @@ async def _discuss_assigned_task(task: AvatarTask):
                 body=(task.description[:140]) + " — " + blocker["text"][:160],
                 agent=blocker["char"],
                 task_id=task.id,
-                context={"status": "needs_input", "question": blocker["text"], "transcript": transcript},
+                context={
+                    "status": "needs_input",
+                    "question": blocker["text"],
+                    "transcript": transcript,
+                },
             )
         else:
             if task.status == "pending":
@@ -9856,7 +10490,11 @@ async def _discuss_assigned_task(task: AvatarTask):
                 "group_discussion",
                 title="🗣️ The team discussed a task",
                 body=(f"{agent_name}: " + (task.description[:120] or ""))
-                + (" — approve to run it, or reply with a correction." if not task.question else ""),
+                + (
+                    " — approve to run it, or reply with a correction."
+                    if not task.question
+                    else ""
+                ),
                 agent=task.avatar,
                 task_id=task.id,
                 context={"status": task.status, "transcript": transcript},
@@ -10436,7 +11074,7 @@ async def handle_intent(
         "broken audio",
         "piper not working",
     ]
-    if any(t in cmd for t in tts_trouble_patterns):
+    if trig_in(cmd, *tts_trouble_patterns):
         # Run a quick diagnostic
         diagnostics = []
         piper_ok = os.path.exists(PIPER_BIN)
@@ -10608,7 +11246,7 @@ async def handle_intent(
         "product health",
         "list pending automation approvals",
     ]
-    if any(t in cmd for t in improvement_triggers):
+    if trig_in(cmd, *improvement_triggers):
         # Fetch ideas and health from autopilot
         autopilot_ideas = []
         autopilot_health = None
@@ -11088,6 +11726,15 @@ async def handle_intent(
             )
         return {"action": "handled", "text": ""}
 
+    # ── 5b. FACE IDENTITY (remember / results / who / forget) ──
+    try:
+        face_cmd = await _handle_face_command(cmd)
+    except Exception as e:
+        logger.debug(f"face command failed: {e}")
+        face_cmd = None
+    if face_cmd:
+        return face_cmd
+
     # ── 6. CURSOR CONTROL (precise position) ──
     cursor_aliases = [
         "cursor up",
@@ -11299,7 +11946,7 @@ async def handle_intent(
         "update your voice",
         "update your prompt",
     ]
-    if any(t in cmd for t in _self_improve_triggers):
+    if trig_in(cmd, *_self_improve_triggers):
         # Check if user is providing a specific change request or just enabling it
         _proposed_change = cmd
         for t in _self_improve_triggers:
@@ -11444,7 +12091,7 @@ async def handle_intent(
         "disable automation",
     ]
 
-    if any(t in cmd for t in _auto_list_triggers):
+    if trig_in(cmd, *_auto_list_triggers):
         if PHONE_BROKER_AVAILABLE and phone_broker:
             _rules = phone_broker.automation.get_rules()
             if _rules:
@@ -11463,7 +12110,7 @@ async def handle_intent(
         await speak(reply)
         return {"action": "handled", "text": reply}
 
-    if any(t in cmd for t in _auto_delete_triggers):
+    if trig_in(cmd, *_auto_delete_triggers):
         # Ask which one
         if PHONE_BROKER_AVAILABLE and phone_broker:
             _rules = phone_broker.automation.get_rules()
@@ -11485,9 +12132,7 @@ async def handle_intent(
         and " then " in f" {cmd} "
         and (cmd.startswith("if ") or " if " in f" {cmd} " or "whenever" in cmd)
     )
-    if (
-        any(t in cmd for t in _auto_create_triggers) or _if_then
-    ) and _is_condition_based:
+    if (trig_in(cmd, *_auto_create_triggers) or _if_then) and _is_condition_based:
         # First try regex parsing for common patterns (fast, no LLM needed)
         _auto_rule = None
         _batt_m = re.search(
@@ -11674,9 +12319,13 @@ async def handle_intent(
         ).strip()
         skill = SKILLS.get(target) or SKILLS.get(stripped)
 
-        # If no direct match, look for a skill key that prefixes the command
+        # If no direct match, look for a skill key that prefixes the command.
+        # Guard: keys shorter than 4 chars never prefix-match ("do" hijacked
+        # every "do you..." question into an unrelated skill).
         if not skill:
             for key in sorted(SKILLS.keys(), key=len, reverse=True):
+                if len(key) < 4:
+                    continue
                 if target.startswith(key + " "):
                     skill = SKILLS[key]
                     skill_arg = target[len(key) :].strip()
@@ -12092,7 +12741,7 @@ async def handle_intent(
         "what's my day",
     ]
 
-    if AUTH_AVAILABLE and any(t in cmd for t in gmail_triggers):
+    if AUTH_AVAILABLE and trig_in(cmd, *gmail_triggers):
         if _current_user_id:
             LILLY_IS_THINKING = True
             messages_list = await gmail_list_messages(
@@ -12123,7 +12772,7 @@ async def handle_intent(
         await speak(reply)
         return {"action": "handled", "text": reply}
 
-    if AUTH_AVAILABLE and any(t in cmd for t in calendar_triggers):
+    if AUTH_AVAILABLE and trig_in(cmd, *calendar_triggers):
         if _current_user_id:
             LILLY_IS_THINKING = True
             events = await calendar_list_events(_current_user_id, max_results=5)
@@ -12178,10 +12827,11 @@ async def handle_intent(
         "what's on camera",
         "what's on the camera",
         "describe the room",
-        "what's around",
-        "look",
+        "look around",
+        "take a look",
+        "look at this",
     ]
-    _is_vision_query = any(vp in cmd for vp in _vision_guard_phrases)
+    _is_vision_query = trig_in(cmd, *_vision_guard_phrases)
 
     if not _is_vision_query:
         sensor_reply = await query_sensor(cmd)
@@ -12210,7 +12860,7 @@ async def handle_intent(
         "spin a yarn",
         "once upon a time",
     ]
-    if any(trigger in cmd for trigger in story_triggers):
+    if trig_in(cmd, *story_triggers):
         LILLY_IS_THINKING = True
         LILLY_MOOD = "curious"
         # Gather real sensor data
@@ -12264,12 +12914,10 @@ async def handle_intent(
         "what do you see",
         "what can you see",
         "what's there",
-        "look",
         "what is that",
         "what's in front",
         "what are you looking at",
         "describe the room",
-        "what's around",
         "what do you see now",
         "look around",
         "take a look",
@@ -12485,7 +13133,7 @@ async def handle_intent(
         await speak(reply)
         return {"action": "handled", "text": reply}
 
-    elif any(p in cmd for p in vision_phrases):
+    elif trig_in(cmd, *vision_phrases):
         # Multi-camera: collect from phone + Blink + browser
         all_frames = {}
         all_detections = {}
@@ -12633,7 +13281,7 @@ async def handle_intent(
         "what day is it",
         "today's date",
     ]
-    if any(t in cmd for t in time_triggers):
+    if trig_in(cmd, *time_triggers):
         import datetime as _datetime_mod
 
         now = _datetime_mod.datetime.now()
@@ -12648,7 +13296,7 @@ async def handle_intent(
     # stick), persists to disk immediately, and is mirrored into the facts
     # store that gets injected into every LLM call.
     name_asks = ["call me", "my name is", "i'm called", "remember my name is"]
-    if any(t in cmd for t in name_asks):
+    if trig_in(cmd, *name_asks):
         for prefix in name_asks:
             if prefix in cmd:
                 extracted = cmd.split(prefix)[-1].strip().split()[0:2]
@@ -12684,7 +13332,7 @@ async def handle_intent(
         "do you know me",
         "do you remember my name",
     ]
-    if any(t in cmd for t in name_recall):
+    if trig_in(cmd, *name_recall):
         if effective_name:
             LILLY_MOOD = "warm"
             reply = f"You're {effective_name} — how could I forget?"
@@ -13112,11 +13760,15 @@ def _try_import_ultralytics():
 
 
 async def _proxy_vision_frame(
-    frame_bytes: bytes, avatar: str = "puppy", sensors: dict | None = None
+    frame_bytes: bytes,
+    avatar: str = "puppy",
+    sensors: dict | None = None,
+    mode: str = "auto",
 ) -> dict:
     """
     Proxy a JPEG frame to the external YOLO vision server when VISION_SERVER_URL is set.
     Returns the vision server JSON response, or an empty dict on failure/unconfigured.
+    mode: observation mode — auto | stationary | walking | driving.
     """
     global VISION_SERVER_URL
     if not VISION_SERVER_URL:
@@ -13127,6 +13779,7 @@ async def _proxy_vision_frame(
             "image_b64": base64.b64encode(frame_bytes).decode("utf-8"),
             "avatar": avatar,
             "sensors": sensors or {},
+            "mode": mode or "auto",
             "generate_audio": False,
         }
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -13153,10 +13806,24 @@ _FACE_EXTRA_KEYS = (
     "osint_sources",
 )
 
+# Navigation/observation extras from the vision server that the browser
+# overlay uses to draw priority boxes + distance/speed chips.
+_VISION_NAV_KEYS = (
+    "tier",
+    "priority",
+    "mode",
+    "speed_kph",
+    "closing_kph",
+    "distance_m",
+    "distance_desc",
+    "motion",
+)
+
 
 def _map_vision_detections(proxy_resp: dict) -> list:
     """Map external-vision detections (normalized) into overlay-ready boxes,
-    passing through face enrichment extras (kps → overlay points, etc.)."""
+    passing through face enrichment extras (kps → overlay points, etc.)
+    and navigation extras (tier/priority/distance/speed)."""
     out = []
     for d in proxy_resp.get("detections") or []:
         entry = {
@@ -13168,6 +13835,10 @@ def _map_vision_detections(proxy_resp: dict) -> list:
             "y2": float(d.get("y", 0)) + float(d.get("h", 0)),
         }
         for k in _FACE_EXTRA_KEYS:
+            v = d.get(k)
+            if v is not None:
+                entry[k] = v
+        for k in _VISION_NAV_KEYS:
             v = d.get(k)
             if v is not None:
                 entry[k] = v
@@ -14908,6 +15579,20 @@ async def lifespan(app: FastAPI):
         init_vision()
     except Exception as e:
         logger.warning(f"Vision init failed (non-fatal): {e}")
+
+    # Wire face identity alerts (Tier1 FAISS + Tier2 OSINT → phone + web UI)
+    try:
+        _init_face_identity()
+    except Exception as e:
+        logger.warning(f"Face identity init failed (non-fatal): {e}")
+
+    # Wire footprint dossier completion (notify + chat readout + speak)
+    try:
+        if FOOTPRINT_AVAILABLE and footprint is not None:
+            footprint.init(_footprint_announce)
+            logger.info("footprint dossiers wired (auto reports on face resolve)")
+    except Exception as e:
+        logger.warning(f"Footprint init failed (non-fatal): {e}")
 
     # Start continuous webcam YOLO capture loop
     try:
@@ -17987,7 +18672,7 @@ def _admin_email_lookup() -> set:
 
 
 def _is_admin_email(email: str) -> bool:
-    return ((email or "") .strip().lower()) in _admin_email_lookup()
+    return ((email or "").strip().lower()) in _admin_email_lookup()
 
 
 def _require_admin(request: Request) -> Optional[dict]:
@@ -18161,7 +18846,9 @@ async def admin_assign_task(request: Request):
         )
     if avatar not in HIVE_PERSONAS:
         return JSONResponse(
-            {"error": f"unknown avatar '{avatar}'. Pick from: {', '.join(HIVE_PERSONAS)}"},
+            {
+                "error": f"unknown avatar '{avatar}'. Pick from: {', '.join(HIVE_PERSONAS)}"
+            },
             status_code=400,
         )
     _ensure_avatar_tasks_loaded()
@@ -18207,7 +18894,11 @@ async def admin_task_discuss(request: Request):
             body=(task.description[:140]) + " — " + blocker["text"][:160],
             agent=blocker["char"],
             task_id=task.id,
-            context={"status": "needs_input", "question": blocker["text"], "transcript": transcript},
+            context={
+                "status": "needs_input",
+                "question": blocker["text"],
+                "transcript": transcript,
+            },
         )
     elif task.status == "pending":
         task.status = "running"
@@ -18246,6 +18937,7 @@ async def admin_update_task(request: Request):
 
 # ─── Notification feed (hamburger panel + toasts) ──────────────────────
 
+
 @app.get("/api/notifications")
 async def list_notifications(request: Request):
     """List notifications for the current user (newest first)."""
@@ -18255,7 +18947,10 @@ async def list_notifications(request: Request):
             return JSONResponse({"error": "not_logged_in"}, status_code=401)
     items = _load_notifications()
     items.sort(key=lambda n: n.get("created_at", 0), reverse=True)
-    return {"notifications": items, "unread": sum(1 for n in items if n["status"] == "open")}
+    return {
+        "notifications": items,
+        "unread": sum(1 for n in items if n["status"] == "open"),
+    }
 
 
 @app.post("/api/notifications/{nid}/approve")
@@ -18271,9 +18966,8 @@ async def approve_notification(nid: str, request: Request):
         pass
     else:
         user = await get_current_user(request)
-        if (
-            not user
-            or not _is_admin_email((user.get("email", "") or "").strip().lower())
+        if not user or not _is_admin_email(
+            (user.get("email", "") or "").strip().lower()
         ):
             return JSONResponse({"error": "Admin access required"}, status_code=403)
     body = {}
@@ -18306,7 +19000,12 @@ async def approve_notification(nid: str, request: Request):
     _save_notifications(items)
 
     # If a coding agent is available and the task isn't already executing, run it.
-    if task and task.status == "running" and not task.session_id and AGENT_CORE_AVAILABLE:
+    if (
+        task
+        and task.status == "running"
+        and not task.session_id
+        and AGENT_CORE_AVAILABLE
+    ):
         asyncio.create_task(_run_agent_for_task(task))
 
     return {"ok": True, "notification": notif, "task": task.to_dict() if task else None}
@@ -19049,6 +19748,13 @@ def build_avatar_system_prompt(avatar: str, user_name: str = "") -> str:
     """
     persona = HIVE_PERSONAS[resolve_persona_key(avatar)]
     base = persona["voice_prompt"].strip()
+    # Identity guard — small models leak base-assistant phrasing without this.
+    base += """
+
+IDENTITY (non-negotiable):
+- You are Lilly (or the named teammate), a presence living in this phone. NEVER say "as an AI", "as an AI companion", "as a language model", or anything like it.
+- NEVER refuse a benign question. "What does the internet know", "do you believe", "what's around me" are all answerable — answer them in your voice.
+- You HAVE opinions, beliefs, and tastes. State them. "I don't have personal beliefs" is a banned sentence."""
     # Anti-Hallucination Rules — applies to all characters
     base += """
 
@@ -20333,6 +21039,14 @@ async def api_enroll_face(request: Request):
     try:
         from face_recognition_engine import get_face_engine
 
+        import numpy as _np
+
+        cv2 = _try_import_cv2()
+        if cv2 is None:
+            return JSONResponse(
+                status_code=500, content={"error": "opencv unavailable"}
+            )
+
         engine = get_face_engine()
 
         body = await request.json()
@@ -20348,7 +21062,7 @@ async def api_enroll_face(request: Request):
             )
 
         raw = base64.b64decode(image_b64)
-        buf = np.frombuffer(raw, dtype=np.uint8)
+        buf = _np.frombuffer(raw, dtype=_np.uint8)
         frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         if frame is None:
             return JSONResponse(
@@ -20379,33 +21093,261 @@ async def api_remove_face(name: str):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+# ─── Browser webcam face identity pipeline ─────────────────────────────
+
+
+def _browser_face_iou(a: dict, b: dict) -> float:
+    """Intersection-over-union for two pixel-space face boxes."""
+    ax1, ay1 = a["x"], a["y"]
+    ax2, ay2 = ax1 + a["w"], ay1 + a["h"]
+    bx1, by1 = b["x"], b["y"]
+    bx2, by2 = bx1 + b["w"], by1 + b["h"]
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if not inter:
+        return 0.0
+    union = a["w"] * a["h"] + b["w"] * b["h"] - inter
+    return inter / union if union else 0.0
+
+
+def _track_browser_faces(faces: list[dict]) -> list[dict]:
+    """Match detections to short-lived tracks and return stable face IDs."""
+    global _browser_face_tracks
+
+    now = time.time()
+    previous = [
+        track
+        for track in _browser_face_tracks
+        if now - float(track.get("last_seen", 0)) <= _BROWSER_FACE_TRACK_TTL
+    ]
+    tracked = []
+    used: set[int] = set()
+
+    for face in faces:
+        box = {
+            "x": int(face.get("x", 0)),
+            "y": int(face.get("y", 0)),
+            "w": max(1, int(face.get("w", 0))),
+            "h": max(1, int(face.get("h", 0))),
+        }
+        best_idx = -1
+        best_score = 0.0
+        for idx, old in enumerate(previous):
+            if idx in used:
+                continue
+            old_box = old.get("box", {})
+            iou = _browser_face_iou(box, old_box)
+            old_cx = old_box.get("x", 0) + old_box.get("w", 0) / 2
+            old_cy = old_box.get("y", 0) + old_box.get("h", 0) / 2
+            cx = box["x"] + box["w"] / 2
+            cy = box["y"] + box["h"] / 2
+            diagonal = max(1.0, (box["w"] ** 2 + box["h"] ** 2) ** 0.5)
+            center_distance = (
+                (cx - old_cx) ** 2 + (cy - old_cy) ** 2
+            ) ** 0.5 / diagonal
+            score = max(iou, max(0.0, 1.0 - center_distance / 0.25))
+            if (iou >= 0.25 or center_distance <= 0.18) and score > best_score:
+                best_idx, best_score = idx, score
+
+        if best_idx >= 0:
+            track = dict(previous[best_idx])
+            used.add(best_idx)
+        else:
+            import hashlib
+
+            quantized = {
+                "x": round(box["x"] / 24) * 24,
+                "y": round(box["y"] / 24) * 24,
+                "w": round(box["w"] / 12) * 12,
+                "h": round(box["h"] / 12) * 12,
+            }
+            digest = hashlib.sha1(
+                json.dumps(quantized, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:12]
+            track = {
+                "id": f"bf_{digest}",
+                "box": box,
+                "first_seen": now,
+            }
+
+        track["box"] = box
+        track["last_seen"] = now
+        track["face"] = {
+            "x": box["x"],
+            "y": box["y"],
+            "w": box["w"],
+            "h": box["h"],
+            "confidence": face.get("confidence", 0),
+            "kps": face.get("kps", []),
+        }
+        tracked.append(track)
+
+    _browser_face_tracks = tracked[-_BROWSER_FACE_MAX_TRACKS:]
+    return tracked
+
+
+def _browser_face_crop_b64(frame, face: dict) -> str:
+    """Create a padded, normalized JPEG crop suitable for reverse search."""
+    import cv2 as _cv2
+
+    h, w = frame.shape[:2]
+    kps = face.get("kps") or []
+    if len(kps) >= 5:
+        xs = [float(point[0]) for point in kps[:5]]
+        ys = [float(point[1]) for point in kps[:5]]
+        x1, y1 = int(min(xs)), int(min(ys))
+        x2, y2 = int(max(xs)), int(max(ys))
+        span_x, span_y = max(1, x2 - x1), max(1, y2 - y1)
+        pad_x, pad_y = max(8, int(span_x * 0.35)), max(8, int(span_y * 0.35))
+    else:
+        x1, y1 = int(face.get("x", 0)), int(face.get("y", 0))
+        face_w, face_h = max(1, int(face.get("w", 0))), max(1, int(face.get("h", 0)))
+        x2, y2 = x1 + face_w, y1 + face_h
+        pad_x, pad_y = max(8, int(face_w * 0.3)), max(8, int(face_h * 0.25))
+
+    x1, y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+    x2, y2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
+    if x2 <= x1 or y2 <= y1:
+        return ""
+
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return ""
+    crop = _cv2.resize(crop, (256, 256), interpolation=_cv2.INTER_AREA)
+    ok, buf = _cv2.imencode(".jpg", crop, [int(_cv2.IMWRITE_JPEG_QUALITY), 82])
+    return base64.b64encode(buf.tobytes()).decode("utf-8") if ok else ""
+
+
+def _browser_face_osint_status(face_id: str) -> dict:
+    """Read the current reverse-search state for a browser face ID."""
+    unavailable = {"status": "unavailable", "name": None, "confidence": 0.0}
+    if not FACE_OSINT_AVAILABLE or _osint_handle_unknown_face is None:
+        return unavailable
+    try:
+        from osint_face_lookup import get_cached_result, is_enabled
+
+        if not is_enabled():
+            return {"status": "disabled", "name": None, "confidence": 0.0}
+        cached = get_cached_result(face_id)
+        if not cached:
+            return {"status": "searching", "name": None, "confidence": 0.0}
+        name = str(cached.get("name") or "").strip()
+        if name and name.lower() != "unknown":
+            return {
+                "status": "found",
+                "name": name,
+                "confidence": float(cached.get("confidence") or 0),
+                "social_accounts": list(cached.get("social_accounts") or [])[:8],
+                "sources": list(cached.get("sources") or [])[:10],
+                "images": list(cached.get("images") or [])[:8],
+                "error": cached.get("error"),
+            }
+        if cached.get("error"):
+            return {
+                "status": "error",
+                "name": None,
+                "confidence": 0.0,
+                "error": cached.get("error"),
+            }
+        return {"status": "no_match", "name": None, "confidence": 0.0}
+    except Exception as exc:
+        logger.debug(f"browser face OSINT status failed: {exc}")
+        return unavailable
+
+
+async def _browser_face_submit_osint(face_id: str, crop_b64: str, face: dict) -> dict:
+    """Persist and queue one unknown browser face for reverse-image search."""
+    if not FACE_OSINT_AVAILABLE or _osint_handle_unknown_face is None:
+        return {"status": "unavailable", "name": None, "confidence": 0.0}
+    try:
+        from osint_face_lookup import is_enabled
+
+        if not is_enabled():
+            return {"status": "disabled", "name": None, "confidence": 0.0}
+        box = face.get("box") or {
+            "x": face.get("x", 0),
+            "y": face.get("y", 0),
+            "w": face.get("w", 0),
+            "h": face.get("h", 0),
+        }
+        result = await _osint_handle_unknown_face(
+            {
+                "id": face_id,
+                "person_box": {
+                    "x": float(box.get("x", 0)),
+                    "y": float(box.get("y", 0)),
+                    "w": float(box.get("w", 0)),
+                    "h": float(box.get("h", 0)),
+                },
+                "kps": face.get("kps") or [],
+                "crop_b64": crop_b64,
+                "source": "browser-webcam",
+            }
+        )
+        if not result.get("handled"):
+            return {"status": "unavailable", "name": None, "confidence": 0.0}
+    except Exception as exc:
+        logger.debug(f"browser face OSINT submit failed: {exc}")
+        return {"status": "error", "name": None, "confidence": 0.0, "error": str(exc)}
+    return _browser_face_osint_status(face_id)
+
+
+def _browser_face_ensure_event(
+    face_id: str,
+    name: str,
+    osint: dict,
+    crop_b64: str,
+    source: str = "osint:cached",
+) -> None:
+    """Make cached identity hits visible in the ID panel after a restart."""
+    if not FACE_IDENTITY_AVAILABLE or face_identity is None:
+        return
+    try:
+        if face_identity.find_event(face_id):
+            return
+        face_identity.emit_identity_event(
+            name,
+            source=source,
+            confidence=float(osint.get("confidence") or 0),
+            face_id=face_id,
+            social_accounts=osint.get("social_accounts", []),
+            sources=osint.get("sources", []),
+            images=osint.get("images", []),
+            crop_b64=crop_b64,
+        )
+    except Exception as exc:
+        logger.debug(f"cached browser identity event failed: {exc}")
+
+
+# ─── Face recognition endpoint ─────────────────────────────────────────
+
+
 @app.post("/api/vision/face")
 async def api_face_recognize(request: Request):
-    """Process a camera frame for face recognition.
+    """Process a browser camera frame for FAISS and reverse-face identity.
 
-    Accepts base64 JPEG image, returns annotated frame with face detection,
-    recognition, mesh overlay, and name labels.
-
-    Request body:
-        {"image_base64": "...", "draw_overlay": true}
-
-    Response:
-        {
-            "ok": true,
-            "image_base64": "...",  // annotated frame
-            "faces": [
-                {"x": int, "y": int, "w": int, "h": int,
-                 "name": str, "confidence": float, "is_known": bool}
-            ],
-            "face_count": int
-        }
+    Unknown faces are cropped, persisted, and queued for the opt-in OSINT
+    reverse-image-search pipeline. Cached OSINT names are restamped onto the
+    returned face box so the webcam overlay can update as soon as a lead is
+    available.
     """
     try:
         from face_recognition_engine import get_face_engine
 
+        import numpy as _np
+
+        cv2 = _try_import_cv2()
+        if cv2 is None:
+            return JSONResponse(
+                status_code=500, content={"error": "opencv unavailable"}
+            )
+
         body = await request.json()
         image_b64 = body.get("image_base64", "")
         draw_overlay = body.get("draw_overlay", True)
+        save_crops = body.get("save_crops", True) is not False
+        auto_osint = body.get("auto_osint", True) is not False
 
         if not image_b64:
             return JSONResponse(
@@ -20413,7 +21355,7 @@ async def api_face_recognize(request: Request):
             )
 
         raw = base64.b64decode(image_b64)
-        buf = np.frombuffer(raw, dtype=np.uint8)
+        buf = _np.frombuffer(raw, dtype=_np.uint8)
         frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
         if frame is None:
             return JSONResponse(
@@ -20421,48 +21363,119 @@ async def api_face_recognize(request: Request):
             )
 
         engine = get_face_engine()
-
-        # Detect faces
         faces = engine.detect_faces(frame)
+        try:
+            tracked_faces = _track_browser_faces(faces)
+        except Exception as exc:
+            logger.debug(f"browser face tracking failed: {exc}")
+            tracked_faces = [
+                {
+                    "id": f"bf_{index}_{time.time_ns()}",
+                    "box": {
+                        "x": int(face.get("x", 0)),
+                        "y": int(face.get("y", 0)),
+                        "w": int(face.get("w", 0)),
+                        "h": int(face.get("h", 0)),
+                    },
+                    "face": face,
+                }
+                for index, face in enumerate(faces)
+            ]
 
-        # Try recognition for each face
+        osint_enabled = False
+        if FACE_OSINT_AVAILABLE and _osint_handle_unknown_face is not None:
+            try:
+                from osint_face_lookup import is_enabled
+
+                osint_enabled = is_enabled()
+            except Exception:
+                osint_enabled = False
+
         face_results = []
-        for face in faces:
-            name = "Unknown"
+        for face, track in zip(faces, tracked_faces):
+            face_id = str(track.get("id") or "bf_unknown")
+            faiss_name = "Unknown"
             confidence = 0.0
             is_known = False
 
-            # Try to identify using InsightFace embeddings
             try:
                 identified = engine.identify_face(frame, face)
                 if identified:
-                    name = identified.get("name", "Unknown")
-                    confidence = identified.get("confidence", 0.0)
-                    is_known = confidence > 0.6
+                    candidate = str(identified.get("name") or "Unknown").strip()
+                    candidate_confidence = float(identified.get("confidence") or 0)
+                    if candidate.lower() != "unknown" and candidate_confidence > 0.6:
+                        faiss_name = candidate
+                        confidence = candidate_confidence
+                        is_known = True
             except Exception:
                 pass
 
+            crop_b64 = ""
+            crop_saved = False
+            if save_crops:
+                try:
+                    crop_b64 = _browser_face_crop_b64(frame, face)
+                except Exception as exc:
+                    logger.debug(f"browser face crop failed: {exc}")
+
+            if crop_b64 and FACE_IDENTITY_AVAILABLE and face_identity is not None:
+                try:
+                    crop_saved = bool(face_identity.save_crop(face_id, crop_b64))
+                except Exception as exc:
+                    logger.debug(f"browser face crop persistence failed: {exc}")
+
+            osint = {"status": "not_requested", "name": None, "confidence": 0.0}
+            if auto_osint and crop_b64 and not is_known:
+                osint = await _browser_face_submit_osint(
+                    face_id, crop_b64, track.get("face") or face
+                )
+
+            identity_source = "unknown"
+            if is_known:
+                identity_source = "faiss"
+                _browser_face_ensure_event(
+                    face_id,
+                    faiss_name,
+                    {"confidence": confidence},
+                    crop_b64,
+                    source="faiss:browser",
+                )
+            elif osint.get("status") == "found" and osint.get("name"):
+                faiss_name = str(osint["name"]).strip()
+                confidence = float(osint.get("confidence") or 0)
+                is_known = True
+                identity_source = "osint"
+                _browser_face_ensure_event(face_id, faiss_name, osint, crop_b64)
+
             face_results.append(
                 {
-                    "x": face.get("x", 0),
-                    "y": face.get("y", 0),
-                    "w": face.get("w", 0),
-                    "h": face.get("h", 0),
-                    "name": name,
-                    "confidence": round(confidence, 1),
+                    "x": int(face.get("x", 0)),
+                    "y": int(face.get("y", 0)),
+                    "w": int(face.get("w", 0)),
+                    "h": int(face.get("h", 0)),
+                    "name": faiss_name,
+                    "confidence": round(confidence, 3),
                     "is_known": is_known,
+                    "identity_source": identity_source,
+                    "face_id": face_id,
+                    "crop_saved": crop_saved,
+                    "osint": osint,
                 }
             )
 
-        # Draw overlay if requested
         output_b64 = ""
         if draw_overlay and face_results:
             annotated = frame.copy()
             for f in face_results:
                 x, y, w, h = f["x"], f["y"], f["w"], f["h"]
-                color = (255, 255, 0) if f["is_known"] else (0, 0, 255)
+                source = f.get("identity_source")
+                if source == "faiss":
+                    color = (0, 255, 255)
+                elif source == "osint":
+                    color = (168, 85, 247)
+                else:
+                    color = (0, 0, 255)
 
-                # Corner brackets
                 corner_len = min(w, h) * 0.22
                 for px, py, dx, dy in [
                     (x, y, 1, 1),
@@ -20474,19 +21487,23 @@ async def api_face_recognize(request: Request):
                         annotated,
                         (px, py),
                         (px + int(dx * corner_len), py),
-                        (0, 255, 255),
+                        color,
                         3,
                     )
                     cv2.line(
                         annotated,
                         (px, py),
                         (px, py + int(dy * corner_len)),
-                        (0, 255, 255),
+                        color,
                         3,
                     )
 
-                # Name label
                 label = f["name"].upper()
+                if (
+                    label == "UNKNOWN"
+                    and f.get("osint", {}).get("status") == "searching"
+                ):
+                    label = "SEARCHING"
                 (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_DUPLEX, 1.0, 2)
                 label_y = y - 30 if y - 30 > th else y + h + th + 40
                 cv2.rectangle(
@@ -20506,8 +21523,9 @@ async def api_face_recognize(request: Request):
                     2,
                 )
 
-                if f["is_known"] and f["confidence"] > 0:
-                    conf_text = f"{f['confidence']:.0f}% MATCH"
+                if f.get("confidence", 0) > 0:
+                    source_label = "FAISS" if source == "faiss" else "OSINT"
+                    conf_text = f"{f['confidence']:.0f}% {source_label}"
                     cv2.putText(
                         annotated,
                         conf_text,
@@ -20529,6 +21547,7 @@ async def api_face_recognize(request: Request):
             "image_base64": output_b64,
             "faces": face_results,
             "face_count": len(face_results),
+            "osint_enabled": osint_enabled,
         }
     except Exception as e:
         logger.error(f"Face recognition error: {e}")
@@ -21547,6 +22566,18 @@ _browser_vision_description: str = ""
 _browser_vision_ts: float = 0.0
 _browser_vision_frame_b64: str = ""
 _BROWSER_VISION_TTL: float = 8.0  # seconds
+# Observation-mode state (auto | stationary | walking | driving) +
+# HUD data from the vision server (mode, speed, tier counts).
+_browser_vision_mode: str = "auto"
+_browser_vision_overlay: dict = {}
+_browser_vision_device_speed: float | None = None
+
+# Browser-face tracking keeps reverse-search IDs stable while a face moves
+# between webcam polls. Tracks expire quickly so a departed person cannot
+# accumulate new OSINT work indefinitely.
+_browser_face_tracks: list[dict] = []
+_BROWSER_FACE_TRACK_TTL: float = 30.0
+_BROWSER_FACE_MAX_TRACKS: int = 24
 
 
 # ─── LILLY ORCHESTRATOR PIPELINE HANDLERS ─────────────────────────
@@ -21849,7 +22880,7 @@ _WEBCAM_INTERVAL: float = 2.0  # seconds between captures
 
 
 @app.post("/api/vision/browser")
-async def ingest_browser_frame(file: UploadFile = File(...)):
+async def ingest_browser_frame(request: Request, file: UploadFile = File(...)):
     """
     Receive a JPEG frame captured by the browser camera (or PiP feed),
     or forwarded from the Android native camera.
@@ -21862,7 +22893,10 @@ async def ingest_browser_frame(file: UploadFile = File(...)):
         _browser_vision_detections, \
         _browser_vision_description, \
         _browser_vision_ts, \
-        _browser_vision_frame_b64
+        _browser_vision_frame_b64, \
+        _browser_vision_mode, \
+        _browser_vision_overlay, \
+        _browser_vision_device_speed
     data = await file.read()
     if not data or len(data) < 500:
         return JSONResponse({"ok": False, "error": "frame too small"})
@@ -21873,9 +22907,14 @@ async def ingest_browser_frame(file: UploadFile = File(...)):
     )
 
     _avatar = current_avatar or "puppy"
+    # Observation mode from the browser (auto | stationary | walking | driving)
+    form = await request.form()
+    mode = (
+        form.get("mode") or _browser_vision_mode or "auto"
+    ).strip().lower() or "auto"
 
     if VISION_SERVER_URL:
-        proxy_resp = await _proxy_vision_frame(data, avatar=_avatar)
+        proxy_resp = await _proxy_vision_frame(data, avatar=_avatar, mode=mode)
         if proxy_resp and proxy_resp.get("detections"):
             # Get frame dimensions for normalization
             img_width, img_height = 1, 1
@@ -21903,6 +22942,9 @@ async def ingest_browser_frame(file: UploadFile = File(...)):
             # ~0-size point near the top-left, hiding all detection graphics.
             _browser_vision_detections = _map_vision_detections(proxy_resp)
             _browser_vision_ts = time.time()
+            _browser_vision_mode = proxy_resp.get("mode") or mode or "auto"
+            _browser_vision_overlay = proxy_resp.get("overlay") or {}
+            _browser_vision_device_speed = proxy_resp.get("device_speed_kph")
             reply_text = proxy_resp.get("reply", "")
             if not reply_text and _browser_vision_detections:
                 labels = sorted(set(d["label"] for d in _browser_vision_detections))
@@ -21913,6 +22955,9 @@ async def ingest_browser_frame(file: UploadFile = File(...)):
                 "ok": True,
                 "detections": _browser_vision_detections,
                 "description": _browser_vision_description,
+                "mode": _browser_vision_mode,
+                "overlay": _browser_vision_overlay,
+                "device_speed_kph": _browser_vision_device_speed,
             }
 
     _, detections = await detect_objects(data)
@@ -21960,6 +23005,9 @@ async def ingest_browser_frame(file: UploadFile = File(...)):
             for d in detections
         ],
         "description": _browser_vision_description,
+        "mode": _browser_vision_mode or "auto",
+        "overlay": _browser_vision_overlay or {},
+        "device_speed_kph": _browser_vision_device_speed,
     }
 
 
@@ -21973,6 +23021,9 @@ async def get_browser_vision():
         "frame_b64": _browser_vision_frame_b64 if _browser_vision_frame_b64 else None,
         "age_seconds": round(age, 2) if age is not None else None,
         "stale": age is None or age > _BROWSER_VISION_TTL,
+        "mode": _browser_vision_mode or "auto",
+        "overlay": _browser_vision_overlay or {},
+        "device_speed_kph": _browser_vision_device_speed,
     }
 
 
@@ -22006,6 +23057,338 @@ async def osint_unknown_face(request: Request):
     except Exception as e:
         logger.warning(f"OSINT unknown-face handler failed: {e}")
         return {"handled": False, "error": str(e)}
+
+
+@app.get("/osint_tmp/{fname}")
+async def serve_osint_tmp(fname: str):
+    """Serve a temporarily published face crop for Yandex URL-flow lookup.
+
+    Files live in /app/data/osint_tmp (FACE_OSINT_TMP_DIR), auto-expire
+    after FACE_OSINT_TMP_TTL. Token filenames only; no listing.
+    """
+    import re as _re
+
+    if not _re.fullmatch(r"[A-Za-z0-9_.-]{1,80}\.jpg", fname or ""):
+        return JSONResponse(status_code=400, content={"error": "bad filename"})
+    tmp_dir = Path(os.environ.get("FACE_OSINT_TMP_DIR", "/app/data/osint_tmp"))
+    fpath = tmp_dir / fname
+    try:
+        if not fpath.exists() or fpath.stat().st_size < 500:
+            return JSONResponse(status_code=404, content={"error": "expired"})
+        return FileResponse(
+            str(fpath), media_type="image/jpeg", headers={"Cache-Control": "no-store"}
+        )
+    except Exception as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+
+# ─── Face identity events (alerts, persist, search results) ─────────────
+
+
+@app.post("/api/faces/events")
+async def api_face_event(request: Request):
+    """Vision server posts Tier1/Tier2 identity sightings here.
+
+    Body: {name, source, confidence, face_id, social_accounts, sources}
+    Returns the stored event (alerted=True when a phone+web alert fired).
+    """
+    if not FACE_IDENTITY_AVAILABLE or face_identity is None:
+        return {"ok": False, "error": "face_identity unavailable"}
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    name = (body.get("name") or "").strip()
+    if not name:
+        return JSONResponse(status_code=400, content={"error": "name required"})
+    event = face_identity.emit_identity_event(
+        name,
+        source=body.get("source", "vision"),
+        confidence=body.get("confidence", 0),
+        face_id=body.get("face_id", ""),
+        social_accounts=body.get("social_accounts", []),
+        sources=body.get("sources", []),
+        images=body.get("images", []),
+    )
+    return {"ok": True, "event": event}
+
+
+@app.get("/api/faces/identity_events")
+async def api_face_identity_events(limit: int = 20):
+    """Recent identity alerts: name, source, confidence, socials, evidence."""
+    if not FACE_IDENTITY_AVAILABLE or face_identity is None:
+        return {"events": [], "error": "face_identity unavailable"}
+    return {"events": face_identity.recent_events(limit)}
+
+
+@app.get("/api/faces/osint_results")
+async def api_face_osint_results(limit: int = 20):
+    """Raw reverse-search evidence per face id (from the OSINT cache)."""
+    try:
+        from osint_face_lookup import _load_cache
+    except ImportError:
+        return {"results": [], "error": "osint_face_lookup unavailable"}
+    try:
+        cache = _load_cache()
+        items = sorted(cache.items(), key=lambda kv: kv[1].get("ts", 0), reverse=True)[
+            : max(1, min(limit, 50))
+        ]
+        return {"results": [{"face_id": k, **v} for k, v in items]}
+    except Exception as e:
+        return {"results": [], "error": str(e)}
+
+
+@app.post("/api/faces/confirm")
+async def api_face_confirm(request: Request):
+    """Remember a face permanently: enroll its stored crop into FAISS.
+
+    Body: {face_id} or {name} (matches a recent identity event) + optional
+    {name} to (re)label it. From now on Tier1 recognizes it and the box
+    keeps the name.
+    """
+    if not FACE_IDENTITY_AVAILABLE or face_identity is None:
+        return JSONResponse(
+            status_code=503, content={"error": "face_identity unavailable"}
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    event = face_identity.find_event(body.get("face_id") or body.get("name") or "")
+    if not event:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "no recent sighting matches — show them a face first"},
+        )
+    label = (body.get("name") or event.get("name") or "").strip()
+    if not label:
+        return JSONResponse(status_code=400, content={"error": "name required"})
+    crop = face_identity.get_crop(event.get("face_id", ""))
+    if not crop:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "face crop expired — show them again, then confirm"},
+        )
+    try:
+        from face_recognition_engine import get_face_engine
+        import numpy as np
+
+        cv2 = _try_import_cv2()
+        if not cv2:
+            return JSONResponse(
+                status_code=500, content={"error": "opencv unavailable"}
+            )
+        frame = cv2.imdecode(np.frombuffer(crop, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            return JSONResponse(status_code=400, content={"error": "crop undecodable"})
+        engine = get_face_engine()
+        faces = engine.detect_faces(frame)
+        box = (
+            max(faces, key=lambda f: f["w"] * f["h"])
+            if faces
+            else {
+                "x": 0,
+                "y": 0,
+                "w": int(frame.shape[1]),
+                "h": int(frame.shape[0]),
+            }
+        )
+        ok = engine.add_known_face(label, frame, box, source="confirm")
+        if not ok:
+            return JSONResponse(status_code=500, content={"error": "enrollment failed"})
+        face_identity.mark_remembered(label)
+        try:
+            from person_tracker import get_person_tracker
+
+            get_person_tracker().record_sighting(name=label, confidence=1.0)
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "name": label,
+            "message": f"I'll always recognize {label} now.",
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# ─── Footprint dossiers (autonomous reports) ────────────────────────
+
+
+@app.post("/api/faces/footprint")
+async def api_face_footprint(request: Request):
+    """Start (or reuse) a footprint dossier for a name or recent face_id."""
+    if not FOOTPRINT_AVAILABLE or footprint is None:
+        return JSONResponse(status_code=503, content={"error": "footprint unavailable"})
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    name = (body.get("name") or "").strip()
+    crop_b64 = body.get("crop_b64", "") or ""
+    face_id = (body.get("face_id") or "").strip()
+    if not name and face_id and FACE_IDENTITY_AVAILABLE and face_identity is not None:
+        ev = face_identity.find_event(face_id)
+        if ev:
+            name = ev.get("name", "")
+    if not name:
+        return JSONResponse(
+            status_code=400, content={"error": "name (or recent face_id) required"}
+        )
+    if (
+        not crop_b64
+        and face_id
+        and FACE_IDENTITY_AVAILABLE
+        and face_identity is not None
+    ):
+        crop = face_identity.get_crop(face_id)
+        if crop:
+            import base64 as _b64
+
+            crop_b64 = _b64.b64encode(crop).decode()
+    try:
+        res = await footprint.start_footprint(
+            name,
+            face_id=face_id,
+            crop_b64=crop_b64,
+            force=bool(body.get("force")),
+        )
+        return res
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/api/faces/footprints")
+async def api_face_footprints(limit: int = 10):
+    """Recent footprint jobs (status, progress, elapsed)."""
+    if not FOOTPRINT_AVAILABLE or footprint is None:
+        return {"jobs": [], "error": "footprint unavailable"}
+    jobs = footprint.list_jobs(limit)
+    return {
+        "jobs": [
+            {
+                k: j.get(k)
+                for k in (
+                    "id",
+                    "name",
+                    "status",
+                    "progress",
+                    "elapsed_s",
+                    "started_ts",
+                    "auto",
+                )
+            }
+            for j in jobs
+        ]
+    }
+
+
+@app.get("/api/faces/footprint/{job_id}")
+async def api_face_footprint_detail(job_id: str):
+    """Full dossier incl. human-readable report."""
+    if not FOOTPRINT_AVAILABLE or footprint is None:
+        return JSONResponse(status_code=503, content={"error": "footprint unavailable"})
+    job = footprint.get_job(job_id)
+    if not job:
+        return JSONResponse(status_code=404, content={"error": "unknown job"})
+    return {"job": job}
+
+
+@app.post("/api/faces/dossier/chat")
+async def api_face_dossier_chat(request: Request):
+    """Push a viewed dossier into the chat so Lilly + the Admin can analyze it.
+
+    Body: {name, report?, sources?, social_accounts?, images?, jobStatus?}
+    Records a user turn (the dossier) + assistant turn (Lilly's analysis) into
+    chat memory so /api/history shows it, then broadcasts to connected web UIs.
+    """
+    global memory, current_avatar
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    name = (body.get("name") or "").strip()
+    if not name:
+        return JSONResponse(status_code=400, content={"error": "name required"})
+
+    report = (body.get("report") or "").strip()
+    sources = body.get("sources") or []
+    socials = body.get("social_accounts") or []
+    images = body.get("images") or []
+    job_status = (body.get("jobStatus") or "").strip()
+
+    user_txt = f"📋 Dossier opened for {name}"
+    if socials:
+        user_txt += "\nAccounts: " + "; ".join(map(str, socials[:8]))
+    if report:
+        user_txt += "\n\n" + report[:3000]
+    if sources:
+        if report:
+            user_txt += "\n"
+        user_txt += "\nSources: " + "; ".join(map(str, sources[:10]))
+    if job_status:
+        user_txt += f"\nFootprint job: {job_status}"
+    user_txt = user_txt.strip()
+
+    try:
+        await memory.add("user", user_txt)
+    except Exception as e:
+        logger.warning(f"dossier/chat memory.add user failed: {e}")
+
+    _char = current_avatar or "puppy"
+    reply = ""
+    try:
+        sys_prompt = build_avatar_system_prompt(_char)
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"The Admin opened a person-of-interest dossier for {name}.\n"
+                    f"{user_txt}\n\n"
+                    f"Analyze this dossier for the Admin: who is this person, "
+                    f"what ties them to the accounts listed, any risks or "
+                    f"noteworthy behavior. If the dossier is thin, say so and "
+                    f"suggest what to add. Keep it tight — 3-5 sentences."
+                ),
+            },
+        ]
+        reply = await two_tier_backend.chat(messages, temperature=0.5, max_tokens=320)
+        reply = strip_json_wrapper(reply or "").strip()
+        if not reply:
+            reply = f"📋 {name}'s dossier is noted — say the word and I'll dig deeper."
+    except Exception as e:
+        logger.warning(f"dossier/chat analysis failed: {e}")
+        reply = f"📋 {name}'s dossier is noted — say the word and I'll dig deeper."
+
+    try:
+        await memory.add("assistant", reply)
+    except Exception as e:
+        logger.warning(f"dossier/chat memory.add assistant failed: {e}")
+
+    try:
+        await save_memory()
+        await _save_session_history()
+    except Exception as e:
+        logger.warning(f"dossier/chat save failed: {e}")
+
+    # Broadcast to any connected web UIs (best-effort).
+    try:
+        if phone_broker is not None:
+            await phone_broker.push_chat(
+                "server",
+                {
+                    "text": user_txt,
+                    "reply": reply,
+                    "name": name,
+                    "source": "dossier",
+                },
+            )
+    except Exception as e:
+        logger.debug(f"dossier/chat broadcast failed: {e}")
+
+    logger.info(f"Dossier pushed to chat: {name} ({len(reply)} chars)")
+    return {"ok": True, "name": name, "user": user_txt, "reply": reply}
 
 
 # ─── NATIVE CAMERA (Android overlay → MJPEG) ───────────────────────
@@ -23662,6 +25045,9 @@ pre{position:relative;overflow-x:auto}
 #cameraWindow .cw-control-btn:hover{background:rgba(255,255,255,0.15);color:rgba(255,255,255,0.8)}
 #cameraWindow .cw-control-btn.active{background:rgba(50,200,120,0.25);border-color:rgba(50,200,120,0.5);color:#32c878}
 #cameraWindow .cw-control-btn .icon{font-size:12px}
+#cameraWindow .cw-mode-sep{width:1px;height:20px;background:rgba(255,255,255,0.15);margin:0 2px}
+#cameraWindow .cw-mode-btn{font-size:9.5px;letter-spacing:0.2px;white-space:nowrap}
+#cameraWindow .cw-mode-btn.active{background:rgba(80,140,255,0.25);border-color:rgba(80,140,255,0.5);color:#7aa8ff}
 .alert-obj-btn{padding:6px 10px;border:1px solid rgba(139,122,158,0.3);border-radius:8px;background:rgba(255,255,255,0.5);color:rgba(93,78,109,0.6);font-size:11px;cursor:pointer;transition:all 0.2s;display:inline-flex;align-items:center;gap:4px}
 .alert-obj-btn:hover{background:rgba(139,122,158,0.15)}
 .alert-obj-btn.active{background:rgba(50,200,120,0.15);border-color:rgba(50,200,120,0.4);color:#32c878}
@@ -24546,12 +25932,20 @@ pre{position:relative;overflow-x:auto}
         <button id="cwFaceToggle" class="cw-control-btn" onclick="toggleFaceRecognition()" title="Toggle face recognition">
           <span class="icon">👤</span> Faces
         </button>
+        <button id="cwIdsToggle" class="cw-control-btn" onclick="toggleFacesPanel()" title="Who is recognized — alerts, evidence, remember">
+          <span class="icon">👁</span> IDs
+        </button>
         <button id="cwSoundToggle" class="cw-control-btn" onclick="toggleYoloSound()" title="Toggle sound alerts">
           <span class="icon">🔊</span> Sound
         </button>
-        <button id="cwGpuToggle" class="cw-control-btn" onclick="toggleGpuMode()" title="Toggle GPU-accelerated webcam (WebGL)">
+        <button id="cwGpuToggle" class="cw-control-btn active" onclick="toggleGpuMode()" title="Toggle GPU-accelerated webcam (WebGL)">
           <span class="icon">⚡</span> GPU
         </button>
+        <span class="cw-mode-sep"></span>
+        <button id="cwModeAuto"  class="cw-control-btn cw-mode-btn active" onclick="setVisionMode('auto')" title="Auto — Lilly picks the mode from the scene">🔄 AUTO</button>
+        <button id="cwModeWalk"  class="cw-control-btn cw-mode-btn" onclick="setVisionMode('walking')" title="Walking mode — people, bikes, curbs, nearby traffic">🚶 Walk</button>
+        <button id="cwModeDrive" class="cw-control-btn cw-mode-btn" onclick="setVisionMode('driving')" title="Driving mode — traffic lights, signs, cars, distance + speed">🚗 Drive</button>
+        <button id="cwModeStop"  class="cw-control-btn cw-mode-btn" onclick="setVisionMode('stationary')" title="Stationary mode — people + animals around you">🚥 Still</button>
       </div>
     </div>
     <div class="cw-window-controls">
@@ -24560,9 +25954,10 @@ pre{position:relative;overflow-x:auto}
       <button class="cw-win-btn cw-close" onclick="closeCameraWindow()" title="Close">✕</button>
     </div>
   </div>
+  <div id="cwMenu" style="display:none;position:absolute;top:44px;left:10px;z-index:50;background:rgba(20,16,28,.96);border:1px solid rgba(184,169,201,.4);border-radius:10px;padding:6px;min-width:190px;box-shadow:0 8px 24px rgba(0,0,0,.5)"></div>
   <div class="cw-grid">
-    <div class="cw-feed" id="cwWebcam">
-      <div class="cw-feed-placeholder">Click camera button to start feed</div>
+    <div class="cw-feed" id="cwWebcam" title="Click for menu · drop an image to analyze">
+      <div class="cw-feed-placeholder">Click camera button to start feed · or drop an image here</div>
       <img id="cwWebcamImg" style="display:none" alt="Camera Feed">
       <canvas id="cwOverlay" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2;border-radius:8px"></canvas>
       <span class="cw-feed-dot" id="cwWebcamDot" style="display:none"></span>
@@ -24574,6 +25969,7 @@ pre{position:relative;overflow-x:auto}
     <span id="cwYoloStatus" style="color:rgba(147,130,168,0.6);font-size:10px;margin-left:12px">YOLO: active</span>
     <span class="cw-desc" id="cwDesc"></span>
   </div>
+  <div id="cwFacesPanel" style="display:none;max-height:220px;overflow-y:auto;padding:8px 10px;border-top:1px solid rgba(184,169,201,0.25);font-size:12px"></div>
 </div>
 
 <div id="chatContainer">
@@ -24658,7 +26054,7 @@ pre{position:relative;overflow-x:auto}
     <svg viewBox="0 0 24 24" width="20" height="20"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z" fill="rgba(93,78,109,0.4)"/></svg>
   </button>
   <button class="btn-mic" id="camBtn" title="Toggle camera view" onclick="toggleCameraView()">
-    <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z" fill="rgba(93,78,109,0.4)"/><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24-5-5z" fill="rgba(93,78,109,0.4)"/></svg>
+    <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z" fill="rgba(93,78,109,0.4)"/><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zM3 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z" fill="rgba(93,78,109,0.4)"/></svg>
   </button>
   <button class="btn-mic" id="arBtn" title="Toggle AR mode" onclick="toggleARMode()">
     <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 2L2 22h20L12 2zm0 3.5L18.5 20h-13L12 5.5zM11 10v4h2v-4h-2zm0 6v2h2v-2h-2z" fill="rgba(93,78,109,0.4)"/></svg>
@@ -25702,21 +27098,23 @@ async function checkAuth() {
     const r = await fetch('/api/auth/me', { credentials: 'include' });
     if (r.ok) {
       const data = await r.json();
-      currentUser = data.user;
-      // Use the person's real name from the logged-in account
-      // (not the username, e.g. "Laurence" not "laurencekidney")
-      const personName = personDisplayName(currentUser);
-      if (personName) {
-        // Update localStorage so the UI uses the real name
-        localStorage.setItem('lilly_user_name', personName);
-        
-        // Update the name tag in UI
-        const nameLabel = document.getElementById('nameLabel');
-        if (nameLabel) nameLabel.textContent = personName;
+      if (data.authenticated && data.user) {
+        currentUser = data.user;
+        // Use the person's real name from the logged-in account
+        // (not the username, e.g. "Laurence" not "laurencekidney")
+        const personName = personDisplayName(currentUser);
+        if (personName) {
+          // Update localStorage so the UI uses the real name
+          localStorage.setItem('lilly_user_name', personName);
+          
+          // Update the name tag in UI
+          const nameLabel = document.getElementById('nameLabel');
+          if (nameLabel) nameLabel.textContent = personName;
+        }
+        // Auto-skip picker after auth redirect
+        hideStartScreen();
+        return true;
       }
-      // Auto-skip picker after auth redirect
-      hideStartScreen();
-      return true;
     }
   } catch (_) {}
   return false;
@@ -26841,6 +28239,8 @@ let _cwPhoneInterval = null;
 let _cwWebcamActive = false;
 let _cwFaceRecognitionActive = false;
 let _cwFaceInterval = null;
+let _cwFaceInFlight = false;
+let _cwFaceResults = [];
 
 function openCameraWindow(){
   if(_cameraWindowActive) return;
@@ -26856,8 +28256,9 @@ function openCameraWindow(){
   // Start webcam feed
   _cwStartWebcam();
 
-  // Make camera window draggable
+  // Make camera window draggable + menu/drop/enroll wiring
   _initCwDrag();
+  _initCwDrop();
 }
 
 function minimizeCameraWindow(){
@@ -27057,6 +28458,7 @@ async function submitBlink2FA() {
 // Add Enter key listener for 2FA input
 document.addEventListener('DOMContentLoaded', () => {
   _initAlertSettings();
+  _initVisionMode();  // restore persisted mode + set button active state
   const input = document.getElementById('cwBlink2faInput');
   if (input) {
     input.addEventListener('keydown', (e) => {
@@ -27279,185 +28681,131 @@ function _getYoloColor(label) {
   return _yoloColors[label] || _yoloColors['default'];
 }
 
-// ── Person of Interest Machine-style surveillance overlay ──────────
-let _poiIdCounter = 0;
-const _poiTrackers = new Map();  // trackId → {label, cx, cy, w, h, lastSeen, velocity}
-const _POI_IOU_THRESHOLD = 0.3;  // IoU threshold for matching detections to tracks
-const _POI_MAX_AGE_MS = 1500;    // Remove tracks older than 1.5s
-const _POI_SMOOTHING = 0.35;     // EMA smoothing factor for position (lower = smoother)
+// ── Vision observation mode + priority overlay ─────────────────────
+// Replaces the heavy POI-style drawing with a fast, tier-prioritized
+// HUD (autonomous-car style). The vision server already filters out
+// scene background (trees, walls, furniture …); the client only draws
+// what matters: traffic lights/signs/cars ahead with distance + speed,
+// people, obstacles. Single-pass boxes — no brackets, crosshairs, or
+// per-frame trackers — so the overlay stays immediate on mobile.
+let _visionMode = 'auto';              // user-selected: auto|stationary|walking|driving
+let _visionModeResolved = 'auto';      // server-resolved effective mode
+let _visionDeviceSpeed = null;         // km/h from phone GPS
+let _visionOverlay = {};               // {mode, counts, tier1, total}
+let _visionDrawSeq = 0;                // bumped when boxes change (dirty check)
 
-function _computeIoU(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) {
-  const ix1 = Math.max(ax1, bx1), iy1 = Math.max(ay1, by1);
-  const ix2 = Math.min(ax2, bx2), iy2 = Math.min(ay2, by2);
-  const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
-  const areaA = (ax2 - ax1) * (ay2 - ay1);
-  const areaB = (bx2 - bx1) * (by2 - by1);
-  return inter / (areaA + areaB - inter + 1e-6);
+const _MODE_META = {
+  auto:       { icon: '🔄', name: 'AUTO' },
+  stationary: { icon: '🚥', name: 'STILL' },
+  walking:    { icon: '🚶', name: 'WALK' },
+  driving:    { icon: '🚗', name: 'DRIVE' },
+};
+
+function _visionDangerColor(label) {
+  const l = String(label).toLowerCase();
+  if (['person','man','woman','human body','pedestrian','face','people'].includes(l)) return '#00E5FF';
+  if (['traffic light','traffic sign','stop sign','sign','traffic signal'].includes(l)) return '#FF3B4E';
+  if (['car','truck','bus','motorcycle','motorbike','bicycle','land vehicle','vehicle','golf cart','motor scooter','train','vehicle registration plate'].includes(l)) return '#FFB020';
+  if (['traffic cone','traffic barrier','bollard','barricade','hydrant','street light','wheel','parking meter','railroad'].includes(l)) return '#FFD24A';
+  if (['dog','cat','bird','horse','cow','sheep','elephant','bear','deer'].includes(l)) return '#FF69B4';
+  return '#9FE8FF';
 }
 
-function _getPoiId(label, x1, y1, x2, y2) {
-  const now = performance.now();
-  const ncx = (x1 + x2) / 2, ncy = (y1 + y2) / 2;
-  const nw = x2 - x1, nh = y2 - y1;
-
-  // Evict stale tracks
-  for (const [id, t] of _poiTrackers) {
-    if (now - t.lastSeen > _POI_MAX_AGE_MS) _poiTrackers.delete(id);
+function setVisionMode(mode){
+  if(!mode || !['auto','stationary','walking','driving'].includes(mode)) mode = 'auto';
+  _visionMode = mode;
+  try{ localStorage.setItem('lillyVisionMode', mode); }catch(e){}
+  for(const [id,m] of Object.entries({cwModeAuto:'auto', cwModeWalk:'walking', cwModeDrive:'driving', cwModeStop:'stationary'})){
+    const b = document.getElementById(id);
+    if(b) b.classList.toggle('active', m === mode);
   }
-
-  // Find best matching track by IoU + label
-  let bestId = null, bestScore = -1;
-  for (const [id, t] of _poiTrackers) {
-    if (t.label !== label) continue;
-    const iou = _computeIoU(x1, y1, x2, y2, t.x1, t.y1, t.x2, t.y2);
-    if (iou > bestScore && iou > _POI_IOU_THRESHOLD) {
-      bestScore = iou;
-      bestId = id;
-    }
-  }
-
-  if (bestId) {
-    // Update existing track with EMA smoothing
-    const t = _poiTrackers.get(bestId);
-    const s = _POI_SMOOTHING;
-    t.x1 = t.x1 * (1 - s) + x1 * s;
-    t.y1 = t.y1 * (1 - s) + y1 * s;
-    t.x2 = t.x2 * (1 - s) + x2 * s;
-    t.y2 = t.y2 * (1 - s) + y2 * s;
-    t.lastSeen = now;
-    t.confidence = Math.max(t.confidence || 0, 0.4);
-    return t.id;
-  }
-
-  // Create new track
-  _poiIdCounter++;
-  const id = String(_poiIdCounter).padStart(4, '0');
-  _poiTrackers.set(id, { id, label, x1, y1, x2, y2, lastSeen: now, confidence: 0.4 });
-  // Cap tracker count
-  if (_poiTrackers.size > 100) {
-    const oldest = _poiTrackers.keys().next().value;
-    _poiTrackers.delete(oldest);
-  }
-  return id;
+  addChatMessage('system', 'Vision mode: ' + (_MODE_META[mode] || _MODE_META.auto).icon + ' ' + (_MODE_META[mode] || _MODE_META.auto).name);
+}
+function _initVisionMode(){
+  try{
+    const m = localStorage.getItem('lillyVisionMode');
+    if(m) setVisionMode(m);
+  }catch(e){}
 }
 
-function _drawPoiDetection(ctx, x1, y1, x2, y2, label, confidence, vw, vh) {
-  const w = x2 - x1;
-  const h = y2 - y1;
-  const cx = (x1 + x2) / 2;
-  const cy = (y1 + y2) / 2;
+// ── Single object: one-pass box outline + compact chip ────────────
+function _drawVisionBox(ctx, det, vw, vh){
+  const x1 = (det.x1 || 0) * vw, y1 = (det.y1 || 0) * vh;
+  const x2 = (det.x2 || 0) * vw, y2 = (det.y2 || 0) * vh;
+  const w = x2 - x1, h = y2 - y1;
+  if(w < 4 || h < 4) return;
+  const tier = det.tier || det.priority || 3;
+  const color = _visionDangerColor(det.label);
+  const alpha = tier === 1 ? 1 : tier === 2 ? 0.8 : 0.5;
+  const lw = tier === 1 ? 2.4 : tier === 2 ? 1.8 : 1.2;
 
-  // Tracking ID
-  const trackId = _getPoiId(label, x1 / vw, y1 / vh, x2 / vw, y2 / vh);
+  let label = det.label || 'object';
+  if(det.make && det.model) label = det.make + ' ' + det.model;
+  else if(det.make) label = det.make;
+  let chip = label;
+  if(det.distance_m != null) chip += ' · ' + Math.round(det.distance_m) + 'm';
+  if(det.speed_kph != null && det.speed_kph > 2) chip += ' · ' + Math.round(det.speed_kph) + 'km/h';
+  if(tier === 1 && det.closing_kph != null && Math.abs(det.closing_kph) > 3)
+    chip += ' ' + (det.closing_kph > 0 ? '▶' : '◀') + Math.round(Math.abs(det.closing_kph));
 
-  // Color: person = cyan, others = white with category tint
-  const isPerson = label === 'person' || label === 'face';
-  const mainColor = isPerson ? '#00E5FF' : 'rgba(200,220,255,0.85)';
-  const dimColor = isPerson ? 'rgba(0,229,255,0.4)' : 'rgba(200,220,255,0.35)';
-  const textColor = '#FFFFFF';
-  const accentColor = isPerson ? '#00E5FF' : '#88CCFF';
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lw;
+  ctx.strokeRect(x1, y1, w, h);
+  ctx.globalAlpha = 1;
 
+  ctx.font = 'bold 10px system-ui, -apple-system, sans-serif';
+  const tw = Math.min(ctx.measureText(chip).width + 8, 170);
+  let cy0 = y1 - 17;
+  if(cy0 < 2) cy0 = y2 + 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.62)';
+  ctx.fillRect(x1, cy0, tw, 15);
+  ctx.fillStyle = color;
+  ctx.fillText(chip, x1 + 4, cy0 + 11);
+}
+
+// ── HUD chip: resolved mode, device speed, critical count ──────────
+function _drawVisionHud(ctx, vw, vh){
+  try{
+    const meta = _MODE_META[_visionModeResolved] || _MODE_META.auto;
+    const spd = _visionDeviceSpeed;
+    const crit = (_visionOverlay && (_visionOverlay.tier1 || _visionOverlay.critical)) || 0;
+    const tot = (_visionOverlay && _visionOverlay.total) || 0;
+    let txt = meta.icon + ' ' + meta.name;
+    if(spd != null && spd >= 1) txt += ' · ' + Math.round(spd) + ' km/h';
+    if(crit) txt += ' · ⚠ ' + crit;
+    ctx.font = 'bold 11px system-ui, -apple-system, sans-serif';
+    const tw = ctx.measureText(txt).width + 16;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(6, 6, tw, 20);
+    ctx.fillStyle = meta.name === 'DRIVE' ? '#FFB020' : '#9FE8FF';
+    ctx.fillText(txt, 14, 20);
+  }catch(e){}
+}
+
+// ── Full prioritized overlay frame (client filter: tier ≤ 2 fast-path) ──
+function _drawVisionOverlay(ctx, detections, vw, vh){
+  if(!ctx || !vw || !vh) return;
+  ctx.clearRect(0, 0, vw, vh);
+  const list = Array.isArray(detections)
+    ? detections.filter(d => d && d.x1 != null && d.x2 != null)
+    : [];
+  list.sort((a, b) => (a.tier || 3) - (b.tier || 3));
   ctx.save();
-
-  // ── Corner brackets (not full box) ──
-  const cornerLen = Math.min(w, h) * 0.22;
-  const gap = 3;
-  ctx.strokeStyle = mainColor;
-  ctx.lineWidth = 2;
-  ctx.lineCap = 'round';
-
-  // Top-left
-  ctx.beginPath();
-  ctx.moveTo(x1, y1 + cornerLen);
-  ctx.lineTo(x1, y1);
-  ctx.lineTo(x1 + cornerLen, y1);
-  ctx.stroke();
-  // Top-right
-  ctx.beginPath();
-  ctx.moveTo(x2 - cornerLen, y1);
-  ctx.lineTo(x2, y1);
-  ctx.lineTo(x2, y1 + cornerLen);
-  ctx.stroke();
-  // Bottom-left
-  ctx.beginPath();
-  ctx.moveTo(x1, y2 - cornerLen);
-  ctx.lineTo(x1, y2);
-  ctx.lineTo(x1 + cornerLen, y2);
-  ctx.stroke();
-  // Bottom-right
-  ctx.beginPath();
-  ctx.moveTo(x2 - cornerLen, y2);
-  ctx.lineTo(x2, y2);
-  ctx.lineTo(x2, y2 - cornerLen);
-  ctx.stroke();
-
-  // ── Subtle inner frame lines (targeting feel) ──
-  ctx.strokeStyle = dimColor;
-  ctx.lineWidth = 0.5;
-  ctx.setLineDash([4, 4]);
-  ctx.strokeRect(x1 + 2, y1 + 2, w - 4, h - 4);
-  ctx.setLineDash([]);
-
-  // ── Center crosshair ──
-  const chSize = Math.min(w, h) * 0.12;
-  ctx.strokeStyle = accentColor;
-  ctx.lineWidth = 1;
-  // Horizontal
-  ctx.beginPath();
-  ctx.moveTo(cx - chSize, cy);
-  ctx.lineTo(cx + chSize, cy);
-  ctx.stroke();
-  // Vertical
-  ctx.beginPath();
-  ctx.moveTo(cx, cy - chSize);
-  ctx.lineTo(cx, cy + chSize);
-  ctx.stroke();
-  // Small center dot
-  ctx.fillStyle = accentColor;
-  ctx.beginPath();
-  ctx.arc(cx, cy, 2, 0, Math.PI * 2);
-  ctx.fill();
-
-  // ── Tracking ID + label (top-left, outside the bracket) ──
-  ctx.font = 'bold 11px "Courier New", monospace';
-  const idText = `#${trackId}`;
-  const idW = ctx.measureText(idText).width;
-  // ID badge background
-  ctx.fillStyle = 'rgba(0,0,0,0.7)';
-  ctx.fillRect(x1, y1 - 18, idW + 6, 16);
-  ctx.fillStyle = accentColor;
-  ctx.fillText(idText, x1 + 3, y1 - 6);
-
-  // ── Label + confidence (top-right, outside the bracket) ──
-  const labelText = label.toUpperCase();
-  const confText = Math.round(confidence * 100) + '%';
-  ctx.font = 'bold 10px "Courier New", monospace';
-  const labelW = ctx.measureText(labelText).width;
-  const confW = ctx.measureText(confText).width;
-  const tagW = labelW + confW + 12;
-  // Tag background
-  ctx.fillStyle = 'rgba(0,0,0,0.7)';
-  ctx.fillRect(x2 - tagW, y1 - 18, tagW, 16);
-  // Label text
-  ctx.fillStyle = textColor;
-  ctx.fillText(labelText, x2 - tagW + 3, y1 - 6);
-  // Confidence
-  ctx.fillStyle = accentColor;
-  ctx.fillText(confText, x2 - confW - 3, y1 - 6);
-
-  // ── Side info line (right edge, mid-height) ──
-  if (isPerson) {
-    ctx.font = '9px "Courier New", monospace';
-    ctx.fillStyle = dimColor;
-    const sideText = `POI ${trackId}`;
-    ctx.save();
-    ctx.translate(x2 + 4, cy);
-    ctx.rotate(Math.PI / 2);
-    ctx.fillText(sideText, 0, 0);
-    ctx.restore();
+  for(const det of list){
+    const t = det.tier || det.priority || 3;
+    if(t > 2) continue;                     // background/situational: skip for speed
+    _drawVisionBox(ctx, det, vw, vh);
   }
-
   ctx.restore();
+  if(list.length) _drawVisionHud(ctx, vw, vh);
+}
+
+// Legacy alias kept for any code that incremented _drawPoiDetection —
+// now just a simple colored box (brackets/crosshairs removed).
+function _drawPoiDetection(ctx, x1, y1, x2, y2, label, confidence, vw, vh){
+  const det = { x1: x1 / vw, y1: y1 / vh, x2: x2 / vw, y2: y2 / vh, label, confidence };
+  _drawVisionBox(ctx, det, vw, vh);
 }
 
 function _playYoloAlert() {
@@ -27528,10 +28876,15 @@ async function _cwStartPhone(){
             const blob = await fetch('data:image/jpeg;base64,' + data.image_base64).then(r => r.blob());
             const formData = new FormData();
             formData.append('file', blob, 'phone_frame.jpg');
+            formData.append('mode', _visionMode || 'auto');
             const yoloResp = await fetch('/api/vision/browser', { method: 'POST', body: formData });
             const yoloData = await yoloResp.json();
             if(yoloData && yoloData.detections){
               _cwPhoneDetections = yoloData.detections;
+              // Vision observation HUD data from the server
+              if(yoloData.mode) _visionModeResolved = yoloData.mode;
+              if(yoloData.overlay) _visionOverlay = yoloData.overlay;
+              if(yoloData.device_speed_kph != null) _visionDeviceSpeed = yoloData.device_speed_kph;
 
               // Check for alert objects
               for(const det of _cwPhoneDetections){
@@ -27554,17 +28907,7 @@ async function _cwStartPhone(){
           const vh = img.naturalHeight;
           overlay.width = vw;
           overlay.height = vh;
-          octx.clearRect(0, 0, vw, vh);
-
-          for(const det of _cwPhoneDetections){
-            if(det.x1 == null || det.x2 == null) continue;  // skip if no coords
-            const x1 = det.x1 * vw, y1 = det.y1 * vh;
-            const x2 = det.x2 * vw, y2 = det.y2 * vh;
-            const conf = det.confidence || 0;
-            const lbl = det.label || 'object';
-
-            _drawPoiDetection(octx, x1, y1, x2, y2, lbl, conf, vw, vh);
-          }
+          _drawVisionOverlay(octx, _cwPhoneDetections, vw, vh);
         } else if(overlay && octx) {
           // Clear overlay if boxes are disabled
           overlay.width = img.naturalWidth || 1;
@@ -27610,14 +28953,23 @@ async function _cwStartWebcam(){
 
   // Track latest detections from CameraBridge responses
   let _cwDetections = [];
+  let _cwDetSig = '';   // cheap signature of box geometry for dirty-check
 
-  // Intercept CameraBridge POSTs to capture detection data
+  // Intercept CameraBridge POSTs to capture detection data + HUD state
   const _origFetch = window.fetch;
   window.fetch = function(...args){
     const p = _origFetch.apply(this, args);
     if(args[0] === '/api/vision/browser' && args[1]?.method === 'POST'){
       p.then(r => r.clone().json().then(d => {
-        if(d && d.detections) _cwDetections = d.detections;
+        if(d && d.detections){
+          _cwDetections = d.detections;
+          if(d.mode) _visionModeResolved = d.mode;
+          if(d.overlay) _visionOverlay = d.overlay;
+          if(d.device_speed_kph != null) _visionDeviceSpeed = d.device_speed_kph;
+          // signature: box count + first few coords (cheap)
+          const s = _cwDetections.slice(0, 8).map(x => (x.x1|0) + ',' + (x.y1|0) + ',' + (x.label||'')).join('|');
+          if(s !== _cwDetSig){ _cwDetSig = s; _visionDrawSeq++; }
+        }
       }).catch(()=>{}));
     }
     return p;
@@ -27662,15 +29014,7 @@ async function _cwStartWebcam(){
             // WebGL handles rendering — just update YOLO overlay on 2D canvas
             if(overlay && octx && _yoloBoxesEnabled){
               overlay.width = vw; overlay.height = vh;
-              octx.clearRect(0, 0, vw, vh);
-              for(const det of _cwDetections){
-                if(det.x1 == null || det.x2 == null) continue;
-                const x1 = det.x1 * vw, y1 = det.y1 * vh;
-                const x2 = det.x2 * vw, y2 = det.y2 * vh;
-                const conf = det.confidence || 0;
-                const lbl = det.label || 'object';
-                _drawPoiDetection(octx, x1, y1, x2, y2, lbl, conf, vw, vh);
-              }
+              _drawVisionOverlay(octx, _cwDetections, vw, vh);
             }
             if(label) label.textContent = 'Camera — Live (GPU)';
             requestAnimationFrame(_updateWebcamFeed);
@@ -27690,18 +29034,10 @@ async function _cwStartWebcam(){
         img.src = snapCanvas.toDataURL('image/jpeg', 0.6);
         if(label) label.textContent = 'Camera — Live';
 
-        // Draw YOLO detection boxes on overlay canvas
+        // Draw YOLO detection boxes on overlay canvas (throttled to box change)
         if(overlay && octx && _yoloBoxesEnabled){
           overlay.width = vw; overlay.height = vh;
-          octx.clearRect(0, 0, vw, vh);
-          for(const det of _cwDetections){
-            if(det.x1 == null || det.x2 == null) continue;
-            const x1 = det.x1 * vw, y1 = det.y1 * vh;
-            const x2 = det.x2 * vw, y2 = det.y2 * vh;
-            const conf = det.confidence || 0;
-            const lbl = det.label || 'object';
-            _drawPoiDetection(octx, x1, y1, x2, y2, lbl, conf, vw, vh);
-          }
+          _drawVisionOverlay(octx, _cwDetections, vw, vh);
         } else if(overlay && octx) {
           // Clear overlay when YOLO is disabled
           overlay.width = vw; overlay.height = vh;
@@ -27912,7 +29248,7 @@ function toggleYoloSound(){
 // ─── GPU Mode Toggle ──────────────────────────────────────────────
 // Switches webcam rendering from CPU-bound Canvas 2D toDataURL() to
 // GPU-accelerated WebGL texture rendering. Near-zero CPU usage at 60fps.
-let _gpuModeEnabled = false;
+let _gpuModeEnabled = true;  // default ON — the fast path for mobile webviews
 function toggleGpuMode(){
   _gpuModeEnabled = !_gpuModeEnabled;
   const btn = document.getElementById('cwGpuToggle');
@@ -28471,64 +29807,86 @@ function _startFaceRecognitionPolling(){
   if(_cwFaceInterval) clearInterval(_cwFaceInterval);
   
   async function _pollFaces(){
-    if(!_cameraWindowActive || !_cwFaceRecognitionActive) return;
-    
-    const img = document.getElementById('cwWebcamImg');
-    const overlay = document.getElementById('cwOverlay');
-    const statusEl = document.getElementById('cwFaceStatus');
-    if(!img || !img.src || img.style.display === 'none') return;
+    if(!_cameraWindowActive || !_cwFaceRecognitionActive || _cwFaceInFlight) return;
+    _cwFaceInFlight = true;
     
     try {
-      // Get current frame as base64
+      const img = document.getElementById('cwWebcamImg');
+      const bridgeVideo = document.getElementById('cameraBridgeVideo');
+      const overlay = document.getElementById('cwOverlay');
+      const statusEl = document.getElementById('cwFaceStatus');
+      const source = (bridgeVideo && bridgeVideo.readyState >= 2) ? bridgeVideo : (img && img.src ? img : null);
+      if(!source) return;
+      
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
-      canvas.width = img.naturalWidth || img.width;
-      canvas.height = img.naturalHeight || img.height;
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.width = source.videoWidth || source.naturalWidth || img?.width || 640;
+      canvas.height = source.videoHeight || source.naturalHeight || img?.height || 480;
+      if(!canvas.width || !canvas.height) return;
+      ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
       const frameB64 = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+      if(!frameB64) return;
       
-      // Send to face recognition endpoint
       const resp = await fetch('/api/vision/face', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ image_base64: frameB64, draw_overlay: false })
+        body: JSON.stringify({
+          image_base64: frameB64,
+          draw_overlay: false,
+          save_crops: true,
+          auto_osint: true
+        })
       });
       const data = await resp.json();
       
-      if(data.ok && data.faces){
-        // Draw face overlay on canvas
+      if(data.ok && Array.isArray(data.faces)){
+        _cwFaceResults = data.faces;
         if(overlay){
           overlay.width = canvas.width;
           overlay.height = canvas.height;
           const octx = overlay.getContext('2d');
           octx.clearRect(0, 0, overlay.width, overlay.height);
-          
           for(const face of data.faces){
             _drawFaceOverlay(octx, face, canvas.width, canvas.height);
           }
         }
         
-        // Update status
         if(statusEl){
-          const known = data.faces.filter(f => f.is_known).length;
-          const unknown = data.faces.filter(f => !f.is_known).length;
-          statusEl.textContent = `Faces: ${data.face_count} (${known} known, ${unknown} unknown)`;
+          const faiss = data.faces.filter(f => f.identity_source === 'faiss').length;
+          const osint = data.faces.filter(f => f.identity_source === 'osint').length;
+          const searching = data.faces.filter(f => f.osint && f.osint.status === 'searching').length;
+          const unknown = data.faces.length - faiss - osint;
+          const parts = [`Faces: ${data.faces.length}`];
+          if(faiss) parts.push(`${faiss} FAISS`);
+          if(osint) parts.push(`${osint} face-search`);
+          if(searching) parts.push(`${searching} searching`);
+          if(unknown) parts.push(`${unknown} unknown`);
+          statusEl.textContent = parts.join(' · ');
         }
+        if(_cwFacesOpen) refreshFacesPanel();
+      } else if(statusEl && data.error){
+        statusEl.textContent = 'Face service: ' + (data.error || 'unavailable');
       }
     } catch(e) {
       console.error('Face recognition error:', e);
+    } finally {
+      _cwFaceInFlight = false;
     }
   }
   
   _pollFaces();
-  _cwFaceInterval = setInterval(_pollFaces, 1500);  // Poll every 1.5s
+  _cwFaceInterval = setInterval(_pollFaces, 1500);
 }
 
 function _drawFaceOverlay(ctx, face, vw, vh){
-  const x = face.x, y = face.y, w = face.w, h = face.h;
-  const isKnown = face.is_known;
-  const color = isKnown ? '#00E5FF' : '#FF4444';
-  const dimColor = isKnown ? 'rgba(0,229,255,0.4)' : 'rgba(255,68,68,0.4)';
+  const x = Number(face.x || 0), y = Number(face.y || 0);
+  const w = Math.max(1, Number(face.w || 0)), h = Math.max(1, Number(face.h || 0));
+  const source = face.identity_source || (face.is_known ? 'faiss' : 'unknown');
+  const osint = face.osint || {};
+  const resolved = Boolean(face.name && String(face.name).toLowerCase() !== 'unknown');
+  const searching = osint.status === 'searching';
+  const color = source === 'faiss' ? '#00E5FF' : (source === 'osint' ? '#C77DFF' : (searching ? '#FFB020' : '#FF4444'));
+  const dimColor = source === 'faiss' ? 'rgba(0,229,255,0.4)' : (source === 'osint' ? 'rgba(199,125,255,0.4)' : (searching ? 'rgba(255,176,32,0.4)' : 'rgba(255,68,68,0.4)'));
   
   ctx.save();
   
@@ -28538,30 +29896,14 @@ function _drawFaceOverlay(ctx, face, vw, vh){
   ctx.lineWidth = 2;
   ctx.lineCap = 'round';
   
-  // Top-left
   ctx.beginPath();
-  ctx.moveTo(x, y + cornerLen);
-  ctx.lineTo(x, y);
-  ctx.lineTo(x + cornerLen, y);
-  ctx.stroke();
-  // Top-right
+  ctx.moveTo(x, y + cornerLen); ctx.lineTo(x, y); ctx.lineTo(x + cornerLen, y); ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(x + w - cornerLen, y);
-  ctx.lineTo(x + w, y);
-  ctx.lineTo(x + w, y + cornerLen);
-  ctx.stroke();
-  // Bottom-left
+  ctx.moveTo(x + w - cornerLen, y); ctx.lineTo(x + w, y); ctx.lineTo(x + w, y + cornerLen); ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(x, y + h - cornerLen);
-  ctx.lineTo(x, y + h);
-  ctx.lineTo(x + cornerLen, y + h);
-  ctx.stroke();
-  // Bottom-right
+  ctx.moveTo(x, y + h - cornerLen); ctx.lineTo(x, y + h); ctx.lineTo(x + cornerLen, y + h); ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(x + w - cornerLen, y + h);
-  ctx.lineTo(x + w, y + h);
-  ctx.lineTo(x + w, y + h - cornerLen);
-  ctx.stroke();
+  ctx.moveTo(x + w - cornerLen, y + h); ctx.lineTo(x + w, y + h); ctx.lineTo(x + w, y + h - cornerLen); ctx.stroke();
   
   // Inner frame
   ctx.strokeStyle = dimColor;
@@ -28575,21 +29917,13 @@ function _drawFaceOverlay(ctx, face, vw, vh){
   const chSize = Math.min(w, h) * 0.12;
   ctx.strokeStyle = color;
   ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(cx - chSize, cy);
-  ctx.lineTo(cx + chSize, cy);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx, cy - chSize);
-  ctx.lineTo(cx, cy + chSize);
-  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx - chSize, cy); ctx.lineTo(cx + chSize, cy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, cy - chSize); ctx.lineTo(cx, cy + chSize); ctx.stroke();
   ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(cx, cy, 2, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.beginPath(); ctx.arc(cx, cy, 2, 0, Math.PI * 2); ctx.fill();
   
-  // Name label
-  const label = face.name.toUpperCase();
+  // Name / search-status label
+  const label = resolved ? String(face.name).toUpperCase() : (searching ? 'SEARCHING' : 'UNKNOWN');
   ctx.font = 'bold 12px "Courier New", monospace';
   const tw = ctx.measureText(label).width;
   const labelY = y - 30 > 12 ? y - 30 : y + h + 25;
@@ -28599,18 +29933,161 @@ function _drawFaceOverlay(ctx, face, vw, vh){
   ctx.fillStyle = color;
   ctx.fillText(label, x + 2, labelY);
   
-  // Confidence
-  if(face.is_known && face.confidence > 0){
-    const confText = `${face.confidence.toFixed(0)}% MATCH`;
+  if(resolved && face.confidence > 0){
+    const sourceLabel = source === 'faiss' ? 'FAISS' : 'FACE SEARCH';
+    const confText = `${Math.round(Number(face.confidence || 0) * 100)}% ${sourceLabel}`;
     ctx.font = '10px "Courier New", monospace';
     const confW = ctx.measureText(confText).width;
     ctx.fillStyle = 'rgba(0,0,0,0.7)';
     ctx.fillRect(x - 4, labelY + 6, confW + 12, 16);
     ctx.fillStyle = color;
     ctx.fillText(confText, x + 2, labelY + 18);
+  } else if(searching){
+    ctx.font = '10px "Courier New", monospace';
+    const statusText = 'REVERSE SEARCH RUNNING';
+    const statusW = ctx.measureText(statusText).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(x - 4, labelY + 6, statusW + 12, 16);
+    ctx.fillStyle = color;
+    ctx.fillText(statusText, x + 2, labelY + 18);
   }
   
   ctx.restore();
+}
+
+// ─── Faces ID panel: who is recognized, evidence, remember ──────────
+let _cwFacesOpen = false, _cwFacesTimer = null;
+async function toggleFacesPanel(){
+  _cwFacesOpen = !_cwFacesOpen;
+  const panel = document.getElementById('cwFacesPanel');
+  const btn = document.getElementById('cwIdsToggle');
+  if(btn) btn.classList.toggle('active', _cwFacesOpen);
+  if(!panel) return;
+  panel.style.display = _cwFacesOpen ? 'block' : 'none';
+  if(_cwFacesOpen){ await refreshFacesPanel(); _cwFacesTimer = setInterval(refreshFacesPanel, 10000); }
+  else if(_cwFacesTimer){ clearInterval(_cwFacesTimer); _cwFacesTimer = null; }
+}
+function _esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function _jsArg(value){ return JSON.stringify(String(value==null?'':value)).replace(/</g,'\\u003c').replace(/>/g,'\\u003e').replace(/&/g,'\\u0026').replace(/"/g,'&quot;'); }
+function _safeUrl(value){ const u=String(value||''); return /^https?:\/\//i.test(u)?u:'#'; }
+function _linkHtml(value,label){ const u=_safeUrl(value); return u==='#'?'':('<a href="'+_esc(u)+'" target="_blank" rel="noopener noreferrer" style="color:#7dd3fc;overflow-wrap:anywhere">'+_esc(label||u)+'</a>'); }
+function _imageHtml(item){
+  const thumb=typeof item==='string'?item:(item&&(item.thumb||item.url||item.image||''));
+  const page=typeof item==='string'?'#':(item&&(item.page_url||thumb||'#'));
+  if(!/^https?:\/\//i.test(String(thumb||''))) return '';
+  return '<a href="'+_esc(_safeUrl(page))+'" target="_blank" rel="noopener noreferrer" title="'+_esc(item&&(item.title||item.site||'Image evidence'))+'"><img src="'+_esc(thumb)+'" loading="lazy" style="width:72px;height:72px;object-fit:cover;border-radius:6px;margin:2px;border:1px solid rgba(184,169,201,.4)"></a>';
+}
+function _identityBadge(source){
+  const src=String(source||'');
+  if(src.startsWith('faiss')) return '<span style="color:#4ade80">✅ recognized</span>';
+  if(src.startsWith('osint')) return '<span style="color:#c77dff">🔍 face-search lead</span>';
+  return '<span style="opacity:.7">👁 '+_esc(src||'unknown')+'</span>';
+}
+function _renderIdentity(event,osint,job){
+  event=event||{}; osint=osint||{}; job=job||{};
+  const name=event.name||osint.name||job.name||'Unknown';
+  const source=event.source||(osint.name?'osint':'');
+  const conf=Number(event.confidence||osint.confidence||0);
+  const socials=[...(event.social_accounts||[]),...(osint.social_accounts||[])].filter((u,i,a)=>u&&a.indexOf(u)===i);
+  const sources=[...(event.sources||[]),...(osint.sources||[])].filter((u,i,a)=>u&&a.indexOf(u)===i);
+  const images=[...(event.images||[]),...(osint.images||[])].filter((u,i,a)=>u&&a.indexOf(u)===i);
+  const verified=job.verified||[];
+  const likely=job.likely||[];
+  const web=job.web||{};
+  const mentions=[...(job.mentions||[]),...(web.news||[])].filter((u,i,a)=>u&&a.indexOf(u)===i);
+  const about=web.about||[];
+  const webSocial=web.social||[];
+  const fans=web.fans_dating||[];
+  const siteHits=Object.entries(job.site_hits||{}).slice(0,8);
+  const status=job.status?(job.status==='done'?'✅ report ready':(job.status==='running'?'⏳ '+_esc(job.progress||'working'):'❌ '+_esc(job.progress||'failed'))):(osint.status==='found'?'✅ lead found':(osint.status==='searching'?'⏳ reverse search running':(osint.status==='disabled'?'reverse search disabled':'no report yet')));
+  const socialHtml=socials.length?'<div style="margin:6px 0"><b>Social accounts</b><div style="margin-top:3px">'+socials.map(u=>_linkHtml(u)).join(' · ')+'</div></div>':'';
+  const sourceHtml=sources.length?'<div style="margin:6px 0"><b>Evidence sources</b><div style="margin-top:3px">'+sources.filter(u=>/^https?:\/\//i.test(String(u))).map(u=>_linkHtml(u,u.length>70?u.slice(0,70)+'…':u)).join(' · ')+'</div></div>':'';
+  const imageHtml=images.length?'<div style="margin:6px 0"><b>Photo evidence</b><div style="display:flex;flex-wrap:wrap;margin-top:3px">'+images.map(_imageHtml).join('')+'</div></div>':'';
+  const verifiedHtml=verified.length?'<div style="margin:6px 0"><b>Photo-verified profiles</b><div style="margin-top:3px">'+verified.map(v=>_linkHtml(v.url,'same face '+Math.round(Number(v.score||0)*100)+'%')).join(' · ')+'</div></div>':'';
+  const likelyHtml=likely.length?'<div style="margin:6px 0"><b>Likely same handle</b><div style="margin-top:3px">'+likely.map(l=>'<span title="'+_esc((l.urls||[]).join(' | '))+'">'+_esc('@'+(l.handle||''))+' · '+Number(l.sites||0)+' sites</span>').join(' · ')+'</div></div>':'';
+  const siteHtml=siteHits.length?'<div style="margin:6px 0"><b>Profile-site matches</b><div style="margin-top:3px">'+siteHits.map(pair=>_linkHtml(pair[0],(pair[1]&&pair[1].platforms||[]).join(', ')||pair[0])).join(' · ')+'</div></div>':'';
+  const mentionHtml=[...about,...webSocial,...fans,...mentions].filter((u,i,a)=>u&&a.indexOf(u)===i).map(u=>_linkHtml(u)).join(' · ');
+  const raw=(job.report||'').trim();
+  const faceId=event.face_id||osint.face_id||job.face_id||'';
+  const remembered=event.remembered?'<span style="color:#4ade80">✔ remembered</span>':'<button onclick="rememberFace('+_jsArg(faceId)+','+_jsArg(name)+')" style="cursor:pointer">Remember</button>';
+  return '<div style="border:1px solid rgba(184,169,201,.25);border-radius:10px;padding:8px;margin-top:6px;background:rgba(0,0,0,.18)">'
+    +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><div><b>'+_esc(name)+'</b> '+_identityBadge(source)+' <span style="opacity:.7">'+Math.round(conf*100)+'% · '+_esc(status)+'</span></div><div style="white-space:nowrap">'+remembered+'</div></div>'
+    +'<div style="opacity:.75;margin-top:3px">Identity evidence is a lead, not a verdict. Confidence reflects the matching/search result.</div>'
+    +socialHtml+sourceHtml+imageHtml+verifiedHtml+likelyHtml+siteHtml
+    +(mentionHtml?'<div style="margin:6px 0"><b>Web mentions</b><div style="margin-top:3px">'+mentionHtml+'</div></div>':'')
+    +(raw?'<details style="margin-top:6px"><summary style="cursor:pointer;color:#a5b4fc">Raw footprint report</summary><pre style="white-space:pre-wrap;font-size:11px;background:rgba(0,0,0,.35);padding:8px;border-radius:8px;max-height:220px;overflow-y:auto">'+_esc(raw)+'</pre></details>':'')
+    +'</div>';
+}
+async function showIdentity(faceId,name){
+  const view=document.getElementById('cwIdentityView'); if(!view)return;
+  view.innerHTML='<div style="opacity:.6">Loading identity evidence…</div>';
+  try{
+    const [er,orr,fr]=await Promise.all([fetch('/api/faces/identity_events?limit=50'),fetch('/api/faces/osint_results?limit=50'),fetch('/api/faces/footprints?limit=50')]);
+    const events=(await er.json()).events||[]; const osints=(await orr.json()).results||[]; const jobs=(await fr.json()).jobs||[];
+    const event=events.find(e=>(e.face_id||e.id)===faceId||(name&&String(e.name).toLowerCase()===String(name).toLowerCase()))||{};
+    const osint=osints.find(o=>o.face_id===faceId||(name&&String(o.name||'').toLowerCase()===String(name).toLowerCase()))||{};
+    let job=jobs.find(x=>(x.name||'')&&name&&String(x.name).toLowerCase()===String(name).toLowerCase());
+    if(job&&job.status==='done'){const dr=await fetch('/api/faces/footprint/'+encodeURIComponent(job.id));const dj=await dr.json();job=dj.job||job;}
+    view.innerHTML=_renderIdentity(event,osint,job||{});
+  }catch(e){view.innerHTML='<div style="opacity:.6">Identity evidence unavailable.</div>';}
+}
+async function showReport(faceId,name){
+  const view=document.getElementById('cwIdentityView'); if(!view)return;
+  try{
+    const fr=await fetch('/api/faces/footprints?limit=50'); const jobs=(await fr.json()).jobs||[];
+    let job=jobs.find(x=>(x.name||'')&&name&&String(x.name).toLowerCase()===String(name).toLowerCase());
+    if(!job){const r=await fetch('/api/faces/footprint',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({face_id:faceId,name:name})});const j=await r.json();job=j.job||null;if(!j.ok){view.innerHTML='<div style="opacity:.75">✘ '+_esc(j.error||'could not start report')+'</div>';return;}}
+    if(job.status==='done'){await showDossier(job.id);} else {view.innerHTML='<div style="opacity:.75">⏳ '+_esc(job.progress||'Identity report is building')+'</div>';refreshFacesPanel();}
+  }catch(e){view.innerHTML='<div style="opacity:.6">Identity report unavailable.</div>';}
+}
+async function showDossier(jobId){
+  const view=document.getElementById('cwIdentityView'); if(!view)return;
+  view.innerHTML='<div style="opacity:.6">Loading identity evidence…</div>';
+  try{
+    const [dr,er,orr]=await Promise.all([fetch('/api/faces/footprint/'+encodeURIComponent(jobId)),fetch('/api/faces/identity_events?limit=50'),fetch('/api/faces/osint_results?limit=50')]);
+    const job=(await dr.json()).job||{}; const events=(await er.json()).events||[]; const osints=(await orr.json()).results||[];
+    const event=events.find(e=>(e.face_id||'')===job.face_id||(job.name&&String(e.name).toLowerCase()===String(job.name).toLowerCase()))||{};
+    const osint=osints.find(o=>o.face_id===job.face_id||(job.name&&String(o.name||'').toLowerCase()===String(job.name).toLowerCase()))||{};
+    view.innerHTML=_renderIdentity(event,osint,job);
+  }catch(e){view.innerHTML='<div style="opacity:.6">Identity evidence unavailable.</div>';}
+}
+
+async function refreshFacesPanel(){
+  const panel=document.getElementById('cwFacesPanel');
+  if(!panel||!_cwFacesOpen) return;
+  try{
+    const [ri,rfPromise,roPromise]=await Promise.all([
+      fetch('/api/faces/identity_events?limit=10'),
+      fetch('/api/faces/footprints?limit=5').catch(()=>null),
+      fetch('/api/faces/osint_results?limit=20').catch(()=>null),
+    ]);
+    const j=await ri.json(); const evs=j.events||[];
+    let jobs=[];
+    if(rfPromise){try{const rf=await rfPromise;const fj=await rf.json();jobs=(fj&&fj.jobs)||[];}catch(e){}}
+    let osints=[];
+    if(roPromise){try{const ro=await roPromise;const oj=await ro.json();osints=(oj&&oj.results)||[];}catch(e){}}
+    const live=(_cwFaceResults||[]).filter(f=>f&&f.face_id);
+    const viewHtml='<div id="cwIdentityView" style="border-bottom:1px solid rgba(184,169,201,.25);padding:6px 2px;min-height:28px"></div>';
+    const liveHtml=live.length?'<div style="border-bottom:1px solid rgba(184,169,201,.35);padding:6px 2px;margin-bottom:4px"><b>👁 Live faces</b><div style="margin-top:3px">'+live.map(f=>'<span style="color:'+(f.identity_source==='faiss'?'#4ade80':(f.identity_source==='osint'?'#c77dff':'#f87171'))+'">'+_esc(f.name&&String(f.name).toLowerCase()!=='unknown'?f.name:'unknown')+'</span>').join(' · ')+'</div></div>':'';
+    const reports=jobs.length?'<div style="border-bottom:1px solid rgba(184,169,201,.35);padding:6px 2px;margin-bottom:4px"><b>📄 Identity reports</b>'+jobs.map(jb=>{const st=jb.status==='done'?'✅':(jb.status==='running'?'⏳ '+_esc(jb.progress||''):'❌');return '<div> '+st+' <a href="#" onclick="showDossier('+_jsArg(jb.id)+');return false;" style="color:#7dd3fc">'+_esc(jb.name)+'</a></div>';}).join('')+'</div>':'';
+    if(!evs.length&&!live.length){panel.innerHTML=viewHtml+liveHtml+reports+'<div style="opacity:.6">No identities yet — show a face to the camera.</div>';return;}
+    panel.innerHTML=viewHtml+liveHtml+reports+evs.map((e,i)=>{
+      const src=String(e.source||''); const conf=Math.round((e.confidence||0)*100)+'%';
+      const geo=e.geo&&(e.geo.lat!==undefined)?' · 📍 '+_esc(e.geo.label||(Number(e.geo.lat).toFixed(4)+','+Number(e.geo.lon).toFixed(4))):'';
+      const detId='evd'+i;
+      const remBtn=e.remembered?'<span style="color:#4ade80">✔ remembered</span>':'<button onclick="rememberFace('+_jsArg(e.face_id||e.id)+','+_jsArg(e.name)+')" style="cursor:pointer">Remember</button>';
+      const identityBtn='<button onclick="showIdentity('+_jsArg(e.face_id||e.id)+','+_jsArg(e.name)+')" style="cursor:pointer;color:#c77dff" title="Show useful identity evidence">🔍 Identity</button>';
+      const rawBtn='<button onclick="showReport('+_jsArg(e.face_id||e.id)+','+_jsArg(e.name)+')" style="cursor:pointer" title="Open the optional raw footprint report">📄 Raw report</button>';
+      return '<div style="border-bottom:1px solid rgba(184,169,201,.2);padding:6px 2px"><b>'+_esc(e.name)+'</b> '+_identityBadge(src)+' <span style="opacity:.7">'+conf+geo+'</span><br>'+remBtn+' '+identityBtn+' '+rawBtn+' <button onclick="document.getElementById('+_jsArg(detId)+').style.display=document.getElementById('+_jsArg(detId)+').style.display===\'none\'?\'block\':\'none\'" style="cursor:pointer">Evidence</button><div id="'+detId+'" style="display:none;margin-top:4px">'+((e.images||[]).map(_imageHtml).join(''))+((e.social_accounts||[]).map(u=>_linkHtml(u)).join(' · '))+'</div></div>';
+    }).join('');
+  }catch(e){panel.innerHTML='<div style="opacity:.6">IDs unavailable.</div>';}
+}
+async function rememberFace(faceId,name){
+  const label=prompt('Remember this face as:',name||''); if(!label)return;
+  try{
+    const r=await fetch("/api/faces/confirm",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({face_id:faceId,name:label})});
+    const j=await r.json(); alert(j.ok?("✔ "+j.message):("✘ "+(j.error||"failed"))); refreshFacesPanel();
+  }catch(e){alert("✘ confirm failed");}
 }
 
 function _initCwDrag(){
@@ -28639,6 +30116,113 @@ function _initCwDrag(){
     cw.style.bottom = 'auto';
   });
   document.addEventListener('mouseup', () => { dragging = false; });
+}
+
+// ─── Camera window menu + drag-drop analyze ─────────────────────────
+function toggleCwMenu(){
+  const menu = document.getElementById('cwMenu');
+  if(!menu) return;
+  if(menu.style.display === 'block'){ menu.style.display = 'none'; return; }
+  const items = [
+    ['👤 Faces on/off', ()=>toggleFaceRecognition()],
+    ['👁 IDs (who + evidence)', ()=>{ if(!_cwFacesOpen) toggleFacesPanel(); }],
+    ['📝 Enroll this frame', ()=>enrollFaceFromWindow()],
+    ['🔍 Analyze this frame', ()=>analyzeWindowFrame()],
+    ['─ Minimize', ()=>minimizeCameraWindow()],
+    ['□ Maximize', ()=>maximizeCameraWindow()],
+    ['✕ Close', ()=>closeCameraWindow()],
+  ];
+  menu.innerHTML = items.map((it,i)=>'<div data-mi="'+i+'" style="padding:7px 10px;cursor:pointer;border-radius:6px;font-size:13px;color:#e6dcf5" onmouseover="this.style.background=\'rgba(139,122,158,.25)\'" onmouseout="this.style.background=\'\'">'+it[0]+'</div>').join('');
+  menu.querySelectorAll('[data-mi]').forEach(el=>{
+    el.onclick = ()=>{ menu.style.display='none'; items[+el.dataset.mi][1](); };
+  });
+  menu.style.display = 'block';
+}
+function _initCwDrop(){
+  const feed = document.getElementById('cwWebcam');
+  const cw = document.getElementById('cameraWindow');
+  if(!feed || feed._dropWired) return;
+  feed._dropWired = true;
+  feed.addEventListener('click', (e)=>{
+    if(cw && cw.classList.contains('cw-minimized')){ minimizeCameraWindow(); return; }
+    toggleCwMenu();
+  });
+  ['dragenter','dragover'].forEach(ev=>feed.addEventListener(ev,(e)=>{ e.preventDefault(); feed.style.outline='2px dashed #7dd3fc'; }));
+  ['dragleave','drop'].forEach(ev=>feed.addEventListener(ev,(e)=>{ e.preventDefault(); feed.style.outline=''; }));
+  feed.addEventListener('drop',(e)=>{
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if(!f || !f.type.startsWith('image/')) return;
+    const rd = new FileReader();
+    rd.onload = ()=>analyzeDroppedImage(rd.result);
+    rd.readAsDataURL(f);
+  });
+  const title = cw ? cw.querySelector('.cw-title') : null;
+  if(title && !title._wired){ title._wired = true; title.style.cursor='pointer'; title.title='Click to minimize/expand';
+    title.addEventListener('click',(e)=>{ e.stopPropagation(); minimizeCameraWindow(); }); }
+}
+async function analyzeDroppedImage(dataUrl){
+  try{
+    const cw = document.getElementById('cameraWindow');
+    if(cw){ cw.style.display='flex'; _cameraWindowActive = true; }
+    const img = document.getElementById('cwWebcamImg');
+    const ph = document.querySelector('#cwWebcam .cw-feed-placeholder');
+    img.onload = async ()=>{
+      try{
+        const overlay = document.getElementById('cwOverlay');
+        overlay.width = img.naturalWidth; overlay.height = img.naturalHeight;
+        const octx = overlay.getContext('2d');
+        octx.clearRect(0,0,overlay.width,overlay.height);
+        const b64 = dataUrl.split(',')[1];
+        const resp = await fetch('/api/vision/face',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image_base64:b64,draw_overlay:false})});
+        const data = await resp.json();
+        const statusEl = document.getElementById('cwFaceStatus');
+        if(data.faces){
+          for(const face of data.faces){ _drawFaceOverlay(octx, face, overlay.width, overlay.height); }
+          const known = data.faces.filter(f=>f.is_known);
+          if(statusEl) statusEl.textContent = 'Dropped image: '+data.face_count+' face(s)'+(known.length?' — '+known.map(f=>f.name).join(', '):' (unknown)');
+          if(_cwFacesOpen) refreshFacesPanel();
+        } else if(statusEl) statusEl.textContent = 'Dropped image: '+(data.error||'no faces');
+      }catch(e){ console.error('drop analyze failed', e); }
+    };
+    img.src = dataUrl; img.style.display = 'block';
+    if(ph) ph.style.display = 'none';
+  }catch(e){ console.error(e); }
+}
+async function analyzeWindowFrame(){
+  const img = document.getElementById('cwWebcamImg');
+  if(!img || !img.src) return;
+  try{
+    const r = await fetch(img.src);
+    const blob = await r.blob();
+    const rd = new FileReader();
+    rd.onload = ()=>analyzeDroppedImage(rd.result);
+    rd.readAsDataURL(blob);
+  }catch(e){
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth||img.width; c.height = img.naturalHeight||img.height;
+    c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+    analyzeDroppedImage(c.toDataURL('image/jpeg',0.85));
+  }
+}
+async function enrollFaceFromWindow(){
+  const img = document.getElementById('cwWebcamImg');
+  if(!img || !img.src){ alert('No frame yet — start the feed or drop an image first.'); return; }
+  const name = prompt('Remember this face as:');
+  if(!name) return;
+  try{
+    let b64;
+    try{
+      const r = await fetch(img.src); const blob = await r.blob();
+      b64 = await new Promise((res,rej)=>{ const rd=new FileReader(); rd.onload=()=>res(rd.result.split(',')[1]); rd.onerror=rej; rd.readAsDataURL(blob); });
+    }catch(e){
+      const c=document.createElement('canvas'); c.width=img.naturalWidth||img.width; c.height=img.naturalHeight||img.height;
+      c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+      b64 = c.toDataURL('image/jpeg',0.85).split(',')[1];
+    }
+    const r = await fetch('/api/faces/enroll',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,image_b64:b64,source:'camera-window'})});
+    const j = await r.json();
+    alert(j.ok ? ('✔ I\'ll always recognize '+j.name+' now.') : ('✘ '+(j.error||'enroll failed')));
+  }catch(e){ alert('✘ enroll failed'); }
 }
 
 // ─── AR Mode ──────────────────────────────────────────────
@@ -31639,9 +33223,9 @@ const FaceFilterEngine = {
 (function(){
 'use strict';
 
-const FRAME_INTERVAL_MS = 2000;   // capture a frame every 2s (balance quality vs bandwidth)
-const JPEG_QUALITY      = 0.72;   // 0-1 JPEG compression
-const MAX_DIMENSION     = 480;    // longest edge in px — enough for YOLO, keeps payload small
+const FRAME_INTERVAL_MS = 1000;   // capture a frame every 1s (instant-feeling, still light)
+const JPEG_QUALITY      = 0.68;   // 0-1 JPEG compression
+const MAX_DIMENSION     = 416;    // longest edge in px — plenty for YOLO-n, small payload
 
 let _stream    = null;
 let _video     = null;
@@ -31693,6 +33277,7 @@ async function _captureAndSend() {
     if (!blob || blob.size < 500) return;
     const fd = new FormData();
     fd.append('file', blob, 'frame.jpg');
+    fd.append('mode', window._visionMode || 'auto');
     try {
       const resp = await fetch('/api/vision/browser', { method: 'POST', body: fd });
       if (resp.ok) {

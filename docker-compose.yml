@@ -11,6 +11,9 @@ services:
     #   - "/dev/hci0:/dev/hci0"
     volumes:
       - .:/app
+      # Patched boot script (skips placeholder Agent/Web, fixes Bridge cmd).
+      # Remove once the image is rebuilt with the fixed start.sh.
+      - ./start.sh:/start.sh:ro
       - /home/labhrasd/.ssh:/root/.ssh:ro
       - /home/labhrasd/Lilly_Workspace/Lilly_Workspace:/root/lilly_termux_key:ro
       - /root/ai-server:/root/ai-server:rw
@@ -95,6 +98,14 @@ services:
       # Share the persistent face database with lilly-ai (enrolled faces must
       # survive container recreates and both engines must read the same file)
       - lilly-data:/app/data
+      # Live-mount workspace vision code so hook fixes apply without rebuild.
+      # Remove once the image is rebuilt from the current workspace.
+      - ./yolov8_vision_server.py:/app/yolov8_vision_server.py:ro
+      - ./face_recognition_engine.py:/app/face_recognition_engine.py:ro
+      - ./person_tracker.py:/app/person_tracker.py:ro
+      - ./node_registry.py:/app/node_registry.py:ro
+      - ./blink_detector.py:/app/blink_detector.py:ro
+      - ./car_classifier.py:/app/car_classifier.py:ro
     restart: unless-stopped
 
   lilly-trainer:

@@ -730,6 +730,54 @@ body.expanded #aurora{opacity:1}
     <div id="arTarget" style="position:absolute;width:20px;height:20px;border:2px dashed rgba(244,114,182,0.5);border-radius:50%;pointer-events:none;display:none"></div>
   </div>
 
+  <!-- ─── Tesla FSD-style Full-Screen Camera View ─── -->
+  <div id="teslaOverlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;z-index:9999;background:#000">
+    <!-- Camera feed -->
+    <video id="teslaCamera" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:block"></video>
+    <video id="teslaNativeCamera" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:none"></video>
+    <!-- Detection canvas overlay -->
+    <canvas id="teslaAR" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none"></canvas>
+    <!-- Top status bar -->
+    <div style="position:absolute;top:0;left:0;right:0;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;background:linear-gradient(180deg,rgba(0,0,0,0.8),transparent);pointer-events:none">
+      <div style="display:flex;align-items:center;gap:8px;color:#fff;font-size:13px;font-family:ui-monospace,monospace">
+        <span style="width:8px;height:8px;border-radius:50%;background:#ef4444;animation:pulse 1s infinite"></span>
+        <span id="teslaModeLabel">FSD Beta v12.5</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;color:#fff;font-size:11px">
+        <div id="teslaSpeed" style="font-size:24px;font-weight:700;font-family:ui-monospace,monospace">0 km/h</div>
+        <div id="teslaGear" style="font-size:14px;color:#4ade80">D</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;color:#fff;font-size:11px">
+        <span id="teslaSource">🌐 Browser</span>
+        <button id="teslaExitBtn" style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center">✕</button>
+      </div>
+    </div>
+    <!-- Bottom info bar -->
+    <div style="position:absolute;bottom:0;left:0;right:0;padding:16px;background:linear-gradient(0deg,rgba(0,0,0,0.9),transparent);pointer-events:none">
+      <div style="display:flex;justify-content:space-between;align-items:flex-end;color:#fff;font-size:11px">
+        <div>
+          <div style="font-size:10px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:0.5px">Vision Objects</div>
+          <div id="teslaObjCount" style="font-size:18px;font-weight:600;font-family:ui-monospace,monospace">0</div>
+        </div>
+        <div style="text-align:center">
+          <div style="font-size:10px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:0.5px">Steering</div>
+          <div id="teslaSteer" style="font-size:16px;font-weight:600;font-family:ui-monospace,monospace">0°</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:10px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:0.5px">FPS</div>
+          <div id="teslaFPS" style="font-size:16px;font-weight:600;font-family:ui-monospace,monospace">--</div>
+        </div>
+      </div>
+      <!-- Lane lines visualization -->
+      <canvas id="teslaLanes" style="width:100%;height:60px;margin-top:8px;pointer-events:none" width="300" height="60"></canvas>
+    </div>
+  </div>
+
+  <style>
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  #teslaOverlay video { transform-origin: center; }
+  </style>
+
   <!-- ─── Radial Menu (long-press to open, auto-dismiss on select) ─── -->
   <div id="radialMenu">
     <div class="radial-arm" style="--angle:0deg"><button class="radial-item" onclick="openFeature('chat')"><span class="ri-icon">💬</span><span class="ri-label">Chat</span></button></div>
@@ -3053,6 +3101,7 @@ function renderFeatureCard(name,data){
     html=`<div class="feat-card wide" style="padding:0;overflow:hidden">
       <div id="visionContainer" style="position:relative;width:100%;aspect-ratio:4/3;background:#000;border-radius:12px;overflow:hidden">
         <video id="visionCamera" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:block"></video>
+        <video id="nativeCamera" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;display:none"></video>
         <canvas id="visionAR" style="position:absolute;top:0;left:0;width:100%;height:100%"></canvas>
         <div id="visionDepth" style="position:absolute;bottom:6px;left:6px;font-size:9px;color:#fff;background:rgba(0,0,0,0.55);padding:3px 8px;border-radius:999px;backdrop-filter:blur(6px)">Depth: --</div>
         <div id="visionSourceLabel" style="position:absolute;top:6px;right:6px;font-size:9px;color:#fff;background:rgba(0,0,0,0.55);padding:3px 8px;border-radius:999px;backdrop-filter:blur(6px)">Browser</div>
@@ -3069,6 +3118,8 @@ function renderFeatureCard(name,data){
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <button class="iconBtn" id="visionSnapBtn" style="background:rgba(74,222,128,0.2);color:#4ade80;width:auto;height:auto;padding:6px 10px;border-radius:10px;font-size:10px">📸 Snap</button>
           <button class="iconBtn" id="visionARModeBtn" style="background:rgba(56,189,248,0.2);color:#7dd3fc;width:auto;height:auto;padding:6px 10px;border-radius:10px;font-size:10px">🧭 AR</button>
+          <button class="iconBtn" id="visionSourceToggle" style="background:rgba(251,191,36,0.2);color:#fbbf24;width:auto;height:auto;padding:6px 10px;border-radius:10px;font-size:10px">📷 Native</button>
+          <button class="iconBtn" id="visionTeslaBtn" style="background:rgba(239,68,68,0.2);color:#ef4444;width:auto;height:auto;padding:6px 10px;border-radius:10px;font-size:10px">🚗 Tesla</button>
         </div>
         <div id="visionTrainingPanel" style="margin-top:8px;padding:8px;background:rgba(251,191,36,0.1);border-radius:8px;border:1px solid rgba(251,191,36,0.3)">
           <div style="font-size:9px;color:#fbbf24;text-transform:uppercase;letter-spacing:0.4px;margin-bottom:4px">🎯 Training Mode</div>
@@ -3166,6 +3217,7 @@ function _drawPoiDetection(ctx, x1, y1, x2, y2, label, confidence) {
 // ─── Vision Panel: Real Camera + AR + YOLO Detection ────────────
 let visionStream=null, visionARMode=false, visionAnimFrame=null;
 let visionPanelReady=false, visionDetections=[], visionLastDetection=0;
+let teslaAnimFrame = null; // global for cleanup
 
 async function initVisionPanel(){
   const video=document.getElementById('visionCamera');
@@ -3212,7 +3264,258 @@ async function initVisionPanel(){
     };
   }
 
-  // Vision mode: single browser webcam only
+  // Native camera toggle
+  const nativeVideo = document.getElementById('nativeCamera');
+  const sourceToggle = document.getElementById('visionSourceToggle');
+  const sourceLabel = document.getElementById('visionSourceLabel');
+  let usingNative = false;
+
+  function switchCameraSource(useNative){
+    usingNative = useNative;
+    if(nativeVideo && sourceToggle && sourceLabel){
+      if(useNative){
+        // Try to connect to native MJPEG stream
+        const serverUrl = await _getServer();
+        // MJPEG server runs on phone at port 8095
+        const nativeUrl = serverUrl.replace(/:8098$/, ':8095') + '/';
+        nativeVideo.src = nativeUrl;
+        nativeVideo.style.display = 'block';
+        video.style.display = 'none';
+        sourceToggle.textContent = '🌐 Browser';
+        sourceToggle.style.background = 'rgba(56,189,248,0.2)';
+        sourceLabel.textContent = 'Native';
+        // Notify native Android to start camera stream
+        if(window.LillyBridge && window.LillyBridge.startCameraStream){
+          window.LillyBridge.startCameraStream();
+        }
+      }else{
+        nativeVideo.src = '';
+        nativeVideo.style.display = 'none';
+        video.style.display = 'block';
+        sourceToggle.textContent = '📷 Native';
+        sourceToggle.style.background = 'rgba(251,191,36,0.2)';
+        sourceLabel.textContent = 'Browser';
+        // Notify native Android to stop camera stream
+        if(window.LillyBridge && window.LillyBridge.stopCameraStream){
+          window.LillyBridge.stopCameraStream();
+        }
+      }
+    }
+  }
+
+  if(sourceToggle){
+    sourceToggle.onclick = function(){
+      switchCameraSource(!usingNative);
+    };
+  }
+
+  // Tesla mode button
+  const teslaBtn = document.getElementById('visionTeslaBtn');
+  const teslaOverlay = document.getElementById('teslaOverlay');
+  const teslaCamera = document.getElementById('teslaCamera');
+  const teslaNativeCamera = document.getElementById('teslaNativeCamera');
+  const teslaAR = document.getElementById('teslaAR');
+  const teslaExitBtn = document.getElementById('teslaExitBtn');
+  const teslaObjCount = document.getElementById('teslaObjCount');
+  const teslaSteer = document.getElementById('teslaSteer');
+  const teslaFPS = document.getElementById('teslaFPS');
+  const teslaSpeed = document.getElementById('teslaSpeed');
+  const teslaSource = document.getElementById('teslaSource');
+  const teslaLanes = document.getElementById('teslaLanes');
+  let teslaMode = false;
+  // teslaAnimFrame declared globally
+  let teslaUsingNative = false;
+  let teslaLastFrameTime = 0;
+  let teslaFrameCount = 0;
+
+  function enterTeslaMode(){
+    teslaMode = true;
+    teslaOverlay.style.display = 'block';
+    // Use currently active video source
+    if(usingNative && nativeVideo && nativeVideo.src){
+      teslaNativeCamera.src = nativeVideo.src;
+      teslaNativeCamera.style.display = 'block';
+      teslaCamera.style.display = 'none';
+      teslaUsingNative = true;
+      teslaSource.textContent = '📷 Native';
+    }else{
+      teslaCamera.srcObject = visionStream;
+      teslaCamera.style.display = 'block';
+      teslaNativeCamera.style.display = 'none';
+      teslaUsingNative = false;
+      teslaSource.textContent = '🌐 Browser';
+    }
+    // Resize AR canvas
+    const resizeTeslaAR = () => {
+      teslaAR.width = teslaOverlay.clientWidth;
+      teslaAR.height = teslaOverlay.clientHeight;
+    };
+    resizeTeslaAR();
+    window.addEventListener('resize', resizeTeslaAR);
+    teslaOverlay._resizeHandler = resizeTeslaAR;
+    // Start detection loop
+    teslaAnimFrame = requestAnimationFrame(drawTeslaAR);
+    if(teslaBtn){
+      teslaBtn.style.background = 'rgba(239,68,68,0.45)';
+      teslaBtn.textContent = '🚗 Exit Tesla';
+    }
+  }
+
+  function exitTeslaMode(){
+    teslaMode = false;
+    teslaOverlay.style.display = 'none';
+    if(teslaAnimFrame){
+      cancelAnimationFrame(teslaAnimFrame);
+      teslaAnimFrame = null;
+    }
+    teslaCamera.srcObject = null;
+    teslaNativeCamera.src = '';
+    if(teslaOverlay._resizeHandler){
+      window.removeEventListener('resize', teslaOverlay._resizeHandler);
+    }
+    if(teslaBtn){
+      teslaBtn.style.background = 'rgba(239,68,68,0.2)';
+      teslaBtn.textContent = '🚗 Tesla';
+    }
+  }
+
+  if(teslaBtn && teslaExitBtn){
+    teslaBtn.onclick = function(){
+      if(teslaMode) exitTeslaMode();
+      else enterTeslaMode();
+    };
+    teslaExitBtn.onclick = exitTeslaMode;
+  }
+
+  // Tesla AR drawing loop
+  async function drawTeslaAR(){
+    if(!teslaMode) return;
+    const actx = teslaAR.getContext('2d');
+    const w = teslaAR.width;
+    const h = teslaAR.height;
+    actx.clearRect(0, 0, w, h);
+
+    // FPS counter
+    const now = performance.now();
+    teslaFrameCount++;
+    if(now - teslaLastFrameTime >= 1000){
+      if(teslaFPS) teslaFPS.textContent = teslaFrameCount + ' fps';
+      teslaFrameCount = 0;
+      teslaLastFrameTime = now;
+    }
+
+    // Draw detections with Tesla-style boxes
+    if(visionDetections.length > 0){
+      if(teslaObjCount) teslaObjCount.textContent = visionDetections.length;
+      const videoEl = teslaUsingNative ? teslaNativeCamera : teslaCamera;
+      if(videoEl && videoEl.readyState >= 2){
+        const vw = videoEl.videoWidth;
+        const vh = videoEl.videoHeight;
+        const scaleX = w / vw;
+        const scaleY = h / vh;
+        for(const det of visionDetections){
+          const x1 = det.x1 * w;
+          const y1 = det.y1 * h;
+          const x2 = det.x2 * w;
+          const y2 = det.y2 * h;
+          const conf = det.confidence || 0;
+          const lbl = det.label || 'object';
+          const isPerson = lbl.toLowerCase().includes('person') || lbl.toLowerCase().includes('pedestrian');
+          const isVehicle = ['car','truck','bus','motorcycle','bicycle'].some(v => lbl.toLowerCase().includes(v));
+          const isSign = ['stop','sign','traffic light'].some(v => lbl.toLowerCase().includes(v));
+          
+          // Tesla color coding
+          let boxColor = isPerson ? '#ef4444' : isVehicle ? '#4ade80' : isSign ? '#fbbf24' : '#7dd3fc';
+          let labelBg = boxColor;
+          
+          // Draw box with corners (Tesla style)
+          actx.strokeStyle = boxColor;
+          actx.lineWidth = 2;
+          actx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+          
+          // Corner brackets
+          const bracketSize = 12;
+          actx.beginPath();
+          // Top-left
+          actx.moveTo(x1, y1 + bracketSize); actx.lineTo(x1, y1); actx.lineTo(x1 + bracketSize, y1);
+          // Top-right
+          actx.moveTo(x2 - bracketSize, y1); actx.lineTo(x2, y1); actx.lineTo(x2, y1 + bracketSize);
+          // Bottom-left
+          actx.moveTo(x1, y2 - bracketSize); actx.lineTo(x1, y2); actx.lineTo(x1 + bracketSize, y2);
+          // Bottom-right
+          actx.moveTo(x2 - bracketSize, y2); actx.lineTo(x2, y2); actx.lineTo(x2, y2 - bracketSize);
+          actx.stroke();
+          
+          // Label background
+          actx.font = '11px ui-monospace, monospace';
+          const text = lbl.toUpperCase() + ' ' + Math.round(conf * 100) + '%';
+          const tw = actx.measureText(text).width + 8;
+          actx.fillStyle = labelBg;
+          actx.fillRect(x1, y1 - 20, tw, 18);
+          actx.fillStyle = '#000';
+          actx.fillText(text, x1 + 4, y1 - 6);
+          
+          // Distance estimation (rough, based on box height)
+          const boxHeight = y2 - y1;
+          const estDist = Math.round((vh * 0.5) / Math.max(boxHeight, 1) * 10) / 10;
+          if(estDist < 100){
+            actx.font = '10px ui-monospace, monospace';
+            const distText = estDist.toFixed(1) + 'm';
+            const dw = actx.measureText(distText).width + 6;
+            actx.fillStyle = 'rgba(0,0,0,0.8)';
+            actx.fillRect(x2 - dw, y1 + 2, dw, 16);
+            actx.fillStyle = boxColor;
+            actx.fillText(distText, x2 - dw + 3, y1 + 13);
+          }
+        }
+      }
+    }else{
+      if(teslaObjCount) teslaObjCount.textContent = '0';
+    }
+
+    // Draw lane lines (simulated)
+    if(teslaLanes){
+      const lctx = teslaLanes.getContext('2d');
+      const lw = teslaLanes.width;
+      const lh = teslaLanes.height;
+      lctx.clearRect(0, 0, lw, lh);
+      lctx.strokeStyle = 'rgba(74,222,128,0.6)';
+      lctx.lineWidth = 2;
+      lctx.setLineDash([20, 20]);
+      // Left lane
+      lctx.beginPath();
+      lctx.moveTo(lw * 0.3, lh);
+      lctx.lineTo(lw * 0.35, 0);
+      lctx.stroke();
+      // Right lane
+      lctx.beginPath();
+      lctx.moveTo(lw * 0.7, lh);
+      lctx.lineTo(lw * 0.65, 0);
+      lctx.stroke();
+      lctx.setLineDash([]);
+      // Center line
+      lctx.strokeStyle = 'rgba(251,191,36,0.4)';
+      lctx.setLineDash([10, 20]);
+      lctx.beginPath();
+      lctx.moveTo(lw * 0.5, lh);
+      lctx.lineTo(lw * 0.5, 0);
+      lctx.stroke();
+      lctx.setLineDash([]);
+    }
+
+    // Simulated speed (from sensors if available)
+    if(teslaSpeed){
+      const speed = (Math.random() * 60).toFixed(1);
+      teslaSpeed.textContent = speed + ' km/h';
+    }
+    // Simulated steering angle
+    if(teslaSteer){
+      const angle = (Math.random() * 10 - 5).toFixed(1);
+      teslaSteer.textContent = angle + '°';
+    }
+
+    teslaAnimFrame = requestAnimationFrame(drawTeslaAR);
+  }
 
   // Training status and feedback
   const trainingStatus = document.getElementById('visionTrainingStatus');
@@ -3455,9 +3758,46 @@ async function startVisionDetectionLoop(){
 }
 
 function stopVisionPanel(){
+  // Exit Tesla mode if active
+  const teslaOverlay = document.getElementById('teslaOverlay');
+  if(teslaOverlay && teslaOverlay.style.display === 'block'){
+    const teslaCamera = document.getElementById('teslaCamera');
+    const teslaNativeCamera = document.getElementById('teslaNativeCamera');
+    const teslaBtn = document.getElementById('visionTeslaBtn');
+    if(teslaCamera) teslaCamera.srcObject = null;
+    if(teslaNativeCamera) teslaNativeCamera.src = '';
+    teslaOverlay.style.display = 'none';
+    if(window.teslaAnimFrame){
+      cancelAnimationFrame(window.teslaAnimFrame);
+      window.teslaAnimFrame = null;
+    }
+    if(teslaBtn){
+      teslaBtn.style.background = 'rgba(239,68,68,0.2)';
+      teslaBtn.textContent = '🚗 Tesla';
+    }
+    if(teslaOverlay._resizeHandler){
+      window.removeEventListener('resize', teslaOverlay._resizeHandler);
+    }
+  }
   if(visionStream){
     visionStream.getTracks().forEach(t => t.stop());
     visionStream = null;
+  }
+  // Stop native camera stream
+  const nativeVideo = document.getElementById('nativeCamera');
+  if(nativeVideo){
+    nativeVideo.src = '';
+    nativeVideo.style.display = 'none';
+  }
+  const video = document.getElementById('visionCamera');
+  if(video){
+    video.style.display = 'block';
+  }
+  const sourceLabel = document.getElementById('visionSourceLabel');
+  if(sourceLabel) sourceLabel.textContent = 'Browser';
+  // Notify native Android to stop camera stream
+  if(window.LillyBridge && window.LillyBridge.stopCameraStream){
+    window.LillyBridge.stopCameraStream();
   }
   if(visionAnimFrame){
     cancelAnimationFrame(visionAnimFrame);

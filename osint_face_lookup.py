@@ -43,14 +43,17 @@ FACE_OSINT_COOLDOWN = float(os.environ.get("FACE_OSINT_COOLDOWN", "60"))
 FACE_OSINT_CACHE_DIR = Path(os.environ.get("FACE_OSINT_CACHE_DIR", "/app/data/osint"))
 FACE_OSINT_CACHE = FACE_OSINT_CACHE_DIR / "face_lookup_cache.json"
 VISION_SERVER_URL = os.environ.get("VISION_SERVER_URL", "").rstrip("/")
+# URL-flow: temporarily publish the crop through the public tunnel so Yandex
+# can fetch it via ?rpt=imageview&url= (upload JSON endpoint returns empty).
+FACE_OSINT_PUBLIC_BASE = os.environ.get(
+    "FACE_OSINT_PUBLIC_BASE", "https://droolingwithsanity.ca"
+).rstrip("/")
+FACE_OSINT_TMP_DIR = Path(os.environ.get("FACE_OSINT_TMP_DIR", "/app/data/osint_tmp"))
+FACE_OSINT_TMP_TTL = float(os.environ.get("FACE_OSINT_TMP_TTL", "600"))
 
 _YANDEX_ENDPOINT = "https://yandex.com/images-apphost/image-details"
-_YANDEX_URI = (
-    "?cbird=111&rpt=imageview&format=json"
-    "&request="
-    + urllib.parse.quote(
-        '{"blocks":[{"block":"b-identical-pages"}]}'
-    )
+_YANDEX_URI = "?cbird=111&rpt=imageview&format=json&request=" + urllib.parse.quote(
+    '{"blocks":[{"block":"b-identical-pages"}]}'
 )
 _GUESS_CONF = 0.35  # reverse-face hits are a lead, not a verdict
 
@@ -68,6 +71,21 @@ def _save_cache(cache: dict):
         FACE_OSINT_CACHE.write_text(json.dumps(cache, indent=2))
     except Exception as e:
         logger.debug(f"osint cache save failed: {e}")
+
+
+def get_cached_result(res_id: str) -> dict | None:
+    """Return the latest reverse-search result for a face id, if present."""
+    try:
+        result = _load_cache().get(res_id)
+        return dict(result) if isinstance(result, dict) else None
+    except Exception as e:
+        logger.debug(f"osint cache read failed: {e}")
+        return None
+
+
+def is_enabled() -> bool:
+    """Whether autonomous unknown-face reverse search is configured."""
+    return FACE_OSINT_ENABLED
 
 
 async def handle_unknown_face(payload: dict) -> dict:
@@ -96,20 +114,31 @@ async def handle_unknown_face(payload: dict) -> dict:
         return {"handled": True, "cached": False}
 
     # Kick off the OSINT work in the background; do NOT block the caller.
-    asyncio.get_running_loop().create_task(_lookup_and_push(res_id, payload, crop_bytes))
+    asyncio.get_running_loop().create_task(
+        _lookup_and_push(res_id, payload, crop_bytes)
+    )
     return {"handled": True, "cached": False}
 
 
 async def _lookup_and_push(res_id: str, payload: dict, crop_bytes: bytes):
-    result = {"name": None, "confidence": 0.0, "social_accounts": [], "sources": [], "error": None}
+    result = {
+        "name": None,
+        "confidence": 0.0,
+        "social_accounts": [],
+        "sources": [],
+        "error": None,
+    }
     try:
-        candidates = await _reverse_face_search(crop_bytes)
+        candidates = await _reverse_face_search(crop_bytes, res_id)
         if candidates:
             best = candidates[0]
             result = await _discover_accounts(best["name"], candidates)
     except Exception as e:
         logger.warning(f"OSINT lookup failed for {res_id}: {e}")
         result["error"] = str(e)
+
+    images = _IMAGES_BY_ID.pop(res_id, [])
+    result["images"] = images[:8]
 
     cache = _load_cache()
     cache[res_id] = {
@@ -118,9 +147,44 @@ async def _lookup_and_push(res_id: str, payload: dict, crop_bytes: bytes):
         "confidence": result.get("confidence"),
         "social_accounts": result.get("social_accounts", []),
         "sources": result.get("sources", []),
+        "images": result.get("images", []),
         "error": result.get("error"),
     }
     _save_cache(cache)
+
+    # Tier-2 identity event → alert + remember flow (face_identity).
+    if result.get("name"):
+        try:
+            from face_identity import emit_identity_event
+
+            emit_identity_event(
+                result["name"],
+                source="osint",
+                confidence=result.get("confidence", 0),
+                face_id=res_id,
+                social_accounts=result.get("social_accounts", []),
+                sources=result.get("sources", []),
+                images=result.get("images", []),
+                crop_b64=payload.get("crop_b64") or "",
+            )
+        except Exception as e:
+            logger.debug(f"identity event failed: {e}")
+
+        # Autonomous footprint dossier (background; notifies when ready).
+        if os.environ.get("FACE_FOOTPRINT_AUTO", "1") == "1" and payload.get(
+            "crop_b64"
+        ):
+            try:
+                from footprint import start_footprint
+
+                await start_footprint(
+                    result["name"],
+                    face_id=res_id,
+                    crop_b64=payload.get("crop_b64") or "",
+                    auto=True,
+                )
+            except Exception as e:
+                logger.debug(f"footprint autostart failed: {e}")
 
     if not VISION_SERVER_URL:
         return
@@ -135,6 +199,7 @@ async def _lookup_and_push(res_id: str, payload: dict, crop_bytes: bytes):
                 "confidence": result.get("confidence"),
                 "social_accounts": result.get("social_accounts", []),
                 "sources": result.get("sources", []),
+                "images": result.get("images", []),
             },
         )
         logger.info(f"OSINT identity pushed for {res_id}: {result.get('name')}")
@@ -142,16 +207,377 @@ async def _lookup_and_push(res_id: str, payload: dict, crop_bytes: bytes):
         logger.debug(f"OSINT result push failed: {e}")
 
 
+async def research_face(name: str, res_id: str = "") -> dict:
+    """Force a fresh reverse search for a name even if known/cached.
+
+    Uses the stored crop for a recent sighting (face_id or name match).
+    Returns the lookup result dict.
+    """
+    from face_identity import find_event, get_crop
+
+    ev = find_event(res_id or name)
+    if not ev:
+        return {"name": None, "error": f"no recent sighting of {name}"}
+    fid = ev.get("face_id") or ""
+    crop = get_crop(fid) if fid else None
+    if not crop:
+        return {"name": None, "error": "face crop expired — show them again first"}
+    rid = f"research_{fid or 'x'}_{int(time.time())}"
+    result = {
+        "name": None,
+        "confidence": 0.0,
+        "social_accounts": [],
+        "sources": [],
+        "images": [],
+        "error": None,
+    }
+    try:
+        candidates = await _reverse_face_search(crop, rid)
+        if candidates:
+            # prefer the requested name if among candidates, else top hit
+            want = (name or "").strip().lower()
+            pick = next(
+                (c for c in candidates if (c.get("name") or "").lower() == want),
+                candidates[0],
+            )
+            result = await _discover_accounts(pick["name"], candidates)
+    except Exception as e:
+        result["error"] = str(e)
+    result["images"] = _IMAGES_BY_ID.pop(rid, [])[:8]
+    cache = _load_cache()
+    cache[rid] = {
+        "ts": time.time(),
+        "name": result.get("name"),
+        "confidence": result.get("confidence"),
+        "social_accounts": result.get("social_accounts", []),
+        "sources": result.get("sources", []),
+        "images": result.get("images", []),
+        "error": result.get("error"),
+        "research_for": name,
+    }
+    _save_cache(cache)
+    if result.get("name"):
+        try:
+            from face_identity import emit_identity_event
+
+            emit_identity_event(
+                result["name"],
+                source="osint:research",
+                confidence=result.get("confidence", 0),
+                face_id=rid,
+                social_accounts=result.get("social_accounts", []),
+                sources=result.get("sources", []),
+                images=result.get("images", []),
+            )
+        except Exception:
+            pass
+    return result
+
+
 # ── Step 1: reverse face search ─────────────────────────────────────────
-async def _reverse_face_search(crop_bytes: bytes) -> list[dict]:
+async def _reverse_face_search(crop_bytes: bytes, res_id: str = "") -> list[dict]:
     """Return [{name, href, confidence}] candidates for a face crop."""
     if FACE_OSINT_PROVIDER == "test":
-        return [{"name": "Test Person", "href": "https://example.com", "confidence": _GUESS_CONF}]
-    return await _yandex_reverse_search(crop_bytes)
+        return [
+            {
+                "name": "Test Person",
+                "href": "https://example.com",
+                "confidence": _GUESS_CONF,
+            }
+        ]
+    return await _yandex_reverse_search(crop_bytes, res_id=res_id)
 
 
-async def _yandex_reverse_search(crop_bytes: bytes) -> list[dict]:
+def _publish_crop(crop_bytes: bytes, res_id: str) -> str | None:
+    """Write crop to the tmp dir served at /osint_tmp/; return public URL."""
+    try:
+        import secrets
+
+        FACE_OSINT_TMP_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            now = time.time()
+            for f in FACE_OSINT_TMP_DIR.glob("*.jpg"):
+                try:
+                    if now - f.stat().st_mtime > FACE_OSINT_TMP_TTL:
+                        f.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        token = secrets.token_hex(12)
+        safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", (res_id or "face")[:16])
+        fname = f"{safe_id}_{token}.jpg"
+        (FACE_OSINT_TMP_DIR / fname).write_bytes(crop_bytes)
+        if not FACE_OSINT_PUBLIC_BASE:
+            return None
+        return f"{FACE_OSINT_PUBLIC_BASE}/osint_tmp/{fname}"
+    except Exception as e:
+        logger.debug(f"crop publish failed: {e}")
+        return None
+
+
+def _unpublish_crop(public_url: str | None):
+    try:
+        if not public_url:
+            return
+        fname = re.sub(r"[^A-Za-z0-9_.-]", "_", public_url.rsplit("/", 1)[-1])
+        p = FACE_OSINT_TMP_DIR / fname
+        if p.exists():
+            p.unlink()
+    except Exception:
+        pass
+
+
+def _parse_yandex_html(html: str) -> list[dict]:
+    """Parse Yandex images/search HTML for entity tags + similar titles."""
+    _STOP = {
+        "privacy",
+        "policy",
+        "official",
+        "presidential",
+        "portrait",
+        "media",
+        "events",
+        "times",
+        "prompts",
+        "stable",
+        "diffusion",
+        "yandex",
+        "images",
+        "search",
+        "similar",
+        "photo",
+        "picture",
+        "image",
+        "pictures",
+        "photos",
+        "new",
+        "end",
+        "ht",
+    }
+
+    def _ok_name(t: str) -> bool:
+        words = re.findall(r"[A-Za-z']+", t)
+        if len(words) < 2:
+            return False
+        content = [w for w in words if w.lower() not in _STOP and len(w) > 1]
+        return len(content) >= 2
+
+    out: list[dict] = []
+    seen = set()
+    for tag_text in re.findall(r'"text":"([^"]{2,80})"', html):
+        t = tag_text.strip()
+        if len(t) < 2 or t in seen or not re.search(r"[A-Za-z]", t):
+            continue
+        if not _ok_name(t):
+            continue
+        seen.add(t)
+        out.append(
+            {
+                "name": _guess_name_from_title(t),
+                "href": "",
+                "confidence": _GUESS_CONF,
+                "title": t,
+            }
+        )
+    for title in re.findall(
+        r'([A-Z][A-Za-z\'.-]+(?:\s+[A-Z][A-Za-z\'.-]+){1,3})[^<"]{0,60}?&quot;', html
+    ):
+        t = title.strip()
+        if len(t) < 4 or t in seen:
+            continue
+        if not _ok_name(t):
+            continue
+        seen.add(t)
+        out.append(
+            {
+                "name": _guess_name_from_title(t),
+                "href": "",
+                "confidence": _GUESS_CONF,
+                "title": t,
+            }
+        )
+    for u in re.findall(
+        r"https?://[a-z0-9./_-]*(?:wikipedia\.org|whitehouse\.gov|britannica\.com|biography\.com)[a-z0-9./_?=%#-]*",
+        html,
+        re.I,
+    ):
+        if u not in seen:
+            seen.add(u)
+            out.append(
+                {
+                    "name": _guess_name_from_title(u.split("/")[-1].replace("_", " ")),
+                    "href": u,
+                    "confidence": _GUESS_CONF,
+                }
+            )
+    # rank by frequency: the true entity repeats dozens of times, noise a few
+    out.sort(
+        key=lambda c: html.count(c.get("title") or c.get("name") or ""), reverse=True
+    )
+    return out[:8]
+
+
+_SITE_NAMES = {
+    "youtube.com": "YouTube",
+    "youtu.be": "YouTube",
+    "i.ytimg.com": "YouTube",
+    "wikipedia.org": "Wikipedia",
+    "whitehouse.gov": "White House",
+    "britannica.com": "Britannica",
+    "biography.com": "Biography",
+    "facebook.com": "Facebook",
+    "instagram.com": "Instagram",
+    "linkedin.com": "LinkedIn",
+    "x.com": "X",
+    "twitter.com": "X",
+    "tiktok.com": "TikTok",
+    "vk.com": "VK",
+    "ok.ru": "OK",
+    "reddit.com": "Reddit",
+    "bsky.app": "Bluesky",
+    "github.com": "GitHub",
+    "onlyfans.com": "OnlyFans",
+    "fansly.com": "Fansly",
+    "tinder.com": "Tinder",
+    "bumble.com": "Bumble",
+    "hinge.co": "Hinge",
+    "okcupid.com": "OkCupid",
+    "pof.com": "Plenty of Fish",
+    "plentyoffish.com": "Plenty of Fish",
+    "grindr.com": "Grindr",
+    "feeld.co": "Feeld",
+    "match.com": "Match",
+    "eharmony.com": "eHarmony",
+    "badoo.com": "Badoo",
+    "happn.com": "happn",
+    "herapp.co": "HER",
+}
+
+# Social + fan + dating domains surfaced as accounts.
+_SOCIAL_DOMAINS = (
+    "facebook.com",
+    "instagram.com",
+    "linkedin.com",
+    "x.com/",
+    "twitter.com",
+    "tiktok.com",
+    "vk.com",
+    "ok.ru",
+    "youtube.com/@",
+    "reddit.com/user",
+    "bsky.app",
+    "onlyfans.com",
+    "fansly.com",
+    "tinder.com",
+    "bumble.com",
+    "hinge.co",
+    "okcupid.com",
+    "pof.com",
+    "plentyoffish.com",
+    "grindr.com",
+    "feeld.co",
+    "match.com",
+    "eharmony.com",
+    "badoo.com",
+    "happn.com",
+    "herapp.co",
+)
+
+
+def _site_name(url: str) -> str:
+    try:
+        host = urllib.parse.urlparse(url).netloc.lower().replace("www.", "")
+        for dom, nice in _SITE_NAMES.items():
+            if host == dom or host.endswith("." + dom):
+                return nice
+        return host.split(":")[0] or "web"
+    except Exception:
+        return "web"
+
+
+def _parse_yandex_images(html: str, limit: int = 8) -> list[dict]:
+    """Extract similar-image entries: thumbnail + title + source page image.
+
+    Entries look like: {"imageUrl":"//avatars.mds.yandex.net/...","width":..,
+    "title":"Barack Obama 2020 - YouTube","linkUrl":"/images/search?url=..&img_url=<orig>&.."}
+    """
+    out: list[dict] = []
+    seen = set()
+    # Page HTML-escapes quotes (&quot;) — normalize first.
+    html = html.replace("&quot;", '"').replace("&#x27;", "'").replace("&amp;", "&")
+    pat = re.compile(
+        r'\{"imageUrl":"([^"]+)","width":\d+,"height":\d+,"title":"([^"]{3,120}?)"'
+        r',"linkUrl":"([^"]{10,600}?)"'
+    )
+    for thumb, title, link in pat.findall(html):
+        title = title.replace("&quot;", '"').replace("&#x27;", "'").strip()
+        if len(title) < 3 or title in seen:
+            continue
+        m = re.search(r"img_url=([^&]+)", link)
+        page_url = urllib.parse.unquote(m.group(1)) if m else ""
+        if thumb.startswith("//"):
+            thumb = "https:" + thumb
+        seen.add(title)
+        out.append(
+            {
+                "thumb": thumb,
+                "title": title,
+                "page_url": page_url,
+                "site": _site_name(page_url or thumb),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+# Last similar-image sets by face id (populated by URL flow, consumed once).
+_IMAGES_BY_ID: dict[str, list[dict]] = {}
+
+
+async def _yandex_url_search(public_url: str, res_id: str = "") -> list[dict]:
+    """Yandex ?rpt=imageview&url= HTML flow (JSON apphost returns empty)."""
     import httpx
+
+    search_url = (
+        "https://yandex.com/images/search?rpt=imageview&url="
+        + urllib.parse.quote(public_url, safe="")
+    )
+    try:
+        async with httpx.AsyncClient(
+            timeout=25.0,
+            follow_redirects=True,
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://yandex.com/images/",
+            },
+        ) as client:
+            await client.get("https://yandex.com/images/")
+            r = await client.get(search_url)
+            if r.status_code != 200 or len(r.content) < 10000:
+                return []
+            if res_id:
+                _IMAGES_BY_ID[res_id] = _parse_yandex_images(r.text)
+            return _parse_yandex_html(r.text)
+    except Exception as e:
+        logger.debug(f"yandex url search failed: {e}")
+        return []
+
+
+async def _yandex_reverse_search(crop_bytes: bytes, res_id: str = "") -> list[dict]:
+    import httpx
+
+    # URL flow first (JSON upload endpoint returns empty blocks).
+    public_url = _publish_crop(crop_bytes, res_id or "face")
+    if public_url:
+        try:
+            matches = await _yandex_url_search(public_url, res_id)
+            if matches:
+                return matches[:6]
+        finally:
+            _unpublish_crop(public_url)
 
     async def attempt(url: str, *, use_file: bool) -> list[dict]:
         async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
@@ -159,7 +585,9 @@ async def _yandex_reverse_search(crop_bytes: bytes) -> list[dict]:
                 r = await client.post(
                     url,
                     files={"file": ("crop.jpg", crop_bytes, "image/jpeg")},
-                    headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+                    },
                 )
             else:
                 r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -183,7 +611,8 @@ def _parse_yandex_matches(data) -> list[dict]:
     marker = re.compile(r"^(https?://|@|[\w-]+\.\w{2,})", re.I)
     evidence_terms = re.compile(
         r"person|people|profile|facebook|instagram|linkedin|twitter|"
-        r"vk\.com|ok\.ru|tiktok|youtube|reddit|bio|photo of", re.I
+        r"vk\.com|ok\.ru|tiktok|youtube|reddit|bio|photo of",
+        re.I,
     )
 
     def walk(node):
@@ -203,7 +632,9 @@ def _parse_yandex_matches(data) -> list[dict]:
         if title and evidence_terms.search(title) and title not in seen:
             seen.add(title)
             name = _guess_name_from_title(title)
-            out.append({"name": name, "href": href, "confidence": _GUESS_CONF, "title": title})
+            out.append(
+                {"name": name, "href": href, "confidence": _GUESS_CONF, "title": title}
+            )
         elif href and href not in seen:
             seen.add(href)
             out.append({"name": href, "href": href, "confidence": _GUESS_CONF})
@@ -211,7 +642,9 @@ def _parse_yandex_matches(data) -> list[dict]:
     walk(data)
 
     # Try to read Yandex's typed matches fields too (shape varies by version).
-    for block in (data.get("image-details", {}) if isinstance(data, dict) else {}).values():
+    for block in (
+        data.get("image-details", {}) if isinstance(data, dict) else {}
+    ).values():
         if isinstance(block, list):
             for m in block[:3]:
                 if not isinstance(m, dict):
@@ -220,7 +653,13 @@ def _parse_yandex_matches(data) -> list[dict]:
                 url = m.get("url") or m.get("page-url") or ""
                 if title and title not in seen:
                     seen.add(title)
-                    out.append({"name": _guess_name_from_title(title), "href": url, "confidence": _GUESS_CONF})
+                    out.append(
+                        {
+                            "name": _guess_name_from_title(title),
+                            "href": url,
+                            "confidence": _GUESS_CONF,
+                        }
+                    )
     return out
 
 
@@ -231,7 +670,12 @@ def _guess_name_from_title(title: str) -> str:
         handle = re.search(r"@([A-Za-z0-9_.]{3,40})", t)
         if handle:
             return handle.group(1)
-    cleaned = re.sub(r"\b(linkedin|facebook|instagram|twitter|x\.com|vk|tiktok|reddit|profile)\b.*$", "", t, flags=re.I)
+    cleaned = re.sub(
+        r"\b(linkedin|facebook|instagram|twitter|x\.com|vk|tiktok|reddit|profile)\b.*$",
+        "",
+        t,
+        flags=re.I,
+    )
     cleaned = re.sub(r"[^A-Za-z' -]", "", cleaned)
     parts = [p.strip().title() for p in cleaned.split() if p.strip()]
     proper = [p for p in parts if p and p[0].isupper()]
@@ -251,12 +695,14 @@ async def _discover_accounts(name: str, candidates: list[dict]) -> dict:
 
     try:
         from osint_agents import run_osint_agent
+
         report = await asyncio.wait_for(run_osint_agent("person", name), timeout=90)
     except Exception as e:
         logger.debug(f"osint_agents skipped: {e}")
 
     try:
         from scrapling_engine import scrape_for_lilly
+
         scraped = await asyncio.wait_for(
             scrape_for_lilly(f"Find the social media profiles for {name}"),
             timeout=60,
@@ -271,12 +717,9 @@ async def _discover_accounts(name: str, candidates: list[dict]) -> dict:
     if report:
         sources.append(report[:2000])
 
-    urls = re.findall(r"https?://[^\s)\]]+", " ".join(sources))
+    urls = re.findall(r"https?://[^\s)\]]+", " ".join(s for s in sources if s))
     for u in urls:
-        if any(d in u.lower() for d in (
-            "facebook.com", "instagram.com", "linkedin.com", "x.com/", "twitter.com",
-            "tiktok.com", "vk.com", "ok.ru", "youtube.com/@", "reddit.com/user", "bsky.app",
-        )):
+        if any(d in u.lower() for d in _SOCIAL_DOMAINS):
             if u not in social_accounts:
                 social_accounts.append(u)
 

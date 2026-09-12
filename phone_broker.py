@@ -310,6 +310,10 @@ class PhoneBroker:
         self._last_broadcast: dict[str, float] = {}  # topic → timestamp (rate limiting)
         self._broadcast_interval = 1.0  # min seconds between same-topic broadcasts
         self.automation = AutomationEngine()
+        # Last-known state per device per topic — the stream finally has a
+        # memory. Chat + rules can read recent values without a live round-trip.
+        # {device_id: {topic: {"data": dict, "ts": float}}}
+        self.last_state: dict[str, dict[str, dict]] = {}
 
         if app:
             self.mount(app)
@@ -421,7 +425,54 @@ class PhoneBroker:
             "ts": time.time(),
         }
 
+        # Retain last-known state (bounded per device) for chat/rules.
+        try:
+            dev = self.last_state.setdefault(phone.device_id, {})
+            dev[topic] = {"data": forward["data"], "ts": forward["ts"]}
+            if len(dev) > 12:
+                oldest = min(dev, key=lambda k: dev[k].get("ts", 0))
+                dev.pop(oldest, None)
+        except Exception:
+            pass
+
         await self._broadcast_to_webuis(forward, topic)
+
+        # Evaluate automation rules against the live stream (per-rule
+        # cooldowns prevent double-firing with the poll loop).
+        if self.automation.rules:
+            try:
+                await self.automation.evaluate(forward)
+            except Exception:
+                pass
+
+    def get_last_state(
+        self, device_id: str = "", topic: str = "", max_age: float = 120.0
+    ) -> dict:
+        """Last-known broker state. Empty device/topic = newest match.
+
+        Returns {"device_id":..., "topic":..., "data":..., "ts":..., "age":...}
+        or {} when nothing fresh enough exists.
+        """
+        now = time.time()
+        best: dict = {}
+        for did, topics in (self.last_state or {}).items():
+            if device_id and did != device_id:
+                continue
+            for t, entry in (topics or {}).items():
+                if topic and t != topic:
+                    continue
+                ts = entry.get("ts", 0)
+                if now - ts > max_age:
+                    continue
+                if not best or ts > best.get("ts", 0):
+                    best = {
+                        "device_id": did,
+                        "topic": t,
+                        "data": entry.get("data"),
+                        "ts": ts,
+                        "age": round(now - ts, 1),
+                    }
+        return best
 
     # ─── Web UI connection handler ─────────────────────────────────────────
 

@@ -65,6 +65,11 @@ Phone Camera / Browser Webcam
 | `lilly_ai.py` | Main server (~22,700 lines) — FastAPI, vision, avatars, memory |
 | `phone_broker.py` | WebSocket relay + AutomationEngine (conditions, actions, persistence) |
 | `wiki.html` | Documentation page served at `/wiki.html` |
+| `face_identity.py` | Face alerts, remember flow, geo-tagged sightings, auto-learn |
+| `footprint.py` | Autonomous dossiers (Sherlock + Maigret + ArcFace photo-verify) |
+| `osint_face_lookup.py` | Yandex URL-flow reverse search + socials (incl. fans/dating) |
+| `face_recognition_engine.py` | SCRFD + ArcFace + FAISS (fires identity callbacks) |
+| `yolov8_vision_server.py` | Vision server :8198, renames boxes, pushes unknowns/events |
 | `lilly_skills.json` | 35+ Android skill definitions |
 | `Dockerfile` | Multi-stage build (Node.js + Python, includes ultralytics + opencv) |
 | `requirements.txt` | Python deps including ultralytics, opencv-python-headless |

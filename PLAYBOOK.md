@@ -199,6 +199,23 @@ Customize via `sensor_skills.json` or `GET/POST/DELETE /api/sensor_skills`.
 | "we're at [place]" | Labels current GPS location |
 | "name device [MAC] as [name]" | Bluetooth device nickname |
 
+### Faces & Identity
+
+| Say | Action |
+|-----|--------|
+| "who do you see" | Names currently seen (recognized + leads) |
+| "results for [name]" | Photo evidence + social/source links |
+| "remember him as [name]" | Enrolls face permanently (box keeps name forever) |
+| "research [name]" | Fresh reverse search even for known faces |
+| "footprint [name]" | Full cross-site dossier (Sherlock + Maigret + photo-verify) |
+| "forget [name]" | Removes enrolled face |
+
+Lilly **alerts you** on sight: phone notification naming the person + matching photo sites, full evidence in web chat. Known faces are never re-searched unless requested. After 5 sightings she auto-learns familiars; sightings are geo-tagged ("at home"). The camera window's **👁 IDs panel** shows who + photo grid + Remember/Dossier buttons. Drop any image onto the feed to analyze it; click the feed for the full menu.
+
+### Footprint Dossiers
+
+Every face-search ID auto-starts a background dossier: username variants across 3,000+ sites (Sherlock + Maigret), Wikipedia + GDELT mentions, and **ArcFace photo verification** against the camera crop. Report tiers: ✅ photo-verified → 👤 likely (3+ sites) → leads, plus fans/dating, about, news. Lilly notifies when ready and reads it out in chat.
+
 ---
 
 ## Picture-in-Picture (PiP)
@@ -258,6 +275,11 @@ In kid mode, the avatar never gives direct answers — only guiding questions an
 | `/api/toggle_mic` | POST | Enable/disable mic |
 | `/api/switch_avatar` | POST | Switch character |
 | `/api/phone_status` | GET | Phone connectivity status |
+| `/api/faces/identity_events` | GET | Recent face alerts + photos + geo |
+| `/api/faces/confirm` | POST | Remember a sighted face permanently |
+| `/api/faces/footprint` | POST | Start a dossier (`{"name"}` / `{"face_id"}`) |
+| `/api/faces/footprints` | GET | Dossier jobs + progress |
+| `/api/faces/footprint/{id}` | GET | Full dossier report |
 | `/api/google/gmail` | GET | Gmail inbox (with OAuth) |
 | `/api/google/calendar` | GET | Calendar events (with OAuth) |
 
@@ -273,6 +295,13 @@ In kid mode, the avatar never gives direct answers — only guiding questions an
 | `TERMUX_SSH_USER` | *(empty)* | SSH username |
 | `OLLAMA_URL` | `http://100.93.131.114:11434` | Ollama backend |
 | `PREFER_BACKEND` | `ollama` | `ollama` or `llama` |
+| `FACE_OSINT_ENABLED` | `0` | Tier-2 reverse face search |
+| `OSINT_PUSH_URL` | *(empty)* | Vision → Lilly unknown-face push (empty = Tier-2 never fires) |
+| `FACE_OSINT_PUBLIC_BASE` | tunnel URL | Public base for short-lived search crops |
+| `FACE_ALERT_COOLDOWN` / `FACE_ALERT_DAILY_CAP` | `900` / `10` | Face alert rate limits |
+| `FACE_AUTO_LEARN` / `FACE_AUTO_LEARN_SIGHTINGS` | `1` / `5` | Familiar-face auto-enroll |
+| `FACE_FOOTPRINT_AUTO` / `FACE_FOOTPRINT_COOLDOWN` | `1` / `86400` | Autonomous dossiers |
+| `FOOTPRINT_PHOTO_VERIFY` | `1` | ArcFace photo matching in dossiers |
 
 ---
 
@@ -282,6 +311,10 @@ In kid mode, the avatar never gives direct answers — only guiding questions an
 |------|---------|
 | `lilly_ai.py` | Main application (12,500+ lines) |
 | `termux_sensor_server.py` | Phone sensor server (HTTP) |
+| `face_identity.py` | Face alerts, remember flow, geo-tagged sightings |
+| `footprint.py` | Autonomous cross-site dossiers + photo verify |
+| `osint_face_lookup.py` | Yandex URL-flow reverse search + socials |
+| `face_recognition_engine.py` | SCRFD + ArcFace + FAISS |
 | `lilly_skills.json` | 35+ Android skill definitions |
 | `sensor_skills.json` | 5 sensor-triggered reactive skills |
 | `email_integration.py` | Gmail/Outlook/Calendar |

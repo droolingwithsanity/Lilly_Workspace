@@ -33,6 +33,7 @@ Design notes (v3):
 import json
 import logging
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -60,30 +61,146 @@ except ImportError:  # pragma: no cover
     FAISS_AVAILABLE = False
     faiss = None  # type: ignore
 
+# ── DeepFace enhancer (optional) ───────────────────────────────────────
+# Lives in the shared /app/data volume so both containers use it.
+DEEPFACE_LIB = Path(os.environ.get("DEEPFACE_LIB", "/app/data/deepface-lib"))
+DEEPFACE_HOME = Path(os.environ.get("DEEPFACE_HOME", "/app/data/deepface"))
+if str(DEEPFACE_LIB) not in sys.path:
+    sys.path.insert(0, str(DEEPFACE_LIB))
+os.environ.setdefault("DEEPFACE_HOME", str(DEEPFACE_HOME))
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("GLOG_minloglevel", "3")
+
+DEEPFACE_ENABLED = os.environ.get("DEEPFACE_ENABLED", "1") == "1"
+DEEPFACE_MODEL = os.environ.get("DEEPFACE_MODEL", "SFace")
+DEEPFACE_DETECTOR = os.environ.get("DEEPFACE_DETECTOR", "mtcnn")
+DEEPFACE_MIN_VERIFY = float(os.environ.get("DEEPFACE_MIN_VERIFY", "0.98"))
+DEEPFACE_VERIFY_COOLDOWN = float(os.environ.get("DEEPFACE_VERIFY_COOLDOWN", "20"))
+DEEPFACE_DEMOG_COOLDOWN = float(os.environ.get("DEEPFACE_DEMOG_COOLDOWN", "30"))
+
+_df_cache = {"module": None, "failed": False}
+
+
+def _face_crop(frame, bbox):
+    h, w = frame.shape[:2]
+    if isinstance(bbox, dict):
+        x1 = int(max(0, round(float(bbox.get("x", 0)))))
+        y1 = int(max(0, round(float(bbox.get("y", 0)))))
+        x2 = int(min(w, x1 + round(float(bbox.get("w", 0)))))
+        y2 = int(min(h, y1 + round(float(bbox.get("h", 0)))))
+    else:
+        x1 = int(max(0, round(float(bbox[0]))))
+        y1 = int(max(0, round(float(bbox[1]))))
+        x2 = int(min(w, round(float(bbox[2]))))
+        y2 = int(min(h, round(float(bbox[3]))))
+    return frame[y1:y2, x1:x2]
+
+
+_SFACE_WEIGHT = Path("/app/data/deepface/.deepface/weights/face_recognition_sface_2021dec.onnx")
+_sface_net = None
+
+
+def _get_sface():
+    """Load SFace ONNX model via cv2.dnn (no TF required)."""
+    global _sface_net
+    if _sface_net is not None:
+        return _sface_net
+    if not _SFACE_WEIGHT.exists():
+        logger.warning("SFace weights not found at %s", _SFACE_WEIGHT)
+        return None
+    try:
+        _sface_net = cv2.dnn.readNetFromONNX(str(_SFACE_WEIGHT))
+        logger.info("SFace ONNX model loaded")
+        return _sface_net
+    except Exception as e:
+        logger.warning("SFace load failed: %s", e)
+        return None
+
+
+def _sface_embed(crop):
+    """Compute SFace 128-dim embedding from a face crop (numpy BGR).
+    Preprocessing matches the OpenCV SFace reference: resize to 112x112,
+    convert BGR->RGB, normalize to [-1,1]."""
+    net = _get_sface()
+    if net is None:
+        return None
+    img = cv2.resize(crop, (112, 112))
+    blob = cv2.dnn.blobFromImage(
+        img, 1.0 / 127.5, (112, 112), (127.5, 127.5, 127.5),
+        swapRB=True, crop=False,
+    )
+    net.setInput(blob)
+    emb = net.forward()  # shape (1, 128)
+    emb = emb.flatten().astype(np.float64)
+    norm = np.linalg.norm(emb)
+    if norm > 0:
+        emb = emb / norm
+    return emb
+
+
 logger = logging.getLogger("lilly-faces")
+
+# ── Identity-confirm callbacks ─────────────────────────────────────────
+# Fired when a FAISS name newly appears in a source (absent → present).
+# lilly_ai registers face_identity.emit; the vision process registers an
+# HTTP poster to /api/faces/events. Downstream handles cooldowns/alerts.
+_identity_callbacks: list = []
+_present_by_source: dict[str, set] = {}
+
+
+def on_identity_confirmed(fn):
+    """Register fn(name, confidence, source, extra_dict)."""
+    if callable(fn) and fn not in _identity_callbacks:
+        _identity_callbacks.append(fn)
+
+
+def _fire_identity_confirmed(
+    name: str, conf: float, source: str, extra: dict | None = None
+):
+    if not name or not _identity_callbacks:
+        return
+    for fn in list(_identity_callbacks):
+        try:
+            fn(name, conf, source, extra or {})
+        except Exception:
+            pass
+
 
 # ── Paths ────────────────────────────────────────────────────────────────
 FACES_DIR = Path(os.environ.get("FACES_DIR", "/app/data/faces"))
 FACES_DB = FACES_DIR / "known_faces.json"
+CROP_DIR = FACES_DIR / "crops"
 # Weights are stored in the shared /app/data volume so both the main server
 # and the vision server see the same model files.
 SCRFD_WEIGHT = FACES_DIR.parent / "models" / "det_2.5g.onnx"
 ARCFACE_WEIGHT = FACES_DIR.parent / "models" / "w600k_mbf.onnx"
 YAKHYO_BASE = os.environ.get(
-    "YAKHYO_BASE", "https://github.com/yakhyo/face-reidentification/releases/download/v0.0.1"
+    "YAKHYO_BASE",
+    "https://github.com/yakhyo/face-reidentification/releases/download/v0.0.1",
 )
 
 # ── Tuning ───────────────────────────────────────────────────────────────
 # Person-like class labels from YOLO models (COCO: "person"; Open Images V7:
 # "Man", "Woman", "Human face", ...). Heuristics only — the overlay re-checks.
 PERSON_KEYWORDS = {
-    "person", "people", "human", "human face", "face", "man", "woman",
-    "man face", "women", "girl", "boy", "child", "kid",
+    "person",
+    "people",
+    "human",
+    "human face",
+    "face",
+    "man",
+    "woman",
+    "man face",
+    "women",
+    "girl",
+    "boy",
+    "child",
+    "kid",
 }
 
 DEFAULT_THRESHOLD = float(os.environ.get("FACE_THRESHOLD", "0.42"))
-DET_SCORE_MIN = float(os.environ.get("SCRFD_CONF", "0.5"))     # detector floor
-IDENTIFY_MIN_SIZE = 24                                          # px — smaller faces are too noisy to embed
+DET_SCORE_MIN = float(os.environ.get("SCRFD_CONF", "0.5"))  # detector floor
+IDENTIFY_MIN_SIZE = 24  # px — smaller faces are too noisy to embed
 CONFIRM_STREAK = 2
 HOLD_FRAMES = 6
 SWITCH_MARGIN = 0.12
@@ -145,7 +262,13 @@ def _distance2kps(points: np.ndarray, distance: np.ndarray) -> np.ndarray:
 class SCRFD:
     """SCRFD face detector (works with the yakhyo ONNX releases)."""
 
-    def __init__(self, model_path: str, input_size=SCRFD_INPUT, conf_thres=DET_SCORE_MIN, iou_thres=SCRFD_IOU):
+    def __init__(
+        self,
+        model_path: str,
+        input_size=SCRFD_INPUT,
+        conf_thres=DET_SCORE_MIN,
+        iou_thres=SCRFD_IOU,
+    ):
         self.input_size = input_size
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
@@ -179,10 +302,14 @@ class SCRFD:
             key = (height, width, stride)
             anchor_centers = self.center_cache.get(key)
             if anchor_centers is None:
-                anchor_centers = np.stack(np.mgrid[:height, :width][::-1], axis=-1).astype(np.float32)
+                anchor_centers = np.stack(
+                    np.mgrid[:height, :width][::-1], axis=-1
+                ).astype(np.float32)
                 anchor_centers = (anchor_centers * stride).reshape((-1, 2))
                 if self._num_anchors > 1:
-                    anchor_centers = np.stack([anchor_centers] * self._num_anchors, axis=1).reshape((-1, 2))
+                    anchor_centers = np.stack(
+                        [anchor_centers] * self._num_anchors, axis=1
+                    ).reshape((-1, 2))
                 if len(self.center_cache) < 100:
                     self.center_cache[key] = anchor_centers
             pos_inds = np.where(scores >= threshold)[0]
@@ -197,7 +324,13 @@ class SCRFD:
 
     @staticmethod
     def _nms(dets: np.ndarray, iou_thres: float) -> list:
-        x1, y1, x2, y2, scores = dets[:, 0], dets[:, 1], dets[:, 2], dets[:, 3], dets[:, 4]
+        x1, y1, x2, y2, scores = (
+            dets[:, 0],
+            dets[:, 1],
+            dets[:, 2],
+            dets[:, 3],
+            dets[:, 4],
+        )
         areas = (x2 - x1 + 1) * (y2 - y1 + 1)
         order = scores.argsort()[::-1]
         keep = []
@@ -245,7 +378,9 @@ class SCRFD:
         if 0 < max_num < det.shape[0]:
             area = (det[:, 2] - det[:, 0]) * (det[:, 3] - det[:, 1])
             image_center = np.array([image.shape[1] / 2, image.shape[0] / 2])
-            centers = np.stack([(det[:, 0] + det[:, 2]) / 2, (det[:, 1] + det[:, 3]) / 2], axis=-1)
+            centers = np.stack(
+                [(det[:, 0] + det[:, 2]) / 2, (det[:, 1] + det[:, 3]) / 2], axis=-1
+            )
             offsets = np.sum(np.power(centers - image_center, 2.0), axis=-1)
             values = area - offsets
             bindex = np.argsort(values)[::-1][:max_num]
@@ -256,7 +391,9 @@ class SCRFD:
 
 
 # ── ArcFace recognition model ────────────────────────────────────────────
-def _align_face(image: np.ndarray, landmark: np.ndarray, image_size: int = 112) -> np.ndarray:
+def _align_face(
+    image: np.ndarray, landmark: np.ndarray, image_size: int = 112
+) -> np.ndarray:
     ratio = float(image_size) / 112.0
     target = REFERENCE_LMK * ratio
     pts = np.asarray(landmark, dtype=np.float32)
@@ -273,17 +410,25 @@ class ArcFace:
 
     def __init__(self, model_path: str):
         self.input_size = (112, 112)
-        self.session = onnxruntime.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        self.session = onnxruntime.InferenceSession(
+            model_path, providers=["CPUExecutionProvider"]
+        )
         self.input_name = self.session.get_inputs()[0].name
         self.output_names = [o.name for o in self.session.get_outputs()]
         self.embedding_size = int(self.session.get_outputs()[0].shape[1])
 
-    def get_embedding(self, image: np.ndarray, landmarks: np.ndarray, normalized: bool = True) -> np.ndarray:
-        aligned = _align_face(image, np.asarray(landmarks, dtype=np.float32).reshape(5, 2))
+    def get_embedding(
+        self, image: np.ndarray, landmarks: np.ndarray, normalized: bool = True
+    ) -> np.ndarray:
+        aligned = _align_face(
+            image, np.asarray(landmarks, dtype=np.float32).reshape(5, 2)
+        )
         blob = cv2.dnn.blobFromImage(
             aligned, 1.0 / 127.5, self.input_size, (127.5,) * 3, swapRB=True
         )
-        embedding = self.session.run(self.output_names, {self.input_name: blob})[0].flatten()
+        embedding = self.session.run(self.output_names, {self.input_name: blob})[
+            0
+        ].flatten()
         if normalized:
             norm = np.linalg.norm(embedding)
             if norm > 1e-10:
@@ -319,7 +464,9 @@ class FaceDatabase:
         self.index = index
         self.names = names
 
-    def search(self, embeddings: list[np.ndarray], threshold: float) -> list[tuple[Optional[str], float]]:
+    def search(
+        self, embeddings: list[np.ndarray], threshold: float
+    ) -> list[tuple[Optional[str], float]]:
         if not embeddings or self.index is None or self.index.ntotal == 0:
             return [(None, 0.0)] * len(embeddings)
         mat = np.stack(embeddings).astype(np.float32)
@@ -372,9 +519,13 @@ class FaceRecognitionEngine:
             det_path, rec_path = _ensure_weights(SCRFD_WEIGHT, ARCFACE_WEIGHT)
             self.detector = SCRFD(str(det_path))
             self.recognizer = ArcFace(str(rec_path))
-            logger.info(f"SCRFD + ArcFace(w600k_mbf, {self.recognizer.embedding_size}-dim) ready")
+            logger.info(
+                f"SCRFD + ArcFace(w600k_mbf, {self.recognizer.embedding_size}-dim) ready"
+            )
         except Exception as e:
-            logger.warning(f"Face models failed to load ({e}) — using heuristic fallback.")
+            logger.warning(
+                f"Face models failed to load ({e}) — using heuristic fallback."
+            )
 
     # ── Database ─────────────────────────────────────────────────────────
 
@@ -491,19 +642,30 @@ class FaceRecognitionEngine:
             logger.debug(f"ArcFace embed failed: {e}")
             return None, None, None
         bx1, by1, bx2, by2 = dets[0][:4].astype(int)
-        face_box = {"x": x1 + int(bx1), "y": y1 + int(by1), "w": int(bx2 - bx1), "h": int(by2 - by1)}
+        face_box = {
+            "x": x1 + int(bx1),
+            "y": y1 + int(by1),
+            "w": int(bx2 - bx1),
+            "h": int(by2 - by1),
+        }
         return emb, kps, face_box
 
     def encode_face(self, frame: np.ndarray, face_box: dict) -> Optional[list]:
         """Public API: embed a face region. Returns 512-dim normed list or None."""
         if self.is_ready:
             emb, _, _ = self._embed_from_box(
-                frame, int(face_box["x"]), int(face_box["y"]), int(face_box["w"]), int(face_box["h"])
+                frame,
+                int(face_box["x"]),
+                int(face_box["y"]),
+                int(face_box["w"]),
+                int(face_box["h"]),
             )
             return emb.tolist() if emb is not None else None
         return self._encode_face_fallback(frame, face_box)
 
-    def _encode_face_fallback(self, frame: np.ndarray, face_box: dict) -> Optional[list]:
+    def _encode_face_fallback(
+        self, frame: np.ndarray, face_box: dict
+    ) -> Optional[list]:
         """Legacy 128-dim heuristic — only when the deep models are unavailable."""
         x, y, w, h = face_box["x"], face_box["y"], face_box["w"], face_box["h"]
         if w < 10 or h < 10:
@@ -529,17 +691,25 @@ class FaceRecognitionEngine:
             cell_h, cell_w = max(1, h // grid), max(1, w // grid)
             for gi in range(grid):
                 for gj in range(grid):
-                    cell = gray_inner[gi * cell_h : (gi + 1) * cell_h, gj * cell_w : (gj + 1) * cell_w]
+                    cell = gray_inner[
+                        gi * cell_h : (gi + 1) * cell_h, gj * cell_w : (gj + 1) * cell_w
+                    ]
                     if cell.size > 0:
                         encoding.append(float(np.mean(cell)) / 255.0)
                     else:
                         encoding.append(0.0)
-        gray = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY) if len(face_crop.shape) == 3 else face_crop
+        gray = (
+            cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+            if len(face_crop.shape) == 3
+            else face_crop
+        )
         grid = 4
         cell_h, cell_w = max(1, gray.shape[0] // grid), max(1, gray.shape[1] // grid)
         for gi in range(grid):
             for gj in range(grid):
-                cell = gray[gi * cell_h : (gi + 1) * cell_h, gj * cell_w : (gj + 1) * cell_w]
+                cell = gray[
+                    gi * cell_h : (gi + 1) * cell_h, gj * cell_w : (gj + 1) * cell_w
+                ]
                 if cell.size > 0:
                     encoding.append(float(np.var(cell)) / 1000.0)
                 else:
@@ -582,15 +752,23 @@ class FaceRecognitionEngine:
         if not self.is_ready:
             return self._identify_fallback(frame, face_box)
         emb, _, _ = self._embed_from_box(
-            frame, int(face_box["x"]), int(face_box["y"]), int(face_box["w"]), int(face_box["h"])
+            frame,
+            int(face_box["x"]),
+            int(face_box["y"]),
+            int(face_box["w"]),
+            int(face_box["h"]),
         )
         if emb is None:
             return None
-        (name, score), = self.db.search([emb], self.threshold)
+        ((name, score),) = self.db.search([emb], self.threshold)
         if name:
             with self._lock:
                 self.known_faces[name].last_seen = time.strftime("%Y-%m-%dT%H:%M:%S")
-            return {"name": name, "confidence": round(score, 3), "score": round(score, 3)}
+            return {
+                "name": name,
+                "confidence": round(score, 3),
+                "score": round(score, 3),
+            }
         return None
 
     def _identify_fallback(self, frame: np.ndarray, face_box: dict) -> Optional[dict]:
@@ -607,7 +785,11 @@ class FaceRecognitionEngine:
                 if score > best_score:
                     best_score, best_name = score, name
         if best_name and best_score >= FALLBACK_THRESHOLD:
-            return {"name": best_name, "confidence": round(best_score, 3), "score": round(best_score, 3)}
+            return {
+                "name": best_name,
+                "confidence": round(best_score, 3),
+                "score": round(best_score, 3),
+            }
         return None
 
     # ── Enrollment ───────────────────────────────────────────────────────
@@ -655,8 +837,14 @@ class FaceRecognitionEngine:
                     aliases=aliases or [],
                 )
                 self.known_faces[name] = face
+        try:
+            self.deepface_seed_crop(frame, face_box, name)
+        except Exception:
+            pass
         self._save_database()
-        logger.info(f"Added/updated known face: {name} (source={source}, {face.photo_count} samples)")
+        logger.info(
+            f"Added/updated known face: {name} (source={source}, {face.photo_count} samples)"
+        )
         return True
 
     @staticmethod
@@ -668,6 +856,80 @@ class FaceRecognitionEngine:
         if norm > 0:
             mean = mean / norm
         return mean.tolist()
+
+    def auto_enroll_from_osint(self, name: str, live_crop_b64: str,
+                              profile_image_url: str) -> bool:
+        """Fetch OSINT profile image, SFace-verify against live crop,
+        enroll into FAISS if they match. Called from a background thread."""
+        import base64, urllib.request
+        if not name or not live_crop_b64 or not profile_image_url:
+            return False
+        try:
+            # Decode live crop
+            live_bytes = base64.b64decode(live_crop_b64)
+            live_arr = np.frombuffer(live_bytes, np.uint8)
+            live_img = cv2.imdecode(live_arr, cv2.IMREAD_COLOR)
+            if live_img is None:
+                return False
+
+            # Fetch profile image
+            req = urllib.request.Request(
+                profile_image_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                prof_bytes = resp.read()
+            prof_arr = np.frombuffer(prof_bytes, np.uint8)
+            prof_img = cv2.imdecode(prof_arr, cv2.IMREAD_COLOR)
+            if prof_img is None:
+                return False
+
+            h1, w1 = live_img.shape[:2]
+
+            def _detect_face(img):
+                gray = img[:, :, 0] if len(img.shape) == 3 else img
+                dets, kpss = self.detector.detect(gray, max_num=1)
+                if dets is None or len(dets) == 0:
+                    return None
+                bx1, by1, bx2, by2 = dets[0][:4].astype(int)
+                bx1 = max(0, int(bx1)); by1 = max(0, int(by1))
+                bx2 = min(img.shape[1], int(bx2)); by2 = min(img.shape[0], int(by2))
+                crop = img[by1:by2, bx1:bx2]
+                if crop.size == 0:
+                    return None
+                return crop
+
+            live_face = _detect_face(live_img)
+            prof_face = _detect_face(prof_img)
+            if live_face is None or prof_face is None:
+                logger.info(f"OSINT auto-enroll {name}: no face in one/both images")
+                return False
+
+            live_emb = _sface_embed(live_face)
+            prof_emb = _sface_embed(prof_face)
+            if live_emb is None or prof_emb is None:
+                logger.info(f"OSINT auto-enroll {name}: SFace embed failed")
+                return False
+
+            sim = float(np.dot(live_emb, prof_emb))
+            if sim < 0.40:
+                logger.info(f"OSINT auto-enroll REJECTED {name}: sim={sim:.3f}")
+                return False
+
+            # Enroll: use the live crop with a full-frame box
+            live_box = {"x": 0, "y": 0, "w": float(w1), "h": float(h1)}
+            ok = self.add_known_face(
+                name, live_img, live_box,
+                source="osint_auto",
+                notes=f"auto-enrolled via OSINT profile (sim={sim:.3f})",
+            )
+            logger.info(
+                f"OSINT auto-enroll {name}: sim={sim:.3f} enrolled={ok}"
+            )
+            return ok
+        except Exception as e:
+            logger.debug(f"OSINT auto-enroll failed for {name}: {e}")
+            return False
 
     def remove_known_face(self, name: str) -> bool:
         if name in self.known_faces:
@@ -698,7 +960,11 @@ class FaceRecognitionEngine:
         if self.detector is None:
             return detections
 
-        person_idx = [i for i, d in enumerate(detections) if d.get("label", "").lower() in PERSON_KEYWORDS]
+        person_idx = [
+            i
+            for i, d in enumerate(detections)
+            if d.get("label", "").lower() in PERSON_KEYWORDS
+        ]
         if not person_idx:
             return detections
 
@@ -723,7 +989,10 @@ class FaceRecognitionEngine:
                 cy = (bbox[1] + bbox[3]) / 2.0
                 if not (px1 <= cx <= px2 and py1 <= cy <= py2):
                     continue
-                if bbox[2] - bbox[0] < IDENTIFY_MIN_SIZE or bbox[3] - bbox[1] < IDENTIFY_MIN_SIZE:
+                if (
+                    bbox[2] - bbox[0] < IDENTIFY_MIN_SIZE
+                    or bbox[3] - bbox[1] < IDENTIFY_MIN_SIZE
+                ):
                     continue
                 area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
                 if area > best_area:
@@ -735,7 +1004,11 @@ class FaceRecognitionEngine:
         embeds: dict[int, np.ndarray] = {}
         for i, (bbox, kps) in person_faces.items():
             try:
-                emb = self.recognizer.get_embedding(frame, kps, normalized=True) if self.recognizer else None
+                emb = (
+                    self.recognizer.get_embedding(frame, kps, normalized=True)
+                    if self.recognizer
+                    else None
+                )
                 if emb is not None:
                     embeds[i] = emb
             except Exception as e:
@@ -751,6 +1024,18 @@ class FaceRecognitionEngine:
                     matches[i] = name
                     confs[i] = round(score, 3)
 
+        # Fire identity-confirmed callbacks for newly appeared names only
+        # (absent → present transitions; downstream applies alert cooldowns).
+        try:
+            frame_names = {matches[i]: confs[i] for i in matches}
+            prev = _present_by_source.get(source, set())
+            for _nm, _cf in frame_names.items():
+                if _nm not in prev:
+                    _fire_identity_confirmed(_nm, _cf, source, {"tier": "faiss"})
+            _present_by_source[source] = set(frame_names)
+        except Exception:
+            pass
+
         enriched = []
         for idx, d in enumerate(detections):
             if idx not in person_faces:
@@ -761,15 +1046,33 @@ class FaceRecognitionEngine:
             norm_kps[:, 0] = norm_kps[:, 0] / w
             norm_kps[:, 1] = norm_kps[:, 1] / h
             new_det = dict(d)
-            new_det["kps"] = [[round(float(p[0]), 4), round(float(p[1]), 4)] for p in norm_kps]
+            new_det["kps"] = [
+                [round(float(p[0]), 4), round(float(p[1]), 4)] for p in norm_kps
+            ]
             if idx in matches:
-                new_det["label"] = matches[idx]
-                new_det["face_confidence"] = confs[idx]
+                name = matches[idx]
+                new_det["label"] = name
+                boosted, dverified, ddist = self.deepface_second_opinion(
+                    frame, bbox, name, confs[idx]
+                )
+                new_det["face_confidence"] = boosted
+                if dverified is not None:
+                    new_det["deepface_verified"] = bool(dverified)
+                    new_det["deepface_verified_dist"] = ddist
+                    new_det["face_source"] = "deepface" if dverified else "faiss"
+                dem = self.deepface_demographics(frame, bbox, name=name)
+                if dem:
+                    new_det["demographics"] = dem
+                    for k in ("age", "gender", "emotion", "race"):
+                        if dem.get(k) is not None:
+                            new_det[k] = dem[k]
                 new_det["original_label"] = "person"
                 try:
                     from person_tracker import get_person_tracker
 
-                    get_person_tracker().record_sighting(name=matches[idx], confidence=confs[idx])
+                    get_person_tracker().record_sighting(
+                        name=matches[idx], confidence=confs[idx]
+                    )
                 except Exception:
                     pass  # non-fatal
             enriched.append(new_det)
@@ -793,8 +1096,15 @@ class FaceRecognitionEngine:
         if candidate and score >= threshold:
             if best_idx < 0:
                 tracks.append(
-                    {"name": candidate, "cx": cx, "cy": cy, "streak": 1, "misses": 0,
-                     "confirmed": False, "conf": score}
+                    {
+                        "name": candidate,
+                        "cx": cx,
+                        "cy": cy,
+                        "streak": 1,
+                        "misses": 0,
+                        "confirmed": False,
+                        "conf": score,
+                    }
                 )
             else:
                 t = tracks[best_idx]
@@ -817,13 +1127,19 @@ class FaceRecognitionEngine:
                         t["name"] = candidate
                         t["conf"] = max(score, t.get("conf", 0))
                     t["confirmed"] = True
-                    name, conf = t["name"], score if t["name"] == candidate else t["conf"]
+                    name, conf = (
+                        t["name"],
+                        score if t["name"] == candidate else t["conf"],
+                    )
         else:
             if best_idx >= 0:
                 t = tracks[best_idx]
                 t["misses"] += 1
                 if t["confirmed"] and t["misses"] <= HOLD_FRAMES:
-                    name, conf = t["name"], max(t.get("conf", threshold), threshold + 0.02)
+                    name, conf = (
+                        t["name"],
+                        max(t.get("conf", threshold), threshold + 0.02),
+                    )
                 elif t["misses"] > HOLD_FRAMES:
                     tracks.pop(best_idx)
         return name, conf
@@ -832,6 +1148,94 @@ class FaceRecognitionEngine:
         tracks = self._tracks.get(source)
         if tracks is not None:
             tracks[:] = [t for t in tracks if t["misses"] <= HOLD_FRAMES * 2]
+
+
+
+    # ── DeepFace demography + second-opinion (optional) ────────────────
+    _df_cooldowns = {}
+    _df_last_boost = {}  # name -> (boosted_conf, verified, dist, ts)
+
+    def _df_throttled(self, key, cooldown):
+        now = time.monotonic()
+        last = self._df_cooldowns.get(key, 0.0)
+        if now - last < cooldown:
+            return True
+        self._df_cooldowns[key] = now
+        return False
+
+    @staticmethod
+    def _slug(name):
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in str(name))
+        return safe or "face"
+
+    def deepface_seed_crop(self, frame, bbox, name):
+        """Save/refresh an enrollment crop (used as DeepFace reference)."""
+        try:
+            crop_dir = CROP_DIR
+            crop_dir.mkdir(parents=True, exist_ok=True)
+            ref = crop_dir / f"{self._slug(name)}.jpg"
+            if not name or name not in self.known_faces:
+                return
+            crop = _face_crop(frame, bbox)
+            if crop.size == 0 or crop.shape[0] < 24 or crop.shape[1] < 24:
+                return
+            cv2.imwrite(str(ref), crop)
+            return str(ref)
+        except Exception:
+            return None
+
+    def deepface_demographics(self, frame, bbox, name=None):
+        """Demographics placeholder — requires TF, incompatible with
+        the torch+opencv runtime."""
+        return None
+
+    def deepface_second_opinion(self, frame, bbox, name, arcface_conf):
+        """Cross-check FAISS match using SFace (ONNX) against enrolled crop."""
+        if not DEEPFACE_ENABLED or not name or not arcface_conf:
+            return arcface_conf, None, None
+        if arcface_conf >= DEEPFACE_MIN_VERIFY:
+            return arcface_conf, None, None
+        slug = self._slug(name)
+        recent = self._df_last_boost.get(slug)
+        if recent and recent[1] and (time.time() - recent[3]) < DEEPFACE_VERIFY_COOLDOWN * 3:
+            sim = max(0.0, 1.0 - recent[2])
+            fresh = min(0.999, DEEPFACE_MIN_VERIFY + (sim - 0.5) * 0.02)
+            return round(fresh, 3), True, recent[2]
+        if self._df_throttled(f"verify:{slug}", DEEPFACE_VERIFY_COOLDOWN):
+            return arcface_conf, None, None
+        crop_dir = CROP_DIR
+        ref = crop_dir / f"{self._slug(name)}.jpg"
+        if not ref.exists():
+            if name in self.known_faces:
+                self.deepface_seed_crop(frame, bbox, name)
+            return arcface_conf, None, None
+        crop = _face_crop(frame, bbox)
+        if crop.size == 0 or crop.shape[0] < 24 or crop.shape[1] < 24:
+            return arcface_conf, None, None
+        ref_img = cv2.imread(str(ref))
+        if ref_img is None:
+            return arcface_conf, None, None
+        try:
+            vec_l = _sface_embed(crop)
+            vec_r = _sface_embed(ref_img)
+            if vec_l is None or vec_r is None:
+                return arcface_conf, None, None
+            sim = float(np.dot(vec_l, vec_r))
+            # SFace cosine threshold ~0.362 (paper) — 0.5 is conservative
+            verified = sim >= 0.5
+            logger.info(
+                "SFace second-opinion %s -> sim=%.4f verified=%s",
+                name, sim, verified,
+            )
+            if verified:
+                boosted = min(0.999, DEEPFACE_MIN_VERIFY + (sim - 0.5) * 0.02)
+                self._df_last_boost[slug] = (boosted, True, round(1.0 - sim, 4), time.time())
+                return round(boosted, 3), True, round(1.0 - sim, 4)
+            self._df_last_boost[slug] = (arcface_conf, False, round(1.0 - sim, 4), time.time())
+            return arcface_conf, False, round(1.0 - sim, 4)
+        except Exception as e:
+            logger.debug("SFace verify failed: %s", e)
+            return arcface_conf, None, None
 
 
 # ── Weight download helper ────────────────────────────────────────────────
@@ -849,7 +1253,10 @@ def _ensure_weights(*paths: Path) -> list[Path]:
             logger.info(f"Downloading {path.name} → {path} ...")
             tmp_fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".partial")
             try:
-                with urllib.request.urlopen(url, timeout=300) as resp, os.fdopen(tmp_fd, "wb") as f:
+                with (
+                    urllib.request.urlopen(url, timeout=300) as resp,
+                    os.fdopen(tmp_fd, "wb") as f,
+                ):
                     f.write(resp.read())
                 os.replace(tmp, path)
             except Exception as e:

@@ -436,9 +436,21 @@ LILLY SKILLS
 
 [osint_image_search]
   Label: Image Search
-  Description: Reverse image search via Google Images, Yandex, TinEye.
+  Description: Reverse image search via Yandex URL-flow (JSON upload endpoint is dead). Returns name + matching photo thumbnails with source pages.
   Action Type: prompt_argument
   Aliases: reverse image, image search, photo search, who is in photo, osint image
+
+[face_identity]
+  Label: Face Identity
+  Description: Live who-is-on-camera alerts (phone + web chat), named boxes, remember/forget, evidence results, research. Known faces skip search unless requested.
+  Action Type: prompt_argument
+  Aliases: who do you see, results for, remember him as, remember her as, research, forget face, who is this, who is on camera
+
+[footprint]
+  Label: Footprint Dossier
+  Description: Autonomous cross-site dossier (Sherlock + Maigret + Wikipedia + GDELT) with ArcFace photo verification. Auto-starts on face-search ID, notifies when ready, reads out in chat.
+  Action Type: prompt_argument
+  Aliases: footprint, dossier, deep search report, digital footprint, background check, find everything about
 
 [osint_crypto_lookup]
   Label: Crypto Lookup
