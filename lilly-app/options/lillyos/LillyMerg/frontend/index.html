@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>Lilly OS - Warroom</title>
+    <style>
+      #fallback { display: flex; align-items: center; justify-content: center; min-height: 100vh; font-family: system-ui, sans-serif; background: #F5F5F4; color: #2D2D2D; flex-direction: column; gap: 12px; }
+      #fallback h1 { margin: 0; font-size: 24px; }
+      #fallback p { margin: 0; color: #999; font-size: 14px; }
+      #fallback .spinner { width: 24px; height: 24px; border: 3px solid #eee; border-top-color: #2D2D2D; border-radius: 50%; animation: spin 1s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="app-loading" style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;background:#F5F5F4;color:#2D2D2D;flex-direction:column;gap:12px;z-index:99999">
+      <div style="width:24px;height:24px;border:3px solid #eee;border-top-color:#2D2D2D;border-radius:50%;animation:lspin 1s linear infinite"></div>
+      <h1 style="margin:0;font-size:24px;font-weight:700">LillyOS</h1>
+      <p style="margin:0;color:#999;font-size:14px">Loading platform...</p>
+    </div>
+    <style>@keyframes lspin{to{transform:rotate(360deg)}}</style>
+    <script type="module" src="./src/main.jsx"></script>
+    <script>
+      // Hide loading when React mounts
+      window.__hideLoading = () => {
+        const el = document.getElementById('app-loading');
+        if (el) { el.style.display = 'none'; }
+      };
+    </script>
+  </body>
+</html>

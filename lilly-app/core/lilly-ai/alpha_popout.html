@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=coverage">
+<title>DroolingWithSanity — Alpha</title>
+<style>
+:root{
+  --frost-bg:rgba(240,230,239,0.78);
+  --frost-surface:rgba(255,255,255,0.55);
+  --frost-border:rgba(93,78,109,0.18);
+  --frost-glow:rgba(139,122,158,0.22);
+  --accent:#8b7a9e;
+  --accent2:#8b7a9e;
+  --green:#3a8a6a;
+  --red:#c05555;
+  --yellow:#b58900;
+  --text:#5d4e6d;
+  --text-dim:rgba(93,78,109,0.55);
+  --radius:14px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{
+  font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  background:
+    radial-gradient(1200px 700px at 15% -10%, rgba(167,139,250,.18), transparent 60%),
+    radial-gradient(1000px 600px at 110% 20%, rgba(240,198,224,.28), transparent 55%),
+    radial-gradient(900px 700px at 50% 120%, rgba(158,209,212,.22), transparent 60%),
+    linear-gradient(160deg,#f5eef6,#efe8f5 55%,#e8eef4);
+  color:var(--text);
+  display:flex;align-items:center;justify-content:center;
+  padding:14px;
+}
+.window{
+  width:min(420px,94vw);height:min(660px,92vh);
+  background:var(--frost-surface);
+  backdrop-filter:blur(18px) saturate(1.15);
+  -webkit-backdrop-filter:blur(18px) saturate(1.15);
+  border:1.5px solid var(--frost-border);
+  border-radius:var(--radius);
+  box-shadow:0 18px 50px rgba(93,78,109,.22),0 0 0 1px rgba(255,255,255,.35) inset;
+  display:flex;flex-direction:column;overflow:hidden;
+}
+header{
+  display:flex;align-items:center;gap:12px;padding:14px 16px;
+  background:rgba(255,255,255,.4);border-bottom:1.5px solid var(--frost-border);
+}
+.hamburger{background:transparent;border:1.5px solid var(--frost-border);border-radius:10px;color:var(--text-dim);
+  width:30px;height:30px;font-size:16px;cursor:pointer;transition:.15s;display:flex;align-items:center;justify-content:center}
+.hamburger:hover{background:rgba(139,122,158,.12);color:var(--accent)}
+.orb{
+  width:54px;height:54px;border-radius:50%;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:28px;
+  background:linear-gradient(140deg,rgba(167,139,250,.35),rgba(240,198,224,.4));
+  border:2px solid rgba(167,139,250,.5);
+  box-shadow:0 0 0 4px rgba(255,255,255,.4),0 0 22px var(--frost-glow);
+  position:relative;
+}
+.dot{position:absolute;right:1px;bottom:1px;width:12px;height:12px;border-radius:50%;
+  background:var(--green);border:2px solid #fff;box-shadow:0 0 8px var(--green)}
+.id{flex:1;min-width:0}
+.id .nm{font-weight:700;font-size:16px;color:var(--text)}
+.id .rl{font-size:12px;color:var(--text-dim)}
+.sub{font-size:11px;color:var(--text-dim);margin-top:2px}
+.close{background:transparent;border:1.5px solid var(--frost-border);border-radius:10px;color:var(--text-dim);
+  width:30px;height:30px;font-size:15px;cursor:pointer;transition:.15s}
+.close:hover{background:rgba(192,85,85,.12);color:var(--red)}
+.roster{display:flex;gap:6px;padding:10px 14px;border-bottom:1.5px solid var(--frost-border);
+  background:rgba(255,255,255,.25);overflow-x:auto;scrollbar-width:thin}
+.roster::-webkit-scrollbar{height:5px}
+.rc{flex-shrink:0;width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:19px;cursor:pointer;background:var(--frost-surface);border:1.5px solid var(--frost-border);
+  transition:.15s;position:relative}
+.rc:hover{transform:translateY(-2px);box-shadow:0 4px 12px var(--frost-glow)}
+.rc.sel{border-color:var(--accent);box-shadow:0 0 0 3px rgba(139,122,158,.18)}
+.rc .tip{position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%) translateY(4px);
+  background:rgba(93,78,109,.95);color:#fff;font-size:11px;padding:4px 8px;border-radius:8px;white-space:nowrap;
+  opacity:0;pointer-events:none;transition:.15s;z-index:5}
+.rc:hover .tip{opacity:1;transform:translateX(-50%) translateY(0)}
+.ctxrow{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1.5px solid var(--frost-border);
+  background:rgba(255,255,255,.25)}
+.ctxrow label{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em}
+.ctxrow select{flex:1;font:inherit;font-size:12px;color:var(--text);padding:6px 8px;border-radius:10px;
+  border:1.5px solid var(--frost-border);background:var(--frost-surface);outline:none}
+.msg{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px;scrollbar-width:thin}
+.msg::-webkit-scrollbar{width:6px}
+.cmsg{display:flex;gap:8px;max-width:92%;animation:in .18s ease}
+.cmsg.user{align-self:flex-end;flex-direction:row-reverse}
+@keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.av{width:28px;height:28px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  font-size:15px;background:var(--frost-surface);border:1.5px solid var(--frost-border)}
+.cmsg.user .av{background:rgba(167,139,250,.15);border-color:rgba(167,139,250,.35)}
+.bub{background:rgba(255,255,255,.65);border:1.5px solid var(--frost-border);border-radius:12px;
+  padding:9px 11px;font-size:13px;line-height:1.5;color:var(--text);min-width:0;word-break:break-word}
+.cmsg.user .bub{background:rgba(167,139,250,.16);border-color:rgba(167,139,250,.3)}
+.bub pre{background:rgba(93,78,109,.08);border:1px solid var(--frost-border);border-radius:8px;padding:8px;
+  margin:6px 0;font:11px/1.5 ui-monospace,Consolas,monospace;overflow-x:auto;color:var(--text)}
+.bub code{background:rgba(93,78,109,.1);padding:1px 5px;border-radius:6px;font:11px ui-monospace,Consolas,monospace}
+.bub pre code{background:none;padding:0}
+.bub strong{color:var(--text)}
+.bub em{color:var(--text-dim)}
+.sys{align-self:center;font-size:11px;color:var(--text-dim);background:rgba(93,78,109,.08);
+  border-radius:10px;padding:5px 10px}
+.think{display:flex;gap:4px;align-items:center;padding:4px 2px}
+.think span{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:b .9s infinite}
+.think span:nth-child(2){animation-delay:.15s}.think span:nth-child(3){animation-delay:.3s}
+@keyframes b{0%,80%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
+.inbar{display:flex;gap:8px;padding:12px 14px;border-top:1.5px solid var(--frost-border);
+  background:rgba(255,255,255,.4)}
+.inbar textarea{flex:1;resize:none;font:inherit;font-size:13px;line-height:1.4;color:var(--text);
+  border:1.5px solid var(--frost-border);border-radius:12px;padding:9px 11px;outline:none;
+  background:var(--frost-surface);max-height:96px}
+.inbar textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(139,122,158,.15)}
+.send{background:linear-gradient(140deg,var(--accent),var(--accent2));color:#fff;border:none;border-radius:12px;
+  width:42px;flex-shrink:0;font-size:16px;cursor:pointer;transition:.15s;box-shadow:0 4px 14px var(--frost-glow)}
+.send:hover{filter:brightness(1.08);transform:translateY(-1px)}
+.send:disabled{opacity:.5;cursor:default;transform:none}
+footer{text-align:center;padding:6px;font-size:10px;color:var(--text-dim);background:rgba(255,255,255,.3)}
+
+/* ── Hamburger drawer ── */
+.drawer{position:fixed;top:0;left:0;width:min(280px,80vw);height:100%;background:var(--frost-bg);
+  backdrop-filter:blur(20px) saturate(1.2);-webkit-backdrop-filter:blur(20px) saturate(1.2);
+  border-right:1.5px solid var(--frost-border);box-shadow:0 8px 40px rgba(93,78,109,.25);
+  transform:translateX(-100%);transition:transform .25s ease;z-index:200;display:flex;flex-direction:column}
+.drawer.open{transform:translateX(0)}
+.drawer-header{padding:16px;border-bottom:1.5px solid var(--frost-border);display:flex;align-items:center;gap:10px}
+.drawer-header .nm{font-weight:700;font-size:15px;color:var(--text)}
+.drawer-close{background:transparent;border:none;font-size:18px;color:var(--text-dim);cursor:pointer;margin-left:auto}
+.drawer-close:hover{color:var(--red)}
+.drawer-items{flex:1;overflow-y:auto;padding:8px}
+.drawer-item{display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:10px;cursor:pointer;
+  transition:.15s;font-size:13px;color:var(--text);border:none;background:transparent;width:100%;text-align:left}
+.drawer-item:hover{background:rgba(139,122,158,.12)}
+.drawer-item .di-icon{font-size:18px;width:28px;text-align:center}
+.drawer-item .di-label{flex:1}
+.drawer-item .di-badge{font-size:10px;color:var(--text-dim);background:rgba(93,78,109,.08);padding:2px 8px;border-radius:999px}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.15);z-index:199;opacity:0;pointer-events:none;transition:opacity .25s}
+.overlay.open{opacity:1;pointer-events:auto}
+
+/* ── Collapsible messages ── */
+.msg-header{display:flex;align-items:center;justify-content:space-between;padding:6px 14px;
+  border-bottom:1.5px solid var(--frost-border);background:rgba(255,255,255,.25);cursor:pointer;user-select:none}
+.msg-header span{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em}
+.msg-header button{background:transparent;border:none;font-size:14px;color:var(--text-dim);cursor:pointer;padding:4px 8px;border-radius:6px}
+.msg-header button:hover{background:rgba(139,122,158,.12);color:var(--accent)}
+.msg.collapsed{display:none}
+.inbar.collapsed{display:none}
+
+/* ── Swipe-to-dismiss bubbles ── */
+.cmsg{position:relative;transition:transform .2s ease, opacity .2s ease}
+.cmsg.swiping{transition:none}
+.cmsg.swipe-out{transform:translateX(120%);opacity:0;pointer-events:none}
+.bub{position:relative;overflow:hidden}
+.bub .swipe-hint{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--red);opacity:0;transition:opacity .15s;pointer-events:none}
+.cmsg:hover .swipe-hint{opacity:.7}
+</style>
+</head>
+<body>
+  <div class="window">
+    <header>
+      <button class="hamburger" id="hamburgerBtn" title="Menu">☰</button>
+      <div class="orb" id="orb"><span id="orbEmoji">🐶</span><span class="dot"></span></div>
+      <div class="id">
+        <div class="nm" id="name">Lilly</div>
+        <div class="rl" id="role">Alpha Companion</div>
+        <div class="sub" id="status">online · using VibeCode chat</div>
+      </div>
+      <button class="close" id="closeBtn" title="Close">✕</button>
+    </header>
+    <div class="roster" id="roster"></div>
+    <div class="ctxrow">
+      <label for="ctxProject">Project</label>
+      <select id="ctxProject"><option value="">— no project —</option></select>
+    </div>
+    <div class="msg-header" id="msgHeader">
+      <span>Messages</span>
+      <button id="collapseMsgsBtn" title="Collapse chat">▼</button>
+    </div>
+    <div class="msg" id="messages"></div>
+    <div class="inbar" id="inbar">
+      <textarea id="input" rows="1" placeholder="Ask the Alpha…"></textarea>
+      <button class="send" id="sendBtn" title="Send">➤</button>
+    </div>
+    <footer>Alpha popout · droolingwithsanity.ca</footer>
+  </div>
+
+  <!-- Hamburger drawer -->
+  <div class="drawer-overlay" id="drawerOverlay"></div>
+  <div class="drawer" id="drawer">
+    <div class="drawer-header">
+      <span class="nm">Menu</span>
+      <button class="drawer-close" id="drawerClose">✕</button>
+    </div>
+    <div class="drawer-items">
+      <button class="drawer-item" id="menuToggleChat"><span class="di-icon">💬</span><span class="di-label">Toggle Chat</span><span class="di-badge" id="chatBadge">ON</span></button>
+      <button class="drawer-item" id="menuClearChat"><span class="di-icon">🗑️</span><span class="di-label">Clear All Messages</span></button>
+      <button class="drawer-item" id="menuCopyLast"><span class="di-icon">📋</span><span class="di-label">Copy Last Reply</span></button>
+      <button class="drawer-item" id="menuNewChat"><span class="di-icon">✨</span><span class="di-label">New Conversation</span></button>
+       <button class="drawer-item" id="menuSettings"><span class="di-icon">⚙️</span><span class="di-label">Settings</span></button>
+       <button class="drawer-item" id="menuBroadcast"><span class="di-icon">📡</span><span class="di-label">Bluetooth Broadcast</span></button>
+    </div>
+  </div>
+
+<script>
+// Same 9-avatar roster as VibeCode
+const ROSTER = [
+  { key:'puppy',   name:'Lilly',   emoji:'🐶', role:'Alpha Companion' },
+  { key:'fox',     name:'Fox',     emoji:'🦊', role:'Creative Strategist' },
+  { key:'cat',     name:'Cat',     emoji:'🐱', role:'Precision Analyst' },
+  { key:'bear',    name:'Bear',    emoji:'🐻', role:'Steadfast Guardian' },
+  { key:'bunny',   name:'Bunny',   emoji:'🐰', role:'Energetic Scout' },
+  { key:'owl',     name:'Owl',     emoji:'🦉', role:'Wisdom Keeper' },
+  { key:'deer',    name:'Deer',    emoji:'🦌', role:'Gentle Healer' },
+  { key:'wolf',    name:'Wolf',    emoji:'🐺', role:'Fierce Protector' },
+  { key:'raccoon', name:'Raccoon', emoji:'🦝', role:'Tech Tinkerer' },
+];
+let agent = 'puppy';
+let busy = false;
+
+const $ = id => document.getElementById(id);
+
+function renderRoster() {
+  const box = $('roster');
+  box.innerHTML = '';
+  ROSTER.forEach(p => {
+    const s = document.createElement('div');
+    s.className = 'rc' + (p.key === agent ? ' sel' : '');
+    s.dataset.key = p.key;
+    s.innerHTML = p.emoji + '<span class="tip">' + p.name + '<br>' + p.role + '</span>';
+    s.onclick = () => selectAgent(p.key);
+    box.appendChild(s);
+  });
+}
+
+function selectAgent(key) {
+  agent = key;
+  const p = ROSTER.find(x => x.key === key) || ROSTER[0];
+  $('orbEmoji').textContent = p.emoji;
+  $('name').textContent = p.name;
+  $('role').textContent = p.role;
+  document.querySelectorAll('.rc').forEach(c => c.classList.toggle('sel', c.dataset.key === key));
+}
+
+// Mirrors VibeCode chat rendering
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function renderMarkdown(text) {
+  let out = escHtml(text);
+  out = out.replace(/```(\w+)?\n([\s\S]*?)```/g, (_, lang, code) => {
+    const l = lang || '';
+    return '<pre><code class="lang-'+l+'">' + code.trimEnd() + '</code></pre>';
+  });
+  out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+  out = out.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  out = out.replace(/\n/g, '<br>');
+  return out;
+}
+
+function appendMsg(role, content) {
+  const box = $('messages');
+  const div = document.createElement('div');
+  div.className = 'cmsg ' + role;
+  const p = role === 'user' ? ROSTER.find(x => x.key === 'user') || {} : ROSTER.find(x => x.key === agent);
+  const emoji = role === 'user' ? '🙂' : (p ? p.emoji : '🤖');
+  div.innerHTML = '<div class="av">' + emoji + '</div><div class="bub">' + renderMarkdown(content) + '</div>';
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function appendSys(content) {
+  const box = $('messages');
+  const div = document.createElement('div');
+  div.className = 'sys';
+  div.textContent = content;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function appendThinking() {
+  const box = $('messages');
+  const div = document.createElement('div');
+  div.className = 'cmsg assistant';
+  const p = ROSTER.find(x => x.key === agent) || ROSTER[0];
+  div.innerHTML = '<div class="av">' + p.emoji + '</div><div class="bub"><div class="think"><span></span><span></span><span></span></div></div>';
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
+  return div;
+}
+
+async function loadProjects() {
+  try {
+    const r = await fetch('/api/vibecode/projects');
+    const d = await r.json();
+    const sel = $('ctxProject');
+    sel.innerHTML = '<option value="">— no project —</option>';
+    (d.projects || []).forEach(p => {
+      const o = document.createElement('option');
+      o.value = p.slug;
+      o.textContent = p.slug + (p.status === 'running' ? ' ●' : '');
+      sel.appendChild(o);
+    });
+  } catch (e) { /* project list optional */ }
+}
+
+async function send() {
+  if (busy) return;
+  const input = $('input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+  appendMsg('user', msg);
+  const thinking = appendThinking();
+  busy = true;
+  $('sendBtn').disabled = true;
+  try {
+    const r = await fetch('/api/vibecode/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        slug: $('ctxProject').value || '',
+        message: msg,
+        file: '',
+        agent: agent,
+        session_id: 'alpha-popout',
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'unknown error');
+    thinking.remove();
+    const p = ROSTER.find(x => x.key === agent) || ROSTER[0];
+    if (d.agent_name) $('name').textContent = d.agent_name;
+    appendMsg('assistant', d.reply || '');
+    if (d.alpha_mode === 'asking') appendSys('Alpha is asking a few clarifying questions.');
+  } catch (e) {
+    thinking.remove();
+    appendSys('Error: ' + (e.message || 'unknown'));
+  } finally {
+    busy = false;
+    $('sendBtn').disabled = false;
+    input.focus();
+  }
+}
+
+$('sendBtn').onclick = send;
+$('closeBtn').onclick = () => window.close();
+$('input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$('input').addEventListener('input', e => {
+  e.target.style.height = 'auto';
+  e.target.style.height = Math.min(e.target.scrollHeight, 96) + 'px';
+});
+
+renderRoster();
+loadProjects();
+appendSys('Hi, I\'m Lilly — pick an avatar and a project, then say hello.');
+$('input').focus();
+
+// ── Hamburger drawer ──
+const drawer = $('drawer');
+const drawerOverlay = $('drawerOverlay');
+function openDrawer(){ drawer.classList.add('open'); drawerOverlay.classList.add('open'); }
+function closeDrawer(){ drawer.classList.remove('open'); drawerOverlay.classList.remove('open'); }
+$('hamburgerBtn').onclick = openDrawer;
+$('drawerClose').onclick = closeDrawer;
+drawerOverlay.onclick = closeDrawer;
+
+// Drawer menu actions
+$('menuToggleChat').onclick = () => {
+  const msgArea = $('messages');
+  const inbar = $('inbar');
+  const isHidden = msgArea.style.display === 'none';
+  msgArea.style.display = isHidden ? '' : 'none';
+  inbar.style.display = isHidden ? '' : 'none';
+  $('chatBadge').textContent = isHidden ? 'ON' : 'OFF';
+  closeDrawer();
+};
+$('menuClearChat').onclick = () => {
+  $('messages').innerHTML = '';
+  closeDrawer();
+};
+$('menuCopyLast').onclick = () => {
+  const last = document.querySelector('.cmsg.assistant .bub') || document.querySelector('.cmsg.user .bub');
+  if (last) {
+    navigator.clipboard.writeText(last.textContent.trim()).then(() => {
+      appendSys('Copied last message to clipboard');
+    }).catch(() => {});
+  }
+  closeDrawer();
+};
+$('menuNewChat').onclick = () => {
+  $('messages').innerHTML = '';
+  appendSys('New conversation started');
+  closeDrawer();
+};
+$('menuSettings').onclick = () => {
+  appendSys('Settings — coming soon');
+  closeDrawer();
+};
+
+// ── Collapsible messages ──
+let messagesCollapsed = false;
+$('msgHeader').onclick = () => {
+  messagesCollapsed = !messagesCollapsed;
+  const msgs = $('messages');
+  const inbar = $('inbar');
+  const btn = $('collapseMsgsBtn');
+  if (messagesCollapsed) {
+    msgs.classList.add('collapsed');
+    inbar.classList.add('collapsed');
+    btn.textContent = '▶';
+  } else {
+    msgs.classList.remove('collapsed');
+    inbar.classList.remove('collapsed');
+    btn.textContent = '▼';
+  }
+};
+
+// ── Swipe-to-dismiss speech bubbles ──
+let swipeStartX = 0;
+let swipeStartY = 0;
+let swipeCurrent = null;
+let isSwiping = false;
+
+function attachSwipeHandlers(el) {
+  el.addEventListener('touchstart', (e) => {
+    swipeStartX = e.touches[0].clientX;
+    swipeStartY = e.touches[0].clientY;
+    swipeCurrent = el;
+    isSwiping = false;
+    el.classList.add('swiping');
+  }, { passive: true });
+
+  el.addEventListener('touchmove', (e) => {
+    if (!swipeCurrent) return;
+    const dx = e.touches[0].clientX - swipeStartX;
+    const dy = e.touches[0].clientY - swipeStartY;
+    // Only trigger horizontal swipe if movement is mostly horizontal
+    if (!isSwiping && Math.abs(dx) > 10 && Math.abs(dx) > Math.abs(dy)) {
+      isSwiping = true;
+    }
+    if (isSwiping) {
+      const translateX = Math.max(-120, Math.min(120, dx));
+      el.style.transform = `translateX(${translateX}px)`;
+      el.style.opacity = Math.max(0.2, 1 - Math.abs(translateX) / 200);
+    }
+  }, { passive: true });
+
+  el.addEventListener('touchend', (e) => {
+    el.classList.remove('swiping');
+    if (!swipeCurrent) return;
+    const dx = e.changedTouches[0].clientX - swipeStartX;
+    if (isSwiping && dx < -80) {
+      // Swiped left — dismiss
+      swipeCurrent.classList.add('swipe-out');
+      setTimeout(() => swipeCurrent.remove(), 250);
+    } else if (isSwiping && dx > 80) {
+      // Swiped right — also dismiss (user friendly)
+      swipeCurrent.classList.add('swipe-out');
+      setTimeout(() => swipeCurrent.remove(), 250);
+    } else {
+      // Snap back
+      swipeCurrent.style.transform = '';
+      swipeCurrent.style.opacity = '';
+    }
+    swipeCurrent = null;
+    isSwiping = false;
+  });
+
+  el.addEventListener('touchcancel', () => {
+    el.classList.remove('swiping');
+    if (swipeCurrent) {
+      swipeCurrent.style.transform = '';
+      swipeCurrent.style.opacity = '';
+    }
+    swipeCurrent = null;
+    isSwiping = false;
+  });
+}
+
+// Attach swipe to existing and future bubbles
+function attachSwipeToBubbles() {
+  document.querySelectorAll('.msg').forEach(attachSwipeHandlers);
+}
+
+// Observe for new bubbles
+const msgObserver = new MutationObserver(() => attachSwipeToBubbles());
+msgObserver.observe($('messages'), { childList: true });
+attachSwipeToBubbles();
+
+// ── Hamburger drawer ──
+const drawer = document.getElementById('drawer');
+const drawerOverlay = document.getElementById('drawerOverlay');
+function openDrawer(){ if(drawer) drawer.classList.add('open'); if(drawerOverlay) drawerOverlay.classList.add('open'); }
+function closeDrawer(){ if(drawer) drawer.classList.remove('open'); if(drawerOverlay) drawerOverlay.classList.remove('open'); }
+const hamburgerBtn = document.getElementById('hamburgerBtn');
+if(hamburgerBtn) hamburgerBtn.onclick = openDrawer;
+const drawerClose = document.getElementById('drawerClose');
+if(drawerClose) drawerClose.onclick = closeDrawer;
+if(drawerOverlay) drawerOverlay.onclick = closeDrawer;
+
+// Drawer menu actions
+const menuToggleChat = document.getElementById('menuToggleChat');
+if(menuToggleChat) menuToggleChat.onclick = () => {
+  const msgArea = document.getElementById('messages');
+  const inbar = document.getElementById('inbar');
+  const isHidden = msgArea.style.display === 'none';
+  msgArea.style.display = isHidden ? '' : 'none';
+  inbar.style.display = isHidden ? '' : 'none';
+  const chatBadge = document.getElementById('chatBadge');
+  if(chatBadge) chatBadge.textContent = isHidden ? 'ON' : 'OFF';
+  closeDrawer();
+};
+const menuClearChat = document.getElementById('menuClearChat');
+if(menuClearChat) menuClearChat.onclick = () => {
+  const msgs = document.getElementById('messages');
+  if(msgs) msgs.innerHTML = '';
+  closeDrawer();
+};
+const menuCopyLast = document.getElementById('menuCopyLast');
+if(menuCopyLast) menuCopyLast.onclick = () => {
+  const last = document.querySelector('.msg.assistant .bub') || document.querySelector('.msg.user .bub');
+  if(last) {
+    navigator.clipboard.writeText(last.textContent.trim()).then(() => {
+      appendSys('Copied last message to clipboard');
+    }).catch(() => {});
+  }
+  closeDrawer();
+};
+const menuNewChat = document.getElementById('menuNewChat');
+if(menuNewChat) menuNewChat.onclick = () => {
+  const msgs = document.getElementById('messages');
+  if(msgs) msgs.innerHTML = '';
+  appendSys('New conversation started');
+  closeDrawer();
+};
+const menuSettings = document.getElementById('menuSettings');
+if(menuSettings) menuSettings.onclick = () => {
+  appendSys('Settings — coming soon');
+  closeDrawer();
+};
+const menuBroadcast = document.getElementById('menuBroadcast');
+if(menuBroadcast) menuBroadcast.onclick = () => {
+  openBroadcastPanelInDrawer();
+  closeDrawer();
+};
+
+async function openBroadcastPanelInDrawer() {
+  const panel = document.getElementById('broadcastPanel');
+  if(!panel) return;
+  panel.style.display = 'flex';
+  const status = document.getElementById('broadcastStatus');
+  if(status){ status.textContent='Checking...'; }
+  try{
+    const r = await fetch('/api/bluetooth/advertise/status');
+    const d = await r.json();
+    const advertising = d.advertising || false;
+    if(status){
+      status.innerHTML = advertising
+        ? '<span style="color:rgba(76,175,80,0.9)"> broadcasting</span>'
+        : '<span style="color:rgba(93,78,109,0.5)">not broadcasting</span>';
+    }
+    const startBtn = document.getElementById('broadcastStartBtn');
+    if(startBtn){
+      startBtn.textContent = advertising ? 'Stop Broadcast' : 'Start Broadcast';
+      startBtn.onclick = advertising ? stopBroadcast : startBroadcast;
+    }
+  }catch(e){
+    if(status){ status.textContent='Sensor server unreachable'; }
+  }
+}
+
+// ── Collapsible messages ──
+let messagesCollapsed = false;
+const collapseMsgsBtn = document.getElementById('collapseMsgsBtn');
+const msgHeader = document.getElementById('msgHeader');
+if(msgHeader && collapseMsgsBtn) {
+  msgHeader.onclick = () => {
+    messagesCollapsed = !messagesCollapsed;
+    const msgs = document.getElementById('messages');
+    const inbar = document.getElementById('inbar');
+    if(messagesCollapsed) {
+      msgs.classList.add('collapsed');
+      inbar.classList.add('collapsed');
+      collapseMsgsBtn.textContent = '▶';
+    } else {
+      msgs.classList.remove('collapsed');
+      inbar.classList.remove('collapsed');
+      collapseMsgsBtn.textContent = '▼';
+    }
+  };
+}
+</script>
+
+<!-- Bluetooth Broadcast Panel (inline, for the popout window) -->
+<div id="broadcastPanel" style="display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:999;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center">
+  <div style="background:rgba(255,255,255,0.95);backdrop-filter:blur(12px);border-radius:16px;padding:20px;width:min(360px,90vw);max-height:80vh;overflow-y:auto">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div style="font-size:16px;font-weight:700;color:#5d4e6d">📡 Bluetooth Broadcast</div>
+      <button onclick="document.getElementById('broadcastPanel').style.display='none'" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);font-size:18px;padding:2px 6px">✕</button>
+    </div>
+    <div id="broadcastStatus" style="font-size:12px;color:rgba(93,78,109,0.7);margin-bottom:14px">Checking...</div>
+    <div id="broadcastImageSelector" style="margin-bottom:14px">
+      <label style="display:block;font-size:11px;color:rgba(93,78,109,0.6);margin-bottom:4px">Avatar Image</label>
+      <select id="broadcastImage" onchange="toggleCustomImage(this.value)" style="width:100%;padding:8px;border-radius:10px;border:1px solid rgba(139,122,158,0.3);font-size:13px;background:rgba(255,255,255,0.6)">
+        <option value="/static/lilly/puppy-avatar.svg">🐶 Puppy (Lilly)</option>
+        <option value="/static/lilly/fox-avatar.svg">🦊 Fox</option>
+        <option value="/static/lilly/cat-avatar.svg">🐱 Cat</option>
+        <option value="/static/lilly/bear-avatar.svg">🐻 Bear</option>
+        <option value="/static/lilly/bunny-avatar.svg">🐰 Bunny</option>
+        <option value="/static/lilly/owl-avatar.svg">🦉 Owl</option>
+        <option value="/static/lilly/deer-avatar.svg">🦌 Deer</option>
+        <option value="/static/lilly/wolf-avatar.svg">🐺 Wolf</option>
+        <option value="/static/lilly/raccoon-avatar.svg">🦝 Raccoon</option>
+        <option value="custom">📷 Custom URL...</option>
+      </select>
+      <input type="text" id="broadcastCustomImage" placeholder="https://example.com/image.svg" style="width:100%;margin-top:6px;padding:8px;border-radius:10px;border:1px solid rgba(139,122,158,0.3);font-size:12px;background:rgba(255,255,255,0.6);display:none">
+    </div>
+    <div style="margin-bottom:14px">
+      <label style="display:block;font-size:11px;color:rgba(93,78,109,0.6);margin-bottom:4px">Device Name</label>
+      <input type="text" id="broadcastName" placeholder="Lilly Pup" value="Lilly Pup" style="width:100%;padding:8px;border-radius:10px;border:1px solid rgba(139,122,158,0.3);font-size:13px;background:rgba(255,255,255,0.6)">
+    </div>
+    <div style="display:flex;gap:8px">
+      <button id="broadcastStartBtn" onclick="startBroadcast()" style="flex:1;padding:10px;border:none;border-radius:12px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:13px;font-weight:600;cursor:pointer">Start Broadcast</button>
+      <button onclick="stopBroadcast()" style="flex:1;padding:10px;border:none;border-radius:12px;background:rgba(93,78,109,0.1);color:#5d4e6d;font-size:13px;font-weight:600;cursor:pointer;border:1px solid rgba(139,122,158,0.3)">Stop</button>
+    </div>
+    <div style="margin-top:10px;font-size:11px;color:rgba(93,78,109,0.5)">Phone will appear in Bluetooth scans like earbuds in pairing mode. Nearby devices see the chosen avatar image via this web UI.</div>
+  </div>
+  <script>
+function toggleCustomImage(value){
+  const customEl=document.getElementById('broadcastCustomImage');
+  if(!customEl) return;
+  if(value==='custom'){
+    customEl.style.display='block';
+  } else {
+    customEl.style.display='none';
+    customEl.value='';
+  }
+}
+
+async function startBroadcast(){
+  const status=document.getElementById('broadcastStatus');
+  const startBtn=document.getElementById('broadcastStartBtn');
+  const nameInput=document.getElementById('broadcastName');
+  const selectEl=document.getElementById('broadcastImage');
+  const customEl=document.getElementById('broadcastCustomImage');
+  if(status){ status.textContent='Starting...'; }
+  if(startBtn){ startBtn.disabled=true; }
+  let imagePath = selectEl ? selectEl.value : '/static/lilly/puppy-avatar.svg';
+  if(selectEl && selectEl.value==='custom' && customEl && customEl.value){
+    imagePath = customEl.value.trim();
+  }
+  const body={ name: nameInput ? nameInput.value.trim() : 'Lilly Pup', image: imagePath };
+  try{
+    const r=await fetch('/api/bluetooth/advertise',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(d.ok){
+      if(status){ status.innerHTML='<span style="color:rgba(76,175,80,0.9)"> broadcasting as '+body.name+'</span>'; }
+      if(startBtn){ startBtn.textContent='Stop Broadcast'; startBtn.onclick=stopBroadcast; startBtn.disabled=false; }
+    } else {
+      if(status){ status.textContent='Failed: '+(d.error||'unknown'); }
+      if(startBtn){ startBtn.disabled=false; }
+    }
+  }catch(e){
+    if(status){ status.textContent='Error: '+String(e); }
+    if(startBtn){ startBtn.disabled=false; }
+  }
+}
+
+async function stopBroadcast(){
+  const status=document.getElementById('broadcastStatus');
+  const startBtn=document.getElementById('broadcastStartBtn');
+  if(status){ status.textContent='Stopping...'; }
+  if(startBtn){ startBtn.disabled=true; }
+  try{
+    const r=await fetch('/api/bluetooth/advertise/stop',{method:'POST'});
+    const d=await r.json();
+    if(d.ok){
+      if(status){ status.innerHTML='<span style="color:rgba(93,78,109,0.5)">not broadcasting</span>'; }
+      if(startBtn){ startBtn.textContent='Start Broadcast'; startBtn.onclick=startBroadcast; startBtn.disabled=false; }
+    } else {
+      if(status){ status.textContent='Failed to stop'; }
+      if(startBtn){ startBtn.disabled=false; }
+    }
+  }catch(e){
+    if(status){ status.textContent='Error: '+String(e); }
+    if(startBtn){ startBtn.disabled=false; }
+  }
+}
+  </script>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,9 @@
+# Keep the build context small/portable — exclude data + git
+data/
+**/.git
+**/node_modules
+*.log
+.env
+.env.*
+!.env.example
+!*.onnx.json

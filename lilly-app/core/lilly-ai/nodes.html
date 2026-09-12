@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Lilly Fleet Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root{
+    --bg:#121212; --panel:#1e1e1e; --card:#2a2a2a; --lav:#b78ae0; --pink:#e0a8c0;
+    --ok:#28a745; --warn:#ff9800; --off:#666; --txt:#eee;
+  }
+  *{box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,sans-serif;margin:0;background:var(--bg);color:var(--txt);height:100vh;display:flex;flex-direction:row;overflow:hidden}
+  #sidebar{width:350px;background:var(--panel);padding:12px;overflow-y:auto;border-right:1px solid #333;flex-shrink:0}
+  #map{flex:1;height:100%}
+  h2{margin:0 0 8px;font-size:1.15rem;color:var(--lav);letter-spacing:.3px}
+  h3{font-size:.85rem;margin:6px 0}
+  .btn{flex:1;padding:9px;border:none;border-radius:8px;font-weight:700;color:#fff;cursor:pointer;font-size:.8rem}
+  .btn-rescan{background:#007bff}.btn-add{background:#7b5ea7}
+  .btn-group{display:flex;gap:6px;margin-bottom:10px}
+  .stat{background:var(--card);padding:8px 10px;border-radius:8px;font-size:.78rem;margin-bottom:8px;border:1px solid #333}
+  .stat b{color:#ccc}
+  #feed{display:flex;flex-direction:column;gap:6px}
+  .node-card{background:var(--card);border-radius:10px;padding:9px 10px;font-size:.78rem;border:1px solid #333;border-left:3px solid var(--lav);cursor:pointer;transition:filter .15s}
+  .node-card:hover{filter:brightness(1.2)}
+  .node-card.on{border-left-color:var(--ok)}
+  .node-card.off{border-left-color:var(--off);opacity:.75}
+  .node-head{display:flex;align-items:center;gap:7px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--off);flex-shrink:0}
+  .node-card.on .dot{background:var(--ok)} .node-card.off .dot{background:var(--off)}
+  .nm{font-weight:700;color:#fff;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .badge{font-size:.62rem;padding:1px 6px;border-radius:8px;background:#444}
+  .badge.on{background:rgba(40,167,69,.2);color:#5fe08a}.badge.off{background:#333;color:#999}
+  .mrow{display:flex;flex-wrap:wrap;gap:4px 0;margin-top:5px;font-size:.72rem;color:#bbb}
+  .mrow span{min-width:50px}
+  .del{background:none;border:none;color:#e57373;cursor:pointer;font-size:.85rem;padding:0 2px}
+  #detail{position:fixed;right:12px;bottom:12px;top:12px;width:min(400px,92vw);background:var(--panel);border:1px solid #444;border-radius:14px;z-index:1200;display:none;flex-direction:column;overflow:hidden}
+  #detail.show{display:flex}
+  #detail .d-head{display:flex;align-items:center;gap:8px;padding:12px;border-bottom:1px solid #333}
+  #detail .d-title{font-weight:700;color:#fff;flex:1}
+  #detail .d-x{background:none;border:none;color:#999;font-size:1.1rem;cursor:pointer}
+  #detail .d-body{overflow-y:auto;padding:12px;font-size:.78rem}
+  .kv{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .kv>div{background:var(--card);border:1px solid #333;border-radius:8px;padding:7px 9px}
+  .kv small{display:block;color:#999;font-size:.62rem;text-transform:uppercase;letter-spacing:.4px}
+  .kv b{font-size:.85rem}
+  .dev{background:var(--card);padding:6px 8px;border-radius:6px;margin-top:4px;font-size:.72rem;border-left:2px solid var(--pink)}
+  .btn-del{background:#c0392b}
+  /* add node modal */
+  #addModal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:1500}
+  #addModal.show{display:flex}
+  #addModal .box{background:var(--panel);border:1px solid #444;border-radius:14px;padding:18px;width:min(360px,90vw)}
+  #addModal input{width:100%;padding:9px;margin:6px 0;border-radius:8px;border:1px solid #444;background:#161616;color:#fff;font-size:.85rem}
+  .btn{outline:none}
+  .btn-save{background:var(--lav);color:#fff}
+  .btn-cancel{background:#333;color:#ccc}
+  @media (max-width:820px){
+    body{flex-direction:column-reverse}
+    #sidebar{width:100%;height:44vh;border-right:none;border-top:1px solid #333}
+    #map{height:56vh}
+    #detail{top:auto;bottom:44vh}
+  }
+</style>
+</head>
+<body>
+  <div id="sidebar">
+    <h2>🗺️ Lilly Fleet Map</h2>
+    <div class="btn-group">
+      <button class="btn btn-add" onclick="showAdd()">＋ Add Node</button>
+      <button class="btn btn-rescan" onclick="load()">⟳ Refresh</button>
+    </div>
+    <div class="stat">
+      <div><b>Fleet:</b> <span id="statOnline">…</span></div>
+      <div><b>Map link:</b> <span id="mapLink" style="color:#e0a8c0"></span></div>
+    </div>
+    <div id="feed"><div style="color:#999;text-align:center;padding:18px">Loading nodes…</div></div>
+  </div>
+
+  <div id="map"></div>
+
+  <div id="addModal">
+    <div class="box">
+      <h3>Register node</h3>
+      <small style="color:#999">The node must run the Termux sensor server (:8099).</small>
+      <input id="addName" placeholder="Name (e.g. Kitchen Phone)" value="">
+      <input id="addUrl" placeholder="http://100.115.234.87:8099">
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn-save" onclick="doAdd()">Save</button>
+        <button class="btn btn-cancel" onclick="hideAdd()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="detail">
+    <div class="d-head">
+      <span class="d-title" id="dTitle">Node</span>
+      <button class="d-x" onclick="closeDetail()">✕</button>
+    </div>
+    <div class="d-body" id="dBody"></div>
+  </div>
+
+<script>
+let map, markers={}, selectedId=null;
+function initMap(){
+  map=L.map('map',{zoomControl:false}).setView([0,0],2);
+  L.control.zoom({position:'topright'}).addTo(map);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
+}
+function findSensor(snapshot, probe){
+  const sensors=(snapshot&&snapshot.sensors&&snapshot.sensors.sensors)||{};
+  for(const k in sensors){
+    if(k.toLowerCase().includes(probe)) return sensors[k];
+  }
+  return null;
+}
+function cleanVal(v){
+  if(Array.isArray(v)){ v=v.slice(0,4).map(x=>Math.round(x*100)/100); return v.join(', '); }
+  if(typeof v==='number') return Math.round(v*100)/100;
+  return String(v==null?'':v);
+}
+function nodeLoc(node, snap){
+  let lat=node.last_gps_lat||0, lng=node.last_gps_lng||0, acc=node.last_gps_accuracy||0;
+  const gps=(snap&&snap.gps)||{};
+  const loc=(gps.location&&typeof gps.location==='object')?gps.location:null;
+  if(loc){
+    lat=loc.latitude||loc.lat||lat; lng=loc.longitude||loc.lng||lng;
+    acc=loc.accuracy!=null?loc.accuracy:acc;
+  }
+  return {lat,lng,acc};
+}
+function renderNode(n){
+  const snap=n.snapshot||{};
+  const col=hashColor(n.node.node_id);
+  const on=!!snap.health;
+  const bat=snap.battery&&snap.battery.battery&&snap.battery.battery.level!=null?Math.round(snap.battery.battery.level):(n.node.battery_pct>0?Math.round(n.node.battery_pct):'–');
+  const loc=nodeLoc(n.node,snap);
+  const wifi=(snap.wifi&&snap.wifi.networks)?snap.wifi.networks.length:'–';
+  const bt=(snap.bluetooth&&snap.bluetooth.devices)?snap.bluetooth.devices.length:'–';
+  const notif=(snap.notifications&&snap.notifications.notifications)?snap.notifications.notifications.length:'–';
+  const light=cleanVal(findSensor(snap,'light'));
+  const temp=cleanVal(findSensor(snap,'temperature'));
+  const step=cleanVal(findSensor(snap,'step'));
+  const el=document.createElement('div');
+  el.className='node-card '+(on?'on':'off');
+  el.innerHTML=
+    '<div class="node-head"><span class="dot"></span><span class="nm">'+esc(n.node.name)+'</span><span class="badge '+(on?'on':'off')+'">'+(on?'ONLINE':'OFF')+'</span><button class="del" title="Remove node">✕</button></div>'+
+    '<div class="mrow"><span>🔋 '+bat+'%</span><span>📡 '+wifi+' wi‑fi</span><span>📶 '+bt+' bt</span><span>🔔 '+notif+'</span></div>'+
+    '<div class="mrow"><span>💡 '+(light||'–')+'</span><span>🌡 '+(temp||'–')+'</span><span>👣 '+step+'</span></div>';
+  el.querySelector('.del').onclick=(e)=>{ e.stopPropagation(); if(confirm('Remove node '+n.node.name+'?')) delNode(n.node.node_id); };
+  el.onclick=()=>openDetail(n);
+  return el;
+}
+function openDetail(n){
+  selectedId=n.node.node_id;
+  const snap=n.snapshot||{};
+  const loc=nodeLoc(n.node,snap);
+  document.getElementById('dTitle').innerText=n.node.name;
+  let h='';
+  h+='<div class="kv"><div><small>Status</small><b>'+(snap.health?'Online':'Offline')+'</b></div>'
+   +'<div><small>Battery</small><b>'+Math.round((snap.battery&&snap.battery.battery&&snap.battery.battery.level!=null?snap.battery.battery.level:n.node.battery_pct)||0)+'%</b></div>'
+   +'<div><small>Model</small><b>'+esc(n.node.model||'—')+'</b></div>'
+   +'<div><small>Role</small><b>'+esc(n.node.role)+'</b></div>';
+  if(loc.lat&&loc.lng){ h+='<div><small>Location</small><b>'+loc.lat.toFixed(4)+', '+loc.lng.toFixed(4)+'</b></div><div><small>Accuracy</small><b>'+(Math.round(loc.acc))+'m</b></div>'; }
+  h+='</div>';
+  h+='<h3>🎛 Sensors</h3><div class="kv">';
+  const probes={Light:'light',Temperature:'temperature',Pressure:'pressure',Accelerometer:'accelerometer',Step:'step',Proximity:'proximity',Gyro:'gyro',Magnet:'magnet'};
+  Object.keys(probes).forEach(p=>{ const v=cleanVal(findSensor(snap,probes[p])); if(v!=='') h+='<div><small>'+p+'</small><b>'+v+'</b></div>'; });
+  h+='</div>';
+  if(snap.notifications&&Array.isArray(snap.notifications.notifications)&&snap.notifications.notifications.length){
+    h+='<h3>🔔 Notifications</h3>';
+    snap.notifications.notifications.slice(0,8).forEach(nt=>{ h+='<div class="dev"><b>'+esc(nt.package||'app')+'</b> — '+esc(nt.title||'')+'</div>'; });
+  }
+  if(snap.wifi&&Array.isArray(snap.wifi.networks)&&snap.wifi.networks.length){
+    h+='<h3>📡 WiFi ('+snap.wifi.networks.length+')</h3>';
+    snap.wifi.networks.slice(0,10).forEach(w=>{ h+='<div class="dev">'+esc(w.ssid||'Hidden')+' · '+esc(w.band||'')+' · '+(w.distance!=null?w.distance+'m':'rssi '+w.rssi)+'</div>'; });
+  }
+  if(snap.bluetooth&&Array.isArray(snap.bluetooth.devices)&&snap.bluetooth.devices.length){
+    h+='<h3>📶 Bluetooth ('+snap.bluetooth.devices.length+')</h3>';
+    snap.bluetooth.devices.slice(0,10).forEach(b=>{ h+='<div class="dev">'+esc(b.name||'Unknown')+' · '+esc(b.address||'')+'</div>'; });
+  }
+  if(loc.lat&&loc.lng){ h+='<div style="text-align:center;margin-top:12px"><button class="btn btn-rescan" onclick="panToNode(\''+n.node.node_id+'\')">Center map on node</button></div>'; }
+  document.getElementById('dBody').innerHTML=h;
+}
+function panToNode(id){
+  closeDetail();
+  const m=markers[id]; if(m) map.flyTo(m.getLatLng(),17);
+}
+function closeDetail(){ document.getElementById('detail').classList.remove('show'); selectedId=null; }
+async function load(){
+  try{
+    const r=await fetch('/api/nodes/fleet');
+    const d=await r.json();
+    const feed=document.getElementById('feed');
+    feed.innerHTML='';
+    let online=0;
+    d.nodes.forEach(n=>{
+      if(n.snapshot&&n.snapshot.health) online++;
+      feed.appendChild(renderNode(n));
+      updateMarker(n);
+    });
+    document.getElementById('statOnline').innerText=online+' of '+d.total_count+' online (max '+d.max_nodes+')';
+    document.getElementById('mapLink').innerText=location.origin;
+  }catch(e){
+    document.getElementById('feed').innerHTML='<div style="color:#e57373;text-align:center;padding:18px">Failed to load fleet</div>';
+  }
+}
+function updateMarker(n){
+  const loc=nodeLoc(n.node,n.snapshot||{});
+  const on=!!(n.snapshot&&n.snapshot.health);
+  const key=n.node.node_id, col=hashColor(key);
+  if(!loc.lat&&!loc.lng){
+    if(markers[key]){ markers[key].remove(); delete markers[key]; }
+    return;
+  }
+  const pop='<b>'+esc(n.node.name)+'</b><br>'+(on?'🟢 Online':'⚪ Offline')+'<br>'+loc.lat.toFixed(5)+', '+loc.lng.toFixed(5);
+  if(markers[key]) markers[key].setLatLng([loc.lat,loc.lng]).setStyle({color:col,fillColor:col}).bindPopup(pop);
+  else markers[key]=L.circleMarker([loc.lat,loc.lng],{radius:9,color:'#fff',weight:2,fillColor:col,fillOpacity:.8}).addTo(map).bindPopup(pop);
+  if(loc.lat&&loc.lng&&Object.keys(markers).length===1){ map.setView([loc.lat,loc.lng],14); }
+}
+function delNode(id){
+  fetch('/api/nodes/'+encodeURIComponent(id),{method:'DELETE'})
+    .then(r=>{ if(r.ok){ if(markers[id]){markers[id].remove();delete markers[id];} load(); } })
+    .catch(()=>{});
+}
+function hashColor(s){ let hash=0; for(let i=0;i<s.length;i++)hash=s.charCodeAt(i)+((hash<<5)-hash); const hue=Math.abs(hash)%360; return 'hsl('+hue+',60%,62%)'; }
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function showAdd(){ document.getElementById('addModal').classList.add('show'); }
+function hideAdd(){ document.getElementById('addModal').classList.remove('show'); }
+async function doAdd(){
+  const name=document.getElementById('addName').value.trim();
+  const url=document.getElementById('addUrl').value.trim();
+  if(!url){ alert('Sensor URL required'); return; }
+  const node_id='node-'+(name||url).toLowerCase().replace(/[^a-z0-9]+/g,'-').slice(0,24)+'-'+Math.random().toString(36).slice(2,6);
+  try{
+    await fetch('/api/nodes/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({node_id:node_id,name:name||url,url:sensorCompat(url),sensor_url:sensorCompat(url)})});
+    hideAdd(); load();
+  }catch(e){ alert('Register failed'); }
+}
+function sensorCompat(url){ return url.replace(/\/+$/,''); }
+initMap();
+document.getElementById('detail').querySelector('.d-x').onclick=closeDetail;
+load();
+setInterval(load,8000);
+</script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+version: "3.9"
+
+services:
+
+  backend:
+    build: ./backend
+    container_name: lilly1_backend
+    restart: always
+    ports:
+      - "8001:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://100.93.131.114:11434
+      - CORS_ORIGINS=*
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: lilly1_openwebui
+    restart: always
+    ports:
+      - "3001:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+

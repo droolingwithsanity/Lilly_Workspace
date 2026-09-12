@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>OpenLive × Lilly AI</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;
+  --border:#2a2a3a;--text:#e0e0e8;--text2:#8888a0;
+  --accent:#7c6cf0;--accent2:#a78bfa;--accent-dim:rgba(124,108,240,0.15);
+  --user-bg:#1e1e30;--assistant-bg:#16161f;
+  --mic-on:#ef4444;--mic-idle:#555;--thinking:#f59e0b;
+  --radius:12px;--font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--font)}
+body{display:flex;flex-direction:column}
+
+/* ─── Header ─── */
+.header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 20px;background:var(--surface);border-bottom:1px solid var(--border);
+  flex-shrink:0;z-index:10;
+}
+.header-left{display:flex;align-items:center;gap:10px}
+.avatar-dot{width:32px;height:32px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:16px}
+.header-title{font-size:15px;font-weight:600;letter-spacing:0.3px}
+.header-sub{font-size:11px;color:var(--text2);margin-top:1px}
+.header-right{display:flex;align-items:center;gap:12px}
+.status-pill{font-size:10px;padding:4px 10px;border-radius:20px;background:var(--accent-dim);color:var(--accent2);font-weight:500;letter-spacing:0.5px;text-transform:uppercase}
+.status-pill.connected{background:rgba(34,197,94,0.15);color:#22c55e}
+.status-pill.error{background:rgba(239,68,68,0.15);color:#ef4444}
+
+/* ─── Chat Area ─── */
+.chat-area{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:4px;scroll-behavior:smooth}
+.chat-area::-webkit-scrollbar{width:4px}
+.chat-area::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+
+.msg{max-width:85%;padding:10px 16px;border-radius:var(--radius);font-size:14px;line-height:1.55;animation:msgIn 0.25s ease-out;word-wrap:break-word}
+@keyframes msgIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.msg.user{align-self:flex-end;background:var(--user-bg);border:1px solid var(--border);color:var(--text)}
+.msg.assistant{align-self:flex-start;background:var(--assistant-bg);border:1px solid var(--border)}
+.msg.system{align-self:center;background:transparent;color:var(--text2);font-size:11px;padding:4px 12px;font-style:italic}
+.msg .sender{font-size:11px;color:var(--accent2);font-weight:600;margin-bottom:3px;display:flex;align-items:center;gap:5px}
+.msg .sender .dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.msg .ts{font-size:10px;color:var(--text2);margin-top:4px;opacity:0.5}
+.msg.user .ts{text-align:right}
+
+/* Thinking indicator */
+.thinking{display:none;align-self:flex-start;padding:10px 16px;background:var(--assistant-bg);border:1px solid var(--border);border-radius:var(--radius)}
+.thinking.show{display:flex;gap:4px;align-items:center}
+.thinking span{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:dotBounce 1.2s ease-in-out infinite}
+.thinking span:nth-child(2){animation-delay:0.15s}
+.thinking span:nth-child(3){animation-delay:0.3s}
+@keyframes dotBounce{0%,60%,100%{transform:translateY(0);opacity:0.3}30%{transform:translateY(-8px);opacity:1}}
+
+/* ─── Controls ─── */
+.controls{
+  display:flex;align-items:center;justify-content:center;gap:16px;
+  padding:16px 20px 28px;background:var(--surface);border-top:1px solid var(--border);
+  flex-shrink:0;
+}
+.ctrl-btn{
+  width:52px;height:52px;border-radius:50%;border:2px solid var(--border);
+  background:var(--surface2);cursor:pointer;display:flex;align-items:center;justify-content:center;
+  transition:all 0.2s;position:relative;
+}
+.ctrl-btn:hover{border-color:var(--accent);background:var(--accent-dim)}
+.ctrl-btn:active{transform:scale(0.92)}
+.ctrl-btn svg{width:22px;height:22px;fill:var(--text2);transition:fill 0.2s}
+
+/* Mic button — big, center */
+.ctrl-btn.mic{width:68px;height:68px;border-color:var(--accent)}
+.ctrl-btn.mic svg{width:28px;height:28px}
+.ctrl-btn.mic.active{background:var(--mic-on);border-color:var(--mic-on);box-shadow:0 0 24px rgba(239,68,68,0.4);animation:micPulse 1.5s ease-in-out infinite}
+.ctrl-btn.mic.active svg{fill:#fff}
+.ctrl-btn.mic.muted{opacity:0.3;pointer-events:none}
+@keyframes micPulse{0%,100%{box-shadow:0 0 24px rgba(239,68,68,0.4)}50%{box-shadow:0 0 40px rgba(239,68,68,0.6)}}
+
+/* Text input */
+.text-row{display:flex;gap:8px;width:100%;max-width:500px}
+.text-row input{
+  flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:10px 16px;color:var(--text);font-size:14px;outline:none;
+}
+.text-row input:focus{border-color:var(--accent)}
+.text-row input::placeholder{color:var(--text2)}
+.text-row button{
+  background:var(--accent);border:none;border-radius:var(--radius);padding:10px 18px;
+  color:#fff;font-size:13px;font-weight:600;cursor:pointer;transition:all 0.2s;
+}
+.text-row button:hover{background:var(--accent2)}
+
+/* Volume meter */
+.vol-meter{position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);width:40px;height:3px;background:var(--border);border-radius:2px;overflow:hidden}
+.vol-meter .fill{height:100%;background:var(--mic-on);width:0%;transition:width 0.08s;border-radius:2px}
+
+/* Transcript overlay */
+.transcript-bar{
+  position:fixed;bottom:110px;left:50%;transform:translateX(-50%);
+  max-width:90%;padding:8px 18px;background:var(--surface);border:1px solid var(--border);
+  border-radius:20px;font-size:13px;color:var(--text2);font-style:italic;
+  display:none;z-index:20;backdrop-filter:blur(12px);
+  animation:fadeUp 0.2s ease-out;
+}
+.transcript-bar::before{content:'● ';color:var(--mic-on);font-style:normal}
+@keyframes fadeUp{from{opacity:0;transform:translateX(-50%) translateY(4px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+
+/* Waveform canvas */
+.waveform{position:fixed;bottom:108px;left:50%;transform:translateX(-50%);width:120px;height:24px;z-index:19;pointer-events:none;opacity:0;transition:opacity 0.3s}
+.waveform.active{opacity:1}
+
+/* Connection overlay */
+.connect-overlay{
+  position:fixed;inset:0;background:var(--bg);z-index:100;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;
+}
+.connect-overlay.hidden{display:none}
+.connect-overlay h2{font-size:18px;font-weight:600;color:var(--text)}
+.connect-overlay p{font-size:13px;color:var(--text2);max-width:320px;text-align:center;line-height:1.5}
+.connect-overlay input{
+  background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:12px 16px;color:var(--text);font-size:14px;width:300px;text-align:center;outline:none;
+}
+.connect-overlay input:focus{border-color:var(--accent)}
+.connect-overlay button{
+  background:var(--accent);border:none;border-radius:var(--radius);padding:12px 32px;
+  color:#fff;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px;
+}
+.connect-overlay .logo{font-size:48px;margin-bottom:8px}
+</style>
+</head>
+<body>
+
+<!-- Connection -->
+<div class="connect-overlay" id="connectOverlay">
+  <div class="logo">🔊</div>
+  <h2>OpenLive × Lilly AI</h2>
+  <p>Voice conversation with Lilly. Talk naturally — she listens, thinks, and speaks back.</p>
+  <input type="text" id="serverUrl" placeholder="http://100.115.234.87:8098" value="">
+  <button onclick="connectToServer()">Connect</button>
+</div>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <div class="avatar-dot">🐶</div>
+    <div>
+      <div class="header-title">Lilly</div>
+      <div class="header-sub">OpenLive Voice Mode</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <span class="status-pill" id="statusPill">disconnected</span>
+  </div>
+</div>
+
+<!-- Chat -->
+<div class="chat-area" id="chatArea">
+  <div class="msg system">Connected to Lilly. Tap the mic to start talking.</div>
+</div>
+
+<!-- Thinking -->
+<div class="thinking" id="thinking">
+  <span></span><span></span><span></span>
+</div>
+
+<!-- Transcript overlay -->
+<div class="transcript-bar" id="transcriptBar"></div>
+
+<!-- Waveform -->
+<canvas class="waveform" id="waveformCanvas" width="120" height="24"></canvas>
+
+<!-- Controls -->
+<div class="controls">
+  <button class="ctrl-btn" id="btnClear" title="Clear chat" onclick="clearChat()">
+    <svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+  </button>
+  <button class="ctrl-btn mic" id="btnMic" title="Tap to start/stop listening" onclick="toggleMic()">
+    <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.91-3c-.49 0-.9.36-.98.85C16.52 14.2 14.47 16 12 16s-4.52-1.8-4.93-4.15c-.08-.49-.49-.85-.98-.85-.61 0-1.09.54-1 1.14.49 3 2.89 5.35 5.91 5.78V21c0 .55.45 1 1 1s1-.45 1-1v-3.08c3.02-.43 5.42-2.78 5.91-5.78.1-.6-.39-1.14-1-1.14z"/></svg>
+    <div class="vol-meter"><div class="fill" id="volFill"></div></div>
+  </button>
+  <button class="ctrl-btn" id="btnMode" title="Toggle auto-listen" onclick="toggleAutoListen()">
+    <svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+  </button>
+</div>
+<div style="display:flex;gap:8px;padding:0 20px 20px;background:var(--surface);flex-shrink:0">
+  <input type="text" id="textInput" placeholder="Type a message..." autocomplete="off" style="flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 16px;color:var(--text);font-size:14px;outline:none" onkeydown="if(event.key==='Enter'){sendText(this.value.trim());this.value=''}">
+  <button onclick="sendText(document.getElementById('textInput').value.trim());document.getElementById('textInput').value=''" style="background:var(--accent);border:none;border-radius:var(--radius);padding:10px 18px;color:#fff;font-size:13px;font-weight:600;cursor:pointer">Send</button>
+</div>
+
+<script>
+// ─── State ───────────────────────────────────────────────────────
+let SERVER = '';
+let micStream = null;
+let micRecorder = null;
+let micActive = false;
+let isRecording = false;
+let lillySpeaking = false;
+let autoListen = false;
+let audioCtx = null;
+let analyser = null;
+let volAnim = null;
+
+const chatArea = document.getElementById('chatArea');
+const thinking = document.getElementById('thinking');
+const transcriptBar = document.getElementById('transcriptBar');
+const volFill = document.getElementById('volFill');
+const statusPill = document.getElementById('statusPill');
+const waveformCanvas = document.getElementById('waveformCanvas');
+const waveCtx = waveformCanvas.getContext('2d');
+
+// ─── Connect ─────────────────────────────────────────────────────
+function connectToServer(){
+  const url = document.getElementById('serverUrl').value.trim().replace(/\/$/,'');
+  if(!url){alert('Enter server URL');return}
+  SERVER = url;
+  document.getElementById('connectOverlay').classList.add('hidden');
+  setStatus('connected');
+  addMsg('system', `Connected to ${SERVER}`);
+}
+// Auto-connect if served same-origin from the Lilly server
+window.addEventListener('load',()=>{
+  const inp = document.getElementById('serverUrl');
+  if(inp.value.trim()){
+    // Show overlay but let user confirm
+    return;
+  }
+  if(location.origin && /^https?:$/.test(location.protocol)){
+    inp.value = location.origin;
+    connectToServer();
+  }
+});
+
+function setStatus(s){
+  statusPill.textContent = s;
+  statusPill.className = 'status-pill' + (s==='connected'?' connected':s==='error'?' error':'');
+}
+
+// ─── Chat Messages ──────────────────────────────────────────────
+function addMsg(role, text, sender){
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  const time = new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+  if(role === 'assistant'){
+    div.innerHTML = `<div class="sender"><span class="dot"></span>Lilly</div>${escapeHtml(text)}<div class="ts">${time}</div>`;
+  } else if(role === 'user'){
+    div.innerHTML = `${escapeHtml(text)}<div class="ts">${time}</div>`;
+  } else {
+    div.textContent = text;
+  }
+  chatArea.appendChild(div);
+  chatArea.scrollTop = chatArea.scrollHeight;
+  return div;
+}
+
+function addStreamingMsg(){
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  div.innerHTML = `<div class="sender"><span class="dot"></span>Lilly</div><span class="stream-text"></span>`;
+  chatArea.appendChild(div);
+  chatArea.scrollTop = chatArea.scrollHeight;
+  return div;
+}
+
+function escapeHtml(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function clearChat(){
+  chatArea.innerHTML = '';
+  addMsg('system', 'Chat cleared.');
+}
+
+// ─── Microphone ─────────────────────────────────────────────────
+async function toggleMic(){
+  if(lillySpeaking){stopSpeaking();return}
+  if(micActive){stopMic();return}
+  await startMic();
+}
+function micDown(e){if(e)e.preventDefault()}
+function micUp(e){if(e)e.preventDefault()}
+
+async function startMic(){
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    micActive = true;
+    document.getElementById('btnMic').classList.add('active');
+    setStatus('listening');
+    startVolumeMeter();
+    recordChunk();
+  }catch(e){
+    setStatus('error');
+    addMsg('system', 'Mic access denied.');
+  }
+}
+
+function stopMic(){
+  micActive = false;
+  if(micRecorder && micRecorder.state==='recording'){try{micRecorder.stop()}catch(e){}}
+  if(micStream){micStream.getTracks().forEach(t=>t.stop());micStream=null}
+  document.getElementById('btnMic').classList.remove('active');
+  document.getElementById('btnMic').classList.remove('muted');
+  stopVolumeMeter();
+  setStatus('connected');
+}
+
+function toggleAutoListen(){
+  autoListen = !autoListen;
+  const btn = document.getElementById('btnMode');
+  btn.style.borderColor = autoListen ? 'var(--accent)' : 'var(--border)';
+  btn.style.background = autoListen ? 'var(--accent-dim)' : 'var(--surface2)';
+  addMsg('system', autoListen ? 'Auto-listen: ON — I\'ll listen after I speak.' : 'Auto-listen: OFF');
+}
+
+// ─── Volume Meter ───────────────────────────────────────────────
+function startVolumeMeter(){
+  if(!micStream)return;
+  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  const src = audioCtx.createMediaStreamSource(micStream);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  src.connect(analyser);
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  function draw(){
+    if(!micActive)return;
+    analyser.getByteFrequencyData(data);
+    let sum=0;for(let i=0;i<data.length;i++)sum+=data[i];
+    const avg=sum/data.length;
+    const pct=Math.min(100,avg/128*100);
+    volFill.style.width=pct+'%';
+    drawWaveform(data);
+    volAnim=requestAnimationFrame(draw);
+  }
+  draw();
+}
+function stopVolumeMeter(){
+  if(volAnim)cancelAnimationFrame(volAnim);
+  volFill.style.width='0%';
+  waveCtx.clearRect(0,0,120,24);
+  if(audioCtx){audioCtx.close();audioCtx=null}
+}
+
+function drawWaveform(data){
+  waveCtx.clearRect(0,0,120,24);
+  waveCtx.strokeStyle='rgba(239,68,68,0.5)';
+  waveCtx.lineWidth=1.5;
+  waveCtx.beginPath();
+  const step=120/data.length;
+  for(let i=0;i<data.length;i++){
+    const x=i*step;
+    const y=12-(data[i]/255)*10;
+    i===0?waveCtx.moveTo(x,y):waveCtx.lineTo(x,y);
+  }
+  waveCtx.stroke();
+}
+
+// ─── Recording Pipeline ─────────────────────────────────────────
+function recordChunk(){
+  if(!micActive||!micStream||isRecording)return;
+  isRecording=true;
+  document.getElementById('btnMic').classList.add('muted');
+
+  const opts={mimeType:'audio/webm;codecs=opus'};
+  if(!MediaRecorder.isTypeSupported(opts.mimeType))delete opts.mimeType;
+  micRecorder=new MediaRecorder(micStream,opts);
+  const chunks=[];
+  micRecorder.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data)};
+  micRecorder.onstop=async()=>{
+    isRecording=false;
+    if(!micActive)return;
+    document.getElementById('btnMic').classList.remove('muted');
+
+    if(chunks.length===0){scheduleNext();return}
+    const blob=new Blob(chunks,{type:micRecorder.mimeType||'audio/webm'});
+    const arrayBuf=await blob.arrayBuffer();
+    const ctx=new(window.AudioContext||window.webkitAudioContext)();
+    try{
+      const decoded=await ctx.decodeAudioData(arrayBuf);
+      const wav=encodeWav(decoded);
+
+      // Show live transcript
+      showTranscript('...');
+      setStatus('transcribing');
+
+      // Send to server
+      const resp=await fetch(SERVER+'/api/browser_mic',{method:'POST',headers:{'Content-Type':'audio/wav'},body:wav});
+      const result=await resp.json();
+      hideTranscript();
+
+      if(result.heard){
+        addMsg('user', result.heard);
+      }
+      if(result.reply){
+        setStatus('thinking');
+        thinking.classList.add('show');
+        // Small delay to show thinking
+        await new Promise(r=>setTimeout(r,200));
+        thinking.classList.remove('show');
+        addMsg('assistant', result.reply);
+        if(result.audio_id){
+          lillySpeaking=true;
+          setStatus('speaking');
+          await playAudio(result.audio_id);
+          lillySpeaking=false;
+          setStatus('connected');
+          if(autoListen)scheduleNext();
+        }else{
+          setStatus('connected');
+          if(autoListen)scheduleNext();
+        }
+      }else{
+        setStatus('connected');
+        scheduleNext();
+      }
+    }catch(e){
+      hideTranscript();
+      setStatus('error');
+      addMsg('system', 'Error processing audio.');
+      setTimeout(()=>setStatus('connected'),2000);
+      scheduleNext();
+    }
+    ctx.close();
+  };
+  micRecorder.start();
+  setTimeout(()=>{if(micRecorder&&micRecorder.state==='recording')micRecorder.stop()},2000);
+}
+
+function scheduleNext(){
+  if(micActive)setTimeout(recordChunk,100);
+}
+
+// ─── Transcript Overlay ─────────────────────────────────────────
+function showTranscript(text){
+  transcriptBar.textContent=text;
+  transcriptBar.style.display='block';
+}
+function hideTranscript(){
+  transcriptBar.style.display='none';
+}
+
+// ─── Audio Playback ─────────────────────────────────────────────
+async function playAudio(id){
+  return new Promise(async(resolve)=>{
+    try{
+      const resp=await fetch(SERVER+'/api/tts?id='+id);
+      if(!resp.ok){resolve();return}
+      const blob=await resp.blob();
+      const url=URL.createObjectURL(blob);
+      const audio=new Audio(url);
+      audio.onended=()=>{URL.revokeObjectURL(url);resolve()};
+      audio.onerror=()=>{URL.revokeObjectURL(url);resolve()};
+      await audio.play();
+    }catch(e){resolve()}
+  });
+}
+
+function stopSpeaking(){
+  // Stop any playing audio
+  document.querySelectorAll('audio').forEach(a=>{a.pause();a.currentTime=0});
+  lillySpeaking=false;
+  setStatus('connected');
+}
+
+// ─── WAV Encoder ────────────────────────────────────────────────
+function encodeWav(audioBuffer){
+  const numCh=audioBuffer.numberOfChannels;
+  const sr=audioBuffer.sampleRate;
+  const len=audioBuffer.length*numCh*2;
+  const buf=new ArrayBuffer(44+len);
+  const v=new DataView(buf);
+  const writeStr=(o,s)=>{for(let i=0;i<s.length;i++)v.setUint8(o+i,s.charCodeAt(i))};
+  writeStr(0,'RIFF');v.setUint32(4,36+len,true);writeStr(8,'WAVE');
+  writeStr(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,numCh,true);
+  v.setUint32(24,sr,true);v.setUint32(28,sr*numCh*2,true);v.setUint16(32,numCh*2,true);v.setUint16(34,16,true);
+  writeStr(36,'data');v.setUint32(40,len,true);
+  let off=44;
+  const ch0=audioBuffer.getChannelData(0);
+  for(let i=0;i<audioBuffer.length;i++){
+    const s=Math.max(-1,Math.min(1,ch0[i]));
+    v.setInt16(off,s<0?s*0x8000:s*0x7FFF,true);off+=2;
+  }
+  return buf;
+}
+
+// ─── Keyboard ───────────────────────────────────────────────────
+// Text input has its own onkeydown handler — no global listener needed
+
+function sendText(text){
+  if(!text)return;
+  if(!SERVER){addMsg('system','Not connected.');return}
+  addMsg('user', text);
+  setStatus('thinking');
+  thinking.classList.add('show');
+
+  fetch(SERVER+'/api/cmd',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text:text, avatar:'puppy'})
+  }).then(r=>r.json()).then(async result=>{
+    thinking.classList.remove('show');
+    if(result.reply){
+      addMsg('assistant', result.reply);
+      if(result.audio_id){
+        lillySpeaking=true;
+        setStatus('speaking');
+        await playAudio(result.audio_id);
+        lillySpeaking=false;
+        if(autoListen)await startMic();
+      }
+    }
+    setStatus('connected');
+  }).catch(e=>{
+    thinking.classList.remove('show');
+    setStatus('error');
+    addMsg('system', 'Request failed.');
+    setTimeout(()=>setStatus('connected'),2000);
+  });
+}
+
+// ─── Init ───────────────────────────────────────────────────────
+document.getElementById('textInput')?.focus();
+</script>
+</body>
+</html>

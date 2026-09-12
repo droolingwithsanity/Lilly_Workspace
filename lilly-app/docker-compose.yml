@@ -1,0 +1,226 @@
+#############################################################
+# Lilly AI — single portable compose
+# -----------------------------------------------------------
+# Copy the entire lilly-app/ folder to any machine with Docker
+# and run:  docker compose up -d
+# Optional services start with:  docker compose --profile extras up -d
+# All data lives under ./data  -> fully self-contained.
+#############################################################
+
+services:
+
+  # ═════════════════ CORE ═════════════════
+
+  lilly:
+    image: lilly-ai
+    build:
+      context: .
+      dockerfile: core/lilly-ai/Dockerfile
+    container_name: lilly-ai
+    network_mode: host
+    volumes:
+      - ./core/lilly-ai:/app
+      # Mount workspace start.sh until the image is rebuilt with the fix
+      - ./core/lilly-ai/start.sh:/start.sh:ro
+      - ${SSH_DIR:-/home/labhrasd/.ssh}:/root/.ssh:ro
+      - ./data/ssh:/root/lilly_termux_key:ro
+      - ./data/ai-server:/root/ai-server:rw
+      - ./data/lilly:/app/data
+      - ./data/connect:/app/data/connect
+      - ./data/openlive:/opt/openlive-agent/data
+      - ./data/openlive-voice:/opt/openlive-agent/voice
+      - ./data/openlive:/opt/openlive-web/data
+    env_file:
+      - .env
+      - .env.openconnector
+    environment:
+      - PORT=8098
+      - OLLAMA_URL=${OLLAMA_URL:-http://127.0.0.1:11434}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
+      - PREFER_BACKEND=${PREFER_BACKEND:-ollama}
+      - SENSOR_SERVER_URL=${SENSOR_SERVER_URL:-http://100.115.234.87:8099}
+      - LILLY_MAX_NODES=${LILLY_MAX_NODES:-6}
+      - TERMUX_SSH_HOST=${TERMUX_SSH_HOST}
+      - TERMUX_SSH_PORT=${TERMUX_SSH_PORT:-8022}
+      - TERMUX_SSH_USER=${TERMUX_SSH_USER}
+      - TERMUX_SSH_KEY=/root/lilly_termux_key
+      - AUTH0_DOMAIN=${AUTH0_DOMAIN}
+      - AUTH0_CLIENT_ID=${AUTH0_CLIENT_ID}
+      - AUTH0_CLIENT_SECRET=${AUTH0_CLIENT_SECRET}
+      - AUTH0_SECRET=${AUTH0_SECRET}
+      - APP_BASE_URL=${APP_BASE_URL:-https://droolingwithsanity.ca}
+      - OWNER_EMAIL=${OWNER_EMAIL:-laurencekidney@gmail.com}
+      - AUTH0_ADMIN_EMAILS=${AUTH0_ADMIN_EMAILS:-}
+      - WHISPER_SERVER_URL=${WHISPER_SERVER_URL:-http://127.0.0.1:8001}
+      - OC_BASE_URL=http://localhost:3002
+      - LILLY_WORKSPACE=/app
+      - PIPER_VOICE=/voices/lilly_voice.onnx
+      - SMALL_MODEL=${SMALL_MODEL:-qwen2.5:1.5b}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
+      - FAST_MODEL=${FAST_MODEL:-qwen2.5:7b}
+      - OPENLIVE_AGENT_SECRET=${OPENLIVE_AGENT_SECRET:-lilly-openlive-secret-2026}
+      - VISION_SERVER_URL=${VISION_SERVER_URL:-http://127.0.0.1:8198}
+      - FACE_OSINT_ENABLED=${FACE_OSINT_ENABLED:-0}
+      - FACE_OSINT_PROVIDER=${FACE_OSINT_PROVIDER:-yandex}
+      - FACE_OSINT_COOLDOWN=${FACE_OSINT_COOLDOWN:-60}
+      - BLE_HOST_HCI=${BLE_HOST_HCI:-hci0}
+      - BLE_WEB_UI_URL=${BLE_WEB_UI_URL:-https://droolingwithsanity.ca}
+      - BLINK_USERNAME=${BLINK_USERNAME:-}
+      - BLINK_PASSWORD=${BLINK_PASSWORD:-}
+      - BLINK_MANAGED=${BLINK_MANAGED:-false}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  lilly-vision:
+    image: lilly-vision
+    build:
+      context: .
+      dockerfile: core/lilly-vision/Dockerfile.vision
+    container_name: lilly-vision
+    network_mode: host
+    environment:
+      - PORT=8198
+      - CONF_THRESHOLD=0.35
+      - YOLO_MODEL=yolov8n-oiv7.pt
+      - OLLAMA_URL=${OLLAMA_URL:-http://127.0.0.1:11434}
+      - VISION_LLM_MODEL=${VISION_LLM_MODEL:-qwen2.5:3b}
+      - OSINT_PUSH_URL=${OSINT_PUSH_URL:-}
+    volumes:
+      - ./data/tts-cache:/tmp/lilly_tts
+      - ./data/lilly:/app/data
+      - ./data/frames:/app/frames
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  lilly-trainer:
+    image: lilly-trainer
+    build:
+      context: .
+      dockerfile: core/lilly-trainer/Dockerfile.trainer
+    container_name: lilly-trainer
+    network_mode: host
+    environment:
+      - PORT=8199
+      - BASE_MODEL=yolov8n-oiv7.pt
+    volumes:
+      - ./data/training:/app/training_data
+    restart: unless-stopped
+
+  # Native host Ollama usually owns :11434 (systemd, OLLAMA_HOST=0.0.0.0:11434).
+  # Only start this container on machines WITHOUT a host Ollama:
+  #   docker compose --profile ollama up -d ollama
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    profiles: ["ollama"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./data/ollama:/root/.ollama
+    restart: always
+
+  piper:
+    image: lilly-piper
+    build:
+      context: .
+      dockerfile: options/piper/Dockerfile
+    container_name: piper_api
+    ports:
+      - "5001:5001"
+    restart: unless-stopped
+
+  # ═════════════════ OPTIONS (opt-in) ═════════════════
+  #   docker compose --profile extras up -d [service]
+
+  lilly_mcp:
+    image: simple-ollama-chat-copy-lilly-mcp:latest
+    container_name: lilly_mcp
+    profiles: ["extras"]
+    ports:
+      - "5003:5003"
+    restart: unless-stopped
+
+  lilly_ide:
+    image: codercom/code-server:latest
+    container_name: lilly_ide
+    profiles: ["extras"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/ide:/home/coder
+    environment:
+      - PASSWORD=${IDE_PASSWORD:-changeme}
+    restart: unless-stopped
+
+  dashboard:
+    image: lilly-dashboard-lilly-dashboard:latest
+    container_name: lilly-dashboard
+    profiles: ["extras"]
+    restart: unless-stopped
+
+  lillyos-redis:
+    image: redis:7-alpine
+    container_name: lillyos_redis
+    profiles: ["extras"]
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-supernova_secret}"]
+    volumes:
+      - ./data/lillyos-redis:/data
+    restart: unless-stopped
+
+  lillyos-backend:
+    image: lillymerg-backend
+    build:
+      context: ./options/lillyos/backend
+    container_name: lillyos_backend
+    profiles: ["extras"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-supernova_secret}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./options/lillyos/backend:/app
+    depends_on:
+      - lillyos-redis
+    restart: unless-stopped
+
+  lillyos-frontend:
+    image: lillymerg-frontend
+    build:
+      context: ./options/lillyos/frontend
+    container_name: lillyos_frontend
+    profiles: ["extras"]
+    ports:
+      - "3006:80"
+    environment:
+      - VITE_API_URL=
+    restart: unless-stopped
+
+  webui-openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: lilly1_openwebui
+    profiles: ["extras"]
+    ports:
+      - "3001:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  figranium:
+    image: ghcr.io/figranium/figranium:latest
+    container_name: figranium
+    profiles: ["extras"]
+    ports:
+      - "11345:11345"
+      - "54311:54311"
+    volumes:
+      - ./options/figranium/data:/data
+      - ./options/figranium/captures:/captures
+    restart: unless-stopped

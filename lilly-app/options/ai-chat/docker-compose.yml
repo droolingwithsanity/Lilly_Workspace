@@ -1,0 +1,114 @@
+services:
+  warroom-ui:
+    image: simple-ollama-chat-copy-warroom-ui
+    container_name: warroom-ui
+    ports:
+      - "4000:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./builder.html:/usr/share/nginx/html/builder.html:ro
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+    networks:
+      - chat-network
+    restart: unless-stopped
+
+  piper-tts:
+    image: simple-ollama-chat-copy-piper-tts
+    container_name: piper_api
+    ports:
+      - "5001:5001"
+    networks:
+      - chat-network
+    restart: unless-stopped
+
+  lilly-mcp:
+    image: simple-ollama-chat-copy-lilly-mcp
+    container_name: lilly_mcp
+    ports:
+      - "5003:5003"
+    networks:
+      - chat-network
+    depends_on:
+      - lilly-commander
+    restart: unless-stopped
+
+  kraken-bot:
+    image: simple-ollama-chat-copy-kraken-bot
+    container_name: kraken_bot
+    ports:
+      - "5020:5020"
+    networks:
+      - chat-network
+    depends_on:
+      - lilly-commander
+    restart: unless-stopped
+
+  lilly-commander:
+    image: simple-ollama-chat-copy-lilly-commander
+    container_name: lilly_commander
+    volumes:
+      - ./lilly-commander/app.py:/app/app.py:rw
+      - ./lilly-commander/gallery.yml:/app/gallery.yml:rw
+      - ./lilly-commander/shadcn-components:/app/shadcn-components:rw
+      - ./projects:/projects:rw
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - /root/.aws:/root/.aws:ro
+      - /root/.kiro:/root/.kiro:ro
+      - /root/.local/bin/kiro-cli-chat:/usr/local/bin/kiro-cli-chat:ro
+      - simple-ollama-chat-copy_lilly_memory:/memory:rw
+    networks:
+      - chat-network
+    restart: unless-stopped
+
+  lilly-ide:
+    image: codercom/code-server:latest
+    container_name: lilly_ide
+    ports:
+      - "8080:8080"
+    volumes:
+      - simple-ollama-chat-copy_ide_workspace:/home/coder:rw
+    networks:
+      - chat-network
+    environment:
+      - PASSWORD=changeme
+    restart: unless-stopped
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    ports:
+      - "9000:9000"
+      - "9443:9443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - simple-ollama-chat-copy_portainer_data:/data:rw
+    networks:
+      - chat-network
+    restart: unless-stopped
+
+  guacd:
+    image: guacamole/guacd:latest
+    container_name: guacd
+    networks:
+      - chat-network
+    restart: unless-stopped
+
+  whisper-stt:
+    image: onerahmet/openai-whisper-asr-webservice:latest
+    container_name: whisper_stt
+    networks:
+      - chat-network
+    restart: unless-stopped
+
+networks:
+  chat-network:
+    external: true
+    name: simple-ollama-chat-copy_chat-network
+
+volumes:
+  simple-ollama-chat-copy_lilly_memory:
+    external: true
+  simple-ollama-chat-copy_ide_workspace:
+    external: true
+  simple-ollama-chat-copy_portainer_data:
+    external: true

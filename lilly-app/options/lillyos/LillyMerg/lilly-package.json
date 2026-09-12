@@ -1,0 +1,11 @@
+{
+  "name": "lilly-os-warroom",
+  "version": "1.0.0",
+  "scripts": {
+    "build:frontend": "cd frontend && npm run build",
+    "up": "docker compose up -d --build",
+    "down": "docker compose down",
+    "purge": "docker compose down && docker rmi $(docker images -q lillymerg*) -f",
+    "logs": "docker compose logs -f"
+  }
+}

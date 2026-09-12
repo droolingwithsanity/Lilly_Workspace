@@ -1,0 +1,44 @@
+###############################################
+# Lilly Vision Server — Standalone YOLOv8
+# Build context: lilly-app/  (dockerfile: core/lilly-vision/Dockerfile.vision)
+###############################################
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg ca-certificates curl libgl1 libglib2.0-0 && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY core/lilly-vision/requirements.txt .
+RUN pip install --no-cache-dir \
+    fastapi uvicorn numpy \
+    opencv-python-headless \
+    ultralytics \
+    faiss-cpu \
+    edge-tts \
+    httpx \
+    mediapipe
+
+# Runtime ONNX engine for SCRFD + ArcFace (face recognition) and the
+# vehicle make/model classifier (kept separate so the big
+# ultralytics/torch layer stays cached)
+RUN pip install --no-cache-dir onnxruntime
+
+# Copy YOLO model (prefer Open Images V7 for 601 classes)
+COPY core/lilly-vision/yolov8n-oiv7.pt .
+COPY core/lilly-vision/yunet.onnx .
+
+# Copy vision server + face recognition + person tracker + node registry + blink detector
+COPY core/lilly-vision/yolov8_vision_server.py .
+COPY core/lilly-vision/face_recognition_engine.py .
+COPY core/lilly-vision/person_tracker.py .
+COPY core/lilly-vision/node_registry.py .
+COPY core/lilly-vision/blink_detector.py .
+COPY core/lilly-vision/car_classifier.py .
+COPY core/lilly-vision/car_labels.txt .
+
+EXPOSE 8198
+
+CMD ["python3", "yolov8_vision_server.py"]

@@ -1,0 +1,18 @@
+[Unit]
+Description=Lilly Pi Recon Station node
+After=network-online.target bluetooth.target
+Wants=network-online.target bluetooth.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Run with root so iw/tcpdump can manage monitor mode + scan.
+ExecStart=/usr/bin/python3 /opt/lilly-recon/pi_recon_node.py --port 8099 --name "$RECON_NAME" --node-id "$RECON_NODE_ID" --host "$FLEET_HOST"
+Restart=always
+RestartSec=5
+EnvironmentFile=-/etc/lilly-recon.conf
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

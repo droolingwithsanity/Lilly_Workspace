@@ -1,0 +1,14 @@
+{
+  "name": "lilly-os-cloud-bridge",
+  "version": "1.1.0",
+  "description": "Master Orchestrator for Lilly OS Innisfil Node",
+  "scripts": {
+    "lilly:build": "cd frontend && npm run build",
+    "lilly:up": "docker compose up -d --build",
+    "lilly:down": "docker compose down",
+    "lilly:purge": "docker compose down && docker system prune -af",
+    "lilly:logs": "docker compose logs -f",
+    "lilly:status": "docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'",
+    "node:check": "netstat -tulpn | grep -E '3001|8000|11435'"
+  }
+}
