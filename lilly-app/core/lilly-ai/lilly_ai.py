@@ -25358,6 +25358,10 @@ pre{position:relative;overflow-x:auto}
 #cameraWindow .cw-vf .br{bottom:0;right:0;border-left:none;border-top:none;border-bottom-right-radius:5px}
 #cameraWindow .cw-vf .tl,#cameraWindow .cw-vf .br{border-color:rgba(255,180,84,.65)}
 #cameraWindow .cw-vf .tr,#cameraWindow .cw-vf .bl{border-color:rgba(255,255,255,.4)}
+/* Tesla-style silhouette view — dim only the feed media, keep overlay + brackets bright */
+#cameraWindow .cw-feed.tesla img,
+#cameraWindow .cw-feed.tesla #cwWebcamGL{filter:brightness(.42) saturate(.18) contrast(1.15)}
+#cwTeslaBtn.active{background:rgba(255,255,255,.16);border-color:#f8fafc;color:#fff;box-shadow:0 0 10px rgba(255,255,255,.25)}
 /* context menu (populated by toggleCwMenu) */
 #cameraWindow #cwMenu{position:absolute;top:48px;left:10px;z-index:50;display:none;background:rgba(17,22,29,.96);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:6px;min-width:200px;box-shadow:0 18px 50px -12px rgba(0,0,0,.8)}
 #cameraWindow #cwMenu .cwm-item{padding:8px 10px;cursor:pointer;border-radius:8px;font-size:12px;color:#e8edf4;display:flex;align-items:center;gap:9px}
@@ -26262,6 +26266,8 @@ pre{position:relative;overflow-x:auto}
         <button id="cwModeWalk"  class="cw-control-btn cw-mode-btn" onclick="setVisionMode('walking')" title="Walking mode — people, bikes, curbs, nearby traffic">🚶 WALK</button>
         <button id="cwModeDrive" class="cw-control-btn cw-mode-btn" onclick="setVisionMode('driving')" title="Driving mode — traffic lights, signs, cars, distance + speed">🚗 DRIVE</button>
         <button id="cwModeStop"  class="cw-control-btn cw-mode-btn" onclick="setVisionMode('stationary')" title="Stationary mode — people + animals around you">🚥 STILL</button>
+        <span class="cw-mode-sep"></span>
+        <button id="cwTeslaBtn" class="cw-control-btn" onclick="setTeslaVisual()" title="Tesla-style white/black silhouettes + lane lines — high-contrast object view">⚪ TESLA</button>
       </div>
     </div>
     <div class="cw-window-controls">
@@ -28830,6 +28836,7 @@ async function submitBlink2FA() {
 document.addEventListener('DOMContentLoaded', () => {
   _initAlertSettings();
   _initVisionMode();  // restore persisted mode + set button active state
+  _initTeslaVisual(); // restore persisted Tesla-style silhouette view
   const input = document.getElementById('cwBlink2faInput');
   if (input) {
     input.addEventListener('keydown', (e) => {
@@ -29064,6 +29071,7 @@ let _visionModeResolved = 'auto';      // server-resolved effective mode
 let _visionDeviceSpeed = null;         // km/h from phone GPS
 let _visionOverlay = {};               // {mode, counts, tier1, total}
 let _visionDrawSeq = 0;                // bumped when boxes change (dirty check)
+let _teslaVisual = false;              // Tesla-style white/black silhouettes + lane lines
 
 const _MODE_META = {
   auto:       { icon: '🔄', name: 'AUTO' },
@@ -29098,6 +29106,30 @@ function _initVisionMode(){
   try{
     const m = localStorage.getItem('lillyVisionMode');
     if(m) setVisionMode(m);
+  }catch(e){}
+}
+
+// ── Tesla-style silhouette view (white/black contrast + lane lines) ──
+function setTeslaVisual(){
+  _teslaVisual = !_teslaVisual;
+  try{ localStorage.setItem('lillyTeslaVisual', _teslaVisual ? '1' : ''); }catch(e){}
+  const b = document.getElementById('cwTeslaBtn');
+  if(b) b.classList.toggle('active', _teslaVisual);
+  const feed = document.getElementById('cwWebcam');
+  if(feed) feed.classList.toggle('tesla', _teslaVisual);
+  addChatMessage('system', _teslaVisual
+    ? '⚪ Tesla view on — white/black silhouettes + lane lines'
+    : '▢ Tesla view off — colored YOLO boxes');
+}
+function _initTeslaVisual(){
+  try{
+    if(localStorage.getItem('lillyTeslaVisual') === '1'){
+      _teslaVisual = true;
+      const b = document.getElementById('cwTeslaBtn');
+      if(b) b.classList.add('active');
+      const feed = document.getElementById('cwWebcam');
+      if(feed) feed.classList.add('tesla');
+    }
   }catch(e){}
 }
 
@@ -29156,6 +29188,185 @@ function _drawVisionHud(ctx, vw, vh){
   }catch(e){}
 }
 
+// ── Tesla-style renderer: white/black silhouettes + lane lines ────
+function _teslaRRect(ctx, x, y, w, h, r){
+  if(r > w/2) r = w/2; if(r > h/2) r = h/2;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+// vanishing-point lane lines + road body (subtle animated flow)
+function _drawTeslaWorld(ctx, vw, vh){
+  const vx = vw * 0.5, vy = vh * 0.36;
+  ctx.save();
+  ctx.lineCap = 'round';
+  const dashOn = (Math.floor(Date.now() / 60)) % 6 < 4;
+  ctx.strokeStyle = 'rgba(242,244,247,.28)';
+  ctx.lineWidth = Math.max(1, vh * 0.0045);
+  for(const cx of [vw * 0.08, vw * 0.92]){
+    ctx.beginPath(); ctx.moveTo(cx, vh);
+    ctx.quadraticCurveTo(cx * 0.5 + vw * 0.5, vh * 0.62, vx, vy);
+    ctx.stroke();
+  }
+  ctx.setLineDash([vh * 0.05, vh * 0.06]);
+  ctx.lineDashOffset = -(Date.now() / 24 % (vh * 0.11));
+  ctx.strokeStyle = 'rgba(242,244,247,' + (dashOn ? '.75' : '.5') + ')';
+  ctx.lineWidth = Math.max(1, vh * 0.003);
+  ctx.beginPath(); ctx.moveTo(vx, vy); ctx.lineTo(vx, vh); ctx.stroke();
+  ctx.setLineDash([]); ctx.lineDashOffset = 0;
+  if((_visionModeResolved || _visionMode) === 'driving'){
+    ctx.strokeStyle = 'rgba(242,244,247,.14)';
+    ctx.lineWidth = Math.max(1, vh * 0.0025);
+    ctx.setLineDash([vh * 0.03, vh * 0.09]);
+    ctx.beginPath(); ctx.moveTo(vw * 0.38, vh * 0.30); ctx.lineTo(vw, vh * 0.52); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(vw * 0.62, vh * 0.30); ctx.lineTo(0, vh * 0.52); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+// shape primitives (Tesla-esque: dark glass/tyres on white body)
+function _teslaCar(ctx, x, y, w, h, c){
+  ctx.fillStyle = c; _teslaRRect(ctx, x, y, w, h * 0.62, Math.min(6, h * 0.16)); ctx.fill();
+  ctx.fillStyle = 'rgba(20,24,28,.9)'; _teslaRRect(ctx, x + w * 0.14, y + h * 0.16, w * 0.72, h * 0.34, Math.min(5, h * 0.10)); ctx.fill();
+  ctx.fillStyle = c; ctx.fillRect(x, y + h * 0.62, w, h * 0.02);
+  ctx.fillStyle = 'rgba(15,18,22,.95)';
+  ctx.fillRect(x + w * 0.06, y + h * 0.66, w * 0.18, h * 0.30); ctx.fillRect(x + w * 0.76, y + h * 0.66, w * 0.18, h * 0.30);
+}
+function _teslaTruck(ctx, x, y, w, h, c){
+  ctx.fillStyle = c; _teslaRRect(ctx, x, y + h * 0.18, w * 0.62, h * 0.46, 4); ctx.fill();
+  _teslaRRect(ctx, x + w * 0.66, y, w * 0.34, h * 0.60, 4); ctx.fill();
+  ctx.fillStyle = 'rgba(20,24,28,.9)'; _teslaRRect(ctx, x + w * 0.72, y + h * 0.10, w * 0.20, h * 0.26, 3); ctx.fill();
+  ctx.fillStyle = 'rgba(15,18,22,.95)';
+  ctx.fillRect(x + w * 0.04, y + h * 0.66, w * 0.16, h * 0.30); ctx.fillRect(x + w * 0.30, y + h * 0.66, w * 0.14, h * 0.30);
+  ctx.fillRect(x + w * 0.70, y + h * 0.66, w * 0.18, h * 0.30);
+}
+function _teslaPerson(ctx, x, y, w, h, c){
+  ctx.fillStyle = c;
+  ctx.beginPath(); ctx.arc(x + w * 0.5, y + h * 0.20, Math.min(w * 0.3, h * 0.09), 0, 7); ctx.fill();          // head
+  _teslaRRect(ctx, x + w * 0.14, y + h * 0.34, w * 0.72, h * 0.50, Math.min(7, h * 0.12)); ctx.fill();          // torso
+  ctx.fillStyle = 'rgba(15,18,22,.85)';
+  ctx.fillRect(x + w * 0.20, y + h * 0.86, w * 0.16, h * 0.14); ctx.fillRect(x + w * 0.64, y + h * 0.86, w * 0.16, h * 0.14); // legs
+}
+function _teslaMoto(ctx, x, y, w, h, c){
+  ctx.fillStyle = c;
+  ctx.beginPath(); ctx.arc(x + w * 0.20, y + h * 0.78, h * 0.20, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(15,18,22,.95)'; ctx.beginPath(); ctx.arc(x + w * 0.20, y + h * 0.78, h * 0.10, 0, 7); ctx.fill();
+  ctx.fillStyle = c;
+  ctx.fillRect(x + w * 0.18, y + h * 0.62, w * 0.66, h * 0.10);
+  ctx.beginPath(); ctx.moveTo(x + w * 0.40, y + h * 0.66); ctx.lineTo(x + w * 0.62, y + h * 0.66); ctx.lineTo(x + w * 0.62, y + h * 0.22); ctx.closePath(); ctx.fill();
+  _teslaRRect(ctx, x + w * 0.55, y + h * 0.14, w * 0.30, h * 0.12, 4); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + w * 0.92, y + h * 0.78, h * 0.18, 0, 7); ctx.fill(); ctx.fill();
+  ctx.fillStyle = 'rgba(15,18,22,.95)'; ctx.beginPath(); ctx.arc(x + w * 0.92, y + h * 0.78, h * 0.085, 0, 7); ctx.fill();
+}
+function _teslaBike(ctx, x, y, w, h, c){
+  ctx.fillStyle = c;
+  ctx.beginPath(); ctx.arc(x + w * 0.16, y + h * 0.80, h * 0.16, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + w * 0.86, y + h * 0.80, h * 0.16, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(15,18,22,.95)';
+  ctx.beginPath(); ctx.arc(x + w * 0.16, y + h * 0.80, h * 0.07, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + w * 0.86, y + h * 0.80, h * 0.07, 0, 7); ctx.fill();
+  ctx.fillStyle = c; ctx.lineWidth = h * 0.05; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x + w * 0.20, y + h * 0.78); ctx.lineTo(x + w * 0.48, y + h * 0.20); ctx.lineTo(x + w * 0.80, y + h * 0.78); ctx.stroke();
+  _teslaRRect(ctx, x + w * 0.40, y + h * 0.10, w * 0.24, h * 0.12, 4); ctx.fill();
+}
+function _teslaLight(ctx, x, y, w, h, c){
+  ctx.fillStyle = 'rgba(18,22,28,.92)'; _teslaRRect(ctx, x, y + h * 0.18, w, h * 0.64, 5); ctx.fill();
+  ctx.fillStyle = c;
+  ctx.beginPath(); ctx.arc(x + w / 2, y + h * 0.12, Math.min(w, h) * 0.16, 0, 7); ctx.fill();
+  const cols = ['#5c646f', (_visionModeResolved || _visionMode) === 'driving' ? '#5ea2ff' : '#5c646f', '#5c646f'];
+  for(let i = 0; i < 3; i++){ ctx.fillStyle = cols[i]; ctx.beginPath(); ctx.arc(x + w / 2, y + h * (0.30 + i * 0.20), Math.min(w, h) * 0.13, 0, 7); ctx.fill(); }
+}
+function _teslaSign(ctx, x, y, w, h, c){
+  ctx.fillStyle = c;
+  ctx.beginPath();
+  const cx = x + w / 2, cy = y + h / 2, R = Math.min(w, h) * 0.46;
+  for(let i = 0; i < 8; i++){
+    const a = Math.PI / 8 + i * Math.PI / 4;
+    const px = cx + Math.cos(a) * R, py = cy + Math.sin(a) * R;
+    if(i) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(10,13,17,.85)'; ctx.beginPath(); ctx.arc(cx, cy, h * 0.12, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(10,13,17,.9)'; ctx.fillRect(x + w * 0.46, y + h * 0.55, w * 0.08, h * 0.45);
+}
+function _teslaCone(ctx, x, y, w, h, c){
+  ctx.fillStyle = c;
+  ctx.beginPath(); ctx.moveTo(x + w * 0.5, y); ctx.lineTo(x + w, y + h); ctx.lineTo(x, y + h); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(15,18,22,.95)'; ctx.fillRect(x + w * 0.08, y + h * 0.78, w * 0.84, h * 0.10);
+}
+function _teslaBollard(ctx, x, y, w, h, c){
+  ctx.fillStyle = c; _teslaRRect(ctx, x + w * 0.25, y, w * 0.5, h, 4); ctx.fill();
+  ctx.fillStyle = 'rgba(10,13,17,.9)'; _teslaRRect(ctx, x + w * 0.25, y + h * 0.82, w * 0.5, h * 0.18, 2); ctx.fill();
+}
+function _teslaAnimal(ctx, x, y, w, h, c){
+  ctx.fillStyle = c;
+  ctx.beginPath(); ctx.ellipse(x + w * 0.5, y + h * 0.52, w * 0.42, h * 0.36, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + w * 0.26, y + h * 0.22, w * 0.16, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(10,13,17,.85)';
+  ctx.beginPath(); ctx.moveTo(x + w * 0.14, y + h * 0.10); ctx.lineTo(x + w * 0.22, y); ctx.lineTo(x + w * 0.30, y + h * 0.16); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = c;
+  ctx.beginPath(); ctx.moveTo(x + w * 0.86, y + h * 0.40); ctx.quadraticCurveTo(x + w * 1.02, y + h * 0.50, x + w * 0.90, y + h * 0.70); ctx.quadraticCurveTo(x + w * 0.86, y + h * 0.54, x + w * 0.80, y + h * 0.48); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(15,18,22,.85)';
+  ctx.fillRect(x + w * 0.30, y + h * 0.82, w * 0.10, h * 0.18); ctx.fillRect(x + w * 0.52, y + h * 0.82, w * 0.10, h * 0.18);
+}
+// one silhouette — ground shadow, shape by class, label chip (tier ≤ 2)
+function _drawTeslaEntity(ctx, det, vw, vh){
+  const x1 = (det.x1 || 0) * vw, y1 = (det.y1 || 0) * vh;
+  const x2 = (det.x2 || 0) * vw, y2 = (det.y2 || 0) * vh;
+  const w = x2 - x1, h = y2 - y1;
+  if(w < 4 || h < 4) return;
+  const tier = det.tier || det.priority || 3;
+  const crit = tier === 1;
+  const bg = tier >= 3;
+  const color = crit ? '#ffb454' : '#f2f4f7';
+  ctx.fillStyle = bg ? 'rgba(0,0,0,.3)' : 'rgba(0,0,0,.5)';
+  ctx.beginPath(); ctx.ellipse((x1 + x2) / 2, y2, w * 0.42, Math.max(2, h * 0.03), 0, 0, 7); ctx.fill();
+  ctx.save();
+  ctx.globalAlpha = bg ? 0.45 : 1;
+  const lab = String(det.label || 'object').toLowerCase();
+  if(/person|man|woman|pedestrian|human body/.test(lab)) _teslaPerson(ctx, x1, y1, w, h, color);
+  else if(lab.includes('truck')) _teslaTruck(ctx, x1, y1, w, h, color);
+  else if(/motorcycle|motorbike/.test(lab)) _teslaMoto(ctx, x1, y1, w, h, color);
+  else if(/bicycle|bike/.test(lab)) _teslaBike(ctx, x1, y1, w, h, color);
+  else if(/car|bus|van|suv|pickup|minivan|vehicle|land vehicle/.test(lab)) _teslaCar(ctx, x1, y1, w, h, color);
+  else if(/traffic light|signal/.test(lab)) _teslaLight(ctx, x1, y1, w, h, color);
+  else if(lab.includes('sign')) _teslaSign(ctx, x1, y1, w, h, color);
+  else if(lab.includes('cone')) _teslaCone(ctx, x1, y1, w, h, color);
+  else if(/bollard|post/.test(lab)) _teslaBollard(ctx, x1, y1, w, h, color);
+  else if(/dog|cat/.test(lab)) _teslaAnimal(ctx, x1, y1, w, h, color);
+  else { ctx.fillStyle = color; _teslaRRect(ctx, x1, y1, w, h, Math.min(6, h * 0.18)); ctx.fill(); }
+  ctx.restore();
+  if(!bg){
+    let label = det.label || 'object';
+    if(det.make && det.model) label = det.make + ' ' + det.model;
+    else if(det.make) label = det.make;
+    let txt = label;
+    if(det.distance_m != null) txt += ' · ' + Math.round(det.distance_m) + 'm';
+    ctx.font = '600 10px system-ui, -apple-system, sans-serif';
+    const tw = Math.min(ctx.measureText(txt).width + 8, 170);
+    let cy0 = y1 - 15;
+    if(cy0 < 2) cy0 = y2 + 2;
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; _teslaRRect(ctx, x1, cy0, tw, 13, 4); ctx.fill();
+    ctx.fillStyle = crit ? '#ffd9a0' : '#aeb9c7';
+    ctx.fillText(txt, x1 + 4, cy0 + 10);
+  }
+}
+function _drawTeslaHud(ctx, vw, vh, list){
+  try{
+    const meta = _MODE_META[_visionModeResolved] || _MODE_META.auto;
+    const crit = (list || []).filter(d => (d.tier || 3) === 1).length;
+    let txt = meta.icon + ' ' + meta.name + ' · ⚪ TESLA';
+    if(crit) txt += ' · ⚠ ' + crit;
+    ctx.font = 'bold 11px system-ui, -apple-system, sans-serif';
+    const tw = ctx.measureText(txt).width + 16;
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; _teslaRRect(ctx, 6, 6, tw, 20, 5); ctx.fill();
+    ctx.fillStyle = meta.name === 'DRIVE' ? '#ffb454' : '#f2f4f7';
+    ctx.fillText(txt, 14, 20);
+  }catch(e){}
+}
+
 // ── Full prioritized overlay frame (client filter: tier ≤ 2 fast-path) ──
 function _drawVisionOverlay(ctx, detections, vw, vh){
   if(!ctx || !vw || !vh) return;
@@ -29165,13 +29376,19 @@ function _drawVisionOverlay(ctx, detections, vw, vh){
     : [];
   list.sort((a, b) => (a.tier || 3) - (b.tier || 3));
   ctx.save();
-  for(const det of list){
-    const t = det.tier || det.priority || 3;
-    if(t > 2) continue;                     // background/situational: skip for speed
-    _drawVisionBox(ctx, det, vw, vh);
+  if(_teslaVisual){
+    _drawTeslaWorld(ctx, vw, vh);
+    for(const det of list) _drawTeslaEntity(ctx, det, vw, vh);
+    _drawTeslaHud(ctx, vw, vh, list);
+  } else {
+    for(const det of list){
+      const t = det.tier || det.priority || 3;
+      if(t > 2) continue;                     // background/situational: skip for speed
+      _drawVisionBox(ctx, det, vw, vh);
+    }
+    if(list.length) _drawVisionHud(ctx, vw, vh);
   }
   ctx.restore();
-  if(list.length) _drawVisionHud(ctx, vw, vh);
 }
 
 // Legacy alias kept for any code that incremented _drawPoiDetection —
@@ -29385,7 +29602,7 @@ async function _cwStartWebcam(){
           }
           if(_gpuInitialized){
             // WebGL handles rendering — just update YOLO overlay on 2D canvas
-            if(overlay && octx && _yoloBoxesEnabled){
+if(overlay && octx && (_yoloBoxesEnabled || _teslaVisual)){
               overlay.width = vw; overlay.height = vh;
               _drawVisionOverlay(octx, _cwDetections, vw, vh);
             }
@@ -30499,6 +30716,7 @@ function toggleCwMenu(){
   const groups = [
     {label:'View', items:[
       ['⛶ Fullscreen + landscape', ()=>fsCameraWindow()],
+      ['⚪ Tesla view', ()=>setTeslaVisual()],
       ['▢ Detection boxes', ()=>toggleYoloBoxes()],
       ['👤 Faces on/off', ()=>toggleFaceRecognition()],
       ['👁 IDs (who + evidence)', ()=>{ if(!_cwFacesOpen) toggleFacesPanel(); }],

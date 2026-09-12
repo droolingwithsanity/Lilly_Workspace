@@ -208,6 +208,26 @@ for i, (name, sig) in enumerate(js_functions, 310):
     else:
         log_result(i, f"JS: {name}() exists", "FAIL", f"Missing: {sig}")
 
+# 4.2.1 Tesla-style silhouette view
+tesla_checks = [
+    ("Tesla button in control bar", 'id="cwTeslaBtn"'),
+    ("setTeslaVisual() JS", "function setTeslaVisual()"),
+    ("_initTeslaVisual() JS", "function _initTeslaVisual()"),
+    ("_teslaVisual state", "let _teslaVisual"),
+    ("_drawTeslaWorld() renderer", "function _drawTeslaWorld"),
+    ("_drawTeslaEntity() renderer", "function _drawTeslaEntity"),
+    ("_drawTeslaHud() renderer", "function _drawTeslaHud"),
+    ("Tesla branch in _drawVisionOverlay", "if(_teslaVisual)"),
+    ("Feed dim CSS (.cw-feed.tesla)", ".cw-feed.tesla"),
+    ("GPU guard honors Tesla", "(_yoloBoxesEnabled || _teslaVisual)"),
+]
+
+for i, (name, marker) in enumerate(tesla_checks, 340):
+    if marker in content:
+        log_result(i, f"Tesla: {name}", "PASS")
+    else:
+        log_result(i, f"Tesla: {name}", "FAIL", f"Missing: {marker}")
+
 # 4.3 Check API endpoint references in JS
 api_refs = [
     ("/api/blink/cameras in _cwStartBlink", "/api/blink/cameras"),
