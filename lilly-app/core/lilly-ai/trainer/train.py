@@ -7,11 +7,44 @@ from typing import Optional
 
 import torch
 from datasets import Dataset
-from transformers import set_seed
+from transformers import EarlyStoppingCallback, set_seed
 
 from .config import TrainerConfig
 
 logger = logging.getLogger("PersonaTrainer.Train")
+
+
+def _eval_and_save_kwargs(config: TrainerConfig) -> dict:
+    """Eval + save on the SAME cadence (required for best-model selection)."""
+    eval_steps = config.eval_steps or config.save_steps
+    return {
+        "lr_scheduler_type": config.lr_scheduler_type,
+        "save_strategy": "steps",
+        "eval_steps": eval_steps,
+        "save_steps": eval_steps,
+    }
+
+
+def _best_model_kwargs(config: TrainerConfig) -> dict:
+    if not config.load_best_model_at_end:
+        return {}
+    return {
+        "load_best_model_at_end": True,
+        "metric_for_best_model": "eval_loss",
+        "greater_is_better": False,
+    }
+
+
+def _callbacks(config: TrainerConfig) -> list:
+    patience = int(config.early_stopping_patience or 0)
+    if patience <= 0:
+        return []
+    return [
+        EarlyStoppingCallback(
+            early_stopping_patience=patience,
+            early_stopping_threshold=config.early_stopping_threshold,
+        )
+    ]
 
 
 def _use_unsloth(config: TrainerConfig) -> bool:
@@ -110,9 +143,9 @@ def _train_unsloth(
         learning_rate=config.learning_rate,
         warmup_steps=config.warmup_steps,
         logging_steps=config.logging_steps,
-        save_steps=config.save_steps,
         eval_strategy="steps",
-        eval_steps=config.save_steps,
+        **_eval_and_save_kwargs(config),
+        **_best_model_kwargs(config),
         save_total_limit=2,
         prediction_loss_only=True,
         fp16=not is_bfloat16_supported(),
@@ -138,6 +171,7 @@ def _train_unsloth(
             eval_dataset=eval_ds,
             dataset_text_field="text",
             max_seq_length=config.max_seq_length,
+            callbacks=_callbacks(config),
         )
     else:
         from transformers import DataCollatorForLanguageModeling
@@ -155,6 +189,7 @@ def _train_unsloth(
             data_collator=DataCollatorForLanguageModeling(
                 tokenizer=tokenizer, mlm=False
             ),
+            callbacks=_callbacks(config),
         )
 
     logger.info("[Unsloth] Starting training...")
@@ -293,9 +328,9 @@ def _train_peft(
         learning_rate=config.learning_rate,
         warmup_steps=config.warmup_steps,
         logging_steps=config.logging_steps,
-        save_steps=config.save_steps,
         eval_strategy="steps",
-        eval_steps=config.save_steps,
+        **_eval_and_save_kwargs(config),
+        **_best_model_kwargs(config),
         save_total_limit=2,
         prediction_loss_only=True,
         dataloader_num_workers=2,
@@ -319,6 +354,7 @@ def _train_peft(
         eval_dataset=eval_ds,
         data_collator=data_collator,
         processing_class=tokenizer,
+        callbacks=_callbacks(config),
     )
 
     logger.info("[PEFT] Starting training...")

@@ -22,8 +22,10 @@ services:
       - ./core/lilly-ai:/app
       # Mount workspace start.sh until the image is rebuilt with the fix
       - ./core/lilly-ai/start.sh:/start.sh:ro
+      - ./core/lilly-ai/training.html:/app/training.html:ro
+      - ./core/lilly-ai/training_control.py:/app/training_control.py:ro
       - ${SSH_DIR:-/home/labhrasd/.ssh}:/root/.ssh:ro
-      - ./data/ssh:/root/lilly_termux_key:ro
+      - ./data/ssh/id_ed25519_lilly:/root/lilly_termux_key:ro
       - ./data/ai-server:/root/ai-server:rw
       - ./data/lilly:/app/data
       - ./data/connect:/app/data/connect
@@ -39,6 +41,8 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
       - PREFER_BACKEND=${PREFER_BACKEND:-ollama}
       - SENSOR_SERVER_URL=${SENSOR_SERVER_URL:-http://100.115.234.87:8099}
+      - TENCENTDB_GATEWAY_URL=${TENCENTDB_GATEWAY_URL:-http://100.108.122.95:8420}
+      - TENCENTDB_API_KEY=${TENCENTDB_API_KEY:-tdai-memory-key}
       - LILLY_MAX_NODES=${LILLY_MAX_NODES:-6}
       - TERMUX_SSH_HOST=${TERMUX_SSH_HOST}
       - TERMUX_SSH_PORT=${TERMUX_SSH_PORT:-8022}
@@ -70,6 +74,21 @@ services:
       - BLINK_MANAGED=${BLINK_MANAGED:-false}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Resource limits — prevent runaway processes from crashing the host
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8098/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
   lilly-vision:
@@ -85,13 +104,35 @@ services:
       - YOLO_MODEL=yolov8n-oiv7.pt
       - OLLAMA_URL=${OLLAMA_URL:-http://127.0.0.1:11434}
       - VISION_LLM_MODEL=${VISION_LLM_MODEL:-qwen2.5:3b}
-      - OSINT_PUSH_URL=${OSINT_PUSH_URL:-}
+      - OSINT_PUSH_URL=${OSINT_PUSH_URL:-http://127.0.0.1:8200/xceb/vision/faces/osint_unknown}
+      # CPU throttling env vars — reduce YOLO processing load
+      - MAX_INFER_SIDE=640
+      - FACE_ENRICH_INTERVAL=3.0
+      - BLINK_INTERVAL=3.0
+      - CAR_CLASSIFY_INTERVAL=3.0
+      - UNKNOWN_FACE_SAMPLE_INTERVAL=15.0
+      - YOLO_MAX_DETECTIONS=100
     volumes:
       - ./data/tts-cache:/tmp/lilly_tts
       - ./data/lilly:/app/data
       - ./data/frames:/app/frames
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Resource limits — prevent runaway processes from crashing the host
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8198/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
   lilly-trainer:
@@ -104,8 +145,74 @@ services:
     environment:
       - PORT=8199
       - BASE_MODEL=yolov8n-oiv7.pt
+      - INSTAGRAM_DATA_DIR=/app/instagram_data
     volumes:
       - ./data/training:/app/training_data
+      - ./core/lilly-trainer/instagram_scraper.py:/app/instagram_scraper.py
+      - ./core/lilly-trainer/yolo_trainer_api.py:/app/yolo_trainer_api.py
+      - ./core/lilly-trainer/yolo_self_trainer.py:/app/yolo_self_trainer.py
+      - ./core/lilly-trainer/photo_training_bridge.py:/app/photo_training_bridge.py
+      - ./data/training/instagram:/app/instagram_data
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8199/api/trainer/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── XCEB: Face + OSINT Evidence Broker ──────────────────────────────────────
+  # Autonomous reverse-face search → identity resolution → live box rename.
+  # Dashboard at http://localhost:8200 (API + SSE stream)
+  lilly-xceb:
+    image: lilly-xceb
+    build:
+      context: .
+      dockerfile: core/xceb/Dockerfile.xceb
+    container_name: lilly-xceb
+    network_mode: host
+    environment:
+      - XCEB_DATA=/app/data
+      - XCEB_SHARED=/app/shared
+      - XCEB_PORT=8200
+      - XCEB_PUBLIC_BASE=${XCEB_PUBLIC_BASE:-}
+      - XCEB_VISION_URL=${XCEB_VISION_URL:-http://127.0.0.1:8198}
+      - XCEB_LLM_URL=${OLLAMA_URL:-http://127.0.0.1:11434}
+      - XCEB_RESOLVE_CONF=${XCEB_RESOLVE_CONF:-0.55}
+      - XCEB_AUTO_ENROLL=${XCEB_AUTO_ENROLL:-1}
+      - XCEB_SLEEP_WINDOW=${XCEB_SLEEP_WINDOW:-01:00-05:00}
+      - XCEB_SCHEDULER=1
+      - XCEB_TOKEN=${XCEB_TOKEN:-}
+      - XCEB_PROXY=${XCEB_PROXY:-}
+      - SCRFD_CONF=0.15  # small 256px vision crops need a relaxed detector floor
+    volumes:
+      - ./data/xceb:/app/data                 # cases, faces index, pub crops, logs
+      - ./data/lilly:/app/shared:ro            # shared models + known_faces for seeding
+      - ./data/lilly/models:/app/data/models:ro  # vendored engine reads /app/data/models
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 3G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8200/xceb/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
     restart: unless-stopped
 
   # Native host Ollama usually owns :11434 (systemd, OLLAMA_HOST=0.0.0.0:11434).
@@ -129,6 +236,20 @@ services:
     container_name: piper_api
     ports:
       - "5001:5001"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
   # ═════════════════ OPTIONS (opt-in) ═════════════════
@@ -158,6 +279,20 @@ services:
     image: lilly-dashboard-lilly-dashboard:latest
     container_name: lilly-dashboard
     profiles: ["extras"]
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
   lillyos-redis:
@@ -211,6 +346,21 @@ services:
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Resource limits — prevent runaway processes from crashing the host
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8098/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
   figranium:

@@ -112,11 +112,14 @@ AVATAR_CONFIGS = {
 class AvatarTrainingPipeline:
     """Automated training pipeline for all 9 avatars."""
 
-    def __init__(self, output_base_dir: str = "trained_avatars"):
+    def __init__(
+        self, output_base_dir: str = "trained_avatars", gguf_quant: str = "q8_0"
+    ):
         self.output_base_dir = Path(output_base_dir)
         self.output_base_dir.mkdir(exist_ok=True)
         self.training_log = []
         self.start_time = None
+        self.gguf_quant = gguf_quant or "q8_0"
 
     def train_avatar(
         self, avatar_key: str, config: Dict, use_gpu: bool = False
@@ -149,7 +152,7 @@ class AvatarTrainingPipeline:
                 use_cpu=not use_gpu,
                 use_unsloth=use_gpu,
                 save_gguf=use_gpu,
-                gguf_quant="q8_0",
+                gguf_quant=self.gguf_quant if use_gpu else "q8_0",
                 max_train_samples=5000,
             )
 
@@ -437,10 +440,18 @@ def main():
         action="store_true",
         help="Use GPU + Unsloth for faster training and GGUF export",
     )
+    parser.add_argument(
+        "--gguf-quant",
+        default="q8_0",
+        choices=["q8_0", "q4_k_m", "q4_k_s", "q5_k_m", "f16"],
+        help="GGUF quantization for the Unsloth export (applies with --gpu)",
+    )
     args = parser.parse_args()
 
     # Create pipeline
-    pipeline = AvatarTrainingPipeline(output_base_dir=args.output_dir)
+    pipeline = AvatarTrainingPipeline(
+        output_base_dir=args.output_dir, gguf_quant=args.gguf_quant
+    )
 
     # Determine which avatars to train
     if args.avatar:

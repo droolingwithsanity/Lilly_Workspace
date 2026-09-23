@@ -46,12 +46,57 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("lilly-vision")
 
 MODEL: Optional[YOLO] = None
-CONF_THRESHOLD = float(os.environ.get("CONF_THRESHOLD", "0.35"))
+# 0.25 keeps sign/light/vehicle boxes alive at dusk + rain; tier floors
+# (below) filter the noise so the drive overlay stays clean.
+CONF_THRESHOLD = float(os.environ.get("CONF_THRESHOLD", "0.25"))
 # Prefer Open Images V7 (601 classes) over COCO (80 classes) for broader detection
 MODEL_NAME = os.environ.get("YOLO_MODEL", "yolov8n-oiv7.pt")
 MODEL_PATH = os.environ.get("YOLO_MODEL_PATH", "")
 IOU_THRESHOLD = float(os.environ.get("YOLO_IOU_THRESHOLD", "0.45"))
 MAX_DETECTIONS = int(os.environ.get("YOLO_MAX_DETECTIONS", "300"))
+
+# ── Admin class toggles (training console at :8098/training) ─────────────
+# vision_class_config.json holds {"classes": {"person": true, "car": false},
+# "default": true} — classes switched OFF here are dropped from detection
+# results before any enrichment so the overlay / Lilly never see them.
+CLASS_CONFIG_PATH = Path(__file__).parent / "vision_class_config.json"
+
+
+def _class_toggles() -> dict:
+    try:
+        cfg = json.loads(CLASS_CONFIG_PATH.read_text(encoding="utf-8"))
+        return isinstance(cfg, dict) and cfg.get("classes") or {}
+    except Exception:
+        return {}
+
+
+def _class_default_enabled() -> bool:
+    try:
+        cfg = json.loads(CLASS_CONFIG_PATH.read_text(encoding="utf-8"))
+        return bool(cfg.get("default", True))
+    except Exception:
+        return True
+
+
+def _filter_disabled_classes(detections: list) -> list:
+    """Drop detections whose class is toggled OFF in the admin console."""
+    toggles = _class_toggles()
+    if not toggles:
+        return detections
+    default = _class_default_enabled()
+    kept = []
+    for d in detections:
+        label = str(d.get("label") or d.get("class") or "").strip().lower()
+        if label:
+            if label in toggles:
+                if toggles[label]:
+                    kept.append(d)
+            elif default:
+                kept.append(d)
+        else:
+            kept.append(d)  # no label -> keep, can't be turned off
+    return kept
+
 
 # ── Per-frame cost controls ────────────────────────────────────────────
 # The heavy identification stages (InsightFace, MediaPipe blink, the vehicle
@@ -825,15 +870,88 @@ MODE_TIERS = {
 
 # Confidence floor per tier — critical objects keep even weak boxes;
 # background tier keeps nothing (it's hidden anyway).
-_TIER_CONF_MIN = {1: 0.20, 2: 0.28, 3: 0.38}
+# Driving: floors sit BELOW the model's 0.25 conf so nothing that survived
+# inference gets killed by the overlay filter (the old 0.38 tier-3 floor
+# silently dropped most cars/signs/lights at 0.30–0.38 conf).
+_TIER_CONF_MIN = {1: 0.18, 2: 0.24, 3: 0.26}
 
 # How many boxes can be drawn per tier (keeps the canvas cheap on mobile)
-_TIER_MAX_BOXES = {1: 12, 2: 8, 3: 4}
+_TIER_MAX_BOXES = {1: 12, 2: 10, 3: 10}
+
+# ── Drive-alert MOTION GATE ──────────────────────────────────────────
+# Drive-safety alerts that have real consequences when wrong (PEDESTRIAN,
+# FORWARD_COLLISION) are only meaningful while the device is actually in
+# motion. A parked neighbor's car at the front door, or a porch decoration
+# that looks like a person, must NEVER trigger "brake now / slow down".
+# These constants gate those alerts on phone telemetry:
+#   speed: GPS ground speed in km/h
+#   motion: accelerometer-derived magnitude in g (linear accel ÷9.80665,
+#           or |total_accel/1g − 1| for bumps/turns, or significant_motion)
+# Stop-sign / traffic-light alerts stay ungated — you still see them while
+# stopped at a red light, which is exactly when you need them.
+DRIVE_ALERT_MIN_SPEED_KPH = float(os.environ.get("DRIVE_ALERT_MIN_SPEED_KPH", "8"))
+DRIVE_ALERT_MIN_MOTION_G = float(os.environ.get("DRIVE_ALERT_MIN_MOTION_G", "0.12"))
+# Pedestrian alerts need a higher confidence than the generic tier-1 floor
+# (0.18) so furniture/porch/fence false positives don't make us yell.
+PEDESTRIAN_ALERT_CONF = float(os.environ.get("PEDESTRIAN_ALERT_CONF", "0.35"))
+
+
+def _motion_from_sensors(sensors: dict | None) -> float | None:
+    """Best-effort motion magnitude in g from a termux /sensors/all payload.
+
+    Mirrors lilly_ai._motion_g(): supports {sensor_name: {values:[x,y,z]}}
+    termux payloads for significant_motion / linear_acceleration /
+    accelerometer_uncalibrated / accelerometer. Returns None when no motion
+    sensor data is present (caller treats that as "not moving", the safe
+    default for drive alerts).
+    """
+    if not sensors:
+        return None
+    inner = sensors.get("sensors")
+    raw: dict = inner if isinstance(inner, dict) else sensors
+
+    def _mag(v):
+        if isinstance(v, dict):
+            v = v.get("values")
+        if isinstance(v, (list, tuple)) and len(v) >= 3:
+            try:
+                return float((v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5)
+            except Exception:
+                return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        return None
+
+    best: float | None = None
+    for k in ("significant_motion", "motion"):
+        v = _mag(raw.get(k))  # already in g (unitless event/gear value)
+        if v is not None and (best is None or v > best):
+            best = v
+    G = 9.80665
+    for k in ("linear_acceleration", "accelerometer_uncalibrated"):
+        v = _mag(raw.get(k))  # termux reports m/s² → normalize to g
+        if v is not None:
+            v = v / G
+            if best is None or v > best:
+                best = v
+    v = _mag(raw.get("accelerometer"))
+    if v is not None:
+        dev = abs(v / G - 1.0)  # deviation from 1g captures bumps/turns/braking
+        if best is None or dev > best:
+            best = dev
+    return round(best, 3) if best is not None else None
 
 
 def resolve_mode(detections: list, requested: str = "auto") -> str:
     """Resolve the effective vision mode. 'auto' derives from scene content:
-    lots of vehicles → driving; mainly people → walking; else stationary."""
+    lots of vehicles → driving; mainly people → walking; else stationary.
+
+    IMPORTANT: a SINGLE vehicle in frame is never enough to declare driving —
+    otherwise pointing the camera at your front door while the neighbour's
+    parked car is visible would arm the whole drive-alert system. Two or more
+    vehicles, or confirmed GPS/accel motion (handled by the caller), is what
+    switches us into driving mode.
+    """
     req = (requested or "auto").strip().lower()
     if req in VISION_MODES:
         return req
@@ -850,8 +968,7 @@ def resolve_mode(detections: list, requested: str = "auto") -> str:
         return MODE_DRIVING
     if people and people / total >= 0.3:
         return MODE_WALKING
-    if vehicle >= 1:
-        return MODE_DRIVING
+    # single vehicle + no motion evidence → treat as parked scene, not driving
     return MODE_STATIONARY
 
 
@@ -976,6 +1093,191 @@ def overlay_summary(
         "critical": tier1,
         "total": len(detections),
     }
+
+
+# ── Drive safety alerts (deterministic — no LLM, no randomness) ─────
+# Built per frame from tier 1/2 detections + closing speeds + GPS speed.
+# Cooldown-gated per type so the PiP voice never spams; level-1 collision
+# alerts re-fire on a short timer while the risk persists.
+_DRIVE_ALERT_STATE: dict[str, float] = {}
+_DRIVE_ALERT_COOLDOWN = {
+    "STOP_SIGN": 25.0,
+    "PEDESTRIAN": 12.0,
+    "TRAFFIC_LIGHT": 30.0,
+    "FORWARD_COLLISION": 8.0,
+}
+_LABEL_STOP_SIGN = {"stop sign", "traffic sign", "traffic signal", "sign"}
+_LABEL_PEDESTRIAN = {"person", "man", "woman", "human body", "pedestrian", "people"}
+_LABEL_TRAFFIC_LIGHT = {"traffic light"}
+_LABEL_VEHICLE = _TRAFFIC_VEHICLES
+
+# Short spoken phrases — Piper-friendly (no symbols, no asterisks).
+_ALERT_SPEECH = {
+    "STOP_SIGN_NEAR": "stop sign coming up",
+    "STOP_SIGN_AHEAD": "stop sign ahead",
+    "PEDESTRIAN_NEAR": "pedestrian right there, slow down",
+    "PEDESTRIAN_AHEAD": "pedestrian up ahead",
+    "TRAFFIC_LIGHT": "traffic light ahead",
+    "COLLISION_BRAKE": "too close to the vehicle ahead, brake now",
+    "COLLISION_SLOW": "slow down, vehicle ahead is too close",
+}
+
+# Last drive-alert snapshot, readable by /api/vision/drive (passive polls)
+_DRIVE_LAST: dict = {"ts": 0.0, "mode": None, "device_speed_kph": None, "alerts": []}
+
+
+def _drive_alerts(
+    detections: list,
+    device_speed_kph: float | None,
+    now: float | None = None,
+    motion_g: float | None = None,
+) -> list:
+    """Deterministic drive-safety alerts for the current frame.
+
+    Returns up to 3 alerts ordered by severity:
+      {type, level (1 critical / 2 caution / 3 info), text, tts, ttc_s}
+    Level 1/2 fire speech (cooldown-gated); level 3 is overlay-only.
+
+    MOTION GATE: PEDESTRIAN + FORWARD_COLLISION alerts only fire while phone
+    telemetry confirms the device is actually moving (GPS ≥ 8 km/h OR accel
+    ≥ 0.12g). Otherwise a parked neighbour's car or a porch-decoration
+    "pedestrian" would trigger braking alarms while you stand at the door.
+    STOP_SIGN / TRAFFIC_LIGHT remain ungated (you still need them stopped).
+    """
+    if now is None:
+        now = time.time()
+    lvl1_warned: set[str] = set()
+    alerts: list[dict] = []
+    dev = float(device_speed_kph or 0)  # GPS ground speed (km/h)
+    moving = bool(
+        (device_speed_kph is not None and dev >= DRIVE_ALERT_MIN_SPEED_KPH)
+        or (motion_g is not None and motion_g >= DRIVE_ALERT_MIN_MOTION_G)
+    )
+
+    for d in detections:
+        if d.get("tier") not in (1, 2):
+            continue
+        label = str(d.get("label", "")).lower()
+        conf = float(d.get("conf", 0))
+        cx = d.get("x", 0.5) + d.get("w", 0) / 2
+        where = (
+            "on the left"
+            if cx < 0.33
+            else ("on the right" if cx > 0.66 else "straight ahead")
+        )
+        dist = d.get("distance_m") or None
+        close = dist is not None and dist <= 14.0
+
+        if label in _LABEL_STOP_SIGN and "STOP_SIGN" not in lvl1_warned:
+            lvl1_warned.add("STOP_SIGN")
+            alerts.append(
+                {
+                    "type": "STOP_SIGN",
+                    "level": 2 if close else 3,
+                    "text": f"stop sign {where}"
+                    if close
+                    else f"stop sign ahead, {where}",
+                    "tts": _ALERT_SPEECH[
+                        "STOP_SIGN_NEAR" if close else "STOP_SIGN_AHEAD"
+                    ],
+                }
+            )
+        if (
+            moving
+            and label in _LABEL_PEDESTRIAN
+            and conf >= PEDESTRIAN_ALERT_CONF
+            and "PEDESTRIAN" not in lvl1_warned
+        ):
+            # Motion-gated AND confidence-gated: a weak "person" box while
+            # standing still is a porch plant, not a hazard worth shouting about.
+            lvl1_warned.add("PEDESTRIAN")
+            alerts.append(
+                {
+                    "type": "PEDESTRIAN",
+                    "level": 1 if close else 2,
+                    "text": f"pedestrian {where}"
+                    if close
+                    else f"pedestrian ahead, {where}",
+                    "tts": _ALERT_SPEECH[
+                        "PEDESTRIAN_NEAR" if close else "PEDESTRIAN_AHEAD"
+                    ],
+                }
+            )
+        if label in _LABEL_TRAFFIC_LIGHT and "TRAFFIC_LIGHT" not in lvl1_warned:
+            lvl1_warned.add("TRAFFIC_LIGHT")
+            alerts.append(
+                {
+                    "type": "TRAFFIC_LIGHT",
+                    "level": 3,
+                    "text": "traffic light ahead",
+                    "tts": _ALERT_SPEECH["TRAFFIC_LIGHT"],
+                }
+            )
+        if (
+            moving
+            and label in _LABEL_VEHICLE
+            and "FORWARD_COLLISION" not in lvl1_warned
+        ):
+            closing = float(
+                d.get("closing_kph") or 0
+            )  # hi=this vehicle approaching fast
+            ttc = None
+            if dist and closing > 1.0:
+                ttc = dist / (closing / 3.6)
+            risky = False
+            # 1) Physically too close at our speed: can't stop comfortably.
+            if dist and dev > 8:
+                # comfortable decel 3.0 m/s² → needs v²/(2a) metres to stop
+                stop_dist = (dev / 3.6) ** 2 / (2 * 3.0)
+                if dist < stop_dist * 1.25 + 2:
+                    risky = True
+            # 2) Really closing on us while we're in motion (jitter-suppressed
+            #    when parked because this whole branch is motion-gated above).
+            if close and (closing > 8 or (ttc is not None and ttc < 4.0)):
+                risky = True
+            if risky:
+                lvl1_warned.add("FORWARD_COLLISION")
+                # Emergency if contact in <3.5s or we're basically on it.
+                emergency = (ttc is not None and ttc < 3.5) or (
+                    dist is not None and dist <= 6.0
+                )
+                alerts.append(
+                    {
+                        "type": "FORWARD_COLLISION",
+                        "level": 1,
+                        "text": "vehicle ahead too close — brake now"
+                        if emergency
+                        else "vehicle ahead too close — slow down",
+                        "tts": _ALERT_SPEECH[
+                            "COLLISION_BRAKE" if emergency else "COLLISION_SLOW"
+                        ],
+                        "ttc_s": round(ttc, 1) if ttc is not None else None,
+                    }
+                )
+
+    if not alerts:
+        return []
+    out: list[dict] = []
+    for a in sorted(alerts, key=lambda x: (x["level"], -(x.get("ttc_s") or 99))):
+        key = a["type"]
+        last = _DRIVE_ALERT_STATE.get(key, 0.0)
+        # Level 1 re-fires on its short cooldown while the risk is real;
+        # level 2+ respect their (longer) cooldown so we nag, not yammer.
+        if a["level"] == 1 or (now - last) >= _DRIVE_ALERT_COOLDOWN.get(key, 15.0):
+            if a["level"] in (1, 2):
+                _DRIVE_ALERT_STATE[key] = now
+            out.append(a)
+            if len(out) >= 3:
+                break
+    # Level-3 alerts always ride along (banner-only, never spoken)
+    out.extend(
+        a
+        for a in sorted(alerts, key=lambda x: x["level"])
+        if a["level"] == 3
+        and len(out) < 4
+        and a["type"] not in {x["type"] for x in out}
+    )
+    return out
 
 
 def build_sensor_context(sensors: dict) -> str:
@@ -1749,6 +2051,35 @@ async def vision_status():
     }
 
 
+@app.get("/api/vision/classes")
+async def vision_classes():
+    """Full class list of the loaded model + current enable toggles.
+
+    Used by the admin training console (:8098/training → Objects panel).
+    """
+    names: list = list(MODEL.names.values()) if MODEL is not None else []
+    toggles = _class_toggles()
+    default = _class_default_enabled()
+    seen: dict = {}
+    for n in names:
+        seen.setdefault(str(n).strip().lower(), str(n))
+    classes = [
+        {
+            "name": label,
+            "key": key,
+            "enabled": toggles.get(key, default),
+        }
+        for key, label in seen.items()
+    ]
+    return {
+        "ok": True,
+        "model": MODEL_NAME,
+        "count": len(classes),
+        "default_enabled": default,
+        "classes": classes,
+    }
+
+
 @app.post("/api/vision")
 async def vision_detect(request: Request):
     try:
@@ -1779,6 +2110,11 @@ async def vision_detect(request: Request):
         return JSONResponse(
             status_code=400, content={"error": f"Image decode error: {e}"}
         )
+
+    # Keep the most recent real frame (capped size) for manual re-observe.
+    if image_b64 and len(image_b64) <= 700000:
+        _LAST_FRAME["ts"] = time.time()
+        _LAST_FRAME["b64"] = image_b64
 
     if MODEL is None:
         return JSONResponse(status_code=503, content={"error": "YOLO model not loaded"})
@@ -1825,6 +2161,9 @@ async def vision_detect(request: Request):
                     "distance_desc": distance_desc(est) if est else None,
                 }
             )
+
+    # ── Admin class toggles: drop classes switched OFF in the training console
+    detections = _filter_disabled_classes(detections)
 
     # ── Face recognition: rename "person" → "John" etc. ──────────────
     global FACE_ENGINE, _face_enrich_cache, _vehicle_enrich_cache, _blink_ts
@@ -1930,19 +2269,75 @@ async def vision_detect(request: Request):
     # ── Observation mode: filter + priority annotate (traffic-aware) ──
     resolved_mode, detections = apply_vision_mode(detections, mode, now)
 
-    # Device forward speed from phone GPS (km/h) if available
-    device_speed_kph = None
-    try:
-        raw = sensors.get("sensors") or {}
-        gps = raw.get("gps_speed") or sensors.get("gps_speed")
-        if gps is None:
-            loc = raw.get("location") or sensors.get("location")
-            gps = loc.get("speed") if isinstance(loc, dict) else None
-        if gps is not None:
-            device_speed_kph = round(float(gps) * 3.6, 1)
-    except Exception:
-        pass
+    # Forward live observations → training cache (fire-and-forget, never blocks)
+    if detections:
+        asyncio.create_task(
+            _forward_observations(detections, image_b64, "lilly-camera", (h, w))
+        )
+
+    # Device forward speed from phone GPS (km/h) if available.
+    # Callers (drive watch / PiP) can pass it directly; otherwise derive it
+    # from the merged phone sensor context.
+    device_speed_kph = body.get("device_speed_kph")
+    if device_speed_kph is None:
+        device_speed_kph = None
+        try:
+            raw = sensors.get("sensors") or {}
+            gps = raw.get("gps_speed") or sensors.get("gps_speed")
+            if gps is None:
+                loc = raw.get("location") or sensors.get("location")
+                gps = loc.get("speed") if isinstance(loc, dict) else None
+            if gps is not None:
+                device_speed_kph = round(float(gps) * 3.6, 1)
+        except Exception:
+            pass
+    if device_speed_kph is not None:
+        try:
+            device_speed_kph = float(device_speed_kph)
+        except Exception:
+            device_speed_kph = None
+
+    # Motion magnitude in g (Termux gravity/linear-accel/significant-motion).
+    # Used by _drive_alerts to gate PEDESTRIAN/FORWARD_COLLISION on real
+    # movement — callers may pass it, else derive from the phone sensors.
+    motion_g = body.get("motion_g")
+    if motion_g is None:
+        motion_g = _motion_from_sensors(sensors)
+    if motion_g is not None:
+        try:
+            motion_g = float(motion_g)
+        except Exception:
+            motion_g = None
+
+    # GPS says we're rolling fast — treat as driving even if the scene is
+    # sparse (few vehicles in frame yet). Keeps sign/light alerts armed.
+    if (
+        (mode in ("auto", ""))
+        and device_speed_kph is not None
+        and device_speed_kph >= 25.0
+        and resolved_mode == MODE_STATIONARY
+    ):
+        resolved_mode, detections = apply_vision_mode(detections, MODE_DRIVING, now)
+
     overlay = overlay_summary(detections, resolved_mode, device_speed_kph)
+
+    # Deterministic drive-safety alerts (stop sign / pedestrian / lights / FCW).
+    # motion_g gates pedestrian + forward-collision so a parked neighbour's
+    # car or a porch "pedestrian" can't trigger braking alarms while parked.
+    alerts = (
+        _drive_alerts(detections, device_speed_kph, now, motion_g=motion_g)
+        if resolved_mode == MODE_DRIVING
+        else []
+    )
+    _DRIVE_LAST.update(
+        {
+            "ts": time.time(),
+            "mode": resolved_mode,
+            "device_speed_kph": device_speed_kph,
+            "motion_g": motion_g,
+            "alerts": alerts,
+        }
+    )
 
     elapsed = round(time.time() - t0, 3)
     if generate_audio:
@@ -1974,6 +2369,8 @@ async def vision_detect(request: Request):
         "mode_requested": mode,
         "overlay": overlay,
         "device_speed_kph": device_speed_kph,
+        "motion_g": motion_g,
+        "alerts": alerts,
         "latency_ms": round(elapsed * 1000, 1),
         "dropped": max(0, len(detections) - overlay["total"]),
     }
@@ -1983,6 +2380,175 @@ async def vision_detect(request: Request):
         response["blink"] = blink_info
 
     return response
+
+
+# ── Observation → training cache forwarding ─────────────────────────────
+TRAINER_URL = os.environ.get("TRAINER_URL", "http://127.0.0.1:8199")
+OBSERVE: list = []
+OBSERVE_LIMIT = 80
+_OBSERVE_RATE: dict = {}  # {label: last forward ts} — floor per label
+OBSERVE_MIN_INTERVAL: float = float(
+    os.environ.get("OBSERVE_MIN_INTERVAL", "1.0") or 1.0
+)
+_TRAINER_CFG: dict = {}
+_TRAINER_CFG_TS: float = 0.0
+_TRAINER_CFG_TTL: float = 30.0
+
+
+async def _trainer_config_cached() -> dict:
+    """Trainer config from :8199, cached briefly so we don't hammer it."""
+    global _TRAINER_CFG, _TRAINER_CFG_TS
+    now = time.time()
+    if _TRAINER_CFG and _TRAINER_CFG_TS + _TRAINER_CFG_TTL > now:
+        return _TRAINER_CFG
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{TRAINER_URL}/api/trainer/config")
+            if r.status_code == 200:
+                data = r.json()
+                _TRAINER_CFG = data.get("config", {}) if isinstance(data, dict) else {}
+                if _TRAINER_CFG:
+                    _TRAINER_CFG_TS = now
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"trainer config fetch failed: {e}")
+    return _TRAINER_CFG
+
+
+def _observe_push(obs: dict) -> None:
+    OBSERVE.append(obs)
+    del OBSERVE[:-OBSERVE_LIMIT]
+
+
+async def _forward_observations(
+    detections: list, image_b64: str, source: str, frame_shape: tuple
+) -> None:
+    """Record every detection as a live observation and cache qualifying
+    frames (with YOLO-format labels) to the trainer for real training data.
+    Fire-and-forget; never raises."""
+    try:
+        cfg = await _trainer_config_cached()
+        auto = bool(cfg.get("auto_collect", True))
+        lo = float(cfg.get("collect_threshold", 0.3) or 0.3)
+        hi = float(cfg.get("correction_threshold", 0.7) or 0.7)
+        fh, fw = frame_shape[:2]
+        now = time.time()
+        import httpx
+
+        client = httpx.AsyncClient(timeout=8.0)
+        try:
+            for d in detections:
+                label = str(d.get("label", "")).strip() or "unknown"
+                conf = float(d.get("conf", 0.0))
+                nx, ny = float(d.get("x", 0.0)), float(d.get("y", 0.0))
+                nw, nh = float(d.get("w", 0.0)), float(d.get("h", 0.0))
+                bbox = [
+                    round(nx * fw, 2),
+                    round(ny * fh, 2),
+                    round((nx + nw) * fw, 2),
+                    round((ny + nh) * fh, 2),
+                ]
+                cached = False
+                reason = None
+                last = _OBSERVE_RATE.get(label, 0.0)
+                if now - last < OBSERVE_MIN_INTERVAL:
+                    reason = "rate-limited"
+                elif auto and lo <= conf <= hi and image_b64:
+                    try:
+                        r = await client.post(
+                            f"{TRAINER_URL}/api/trainer/detection",
+                            json={
+                                "source": source,
+                                "label": label,
+                                "confidence": conf,
+                                "bbox": bbox,
+                                "image": image_b64,
+                            },
+                        )
+                        if r.status_code < 300:
+                            data = r.json()
+                            cached = bool(data.get("cached"))
+                            reason = (
+                                None
+                                if cached
+                                else str(data.get("error", "db-only"))[:80]
+                            )
+                            if cached:
+                                _OBSERVE_RATE[label] = now
+                        else:
+                            reason = f"trainer HTTP {r.status_code}"
+                    except Exception as e:  # noqa: BLE001
+                        reason = f"trainer unreachable: {str(e)[:80]}"
+                else:
+                    if not auto:
+                        reason = "auto_collect off"
+                    elif conf < lo:
+                        reason = "below collect_threshold"
+                    elif conf > hi:
+                        reason = "correction pool range"
+                    elif not image_b64:
+                        reason = "no frame"
+                _observe_push(
+                    {
+                        "ts": now,
+                        "source": source,
+                        "label": label,
+                        "conf": round(conf, 4),
+                        "cached": cached,
+                        "reason": reason,
+                    }
+                )
+        finally:
+            await client.aclose()
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"observe forward error: {e}")
+
+
+@app.get("/api/vision/observations")
+async def vision_observations():
+    """Live observation feed (newest first) + upstream trainer URL."""
+    return {
+        "ok": True,
+        "trainer_url": TRAINER_URL,
+        "observations": list(reversed(OBSERVE)),
+    }
+
+
+@app.get("/api/vision/drive")
+async def vision_drive_state():
+    """Latest deterministic drive-safety state (alerts, resolved mode, GPS speed).
+
+    Polled by lightweight surfaces (PiP / overlay) that don't post frames.
+    """
+    return {
+        "ok": True,
+        "ts": _DRIVE_LAST["ts"],
+        "age_s": int(time.time() - _DRIVE_LAST["ts"]) if _DRIVE_LAST["ts"] else None,
+        "mode": _DRIVE_LAST["mode"],
+        "device_speed_kph": _DRIVE_LAST["device_speed_kph"],
+        "alerts": _DRIVE_LAST["alerts"],
+    }
+
+
+# Last real camera frame (for manual re-observe; capped base64 size)
+_LAST_FRAME: dict = {"ts": 0.0, "b64": ""}
+
+
+@app.get("/api/vision/last_frame")
+async def vision_last_frame():
+    """The most recent real frame the vision server analyzed (capped size)."""
+    if not _LAST_FRAME.get("b64"):
+        return {
+            "ok": False,
+            "error": "no camera frame seen yet — open the webcam page or the phone overlay first",
+        }
+    return {
+        "ok": True,
+        "ts": _LAST_FRAME["ts"],
+        "age_s": int(time.time() - _LAST_FRAME["ts"]),
+        "image_b64": _LAST_FRAME["b64"],
+    }
 
 
 # ── Proactive vision state ──────────────────────────────────────────────

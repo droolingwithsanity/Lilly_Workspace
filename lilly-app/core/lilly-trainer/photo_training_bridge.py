@@ -36,7 +36,7 @@ PROGRESS_FILE = WORKSPACE / "training_data" / "photo_bridge_progress.json"
 SAMPLES_DIR = WORKSPACE / "training_data" / "samples"
 
 # Phone sensor server URL
-DEFAULT_PHONE_URL = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8099")
+DEFAULT_PHONE_URL = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8190")
 
 
 def _load_progress() -> dict:

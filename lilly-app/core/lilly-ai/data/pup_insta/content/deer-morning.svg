@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#FFF8DC"/><stop offset="100%" style="stop-color:#F0E68C"/></linearGradient></defs>
+  <rect width="400" height="400" fill="url(#bg)"/>
+  <circle cx="200" cy="100" r="30" fill="#FFD700" opacity="0.7"/>
+  <path d="M100 350 Q150 300 200 350 Q250 300 300 350" fill="#90EE90" opacity="0.5"/>
+  <path d="M50 370 Q100 320 150 370 Q200 320 250 370 Q300 320 350 370" fill="#98FB98" opacity="0.4"/>
+  <text x="200" y="250" text-anchor="middle" font-family="Georgia" font-size="22" fill="#5D4037">gentle morning 🌿</text>
+</svg>

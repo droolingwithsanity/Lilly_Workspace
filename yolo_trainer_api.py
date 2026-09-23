@@ -42,6 +42,7 @@ async def trainer_status():
         "sample_count": trainer._count_samples(),
         "config": trainer.config,
         "last_training": trainer.stats.last_updated,
+        "progress": trainer.training_progress,
     }
 
 
@@ -87,7 +88,13 @@ async def trainer_history(hours: int = 24, source: Optional[str] = None):
 
 @app.post("/api/trainer/detection")
 async def record_detection(request: Request):
-    """Record a detection for training."""
+    """Record a detection for training.
+
+    Body: {source, label, confidence, bbox, image?}
+      image: optional base64-encoded JPEG/PNG frame. When provided (and
+      auto_collect is on with conf in [collect_threshold, correction_threshold]),
+      the frame is cached on disk as a real YOLO-format training sample.
+    """
     try:
         body = await request.json()
     except Exception:
@@ -95,14 +102,94 @@ async def record_detection(request: Request):
 
     trainer = get_trainer()
 
+    # Decode optional base64 image so the trainer can cache a real sample.
+    image = None
+    img_b64 = body.get("image")
+    if img_b64:
+        try:
+            import base64 as _b64
+            import numpy as np
+            import cv2
+
+            raw = _b64.b64decode(img_b64)
+            arr = np.frombuffer(raw, dtype=np.uint8)
+            image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        except Exception as e:
+            return JSONResponse(
+                status_code=400, content={"error": f"image decode: {e}"}
+            )
+        if image is None:
+            return JSONResponse(
+                status_code=400, content={"error": "image decode failed"}
+            )
+
     detection_id = await trainer.record_detection(
         source=body.get("source", "unknown"),
         label=body.get("label", ""),
         confidence=body.get("confidence", 0.0),
         bbox=body.get("bbox", [0, 0, 0, 0]),
+        image=image,
     )
 
-    return {"ok": True, "detection_id": detection_id}
+    cfg = trainer.config
+    collected = bool(
+        image is not None
+        and cfg.get("auto_collect", True)
+        and cfg.get("collect_threshold", 0.3)
+        <= float(body.get("confidence", 0.0))
+        <= cfg.get("correction_threshold", 0.7)
+    )
+    return {
+        "ok": True,
+        "detection_id": detection_id,
+        "cached": collected,
+        "sample_count": trainer._count_samples(),
+    }
+
+
+@app.get("/api/trainer/samples")
+async def trainer_samples():
+    """Real sample-cache state: per-label counts on disk + readiness."""
+    trainer = get_trainer()
+    samples_dir = trainer.data_dir / "samples"
+    labels = []
+    total = 0
+    newest = 0.0
+    if samples_dir.exists():
+        for label_dir in sorted(samples_dir.iterdir()):
+            if not label_dir.is_dir():
+                continue
+            jpgs = sorted(label_dir.glob("*.jpg"))
+            n = len(jpgs)
+            if not n:
+                continue
+            updated = jpgs[-1].stat().st_mtime
+            newest = max(newest, updated)
+            total += n
+            labels.append(
+                {
+                    "label": label_dir.name,
+                    "count": n,
+                    "last_sample_ts": updated,
+                    "last_sample_age_s": max(0, int(time.time() - updated)),
+                }
+            )
+
+    cfg = trainer.config
+    min_samples = int(cfg.get("min_samples_for_training", 100) or 100)
+    readiness = round(min(100, total / min_samples * 100), 1) if min_samples else 100.0
+    return {
+        "ok": True,
+        "data_dir": str(trainer.data_dir / "samples"),
+        "total": total,
+        "min_samples_for_training": min_samples,
+        "readiness_pct": readiness,
+        "labels": labels,
+        "auto_collect": bool(cfg.get("auto_collect", True)),
+        "collect_threshold": cfg.get("collect_threshold", 0.3),
+        "correction_threshold": cfg.get("correction_threshold", 0.7),
+        "newest_sample_ts": newest or None,
+    }
 
 
 @app.post("/api/trainer/correct")

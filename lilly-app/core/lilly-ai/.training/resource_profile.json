@@ -1,0 +1,16 @@
+{
+  "threads": 20,
+  "gpu_pct": 0,
+  "batch_size": 72,
+  "epochs": 155,
+  "periodic": true,
+  "interval_hours": 8,
+  "game_sched": false,
+  "balancer": {
+    "enabled": true,
+    "mode": "split",
+    "persona_weight": 50
+  },
+  "unload_llm": true,
+  "llm_models": "qwen2.5:3b,qwen2.5:1.5b"
+}

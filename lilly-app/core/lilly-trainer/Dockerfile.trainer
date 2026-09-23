@@ -17,15 +17,24 @@ RUN pip install --no-cache-dir \
     opencv-python-headless \
     ultralytics \
     pyyaml \
-    httpx
+    httpx \
+    "scrapling[all]>=0.4.14" \
+    beautifulsoup4 \
+    lxml
+
+# Install Playwright/Chromium browsers for Scrapling stealth fetcher
+RUN python3 -c "from scrapling.fetchers import StealthyFetcher; print('stealthy OK')" \
+    && python3 -m pip show scrapling | head -2 \
+    && (scrapling install --force || SCRAPLING_NO_PYTEST=1 python3 -c "import scrapling, os; os.system('playwright install chromium chromium-headless-shell ffmpeg')" || echo "browser install skipped")
 
 # Copy training agent files
 COPY core/lilly-trainer/yolo_self_trainer.py .
 COPY core/lilly-trainer/yolo_trainer_api.py .
 COPY core/lilly-trainer/photo_training_bridge.py .
+COPY core/lilly-trainer/instagram_scraper.py .
 
 # Create training data directories
-RUN mkdir -p training_data/{samples,images,dataset,models}
+RUN mkdir -p training_data/{samples,images,dataset,models,instagram}
 
 EXPOSE 8199
 

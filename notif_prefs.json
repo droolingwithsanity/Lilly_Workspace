@@ -2,6 +2,8 @@
   "paused": false,
   "daily_cap": 3,
   "proactive": true,
+  "sound": true,
+  "pushbullet_fallback": false,
   "day": "2026-08-14",
   "sent_today": 3
 }

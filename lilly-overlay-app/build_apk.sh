@@ -39,6 +39,11 @@ mkdir -p "$DEST_DIR"
 DEST_FILE="${DEST_DIR}/lilly-overlay-v${VERSION_NAME}-overlay-debug.apk"
 cp -v "$APK_PATH" "$DEST_FILE"
 
+SHARE_DIR="/home/labhrasd/Lilly_Workspace/file_share"
+mkdir -p "$SHARE_DIR"
+SHARE_FILE="${SHARE_DIR}/lilly-overlay-v${VERSION_NAME}-debug.apk"
+cp -v "$APK_PATH" "$SHARE_FILE"
+
 # ── Also copy to builds directory ──
 BUILDS_DIR="/home/labhrasd/Lilly_Workspace/builds"
 mkdir -p "$BUILDS_DIR"

@@ -639,6 +639,32 @@ class PhoneBroker:
             "chat",
         )
 
+    # ─── Server → phone TTS (drive alerts, proactive alerts) ───────────
+    async def push_tts(self, device_id: str, data: dict):
+        """Push a TTS phrase to a connected phone's overlay (Android TTS)
+        and broadcast to web UIs subscribed to the 'tts' topic."""
+        phone = self.phones.get(device_id)
+        if phone is not None:
+            try:
+                await phone.ws.send_json(
+                    {
+                        "type": "tts",
+                        "data": data,
+                        "ts": time.time(),
+                    }
+                )
+            except Exception:
+                pass
+        await self._broadcast_to_webuis(
+            {
+                "type": "tts",
+                "device_id": device_id,
+                "data": data,
+                "ts": time.time(),
+            },
+            "tts",
+        )
+
     def get_phone_ids(self) -> list[str]:
         return list(self.phones.keys())
 

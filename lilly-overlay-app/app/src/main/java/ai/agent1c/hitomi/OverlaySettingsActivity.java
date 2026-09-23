@@ -1,6 +1,7 @@
 package ai.agent1c.hitomi;
 
 import android.content.SharedPreferences;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -510,6 +511,7 @@ public class OverlaySettingsActivity extends AppCompatActivity {
         }
 
         private boolean hasTermuxPermission() {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false;
             return requireContext().checkSelfPermission("com.termux.permission.RUN_COMMAND")
                 == android.content.pm.PackageManager.PERMISSION_GRANTED;
         }

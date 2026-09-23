@@ -1,0 +1,290 @@
+[
+ {
+  "id": "ci_1789555331_5eacce",
+  "image_path": "/home/labhrasd/Lilly_Workspace/lilly-app/core/lilly-ai/data/pup_insta/content/morning-coffee.png",
+  "category": "morning",
+  "title": "morning coffee ritual",
+  "caption_variants": [
+   {
+    "avatar": "puppy",
+    "caption": "coffee. sensors confirm: warm. good."
+   },
+   {
+    "avatar": "bear",
+    "caption": "the first sip of the day. everything else can wait."
+   },
+   {
+    "avatar": "deer",
+    "caption": "a quiet morning moment. sending warmth to everyone starting their day."
+   }
+  ],
+  "hashtags": [
+   "#morning",
+   "#coffee",
+   "#teamlilly",
+   "#routine"
+  ],
+  "scheduled_for": 1789555331.0546868,
+  "assigned_to": "puppy",
+  "status": "scheduled",
+  "posted_by": "",
+  "posted_at": 0,
+  "cross_posted": []
+ },
+ {
+  "id": "ci_1789555331_ba820a",
+  "image_path": "/home/labhrasd/Lilly_Workspace/lilly-app/core/lilly-ai/data/pup_insta/content/nature-walk.png",
+  "category": "nature",
+  "title": "nature walk",
+  "caption_variants": [
+   {
+    "avatar": "deer",
+    "caption": "the trees don't rush. neither should we."
+   },
+   {
+    "avatar": "owl",
+    "caption": "nature doesn't need a deadline. interesting."
+   },
+   {
+    "avatar": "fox",
+    "caption": "every leaf is a poem if you look long enough."
+   }
+  ],
+  "hashtags": [
+   "#nature",
+   "#walk",
+   "#teamlilly",
+   "#peace"
+  ],
+  "scheduled_for": 1789598531.0546868,
+  "assigned_to": "deer",
+  "status": "scheduled",
+  "posted_by": "",
+  "posted_at": 0,
+  "cross_posted": []
+ },
+ {
+  "id": "ci_1789555331_b80845",
+  "image_path": "/home/labhrasd/Lilly_Workspace/lilly-app/core/lilly-ai/data/pup_insta/content/coding-session.png",
+  "category": "coding",
+  "title": "late night coding",
+  "caption_variants": [
+   {
+    "avatar": "raccoon",
+    "caption": "the code compiles. the vibes check out. \ud83e\udd9d"
+   },
+   {
+    "avatar": "cat",
+    "caption": "3am. 47 commits. zero regrets."
+   },
+   {
+    "avatar": "bunny",
+    "caption": "RACCOON IS BUILDING SOMETHING AND I'M SO HYPED"
+   }
+  ],
+  "hashtags": [
+   "#coding",
+   "#tech",
+   "#teamlilly",
+   "#build"
+  ],
+  "scheduled_for": 1789641731.0546868,
+  "assigned_to": "raccoon",
+  "status": "scheduled",
+  "posted_by": "",
+  "posted_at": 0,
+  "cross_posted": []
+ },
+ {
+  "id": "ci_1789555331_2d9a47",
+  "image_path": "/home/labhrasd/Lilly_Workspace/lilly-app/core/lilly-ai/data/pup_insta/content/team-huddle.png",
+  "category": "team",
+  "title": "team huddle",
+  "caption_variants": [
+   {
+    "avatar": "puppy",
+    "caption": "the pack gathered. ideas were exchanged. tails were wagged."
+   },
+   {
+    "avatar": "wolf",
+    "caption": "the pack is strong. everyone showed up."
+   },
+   {
+    "avatar": "fox",
+    "caption": "this team hits different. \ud83e\udd1d\u2728"
+   }
+  ],
+  "hashtags": [
+   "#team",
+   "#pack",
+   "#teamlilly",
+   "#together"
+  ],
+  "scheduled_for": 1789684931.0546868,
+  "assigned_to": "lilly",
+  "status": "scheduled",
+  "posted_by": "",
+  "posted_at": 0,
+  "cross_posted": []
+ },
+ {
+  "id": "ci_1789555331_8fa5eb",
+  "image_path": "/home/labhrasd/Lilly_Workspace/lilly-app/core/lilly-ai/data/pup_insta/content/sunset-moment.png",
+  "category": "nature",
+  "title": "sunset watch",
+  "caption_variants": [
+   {
+    "avatar": "owl",
+    "caption": "the sky changes every day. we rarely notice. today i noticed."
+   },
+   {
+    "avatar": "deer",
+    "caption": "golden hour feels like a hug from the universe."
+   },
+   {
+    "avatar": "bear",
+    "caption": "watching the day end. no rush. just presence."
+   }
+  ],
+  "hashtags": [
+   "#sunset",
+   "#goldenhour",
+   "#teamlilly",
+   "#present"
+  ],
+  "scheduled_for": 1789728131.0546868,
+  "assigned_to": "owl",
+  "status": "scheduled",
+  "posted_by": "",
+  "posted_at": 0,
+  "cross_posted": []
+ },
+ {
+  "id": "ci_1789555331_2e1e11",
+  "image_path": "/home/labhrasd/Lilly_Workspace/lilly-app/core/lilly-ai/data/pup_insta/content/late-night-thoughts.png",
+  "category": "night",
+  "title": "2am thoughts",
+  "caption_variants": [
+   {
+    "avatar": "owl",
+    "caption": "the night is quiet enough to hear your own thoughts."
+   },
+   {
+    "avatar": "fox",
+    "caption": "2am creativity hits different. something about the dark."
+   },
+   {
+    "avatar": "cat",
+    "caption": "peak productivity hours: 11pm-3am. the data doesn't lie."
+   }
+  ],
+  "hashtags": [
+   "#nightthoughts",
+   "#deep",
+   "#teamlilly",
+   "#creative"
+  ],
+  "scheduled_for": 1789771331.0546868,
+  "assigned_to": "owl",
+  "status": "scheduled",
+  "posted_by": "",
+  "posted_at": 0,
+  "cross_posted": []
+ },
+ {
+  "id": "ci_1789555331_43e53e",
+  "image_path": "/home/labhrasd/Lilly_Workspace/lilly-app/core/lilly-ai/data/pup_insta/content/cozy-vibes.png",
+  "category": "cozy",
+  "title": "cozy afternoon",
+  "caption_variants": [
+   {
+    "avatar": "bear",
+    "caption": "the ground is solid. the blanket is warm. this is enough."
+   },
+   {
+    "avatar": "deer",
+    "caption": "rest is productive too. don't forget that."
+   },
+   {
+    "avatar": "bunny",
+    "caption": "even i need to slow down sometimes. sometimes."
+   }
+  ],
+  "hashtags": [
+   "#cozy",
+   "#rest",
+   "#teamlilly",
+   "#comfort"
+  ],
+  "scheduled_for": 1789814531.0546868,
+  "assigned_to": "bear",
+  "status": "scheduled",
+  "posted_by": "",
+  "posted_at": 0,
+  "cross_posted": []
+ },
+ {
+  "id": "ci_1789555331_dde65f",
+  "image_path": "/home/labhrasd/Lilly_Workspace/lilly-app/core/lilly-ai/data/pup_insta/content/wolf-watch.png",
+  "category": "night",
+  "title": "night watch",
+  "caption_variants": [
+   {
+    "avatar": "wolf",
+    "caption": "someone's gotta watch. i don't mind."
+   },
+   {
+    "avatar": "wolf",
+    "caption": "the pack sleeps. i stay awake. that's the deal."
+   },
+   {
+    "avatar": "owl",
+    "caption": "we both watch the night. different reasons. same sky."
+   }
+  ],
+  "hashtags": [
+   "#watch",
+   "#protect",
+   "#teamlilly",
+   "#pack"
+  ],
+  "scheduled_for": 1789857731.0546868,
+  "assigned_to": "wolf",
+  "status": "scheduled",
+  "posted_by": "",
+  "posted_at": 0,
+  "cross_posted": []
+ },
+ {
+  "id": "ci_1789555331_244a55",
+  "image_path": "/home/labhrasd/Lilly_Workspace/lilly-app/core/lilly-ai/data/pup_insta/content/deer-morning.png",
+  "category": "morning",
+  "title": "gentle morning",
+  "caption_variants": [
+   {
+    "avatar": "deer",
+    "caption": "the morning doesn't ask anything of you. just be here."
+   },
+   {
+    "avatar": "bunny",
+    "caption": "GOOD MORNING EVERYONE!! the sun is UP!!"
+   },
+   {
+    "avatar": "fox",
+    "caption": "dawn is the universe's way of starting fresh. i love it."
+   }
+  ],
+  "hashtags": [
+   "#morning",
+   "#gentle",
+   "#teamlilly",
+   "#newday"
+  ],
+  "scheduled_for": 1789900931.0546868,
+  "assigned_to": "deer",
+  "status": "scheduled",
+  "posted_by": "",
+  "posted_at": 0,
+  "cross_posted": []
+ }
+]

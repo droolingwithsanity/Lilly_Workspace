@@ -4,6 +4,7 @@ import android.content.Context;
 import android.os.Build;
 import android.provider.Settings;
 import android.util.Log;
+import android.view.WindowManager;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -84,6 +85,9 @@ public class LillyHttpServer extends NanoHTTPD {
 
     private volatile String screenCache;
     private volatile long screenCacheTs = 0L;
+
+    // Action visualizer — floating HUD for automation feedback
+    private volatile ActionVisualizer actionVis;
 
     public LillyHttpServer(Context context, TermuxCommandBridge bridge) throws IOException {
         super(PORT);
@@ -588,6 +592,28 @@ public class LillyHttpServer extends NanoHTTPD {
                     return json(screenCapture(parms));
                 case "/app/foreground":
                     return json(foregroundApp());
+                case "/a11y/status":
+                    return json(a11yStatus());
+                case "/a11y/tap":
+                    return json(a11yTap(parms));
+                case "/a11y/swipe":
+                    return json(a11ySwipe(parms));
+                case "/a11y/type":
+                    return json(a11yType(parms));
+                case "/a11y/click":
+                    return json(a11yClick(parms));
+                case "/a11y/action":
+                    return json(a11yAction(parms));
+                case "/a11y/foreground":
+                    return json(a11yForeground());
+                case "/a11y/visualize":
+                    return json(a11yVisualize(parms));
+                case "/a11y/visualize/update":
+                    return json(a11yVisualizeUpdate(parms));
+                case "/a11y/visualize/log":
+                    return json(a11yVisualizeLog(parms));
+                case "/a11y/visualize/hide":
+                    return json(a11yVisualizeHide());
                 default:
                     break;
             }
@@ -750,6 +776,203 @@ public class LillyHttpServer extends NanoHTTPD {
         o.put("package", pkg != null ? pkg : JSONObject.NULL);
         o.put("timestamp", nowEpoch());
         return withDevice(o);
+    }
+
+    // ─── Accessibility bridge (Insomnia tap mode) ───────────────
+
+    private LillyAccessibilityService a11y() {
+        return LillyAccessibilityService.getInstance();
+    }
+
+    private JSONObject a11yStatus() throws Exception {
+        LillyAccessibilityService svc = a11y();
+        JSONObject o = new JSONObject();
+        o.put("connected", svc != null);
+        o.put("enabled", svc != null);
+        o.put("package", "ai.agent1c.hitomi");
+        o.put("supported", new JSONArray()
+            .put("tap").put("swipe").put("type").put("click")
+            .put("back").put("home").put("recents")
+            .put("notifications").put("quick_settings").put("foreground"));
+        if (svc != null) o.put("foreground", svc.getForegroundPackage());
+        else o.put("foreground", JSONObject.NULL);
+        o.put("timestamp", nowEpoch());
+        return withDevice(o);
+    }
+
+    private JSONObject a11yTap(Map<String, String> parms) throws Exception {
+        LillyAccessibilityService svc = a11y();
+        if (svc == null) return a11yUnavailable();
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return withDevice(new JSONObject().put("ok", false).put("error", "tap requires Android 7+"));
+        }
+        float x = parseFloat(parms.get("x"), 0f);
+        float y = parseFloat(parms.get("y"), 0f);
+        boolean ok = svc.tap(x, y);
+        return withDevice(new JSONObject().put("ok", ok).put("action", "tap").put("x", x).put("y", y));
+    }
+
+    private JSONObject a11ySwipe(Map<String, String> parms) throws Exception {
+        LillyAccessibilityService svc = a11y();
+        if (svc == null) return a11yUnavailable();
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+            return withDevice(new JSONObject().put("ok", false).put("error", "swipe requires Android 7+"));
+        }
+        float x1 = parseFloat(parms.get("x1"), 0f);
+        float y1 = parseFloat(parms.get("y1"), 0f);
+        float x2 = parseFloat(parms.get("x2"), 0f);
+        float y2 = parseFloat(parms.get("y2"), 0f);
+        long duration = (long) parseFloat(parms.get("duration"), 300f);
+        boolean ok = svc.swipe(x1, y1, x2, y2, duration);
+        return withDevice(new JSONObject()
+            .put("ok", ok).put("action", "swipe")
+            .put("x1", x1).put("y1", y1).put("x2", x2).put("y2", y2).put("duration", duration));
+    }
+
+    private JSONObject a11yType(Map<String, String> parms) throws Exception {
+        LillyAccessibilityService svc = a11y();
+        if (svc == null) return a11yUnavailable();
+        String text = parms.get("text");
+        if (text == null) text = "";
+        boolean ok = svc.typeText(text);
+        return withDevice(new JSONObject().put("ok", ok).put("action", "type").put("len", text.length()));
+    }
+
+    private JSONObject a11yClick(Map<String, String> parms) throws Exception {
+        LillyAccessibilityService svc = a11y();
+        if (svc == null) return a11yUnavailable();
+        String text = parms.get("text");
+        if (text == null) return withDevice(new JSONObject().put("ok", false).put("error", "text parameter required"));
+        boolean ok = svc.clickNodeByText(text);
+        return withDevice(new JSONObject().put("ok", ok).put("action", "click").put("text", text));
+    }
+
+    private JSONObject a11yAction(Map<String, String> parms) throws Exception {
+        LillyAccessibilityService svc = a11y();
+        if (svc == null) return a11yUnavailable();
+        String type = parms.get("type");
+        if (type == null) return withDevice(new JSONObject().put("ok", false).put("error", "type parameter required"));
+        boolean ok = svc.globalAction(type);
+        return withDevice(new JSONObject().put("ok", ok).put("action", type));
+    }
+
+    private JSONObject a11yForeground() throws Exception {
+        LillyAccessibilityService svc = a11y();
+        JSONObject o = new JSONObject();
+        o.put("connected", svc != null);
+        o.put("package", svc != null ? svc.getForegroundPackage() : JSONObject.NULL);
+        o.put("timestamp", nowEpoch());
+        return withDevice(o);
+    }
+
+    private JSONObject a11yUnavailable() throws Exception {
+        return withDevice(new JSONObject()
+            .put("ok", false)
+            .put("error", "accessibility service not enabled — Settings → Accessibility → Lilly")
+            .put("connected", false));
+    }
+
+    // ─── Action Visualizer (floating HUD) ───────────────────────────────
+
+    private ActionVisualizer getActionVis() {
+        if (actionVis == null) {
+            WindowManager wm = (WindowManager) appContext.getSystemService(Context.WINDOW_SERVICE);
+            if (wm != null) {
+                actionVis = new ActionVisualizer(wm);
+            }
+        }
+        return actionVis;
+    }
+
+    /**
+     * GET /a11y/visualize?show=1&session=name&total=12
+     * Show the HUD. Optionally set session name and total steps.
+     */
+    private JSONObject a11yVisualize(Map<String, String> parms) throws Exception {
+        ActionVisualizer vis = getActionVis();
+        if (vis == null) {
+            return withDevice(new JSONObject().put("ok", false).put("error", "WindowManager unavailable"));
+        }
+        boolean show = !"0".equals(parms.get("show"));
+        if (show) {
+            vis.show();
+            String session = parms.get("session");
+            if (session != null && !session.isEmpty()) {
+                vis.update("info", "Session: " + session, null, 0, parseInt(parms.get("total"), 0));
+            }
+        } else {
+            vis.hide();
+        }
+        return withDevice(new JSONObject()
+            .put("ok", true)
+            .put("showing", vis.isShowing()));
+    }
+
+    /**
+     * GET /a11y/visualize/update?action=like&label=Tapping+like&coords=0.86,0.47&step=3&total=12&detail=Tapped+like
+     * Update the current action display. If "detail" is set, also adds to the log.
+     */
+    private JSONObject a11yVisualizeUpdate(Map<String, String> parms) throws Exception {
+        ActionVisualizer vis = getActionVis();
+        if (vis == null) {
+            return withDevice(new JSONObject().put("ok", false).put("error", "not initialized"));
+        }
+        String action = parms.get("action");
+        String label = parms.get("label");
+        String coords = parms.get("coords");
+        int step = parseInt(parms.get("step"), 0);
+        int total = parseInt(parms.get("total"), 0);
+        vis.update(action, label, coords, step, total);
+        // Optionally add to log in the same call
+        String detail = parms.get("detail");
+        if (detail != null && !detail.isEmpty()) {
+            vis.addAction(action != null ? action : "info", detail);
+        }
+        return withDevice(new JSONObject().put("ok", true));
+    }
+
+    /**
+     * GET /a11y/visualize/log
+     * Returns the action log as a JSON array.
+     */
+    private JSONObject a11yVisualizeLog(Map<String, String> parms) throws Exception {
+        ActionVisualizer vis = getActionVis();
+        JSONObject o = new JSONObject();
+        o.put("ok", true);
+        o.put("log", vis != null ? vis.getLogJson() : new JSONArray());
+        o.put("showing", vis != null && vis.isShowing());
+        return withDevice(o);
+    }
+
+    /**
+     * GET /a11y/visualize/hide
+     * Hide the HUD and clear the log.
+     */
+    private JSONObject a11yVisualizeHide() throws Exception {
+        ActionVisualizer vis = getActionVis();
+        if (vis != null) {
+            vis.clearLog();
+            vis.hide();
+        }
+        return withDevice(new JSONObject().put("ok", true));
+    }
+
+    private static float parseFloat(String s, float def) {
+        if (s == null || s.trim().isEmpty()) return def;
+        try {
+            return Float.parseFloat(s);
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
+    private static int parseInt(String s, int def) {
+        if (s == null || s.trim().isEmpty()) return def;
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (NumberFormatException e) {
+            return def;
+        }
     }
 
     // ─── /api/* proxy to relocated phone server ─────────────────

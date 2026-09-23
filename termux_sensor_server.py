@@ -162,6 +162,24 @@ async def _run_sh(cmd_str: str, timeout: float = 5.0) -> str:
         return ""
 
 
+async def _run_sh_both(cmd_str: str, timeout: float = 5.0) -> tuple[str, str]:
+    """Run a shell command async, return (stdout, stderr)."""
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            cmd_str,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr_ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return stdout.decode().strip(), stderr_.decode().strip()
+    except asyncio.TimeoutError:
+        logger.debug(f"cmd timed out: {cmd_str[:60]}")
+        return "", "timeout"
+    except Exception as e:
+        logger.debug(f"sh failed: {e}")
+        return "", str(e)
+
+
 # ─── SENSOR READING ─────────────────────────────────────────────
 
 
@@ -634,9 +652,17 @@ async def get_location_live():
 
 
 @app.post("/shell")
-async def shell_command(cmd: str = ""):
-    out = await _run_sh(cmd, timeout=15.0)
-    return {"output": out}
+async def shell_command(request: Request, cmd: str = ""):
+    # Accept the command from the query string OR a JSON body. The overlay app
+    # and lilly_ai historically send {"command": ...}; new clients send {"cmd": ...}.
+    if request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cmd = body.get("cmd") or body.get("command") or cmd
+    out, err = await _run_sh_both(cmd, timeout=15.0)
+    return {"output": out, "stderr": err}
 
 
 @app.get("/notification/list")

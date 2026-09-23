@@ -1,0 +1,45 @@
+{
+  "id": "1789676140_yolo",
+  "type": "yolo",
+  "started_at": 1789676140.2855525,
+  "ended_at": 1789676169.4983542,
+  "duration_s": 29.2,
+  "args": [
+    "refresh",
+    "yolo",
+    "--epochs",
+    "155",
+    "--batch-size",
+    "14",
+    "--gpu"
+  ],
+  "data_sources": [
+    {
+      "name": "self-collected detection samples + imported phone photos",
+      "origin": "camera detections (auto_collect) / termux gallery import",
+      "sample_count": 0,
+      "class_distribution": {}
+    }
+  ],
+  "what_trained": [],
+  "stats": {
+    "status": "error",
+    "phase": null,
+    "epochs_completed": null,
+    "total_epochs": null,
+    "loss": null,
+    "last_training": 1789499161.8874938,
+    "sample_count": 0,
+    "accuracy_estimate": 0.0,
+    "min_samples_for_training": 100
+  },
+  "outcome": "run errored (no/minimal samples?)",
+  "confidence": {
+    "level": "low",
+    "score": -1,
+    "evidence": [
+      "only 0 samples (< threshold 100)",
+      "training run ended in error phase"
+    ]
+  }
+}

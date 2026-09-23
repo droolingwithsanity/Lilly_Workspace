@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs><radialGradient id="bg" cx="50%" cy="50%"><stop offset="0%" style="stop-color:#FFE4E1"/><stop offset="100%" style="stop-color:#FFC0CB"/></radialGradient></defs>
+  <rect width="400" height="400" fill="url(#bg)"/>
+  <circle cx="120" cy="150" r="35" fill="#FFB6C1"/>
+  <text x="120" y="155" text-anchor="middle" font-size="30">🐶</text>
+  <circle cx="200" cy="120" r="35" fill="#FFD700"/>
+  <text x="200" y="125" text-anchor="middle" font-size="30">🦊</text>
+  <circle cx="280" cy="150" r="35" fill="#B0C4DE"/>
+  <text x="280" y="155" text-anchor="middle" font-size="30">🐱</text>
+  <circle cx="160" cy="220" r="35" fill="#DEB887"/>
+  <text x="160" y="225" text-anchor="middle" font-size="30">🐻</text>
+  <circle cx="240" cy="220" r="35" fill="#98FB98"/>
+  <text x="240" y="225" text-anchor="middle" font-size="30">🐰</text>
+  <text x="200" y="320" text-anchor="middle" font-family="Georgia" font-size="22" fill="#5D4037">team huddle 🤝</text>
+</svg>

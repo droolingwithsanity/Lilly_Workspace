@@ -225,6 +225,7 @@ parse_start_opts() {
       --avatar)      PERSONA_ARGS+=(--avatar); PERSONA_ARGS+=("${2:?--avatar needs a value}"); shift 2;;
       --quick)       PERSONA_ARGS+=(--quick); shift;;
       --gpu)         PERSONA_ARGS+=(--gpu); shift;;
+      --gguf-quant)  PERSONA_ARGS+=(--gguf-quant); PERSONA_ARGS+=("${2}"); shift 2;;
       --name)        JOB_NAME="${2:?--name needs a value}"; shift 2;;
       --epochs)      YOLO_ARGS+=(--epochs); YOLO_ARGS+=("${2:?--epochs needs a value}"); PERSONA_ARGS+=(--max-steps); PERSONA_ARGS+=("${2}"); shift 2;;
       --batch-size)  YOLO_ARGS+=(--batch-size); YOLO_ARGS+=("${2}"); shift 2;;
@@ -440,6 +441,7 @@ cmd_create() {
       --avatar)     NEW_AVATAR="$2"; shift 2;;
       --quick)      QUICK=1; shift;;
       --gpu)        GPU=1; shift;;
+      --gguf-quant) NEW_GGUF="$2"; shift 2;;
       --epochs)     NEW_EPOCHS="$2"; shift 2;;
       --batch-size) NEW_BATCH="$2"; shift 2;;
       --lr)         NEW_LR="$2"; shift 2;;
@@ -462,6 +464,7 @@ cmd_create() {
       [[ -n "${NEW_AVATAR:-}" ]] && cmd+=(--avatar "$NEW_AVATAR")
       [[ "${QUICK:-0}" == 1 ]]   && cmd+=(--quick)
       [[ "${GPU:-0}" == 1 ]]     && cmd+=(--gpu)
+      [[ -n "${NEW_GGUF:-}" ]]   && cmd+=(--gguf-quant "$NEW_GGUF")
       [[ -n "${NEW_EPOCHS:-}" ]] && cmd+=(--max-steps "$NEW_EPOCHS")
       [[ -n "${NEW_OUT:-}" ]]    && cmd+=(--output-dir "$NEW_OUT")
 

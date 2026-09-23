@@ -381,3 +381,219 @@ async def update_config(request: Request):
     trainer._save_config()
 
     return {"ok": True, "config": trainer.config}
+
+
+# ═══════════════════ INSTAGRAM SCRAPER ENDPOINTS ═══════════════════
+
+import importlib
+
+
+def get_scraper():
+    """Get Instagram scraper instance."""
+    try:
+        from instagram_scraper import get_scraper as _get_scraper
+
+        return _get_scraper()
+    except ImportError:
+        return None
+
+
+@app.get("/api/scraper/status")
+async def scraper_status():
+    """Get Instagram scraper status."""
+    scraper = get_scraper()
+    if not scraper:
+        return JSONResponse(
+            status_code=503, content={"error": "Scraper module not available"}
+        )
+    return scraper.get_status()
+
+
+@app.get("/api/scraper/targets")
+async def scraper_targets():
+    """List all scraping targets."""
+    scraper = get_scraper()
+    if not scraper:
+        return JSONResponse(
+            status_code=503, content={"error": "Scraper module not available"}
+        )
+    return {
+        "targets": [
+            t.__dict__ if hasattr(t, "__dict__") else {} for t in scraper.targets
+        ],
+        "total": len(scraper.targets),
+        "pending": len(scraper.get_pending_targets()),
+    }
+
+
+@app.post("/api/scraper/targets")
+async def add_target(request: Request):
+    """Add a new scraping target."""
+    scraper = get_scraper()
+    if not scraper:
+        return JSONResponse(
+            status_code=503, content={"error": "Scraper module not available"}
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+
+    target_id = scraper.add_target(
+        target_type=body.get("type", "hashtag"),
+        value=body.get("value", "").strip(),
+        mode=body.get("mode", "posts"),
+        notes=body.get("notes", ""),
+    )
+    return {"ok": True, "target_id": target_id}
+
+
+@app.post("/api/scraper/csv-import")
+async def csv_import(request: Request):
+    """Import targets from CSV text."""
+    scraper = get_scraper()
+    if not scraper:
+        return JSONResponse(
+            status_code=503, content={"error": "Scraper module not available"}
+        )
+    try:
+        body = await request.json()
+        csv_text = body.get("csv_text", "")
+        count = scraper.add_targets_from_csv_text(csv_text)
+        scraper.save_targets_to_csv()
+        return {"ok": True, "added": count}
+    except Exception as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@app.get("/api/scraper/csv-sample")
+async def csv_sample():
+    """Get sample targets CSV template."""
+    scraper = get_scraper()
+    if not scraper:
+        return JSONResponse(
+            status_code=503, content={"error": "Scraper module not available"}
+        )
+    path = scraper.create_sample_targets_csv()
+    with open(path) as f:
+        return {"csv": f.read()}
+
+
+@app.get("/api/scraper/results")
+async def scraper_results(target_id: Optional[str] = None, selected_only: bool = False):
+    """List scraped results."""
+    scraper = get_scraper()
+    if not scraper:
+        return JSONResponse(
+            status_code=503, content={"error": "Scraper module not available"}
+        )
+    if target_id:
+        results = scraper.get_results_for_target(target_id)
+    elif selected_only:
+        results = scraper.get_selected_results()
+    else:
+        results = scraper.results
+    return {
+        "results": [r.__dict__ if hasattr(r, "__dict__") else {} for r in results],
+        "total": len(results),
+    }
+
+
+@app.post("/api/scraper/results/select")
+async def select_results(request: Request):
+    """Select results for training."""
+    scraper = get_scraper()
+    if not scraper:
+        return JSONResponse(
+            status_code=503, content={"error": "Scraper module not available"}
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+
+    result_ids = body.get("result_ids", [])
+    label = body.get("label", "")
+    count = scraper.select_results(result_ids, label)
+    return {"ok": True, "selected": count}
+
+
+@app.post("/api/scraper/results/deselect")
+async def deselect_results(request: Request):
+    """Deselect results from training."""
+    scraper = get_scraper()
+    if not scraper:
+        return JSONResponse(
+            status_code=503, content={"error": "Scraper module not available"}
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+
+    result_ids = body.get("result_ids", [])
+    count = scraper.deselect_results(result_ids)
+    return {"ok": True, "deselected": count}
+
+
+@app.post("/api/scraper/scrape")
+async def start_scrape(request: Request):
+    """Start or resume scraping."""
+    scraper = get_scraper()
+    if not scraper:
+        return JSONResponse(
+            status_code=503, content={"error": "Scraper module not available"}
+        )
+    try:
+        body = await request.json() if request.body else {}
+        mode = body.get("mode", "both")
+        max_targets = body.get("max_targets", 0)
+    except:
+        mode = "both"
+        max_targets = 0
+
+    scraper.reset_stop()
+    scraper.load_targets_from_csv()
+
+    # Run in background
+    import asyncio
+
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, scraper.run_scraper, mode, max_targets)
+
+    return {"ok": True, "status": "running", "mode": mode}
+
+
+@app.post("/api/scraper/stop")
+async def stop_scrape():
+    """Stop the running scraper."""
+    scraper = get_scraper()
+    if not scraper:
+        return JSONResponse(
+            status_code=503, content={"error": "Scraper module not available"}
+        )
+    scraper.stop_scraper()
+    return {"ok": True, "status": "stopping"}
+
+
+@app.get("/api/scraper/stats")
+async def scraper_stats():
+    """Get dashboard stats."""
+    scraper = get_scraper()
+    if not scraper:
+        return JSONResponse(
+            status_code=503, content={"error": "Scraper module not available"}
+        )
+    return scraper.get_dashboard_stats()
+
+
+@app.post("/api/scraper/export-training")
+async def export_training():
+    """Export selected results as training data."""
+    scraper = get_scraper()
+    if not scraper:
+        return JSONResponse(
+            status_code=503, content={"error": "Scraper module not available"}
+        )
+    data = scraper.export_selected_for_training()
+    return {"ok": True, "training_data": data, "count": len(data)}

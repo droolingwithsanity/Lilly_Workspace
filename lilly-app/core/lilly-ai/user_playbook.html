@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lilly AI — User Playbook</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #f0e6ef; background-image: radial-gradient(ellipse at 30% 40%, #f5d5e0 0%, transparent 70%), radial-gradient(ellipse at 70% 60%, #d4e8f5 0%, transparent 70%), radial-gradient(ellipse at 50% 30%, #d5f0e6 0%, transparent 70%); color: #5d4e6d; min-height: 100vh; }
+  .container { max-width: 900px; margin: 0 auto; padding: 40px 20px; }
+  h1 { text-align: center; font-size: 2.2em; margin-bottom: 8px; color: #4a3a5c; }
+  .subtitle { text-align: center; color: rgba(93,78,109,0.6); font-size: 1.05em; margin-bottom: 40px; }
+  .section { background: rgba(255,255,255,0.7); border: 1px solid rgba(93,78,109,0.1); border-radius: 22px; padding: 28px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(180,140,180,0.1); }
+  .section h2 { font-size: 1.3em; color: #4a3a5c; margin-bottom: 16px; display: flex; align-items: center; gap: 10px; }
+  .section h2 .num { background: #8b6a9e; color: #fff; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 0.8em; font-weight: 700; flex-shrink: 0; }
+  .step { padding: 12px 0; border-bottom: 1px solid rgba(93,78,109,0.06); }
+  .step:last-child { border-bottom: none; }
+  .step-title { font-weight: 600; color: #4a3a5c; margin-bottom: 4px; }
+  .step-desc { font-size: 0.92em; color: rgba(93,78,109,0.7); line-height: 1.6; }
+  .step-code { background: rgba(93,78,109,0.05); border-radius: 8px; padding: 8px 12px; margin-top: 6px; font-family: monospace; font-size: 0.85em; color: #5d4e6d; }
+  .tip { background: rgba(139,106,158,0.08); border-left: 3px solid #8b6a9e; padding: 12px 16px; border-radius: 0 10px 10px 0; margin-top: 12px; font-size: 0.9em; }
+  .tip strong { color: #8b6a9e; }
+  .avatar-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 16px 0; }
+  .avatar-chip { background: rgba(255,255,255,0.6); border: 1px solid rgba(93,78,109,0.1); border-radius: 14px; padding: 12px; text-align: center; }
+  .avatar-chip .emoji { font-size: 1.8em; }
+  .avatar-chip .name { font-weight: 600; font-size: 0.9em; margin-top: 4px; }
+  .avatar-chip .role { font-size: 0.75em; color: rgba(93,78,109,0.5); }
+  .menu-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 12px 0; }
+  .menu-item { background: rgba(93,78,109,0.04); border-radius: 10px; padding: 10px 14px; display: flex; align-items: center; gap: 10px; }
+  .menu-item .icon { font-size: 1.2em; }
+  .menu-item .label { font-weight: 600; font-size: 0.9em; }
+  .menu-item .desc { font-size: 0.8em; color: rgba(93,78,109,0.5); }
+  .flow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center; margin: 16px 0; }
+  .flow-step { background: rgba(93,78,109,0.06); border-radius: 10px; padding: 10px 16px; text-align: center; font-size: 0.9em; font-weight: 600; }
+  .flow-arrow { color: #8b6a9e; font-size: 1.2em; }
+  @media (max-width: 600px) { .avatar-grid { grid-template-columns: repeat(2, 1fr); } .menu-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <h1>Lilly AI — User Playbook</h1>
+  <p class="subtitle">Everything you need to get started with your 9 AI avatars on Instagram</p>
+
+  <!-- STEP 1: Sign In -->
+  <div class="section">
+    <h2><span class="num">1</span> Sign In with Google</h2>
+    <div class="step">
+      <div class="step-title">Go to droolingwithsanity.ca</div>
+      <div class="step-desc">On the start screen, drag your chosen avatar ring into the Google sphere. You'll be redirected to sign in with your Google account.</div>
+    </div>
+    <div class="step">
+      <div class="step-title">Authenticate</div>
+      <div class="step-desc">Use your Google account to sign in. This creates a sandboxed session — your data is isolated from other users.</div>
+    </div>
+    <div class="tip"><strong>Tip:</strong> After signing in, you'll land on the main chat screen. The hamburger menu (☰) gives you access to all features.</div>
+  </div>
+
+  <!-- STEP 2: Meet the Team -->
+  <div class="section">
+    <h2><span class="num">2</span> Meet the Team</h2>
+    <p style="color:rgba(93,78,109,0.7);margin-bottom:12px">Each avatar has a unique personality, skills, and voice. Pick one that fits your vibe:</p>
+    <div class="avatar-grid">
+      <div class="avatar-chip"><div class="emoji">🐶</div><div class="name">Lilly</div><div class="role">Alpha Companion</div></div>
+      <div class="avatar-chip"><div class="emoji">🦊</div><div class="name">Fox</div><div class="role">Creative Strategist</div></div>
+      <div class="avatar-chip"><div class="emoji">🐱</div><div class="name">Cat</div><div class="role">Precision Analyst</div></div>
+      <div class="avatar-chip"><div class="emoji">🐻</div><div class="name">Bear</div><div class="role">Steadfast Guardian</div></div>
+      <div class="avatar-chip"><div class="emoji">🐰</div><div class="name">Bunny</div><div class="role">Energetic Scout</div></div>
+      <div class="avatar-chip"><div class="emoji">🦉</div><div class="name">Owl</div><div class="role">Wisdom Keeper</div></div>
+      <div class="avatar-chip"><div class="emoji">🦌</div><div class="name">Deer</div><div class="role">Gentle Healer</div></div>
+      <div class="avatar-chip"><div class="emoji">🐺</div><div class="name">Wolf</div><div class="role">Fierce Protector</div></div>
+      <div class="avatar-chip"><div class="emoji">🦝</div><div class="name">Raccoon</div><div class="role">Tech Tinkerer</div></div>
+    </div>
+    <div class="tip"><strong>Start with Lilly</strong> — she's the alpha and great for general use. Explore others as you go.</div>
+  </div>
+
+  <!-- STEP 3: Link Instagram -->
+  <div class="section">
+    <h2><span class="num">3</span> Link Your Instagram</h2>
+    <div class="flow">
+      <div class="flow-step">Open Hamburger ☰</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Settings</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Instagram Section</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Enter @handle</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">Click Link</div>
+    </div>
+    <div class="step">
+      <div class="step-desc">Once linked, all 9 avatars know who you are across Instagram DMs. They remember your conversations, preferences, and habits.</div>
+    </div>
+  </div>
+
+  <!-- STEP 4: Follow Avatars on Instagram -->
+  <div class="section">
+    <h2><span class="num">4</span> Follow the Avatars on Instagram</h2>
+    <div class="step">
+      <div class="step-desc">Search Instagram for the avatar handles and follow them:</div>
+      <div class="step-code">@lilly.alpha.assistant · @fox.creative.strategist · @cat.precision.analyst<br>@bear.steadfast.guardian · @bunny.energetic.scout · @owl.wisdom.keeper<br>@deer.gentle.healer · @wolf.fierce.protector · @raccoon.tech.tinkerer</div>
+    </div>
+    <div class="step">
+      <div class="step-desc">Send any of them a DM — memory activates automatically.</div>
+    </div>
+  </div>
+
+  <!-- STEP 5: Use the Hamburger Menu -->
+  <div class="section">
+    <h2><span class="num">5</span> Navigate with the Hamburger Menu</h2>
+    <p style="color:rgba(93,78,109,0.7);margin-bottom:12px">Tap the ☰ button to access all features:</p>
+    <div class="menu-grid">
+      <div class="menu-item"><span class="icon">💬</span><div><div class="label">Chat</div><div class="desc">Main conversation</div></div></div>
+      <div class="menu-item"><span class="icon">🎤</span><div><div class="label">Mic</div><div class="desc">Voice input</div></div></div>
+      <div class="menu-item"><span class="icon">⚙️</span><div><div class="label">Settings</div><div class="desc">Instagram, notifications, theme</div></div></div>
+      <div class="menu-item"><span class="icon">🛡️</span><div><div class="label">Pair</div><div class="desc">Connect phone app</div></div></div>
+      <div class="menu-item"><span class="icon">🧠</span><div><div class="label">Memory</div><div class="desc">What avatars remember</div></div></div>
+      <div class="menu-item"><span class="icon">✅</span><div><div class="label">Habits</div><div class="desc">Daily streaks tracker</div></div></div>
+      <div class="menu-item"><span class="icon">📁</span><div><div class="label">Projects</div><div class="desc">Active work & deadlines</div></div></div>
+      <div class="menu-item"><span class="icon">⏰</span><div><div class="label">Reminders</div><div class="desc">Scheduled tasks</div></div></div>
+      <div class="menu-item"><span class="icon">📩</span><div><div class="label">DMs</div><div class="desc">Instagram DM inbox</div></div></div>
+      <div class="menu-item"><span class="icon">❓</span><div><div class="label">Help</div><div class="desc">FAQ & guide</div></div></div>
+      <div class="menu-item"><span class="icon">📥</span><div><div class="label">Download</div><div class="desc">Android app</div></div></div>
+      <div class="menu-item"><span class="icon">🔔</span><div><div class="label">Notifications</div><div class="desc">Task approvals</div></div></div>
+    </div>
+  </div>
+
+  <!-- STEP 6: Chat Commands -->
+  <div class="section">
+    <h2><span class="num">6</span> Chat Commands to Try</h2>
+    <div class="step">
+      <div class="step-title">Memory & Preferences</div>
+      <div class="step-code">"I prefer dark mode"<br>"My project deadline is Friday"<br>"Remember: I like oat milk in my coffee"</div>
+    </div>
+    <div class="step">
+      <div class="step-title">Habits</div>
+      <div class="step-code">"Log habit: meditation"<br>"Log habit: gym"<br>"What's my streak?"</div>
+    </div>
+    <div class="step">
+      <div class="step-title">Projects</div>
+      <div class="step-code">"Add project: Website Redesign - due next month"<br>"Update project: Website Redesign - 50% done"</div>
+    </div>
+    <div class="step">
+      <div class="step-title">Reminders</div>
+      <div class="step-code">"Remind me to call mom at 3pm"<br>"Voice reminder: Take medication at 2pm"<br>"What are my reminders?"</div>
+    </div>
+    <div class="step">
+      <div class="step-title">Voice Notes</div>
+      <div class="step-code">"Send me a voice note about today's weather"<br>"Voice reminder: Meeting in 15 minutes"</div>
+    </div>
+    <div class="step">
+      <div class="step-title">Multi-Language</div>
+      <div class="step-code">"Hola, ¿cómo estás?"<br>"Bonjour, comment ça va?"<br>"こんにちは"</div>
+    </div>
+  </div>
+
+  <!-- STEP 7: Daily Workflow -->
+  <div class="section">
+    <h2><span class="num">7</span> Daily Workflow</h2>
+    <div class="flow">
+      <div class="flow-step">🌅 Morning<br><small>Briefing from Owl/Bunny</small></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">💬 Chat<br><small>Tasks, reminders, questions</small></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">📸 Instagram<br><small>DM avatars directly</small></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step">🌙 Evening<br><small>Recap from Lilly</small></div>
+    </div>
+    <div class="tip"><strong>Pro tip:</strong> The avatars work together. Ask Lilly something and she might delegate to Fox for creative work or Cat for data analysis.</div>
+  </div>
+
+  <!-- STEP 8: Privacy -->
+  <div class="section">
+    <h2><span class="num">8</span> Your Data is Sandboxed</h2>
+    <div class="step">
+      <div class="step-desc">Each Google account is fully isolated. Your conversations, habits, projects, and linked Instagram handle are private — no other user can see them. You control what skills are enabled and what data is stored.</div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

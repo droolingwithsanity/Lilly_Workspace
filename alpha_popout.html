@@ -154,7 +154,28 @@ footer{text-align:center;padding:6px;font-size:10px;color:var(--text-dim);backgr
 .bub{position:relative;overflow:hidden}
 .bub .swipe-hint{position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--red);opacity:0;transition:opacity .15s;pointer-events:none}
 .cmsg:hover .swipe-hint{opacity:.7}
+
+/* ── Admin panel (drawer) ── */
+.admin-panel{display:none;flex-direction:column;gap:8px;padding:12px;max-height:60vh;overflow-y:auto}
+.admin-panel.open{display:flex}
+.admin-sug{padding:10px;border-radius:10px;background:rgba(255,255,255,.5);border:1px solid var(--frost-border);font-size:12px;transition:.15s}
+.admin-sug:hover{border-color:var(--accent);box-shadow:0 2px 8px var(--frost-glow)}
+.admin-sug .sug-title{font-weight:600;color:var(--text);margin-bottom:4px;display:flex;align-items:center;gap:6px}
+.admin-sug .sug-desc{color:var(--text-dim);font-size:11px;margin-bottom:6px}
+.admin-sug .sug-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.admin-sug .sug-badge{font-size:9px;font-weight:600;text-transform:uppercase;padding:2px 6px;border-radius:4px;background:rgba(139,122,158,.1);color:var(--text-dim)}
+.admin-sug .sug-badge.health{background:rgba(192,85,85,.1);color:var(--red)}
+.admin-sug .sug-badge.upgrade{background:rgba(181,137,0,.1);color:var(--yellow)}
+.admin-sug .sug-badge.optimization{background:rgba(58,138,106,.1);color:var(--green)}
+.admin-sug .sug-btns{display:flex;gap:6px;margin-left:auto}
+.admin-sug .sug-btns button{padding:4px 10px;border-radius:8px;border:1px solid var(--frost-border);background:var(--frost-surface);font-size:11px;cursor:pointer;transition:.15s}
+.admin-sug .sug-btns .approve-btn:hover{background:rgba(58,138,106,.15);border-color:var(--green);color:var(--green)}
+.admin-sug .sug-btns .dismiss-btn:hover{background:rgba(192,85,85,.15);border-color:var(--red);color:var(--red)}
+.admin-empty{font-size:11px;color:var(--text-dim);text-align:center;padding:20px}
+.admin-scan-btn{width:100%;padding:8px;border-radius:10px;border:1px solid var(--frost-border);background:linear-gradient(140deg,rgba(139,122,158,.15),rgba(167,139,250,.1));color:var(--text);font-size:12px;cursor:pointer;transition:.15s}
+.admin-scan-btn:hover{background:linear-gradient(140deg,rgba(139,122,158,.25),rgba(167,139,250,.2));border-color:var(--accent)}
 </style>
+<link rel="stylesheet" href="/static/admin_toast.css">
 </head>
 <body>
   <div class="window">
@@ -199,6 +220,17 @@ footer{text-align:center;padding:6px;font-size:10px;color:var(--text-dim);backgr
       <button class="drawer-item" id="menuNewChat"><span class="di-icon">✨</span><span class="di-label">New Conversation</span></button>
        <button class="drawer-item" id="menuSettings"><span class="di-icon">⚙️</span><span class="di-label">Settings</span></button>
        <button class="drawer-item" id="menuBroadcast"><span class="di-icon">📡</span><span class="di-label">Bluetooth Broadcast</span></button>
+       <button class="drawer-item" id="menuAdmin"><span class="di-icon">⚡</span><span class="di-label">Admin Bot</span><span class="di-badge" id="adminBadge">0</span></button>
+    </div>
+    <!-- Admin Bot panel (slides in below drawer items) -->
+    <div class="admin-panel" id="adminPanel">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <span style="font-size:14px;font-weight:700;color:var(--text)">⚡ Admin Bot</span>
+        <button class="admin-scan-btn" id="adminScanBtn" style="margin-left:auto;width:auto;padding:4px 12px">🔍 Scan</button>
+      </div>
+      <div id="adminSuggestions">
+        <div class="admin-empty">Loading suggestions…</div>
+      </div>
     </div>
   </div>
 
@@ -690,6 +722,107 @@ async function stopBroadcast(){
 }
   </script>
 </div>
+
+<!-- Admin Bot panel logic -->
+<script>
+(function(){
+  const menuAdmin = document.getElementById('menuAdmin');
+  const adminPanel = document.getElementById('adminPanel');
+  const adminBadge = document.getElementById('adminBadge');
+  const adminSuggestions = document.getElementById('adminSuggestions');
+  const adminScanBtn = document.getElementById('adminScanBtn');
+  let panelOpen = false;
+
+  if(menuAdmin) {
+    menuAdmin.onclick = () => {
+      panelOpen = !panelOpen;
+      adminPanel.classList.toggle('open', panelOpen);
+      if(panelOpen) loadAdminSuggestions();
+      closeDrawer();
+    };
+  }
+
+  if(adminScanBtn) {
+    adminScanBtn.onclick = () => {
+      if(window.AdminToast) window.AdminToast.scan();
+      adminScanBtn.textContent = '⏳ Scanning…';
+      setTimeout(() => { adminScanBtn.textContent = '🔍 Scan'; }, 3000);
+    };
+  }
+
+  async function loadAdminSuggestions() {
+    try {
+      const r = await fetch('/api/admin/suggestions?status=pending');
+      const d = await r.json();
+      renderSuggestions(d.suggestions || []);
+    } catch(e) {
+      adminSuggestions.innerHTML = '<div class="admin-empty">Failed to load</div>';
+    }
+  }
+
+  function renderSuggestions(items) {
+    if(!items.length) {
+      adminSuggestions.innerHTML = '<div class="admin-empty">✅ No pending suggestions</div>';
+      if(adminBadge) adminBadge.textContent = '0';
+      return;
+    }
+    if(adminBadge) adminBadge.textContent = items.length;
+    adminSuggestions.innerHTML = items.map(s => `
+      <div class="admin-sug" data-id="${s.id}">
+        <div class="sug-title">
+          <span>${categoryIcon(s.category)}</span>
+          <span>${escAdmin(s.title)}</span>
+        </div>
+        <div class="sug-desc">${escAdmin(s.description)}</div>
+        <div class="sug-meta">
+          <span class="sug-badge ${s.category}">${s.category}</span>
+          <span class="sug-badge">${s.priority}</span>
+          <div class="sug-btns">
+            <button class="approve-btn" onclick="adminApprove('${s.id}')">✓ Approve</button>
+            <button class="dismiss-btn" onclick="adminDismiss('${s.id}')">✕ Dismiss</button>
+          </div>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function categoryIcon(cat) {
+    return {health:'🏥',upgrade:'⬆️',fix:'🔧',optimization:'⚡',feature:'✨',security:'🔒'}[cat]||'💡';
+  }
+
+  function escAdmin(s) {
+    const d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+  }
+
+  window.adminApprove = async function(id) {
+    try {
+      const r = await fetch('/api/admin/suggestions/'+id+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auto_run:false})});
+      const d = await r.json();
+      if(d.ok) loadAdminSuggestions();
+    } catch(e) {}
+  };
+
+  window.adminDismiss = async function(id) {
+    try {
+      const r = await fetch('/api/admin/suggestions/'+id+'/dismiss',{method:'POST'});
+      const d = await r.json();
+      if(d.ok) loadAdminSuggestions();
+    } catch(e) {}
+  };
+
+  // Refresh suggestions when WS gets new ones
+  if(window.AdminToast) {
+    const origShow = window.AdminToast.showSuggestion;
+    window.AdminToast.showSuggestion = function(data) {
+      origShow(data);
+      if(panelOpen) loadAdminSuggestions();
+    };
+  }
+})();
+</script>
+
+<!-- Admin Toast Progress Bar (real-time WS suggestions + task progress) -->
+<script src="/static/admin_toast.js"></script>
 
 </body>
 </html>

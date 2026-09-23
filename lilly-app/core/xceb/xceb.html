@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>XCEB — Face · OSINT Evidence Broker</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,'Segoe UI',system-ui,sans-serif;background:#0d1017;color:#dbe3ee;min-height:100vh}
+header{display:flex;align-items:center;gap:14px;padding:14px 22px;background:#11161f;border-bottom:1px solid #1f2733;position:sticky;top:0;z-index:20}
+header h1{font-size:1rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:#c084fc}
+header .dot{width:9px;height:9px;border-radius:50%;background:#4ade80;box-shadow:0 0 10px #4ade80;display:inline-block;margin-right:6px}
+header .sub{font-size:.72rem;color:#6b7a90}
+.tabs{display:flex;gap:4px;margin-left:auto;background:#0d1118;border:1px solid #1f2733;border-radius:12px;padding:4px}
+.tabs button{padding:7px 14px;border:none;border-radius:8px;background:transparent;color:#8b9bb1;font-weight:600;font-size:.78rem;cursor:pointer}
+.tabs button.active{background:linear-gradient(135deg,#8b5cf6,#a78bfa);color:#fff}
+main{padding:22px;max-width:1280px;margin:0 auto}
+.pane{display:none}
+.pane.active{display:block}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px}
+@media(max-width:980px){.grid2{grid-template-columns:1fr}}
+.card{background:#12161f;border:1px solid #1f2733;border-radius:14px;padding:16px}
+.card h3{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:#c084fc;margin-bottom:12px}
+label{font-size:.72rem;color:#8b9bb1;display:block;margin:10px 0 4px}
+input,select,textarea{width:100%;background:#0d1118;border:1px solid #2a3341;color:#dbe3ee;border-radius:9px;padding:8px 10px;font-size:.8rem;outline:none}
+textarea{resize:vertical;min-height:56px;font-family:ui-monospace,Menlo,monospace;font-size:.7rem}
+.btn{display:inline-flex;align-items:center;gap:6px;background:#161c28;border:1px solid #2a3341;color:#dbe3ee;border-radius:9px;padding:8px 14px;font-size:.76rem;font-weight:600;cursor:pointer;transition:all .15s}
+.btn:hover{border-color:#8b5cf6}
+.btn.primary{background:linear-gradient(135deg,#7c3aed,#a855f7);border:none;color:#fff}
+.btn.danger{background:rgba(220,38,38,.16);border-color:rgba(220,38,38,.4);color:#fca5a5}
+.row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.row>*{flex:1;min-width:120px}
+.switch{position:relative;width:40px;height:21px;background:#1a2230;border:1px solid #2a3341;border-radius:21px;cursor:pointer;display:inline-block;vertical-align:middle;transition:background .2s}
+.switch::after{content:'';position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#7d8fa5;transition:all .2s}
+.switch.on{background:linear-gradient(135deg,#7c3aed,#a855f7);border-color:#a855f7}
+.switch.on::after{left:21px;background:#fff}
+table{width:100%;border-collapse:collapse;font-size:.74rem}
+th{text-align:left;color:#8b9bb1;font-weight:600;padding:7px 8px;border-bottom:1px solid #1f2733;letter-spacing:.05em;text-transform:uppercase;font-size:.64rem}
+td{padding:7px 8px;border-bottom:1px solid #151b26;vertical-align:middle}
+tr:hover td{background:#141a25}
+.chip{display:inline-block;padding:2px 8px;border-radius:14px;font-size:.64rem;font-weight:700;letter-spacing:.03em}
+.chip.new{background:rgba(96,165,250,.14);color:#93c5fd}
+.chip.running{background:rgba(251,191,36,.14);color:#fcd34d}
+.chip.resolved{background:rgba(74,222,128,.14);color:#6ee7a0}
+.chip.lead{background:rgba(192,132,252,.14);color:#d8b4fe}
+.chip.unresolved,.chip.error{background:rgba(248,113,113,.14);color:#fca5a5}
+.chip.queued{background:rgba(148,163,184,.16);color:#cbd5e1}
+a{color:#7dd3fc;text-decoration:none}
+a:hover{text-decoration:underline}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:.7rem;color:#8b9bb1}
+#log{font-family:ui-monospace,Menlo,monospace;font-size:.7rem;line-height:1.65;height:420px;overflow-y:auto;background:#0a0e14;border:1px solid #1f2733;border-radius:10px;padding:10px;white-space:pre-wrap;word-break:break-all}
+#log .ev{color:#c084fc}
+#log .done{color:#6ee7a0}
+#log .err{color:#fca5a5}
+#log .sched{color:#93c5fd}
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.stat{flex:1;min-width:130px;background:#141a25;border:1px solid #1f2733;border-radius:12px;padding:12px 14px}
+.stat b{font-size:1.25rem;display:block;color:#e8eef8}
+.stat span{font-size:.66rem;color:#74839b;text-transform:uppercase;letter-spacing:.12em}
+.face-thumb{width:44px;height:44px;object-fit:cover;border-radius:8px;border:1px solid #2a3341}
+.hint{font-size:.68rem;color:#5d6c82;margin-top:4px}
+.progress{font-size:.7rem;color:#8b9bb1}
+@media(max-width:720px){.grid2{grid-template-columns:1fr}header{flex-wrap:wrap}}
+</style>
+</head>
+<body>
+<header>
+  <div><h1><span class="dot"></span>XCEB</h1></div>
+  <div class="sub" id="hdr-health">connecting…</div>
+  <div class="tabs">
+    <button data-pane="cases" class="active">Cases</button>
+    <button data-pane="faces">Faces</button>
+    <button data-pane="sched">Scheduler</button>
+    <button data-pane="logpane">Live log</button>
+  </div>
+</header>
+<main>
+
+<!-- ─── Cases ─────────────────────────────────────────────────────────── -->
+<section id="pane-cases" class="pane active">
+  <div class="grid2">
+    <div class="card">
+      <h3>New case</h3>
+      <label>Face crop (paste base64 JPEG, or pick a file)</label>
+      <textarea id="crop-b64" placeholder="base64…"></textarea>
+      <div class="row" style="margin-top:8px">
+        <div><label style="margin-top:0">or file</label><input type="file" id="crop-file" accept="image/*"></div>
+        <div><label style="margin-top:0">full frame (orig)</label><input type="file" id="orig-file" accept="image/*"></div>
+      </div>
+      <div class="row">
+        <div><label>face_id (from vision, optional)</label><input id="face-id" placeholder="uf_… / case ref" class="mono"></div>
+        <div><label>geo hint</label><input id="geo" placeholder="city / country / region"></div>
+      </div>
+      <div class="row">
+        <div><label>category</label>
+          <select id="category">
+            <option value="all">all</option><option value="social">social</option>
+            <option value="dating">dating</option><option value="fan">fan</option>
+            <option value="news">news</option><option value="public_record">public record</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <label style="margin:0;flex:0">auto-run</label>
+          <span class="switch on" id="run-now"></span>
+        </div>
+      </div>
+      <div style="margin-top:12px"><button class="btn primary" onclick="newCase()">▶ Start investigation</button></div>
+      <div class="hint" id="case-out"></div>
+    </div>
+    <div class="card">
+      <h3>Active cases <span class="mono" id="case-count"></span></h3>
+      <div style="max-height:520px;overflow-y:auto">
+        <table>
+          <thead><tr><th></th><th>Name</th><th>Status</th><th>Conf</th><th>Source</th><th>Actions</th></tr></thead>
+          <tbody id="cases-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Faces ─────────────────────────────────────────────────────────── -->
+<section id="pane-faces" class="pane">
+  <div class="stats" id="face-stats"></div>
+  <div class="grid2">
+    <div class="card">
+      <h3>FAISS search by photo <span class="mono">(narrow by geo / social / dating)</span></h3>
+      <label>Query image</label><input type="file" id="qimg" accept="image/*">
+      <div class="row">
+        <div><label>geo filter</label><input id="f-geo" placeholder="e.g. Austin"></div>
+        <div><label>category</label>
+          <select id="f-cat">
+            <option value="">all</option><option value="social">social</option>
+            <option value="dating">dating</option><option value="fan">fan</option>
+          </select>
+        </div>
+        <div><label>platform</label><input id="f-plat" placeholder="github / tinder / …"></div>
+      </div>
+      <div style="margin-top:10px"><button class="btn primary" onclick="searchFaces()">🔍 Search index</button></div>
+      <div id="face-match-out" style="margin-top:12px"></div>
+    </div>
+    <div class="card">
+      <h3>Faces file <span class="mono">(enrolled)</span></h3>
+      <div class="row">
+        <div><label>filter geo</label><input id="l-geo" placeholder="city"></div>
+        <div><label>category</label>
+          <select id="l-cat"><option value="">all</option><option value="social">social</option><option value="dating">dating</option><option value="fan">fan</option></select>
+        </div>
+      </div>
+      <div style="margin-top:10px"><button class="btn" onclick="loadFaces()">⟳ Refresh</button></div>
+      <div style="max-height:440px;overflow-y:auto;margin-top:8px">
+        <table>
+          <thead><tr><th>Name</th><th>Cat</th><th>Platform</th><th>Geo</th><th>Seen</th></tr></thead>
+          <tbody id="faces-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── Scheduler ─────────────────────────────────────────────────────── -->
+<section id="pane-sched" class="pane">
+  <div class="card">
+    <h3>Scheduler <span class="mono" id="sched-summary"></span></h3>
+    <div class="row" style="align-items:center">
+      <div style="flex:0"><label style="margin:0">enabled</label><span class="switch on" id="sched-switch"></span></div>
+      <div><label>sleep window</label><input id="sched-window" value="" placeholder="01:00-05:00"></div>
+      <div style="flex:0"><label style="margin:0">&nbsp;</label><button class="btn" onclick="tickNow()">▶ Tick now</button></div>
+    </div>
+    <div class="stats" style="margin-top:14px" id="sched-stats"></div>
+    <h3 style="margin-top:14px">Due now (retry eligible)</h3>
+    <table><tbody id="sched-due"></tbody></table>
+  </div>
+</section>
+
+<!-- ─── Live log ──────────────────────────────────────────────────────── -->
+<section id="pane-logpane" class="pane">
+  <div class="card">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <h3 style="margin:0">Live feed <span class="mono">/xceb/stream</span></h3>
+      <button class="btn" onclick="clrLog()">Clear</button>
+    </div>
+    <div id="log"></div>
+  </div>
+</section>
+
+</main>
+
+<script>
+const $=(s)=>document.querySelector(s);
+let cfg=null, logLines=0;
+// optional token: /xceb?token=abc123 stores it; reused for every request
+if(new URLSearchParams(location.search).get('token')) localStorage.xceb_token=new URLSearchParams(location.search).get('token');
+function tokHeaders(opts){ opts=opts||{}; opts.headers=Object.assign({},opts.headers); if(localStorage.xceb_token) opts.headers['X-XCEB-Token']=localStorage.xceb_token; return opts; }
+async function api(path,opts){
+  const r=await fetch('/xceb'+path, tokHeaders(opts));
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+  return j;
+}
+
+// tabs
+document.querySelectorAll('.tabs button').forEach(b=>{
+  b.onclick=()=>{
+    document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.pane').forEach(x=>x.classList.remove('active'));
+    b.classList.add('active');
+    $('#pane-'+b.dataset.pane).classList.add('active');
+  };
+});
+
+// switch helper
+function bindSwitch(id, onToggle){
+  const el=$(id);
+  el.onclick=()=>{ el.classList.toggle('on'); onToggle(el.classList.contains('on')); };
+}
+
+async function boot(){
+  try{
+    cfg=await api('/config');
+    $('#hdr-health').textContent='ok · '+cfg.data_path+' · resolve ≥'+Math.round(cfg.resolve_conf*100)+'%';
+    $('#sched-window').value=cfg.sleep_window;
+    try{ const s=await api('/scheduler'); paintScheduler(s); }catch(e){}
+    loadCases(); loadFaces();
+    bindSwitch('#sched-switch', (on)=>api('/scheduler',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})}).then(paintScheduler));
+    bindSwitch('#run-now', ()=>{});
+  }catch(e){ $('#hdr-health').textContent='unreachable — '+e.message; }
+}
+
+// ── cases ──
+async function newCase(){
+  const out=$('#case-out'); out.textContent='…';
+  try{
+    let cropB64=$('#crop-b64').value.trim();
+    if(!cropB64 && $('#crop-file').files[0]){
+      cropB64=await fileToB64($('#crop-file').files[0]);
+    }
+    if(!cropB64){ throw new Error('provide a face crop (file or base64)'); }
+    let origB64='';
+    if($('#orig-file').files[0]){ origB64=await fileToB64($('#orig-file').files[0]); }
+    const body={crop_b64:cropB64, original_b64:origB64, face_id:$('#face-id').value.trim(),
+      geo_hint:$('#geo').value.trim(), category:$('#category').value,
+      run_now:$('#run-now').classList.contains('on')};
+    const r=await api('/cases',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    out.textContent='✔ '+r.case_id+' · '+r.status;
+    $('#crop-b64').value=''; $('#crop-file').value=''; $('#orig-file').value='';
+    loadCases();
+  }catch(e){ out.textContent='✘ '+e.message; }
+}
+function fileToB64(f){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(String(r.result).split(',')[1]); r.onerror=rej; r.readAsDataURL(f); }); }
+const statusChip=s=>`<span class="chip ${s||'new'}">${(s||'new').toUpperCase()}</span>`;
+
+async function loadCases(){
+  try{
+    const {cases}=await api('/cases?limit=100');
+    $('#case-count').textContent='('+cases.length+')';
+    $('#cases-body').innerHTML=cases.map(c=>{
+      const name=c.best_name||'—';
+      const conf=c.confidence?Math.round(c.confidence*100)+'%':'';
+      return `<tr>
+        <td>${c.has_photo?`<a href="/xceb/cases/${encodeURIComponent(c.case_id)}/face.jpg" target="_blank"><img class="face-thumb" src="/xceb/cases/${encodeURIComponent(c.case_id)}/face.jpg"></a>`:'—'}</td>
+        <td><a href="/xceb/cases/${encodeURIComponent(c.case_id)}">${name}</a><br><span class="mono">${c.slug}</span></td>
+        <td>${statusChip(c.status)}</td><td>${conf}</td><td>${c.source||''}</td>
+        <td>
+          <button class="btn" onclick="runCase('${c.case_id}')">▶</button>
+          <button class="btn" onclick="openProfile('${c.case_id}')">📄</button>
+          <button class="btn danger" onclick="delCase('${c.case_id}')">✕</button>
+        </td>
+      </tr>`;
+    }).join('')||'<tr><td colspan="6" class="mono">no cases yet — upload a face crop</td></tr>';
+  }catch(e){ $('#cases-body').innerHTML='<tr><td>'+e.message+'</td></tr>'; }
+}
+function openProfile(cid){ window.open('/xceb/cases/'+cid+'/profile.html','_blank'); }
+async function runCase(cid){ try{ await api('/cases/'+cid+'/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}); }catch(e){ log('err','run '+cid+': '+e.message); } }
+async function delCase(cid){ if(!confirm('Delete case '+cid+'?'))return; try{ await api('/cases/'+cid,{method:'DELETE'}); loadCases(); }catch(e){ log('err',e.message); } }
+
+// ── faces ──
+async function loadFaces(){
+  try{
+    const q='?limit=200'+( $('#l-geo').value.trim()?('&geo='+encodeURIComponent($('#l-geo').value.trim())):'' )
+      +($('#l-cat').value?('&category='+encodeURIComponent($('#l-cat').value)):'');
+    const r=await api('/faces'+q);
+    $('#face-stats').innerHTML=Object.entries(r.stats||{}).map(([k,v])=>`<div class="stat"><b>${typeof v==='number'?v:JSON.stringify(v)}</b><span>${k}</span></div>`).join('');
+    $('#faces-body').innerHTML=(r.faces||[]).map(f=>`<tr>
+      <td><b>${f.name||'—'}</b></td><td>${f.category||''}</td><td>${f.platform||''}</td>
+      <td>${(f.geo&&(f.geo.city||f.geo.raw||''))||''}</td><td>${f.sightings||1}</td></tr>`).join('')
+      ||'<tr><td colspan="5" class="mono">faces file empty — resolved cases auto-enroll</td></tr>';
+  }catch(e){ $('#faces-body').innerHTML='<tr><td>'+e.message+'</td></tr>'; }
+}
+async function searchFaces(){
+  const out=$('#face-match-out'); out.innerHTML='…';
+  try{
+    if(!$('#qimg').files[0]) throw new Error('pick a photo first');
+    const fd=new FormData(); fd.append('image',$('#qimg').files[0]);
+    const q='?min_sim=0.45'
+      +($('#f-geo').value.trim()?('&geo='+encodeURIComponent($('#f-geo').value.trim())):'')
+      +($('#f-cat').value?('&category='+encodeURIComponent($('#f-cat').value)):'')
+      +($('#f-plat').value.trim()?('&platform='+encodeURIComponent($('#f-plat').value.trim())):'');
+    const r=await fetch('/xceb/faces/search'+q, tokHeaders({method:'POST',body:fd})).then(x=>x.json());
+    out.innerHTML=(r.matches&&r.matches.length)?`<b>${r.count} match(es)</b><table><tbody>${r.matches.map(m=>`<tr><td><b>${m.name||'unnamed'}</b></td><td>sim ${m.sim}</td><td>${m.category||''} ${m.platform||''}</td><td>src ${m.source||''}</td></tr>`).join('')}</tbody></table>`
+      :'<span class="mono">no faces above sim 0.45 — add geo/category/platform to widen, or this person is unknown to the index.</span>';
+  }catch(e){ out.innerHTML='<span style="color:#fca5a5">✘ '+e.message+'</span>'; }
+}
+
+// ── scheduler ──
+function paintScheduler(s){
+  $('#sched-summary').textContent='· '+($('#sched-switch').classList.contains('on')?'enabled':'paused');
+  $('#sched-switch').classList.toggle('on', !!s.enabled);
+  $('#sched-window').value=s.window||cfg.sleep_window;
+  $('#sched-stats').innerHTML=Object.entries(s.stats||{}).map(([k,v])=>`<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('')
+    +`<div class="stat"><b>${s.in_window?'in':'out'}</b><span>window now</span></div>`
+    +`<div class="stat"><b>${(s.due_now||[]).length}</b><span>due now</span></div>`;
+  $('#sched-due').innerHTML=(s.due_now||[]).map(d=>`<tr><td class="mono">${d}</td><td><button class="btn" onclick="runCase('${d}')">▶ run</button></td></tr>`).join('')||'<tr><td class="mono">none</td></tr>';
+}
+async function tickNow(){ try{ const s=await api('/scheduler',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tick_now:true})}); paintScheduler(s); }catch(e){ log('err',e.message); } }
+
+// ── live log (SSE) ──
+function log(cls,text){
+  const el=$('#log');
+  const t=new Date().toLocaleTimeString();
+  el.insertAdjacentHTML('beforeend',`<div class="${cls||''}">[${t}] ${text}</div>`);
+  el.scrollTop=el.scrollHeight;
+  logLines++;
+  if(logLines>600){ el.innerHTML=''; logLines=0; }
+}
+function clrLog(){ $('#log').innerHTML=''; logLines=0; }
+function wireSSE(){
+  const es=new EventSource('/xceb/stream');
+  es.onmessage=(e)=>{ if((e.data||'').startsWith(':'))return; };
+  es.addEventListener('case',(e)=>{ try{ const d=JSON.parse(e.data); const who=d.name?' → '+d.name:''; log(d.event==='done'?'done':'',`case ${d.event.toUpperCase()} ${d.case_id}${who} ${d.status||''} conf ${d.confidence!=null?Math.round(d.confidence*100)+'%':''}`); loadCases(); }catch(_){} });
+  es.addEventListener('vision',(e)=>{ try{ const d=JSON.parse(e.data); log('sched',`vision ingest uf=${d.face_id} → case ${d.case_id}`); }catch(_){} });
+  es.addEventListener('scheduler',(e)=>{ try{ const d=JSON.parse(e.data); log('sched',`scheduler ${d.event}${d.case_id?(' '+d.case_id):''}${d.status?(' '+d.status):''}`); }catch(_){} });
+  es.onerror=()=>log('err','SSE disconnected — retrying…');
+}
+boot(); wireSSE();
+</script>
+</body>
+</html>

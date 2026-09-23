@@ -1,0 +1,62 @@
+{
+  "description": "Human-like automation pacing \u2014 inspired by Insomniac/uiautomator",
+  "posting": {
+    "min_interval_hours": 4,
+    "max_interval_hours": 14,
+    "posts_per_day": 2,
+    " posting_hours": [
+      9,
+      12,
+      15,
+      18,
+      20
+    ],
+    "random_delay_seconds": [
+      30,
+      120
+    ]
+  },
+  "following": {
+    "max_per_day": 10,
+    "delay_between_follows": [
+      15,
+      45
+    ],
+    "max_per_hour": 3
+  },
+  "likes": {
+    "max_per_day": 30,
+    "delay_between_likes": [
+      5,
+      15
+    ]
+  },
+  "comments": {
+    "max_per_day": 10,
+    "delay_between_comments": [
+      30,
+      90
+    ],
+    "typing_speed": "human"
+  },
+  "sessions": {
+    "max_concurrent": 1,
+    "cooldown_between_accounts": [
+      300,
+      600
+    ]
+  },
+  "safety": {
+    "max_actions_per_hour": 15,
+    "random_breaks": true,
+    "break_duration": [
+      300,
+      900
+    ],
+    "avoid_peak_hours": [
+      2,
+      6
+    ],
+    "weekend_reduction": 0.5
+  }
+}

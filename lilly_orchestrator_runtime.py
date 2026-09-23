@@ -1,6 +1,6 @@
 """Lilly Orchestrator — unified multi-agent system prompt + routing engine.
 
-Lilly is the sole user-facing persona. Underneath her, three specialized
+Lilly is the central interface. Underneath her, three specialized
 autonomous pipelines run: the Vision Agent (see), the Builder Agent (build),
 and the Execution Agent (do). This module owns:
 
@@ -68,7 +68,7 @@ LILLY_TOOLS_SCHEMA: dict[str, Any] = {
     "namespace": "lilly.orchestrator",
     "persona": {
         "name": "Lilly",
-        "role": "sole user-facing persona — orchestrator of all sub-agents",
+        "role": "orchestrator — routes tasks to all sub-agents",
         "syntax": 'TOOL: LILLY.{"function": "<name>", "arguments": {...}}',
     },
     "pipelines": {
@@ -439,7 +439,7 @@ def orchestrator_status() -> dict[str, Any]:
     return {
         "ok": True,
         "mode": "orchestrator",
-        "persona": "Lilly (sole user-facing interface)",
+
         "pipelines": {
             "vision": _pipeline_handlers.get("vision") is not None,
             "build": _pipeline_handlers.get("build") is not None,

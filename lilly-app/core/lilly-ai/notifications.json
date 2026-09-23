@@ -1,0 +1,80 @@
+[
+  {
+    "id": "691cfc29",
+    "type": "group_discussion",
+    "title": "\ud83d\udde3\ufe0f The team discussed a task",
+    "body": "Fox: remove skill YouTube from WebView UI port 8098 and use Termux package manager to open YouTube when requested to open or  \u2014 approve to run it, or reply with a correction.",
+    "agent": "fox",
+    "task_id": "5edab4bb",
+    "status": "open",
+    "created_at": 1789353020.8046763,
+    "context": {
+      "status": "running",
+      "transcript": [
+        {
+          "char": "fox",
+          "name": "Fox",
+          "emoji": "\ud83e\udd8a",
+          "text": "I'm ready when you are."
+        },
+        {
+          "char": "cat",
+          "name": "Cat",
+          "emoji": "\ud83d\udc31",
+          "text": "I'm ready when you are."
+        },
+        {
+          "char": "bear",
+          "name": "Bear",
+          "emoji": "\ud83d\udc3b",
+          "text": "I'm ready when you are."
+        },
+        {
+          "char": "bunny",
+          "name": "Bunny",
+          "emoji": "\ud83d\udc30",
+          "text": "I'm ready when you are."
+        }
+      ]
+    }
+  },
+  {
+    "id": "62a669b8",
+    "type": "group_discussion",
+    "title": "\ud83d\udde3\ufe0f The team discussed a task",
+    "body": "Raccoon: fix any known issues, debug\n\ud83d\udde3\ufe0f Team discussion:\n  \ud83e\udd8a Fox: I'm ready when you are.\n  \ud83d\udc31 Cat: I'm ready when you are.\n  \ud83d\udc3b Be \u2014 approve to run it, or reply with a correction.",
+    "agent": "raccoon",
+    "task_id": "f4f7de4e",
+    "status": "open",
+    "created_at": 1789353602.301884,
+    "context": {
+      "status": "running",
+      "transcript": [
+        {
+          "char": "raccoon",
+          "name": "Raccoon",
+          "emoji": "\ud83e\udd9d",
+          "text": "I'm ready when you are."
+        },
+        {
+          "char": "fox",
+          "name": "Fox",
+          "emoji": "\ud83e\udd8a",
+          "text": "I'm ready when you are."
+        },
+        {
+          "char": "cat",
+          "name": "Cat",
+          "emoji": "\ud83d\udc31",
+          "text": "I'm ready when you are."
+        },
+        {
+          "char": "bear",
+          "name": "Bear",
+          "emoji": "\ud83d\udc3b",
+          "text": "I'm ready when you are."
+        }
+      ]
+    }
+  }
+]

@@ -39,10 +39,18 @@ class TrainerConfig:
     grad_accum_steps: int = 4
     max_steps: int = 300
     learning_rate: float = 2e-4
+    lr_scheduler_type: str = "cosine"
     warmup_steps: int = 50
     logging_steps: int = 10
     save_steps: int = 200
     max_seq_length: int = 512
+
+    # Early stopping / best-checkpoint selection. Requires eval + save on the
+    # same cadence, which train.py enforces.
+    early_stopping_patience: int = 3
+    early_stopping_threshold: float = 0.0
+    eval_steps: Optional[int] = None
+    load_best_model_at_end: bool = True
 
     use_quantization: bool = False
     use_cpu: bool = True

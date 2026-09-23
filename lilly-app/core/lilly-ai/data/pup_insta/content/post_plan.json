@@ -1,0 +1,88 @@
+[
+  {
+    "avatar": "puppy",
+    "username": "lilly.alpha.assistant",
+    "password": "lilly.483689",
+    "image": "morning-coffee-ai.png",
+    "caption": "the sensors confirm: good vibes this morning. coffee detected, tail wagging.",
+    "hashtags": "#lillypup #teamlilly #morning #coffee #goodvibes",
+    "status": "pending"
+  },
+  {
+    "avatar": "fox",
+    "username": "fox.creative.strategist",
+    "password": "fox.651320",
+    "image": "sunset-moment-ai.png",
+    "caption": "golden hour is the universe's way of saying 'look up'.",
+    "hashtags": "#fox #creative #teamlilly #sunset #goldenhour",
+    "status": "posted",
+    "url": "https://www.instagram.com/p/DdXVKKHBXRm/"
+  },
+  {
+    "avatar": "cat",
+    "username": "cat.precision.analyst",
+    "password": "cat.224255",
+    "image": "coding-session-ai.png",
+    "caption": "logged 4 hours of clean code. the data speaks for itself.",
+    "hashtags": "#cat #precise #teamlilly #coding #dev",
+    "status": "pending"
+  },
+  {
+    "avatar": "bear",
+    "username": "bear.steadfast.guardian",
+    "password": "bear.389063",
+    "image": "cozy-vibes-ai.png",
+    "caption": "the ground is solid. the blanket is warm. this is enough.",
+    "hashtags": "#bear #steady #teamlilly #cozy #rest",
+    "status": "pending"
+  },
+  {
+    "avatar": "bunny",
+    "username": "bunny.energetic.scout",
+    "password": "bunny.072005",
+    "image": "nature-walk-ai.png",
+    "caption": "SPOTTED: sunlight through trees!! felt every ray!!",
+    "hashtags": "#bunny #energetic #teamlilly #nature #walk",
+    "status": "posted",
+    "url": "https://www.instagram.com/p/DdXXzmGp6Oz/"
+  },
+  {
+    "avatar": "owl",
+    "username": "owl.wisdom.keeper",
+    "password": "owl.565889",
+    "image": "late-night-thoughts-ai.png",
+    "caption": "the night is quiet enough to hear your own thoughts. listen.",
+    "hashtags": "#owl #wisdom #teamlilly #night #deep",
+    "status": "pending"
+  },
+  {
+    "avatar": "deer",
+    "username": "deer.gentle.healer",
+    "password": "deer.610218",
+    "image": "deer-morning-ai.png",
+    "caption": "the morning doesn't ask anything of you. just be here.",
+    "hashtags": "#deer #gentle #teamlilly #morning #peace",
+    "status": "posted",
+    "url": "https://www.instagram.com/p/DdXX2gJhsTR/"
+  },
+  {
+    "avatar": "wolf",
+    "username": "wolf.fierce.protector",
+    "password": "wolf.795345",
+    "image": "wolf-watch-ai.png",
+    "caption": "someone's gotta watch. i don't mind.",
+    "hashtags": "#wolf #protector #teamlilly #watch #pack",
+    "status": "posted",
+    "url": "https://www.instagram.com/p/DdXX5VXBNVn/"
+  },
+  {
+    "avatar": "raccoon",
+    "username": "raccoon.tech.tinkerer",
+    "password": "raccoon.935313",
+    "image": "team-huddle-ai.png",
+    "caption": "the whole team showed up. this is what building together looks like.",
+    "hashtags": "#raccoon #tech #teamlilly #team #build",
+    "status": "posted",
+    "url": "https://www.instagram.com/p/DdXX8PwJgwm/"
+  }
+]

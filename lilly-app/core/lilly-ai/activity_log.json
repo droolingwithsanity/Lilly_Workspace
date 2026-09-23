@@ -1,0 +1,713 @@
+[
+  {
+    "type": "drive",
+    "date": "2026-09-14 22:15",
+    "duration_sec": 643,
+    "distance_m": 0.0,
+    "avg_speed_kph": 0.0,
+    "max_speed_kph": 64.0,
+    "points": 2
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-14 22:31",
+    "duration_sec": 1069,
+    "distance_m": 25337.7,
+    "avg_speed_kph": 85.3,
+    "max_speed_kph": 106.2,
+    "points": 79
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-14 22:49",
+    "duration_sec": 171,
+    "distance_m": 1155.1,
+    "avg_speed_kph": 24.3,
+    "max_speed_kph": 82.9,
+    "points": 11
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-14 23:05",
+    "duration_sec": 244,
+    "distance_m": 2972.4,
+    "avg_speed_kph": 43.9,
+    "max_speed_kph": 69.3,
+    "points": 15
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-14 23:09",
+    "duration_sec": 71,
+    "distance_m": 473.2,
+    "avg_speed_kph": 24.0,
+    "max_speed_kph": 71.1,
+    "points": 7
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-14 23:11",
+    "duration_sec": 53,
+    "distance_m": 225.8,
+    "avg_speed_kph": 15.3,
+    "max_speed_kph": 55.7,
+    "points": 10
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-14 23:12",
+    "duration_sec": 149,
+    "distance_m": 1921.1,
+    "avg_speed_kph": 46.4,
+    "max_speed_kph": 69.1,
+    "points": 22
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-14 23:14",
+    "duration_sec": 188,
+    "distance_m": 1069.7,
+    "avg_speed_kph": 20.5,
+    "max_speed_kph": 45.0,
+    "points": 14
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-14 23:18",
+    "duration_sec": 31,
+    "distance_m": 0.0,
+    "avg_speed_kph": 0.0,
+    "max_speed_kph": 0.0,
+    "points": 1
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-14 23:18",
+    "duration_sec": 271,
+    "distance_m": 1082.2,
+    "avg_speed_kph": 14.4,
+    "max_speed_kph": 49.4,
+    "points": 17
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-14 23:24",
+    "duration_sec": 108,
+    "distance_m": 870.4,
+    "avg_speed_kph": 29.0,
+    "max_speed_kph": 35.7,
+    "points": 14
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 12:11",
+    "duration_sec": 378,
+    "distance_m": 7833.2,
+    "avg_speed_kph": 74.6,
+    "max_speed_kph": 103.2,
+    "points": 47
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 12:18",
+    "duration_sec": 773,
+    "distance_m": 19240.2,
+    "avg_speed_kph": 89.6,
+    "max_speed_kph": 111.5,
+    "points": 60
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 12:32",
+    "duration_sec": 57,
+    "distance_m": 390.8,
+    "avg_speed_kph": 24.7,
+    "max_speed_kph": 40.4,
+    "points": 6
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 12:34",
+    "duration_sec": 423,
+    "distance_m": 8337.6,
+    "avg_speed_kph": 71.0,
+    "max_speed_kph": 94.2,
+    "points": 47
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 12:43",
+    "duration_sec": 168,
+    "distance_m": 1659.5,
+    "avg_speed_kph": 35.6,
+    "max_speed_kph": 70.6,
+    "points": 26
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 12:47",
+    "duration_sec": 385,
+    "distance_m": 6813.1,
+    "avg_speed_kph": 63.7,
+    "max_speed_kph": 93.7,
+    "points": 40
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 12:56",
+    "duration_sec": 544,
+    "distance_m": 10616.6,
+    "avg_speed_kph": 70.3,
+    "max_speed_kph": 98.2,
+    "points": 63
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 13:06",
+    "duration_sec": 398,
+    "distance_m": 6676.8,
+    "avg_speed_kph": 60.4,
+    "max_speed_kph": 92.1,
+    "points": 59
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 13:14",
+    "duration_sec": 167,
+    "distance_m": 2433.2,
+    "avg_speed_kph": 52.5,
+    "max_speed_kph": 80.5,
+    "points": 26
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 13:40",
+    "duration_sec": 82,
+    "distance_m": 374.8,
+    "avg_speed_kph": 16.5,
+    "max_speed_kph": 58.2,
+    "points": 15
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 13:44",
+    "duration_sec": 61,
+    "distance_m": 256.2,
+    "avg_speed_kph": 15.1,
+    "max_speed_kph": 63.8,
+    "points": 11
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 13:45",
+    "duration_sec": 93,
+    "distance_m": 636.5,
+    "avg_speed_kph": 24.6,
+    "max_speed_kph": 50.7,
+    "points": 9
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 13:49",
+    "duration_sec": 123,
+    "distance_m": 1145.8,
+    "avg_speed_kph": 33.5,
+    "max_speed_kph": 50.1,
+    "points": 19
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 13:54",
+    "duration_sec": 89,
+    "distance_m": 622.3,
+    "avg_speed_kph": 25.2,
+    "max_speed_kph": 48.3,
+    "points": 14
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 13:56",
+    "duration_sec": 71,
+    "distance_m": 587.4,
+    "avg_speed_kph": 29.8,
+    "max_speed_kph": 56.8,
+    "points": 9
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 13:59",
+    "duration_sec": 121,
+    "distance_m": 1193.7,
+    "avg_speed_kph": 35.5,
+    "max_speed_kph": 61.2,
+    "points": 22
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 14:01",
+    "duration_sec": 83,
+    "distance_m": 343.0,
+    "avg_speed_kph": 14.9,
+    "max_speed_kph": 60.3,
+    "points": 16
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 14:03",
+    "duration_sec": 50,
+    "distance_m": 60.8,
+    "avg_speed_kph": 4.4,
+    "max_speed_kph": 40.7,
+    "points": 9
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 21:56",
+    "duration_sec": 360,
+    "distance_m": 7261.3,
+    "avg_speed_kph": 72.6,
+    "max_speed_kph": 99.4,
+    "points": 45
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 22:06",
+    "duration_sec": 327,
+    "distance_m": 443.8,
+    "avg_speed_kph": 4.9,
+    "max_speed_kph": 61.4,
+    "points": 6
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 22:18",
+    "duration_sec": 569,
+    "distance_m": 9254.6,
+    "avg_speed_kph": 58.6,
+    "max_speed_kph": 96.4,
+    "points": 48
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 22:30",
+    "duration_sec": 1374,
+    "distance_m": 28174.1,
+    "avg_speed_kph": 73.8,
+    "max_speed_kph": 111.6,
+    "points": 59
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 23:08",
+    "duration_sec": 158,
+    "distance_m": 1565.1,
+    "avg_speed_kph": 35.7,
+    "max_speed_kph": 55.3,
+    "points": 21
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 23:10",
+    "duration_sec": 452,
+    "distance_m": 6054.0,
+    "avg_speed_kph": 48.2,
+    "max_speed_kph": 69.7,
+    "points": 47
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-15 23:18",
+    "duration_sec": 467,
+    "distance_m": 2666.1,
+    "avg_speed_kph": 20.6,
+    "max_speed_kph": 40.3,
+    "points": 19
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 11:37",
+    "duration_sec": 393,
+    "distance_m": 4227.2,
+    "avg_speed_kph": 38.7,
+    "max_speed_kph": 79.2,
+    "points": 40
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 11:49",
+    "duration_sec": 69,
+    "distance_m": 780.5,
+    "avg_speed_kph": 40.7,
+    "max_speed_kph": 76.7,
+    "points": 9
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 11:51",
+    "duration_sec": 48,
+    "distance_m": 308.3,
+    "avg_speed_kph": 23.1,
+    "max_speed_kph": 76.8,
+    "points": 8
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 11:52",
+    "duration_sec": 75,
+    "distance_m": 575.5,
+    "avg_speed_kph": 27.6,
+    "max_speed_kph": 84.4,
+    "points": 8
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 11:54",
+    "duration_sec": 46,
+    "distance_m": 268.9,
+    "avg_speed_kph": 21.0,
+    "max_speed_kph": 74.0,
+    "points": 9
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 11:55",
+    "duration_sec": 70,
+    "distance_m": 484.3,
+    "avg_speed_kph": 24.9,
+    "max_speed_kph": 89.1,
+    "points": 9
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 11:57",
+    "duration_sec": 68,
+    "distance_m": 654.5,
+    "avg_speed_kph": 34.6,
+    "max_speed_kph": 77.5,
+    "points": 8
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 11:58",
+    "duration_sec": 1001,
+    "distance_m": 20119.8,
+    "avg_speed_kph": 72.4,
+    "max_speed_kph": 98.2,
+    "points": 154
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 12:16",
+    "duration_sec": 187,
+    "distance_m": 3038.1,
+    "avg_speed_kph": 58.5,
+    "max_speed_kph": 95.9,
+    "points": 29
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 12:19",
+    "duration_sec": 75,
+    "distance_m": 0.0,
+    "avg_speed_kph": 0.0,
+    "max_speed_kph": 72.8,
+    "points": 3
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 12:23",
+    "duration_sec": 240,
+    "distance_m": 2115.3,
+    "avg_speed_kph": 31.7,
+    "max_speed_kph": 76.1,
+    "points": 33
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 12:27",
+    "duration_sec": 113,
+    "distance_m": 1561.7,
+    "avg_speed_kph": 49.8,
+    "max_speed_kph": 68.8,
+    "points": 16
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 12:29",
+    "duration_sec": 93,
+    "distance_m": 209.2,
+    "avg_speed_kph": 8.1,
+    "max_speed_kph": 47.7,
+    "points": 17
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 12:32",
+    "duration_sec": 60,
+    "distance_m": 366.1,
+    "avg_speed_kph": 22.0,
+    "max_speed_kph": 36.9,
+    "points": 10
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 12:34",
+    "duration_sec": 72,
+    "distance_m": 0.0,
+    "avg_speed_kph": 0.0,
+    "max_speed_kph": 138.8,
+    "points": 5
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 12:37",
+    "duration_sec": 360,
+    "distance_m": 6264.8,
+    "avg_speed_kph": 62.6,
+    "max_speed_kph": 129.4,
+    "points": 45
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 12:43",
+    "duration_sec": 340,
+    "distance_m": 7847.4,
+    "avg_speed_kph": 83.1,
+    "max_speed_kph": 130.4,
+    "points": 41
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 12:49",
+    "duration_sec": 337,
+    "distance_m": 3353.4,
+    "avg_speed_kph": 35.8,
+    "max_speed_kph": 63.3,
+    "points": 35
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 12:56",
+    "duration_sec": 79,
+    "distance_m": 141.3,
+    "avg_speed_kph": 6.4,
+    "max_speed_kph": 45.3,
+    "points": 10
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 15:32",
+    "duration_sec": 110,
+    "distance_m": 0.0,
+    "avg_speed_kph": 0.0,
+    "max_speed_kph": 30.3,
+    "points": 4
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 20:20",
+    "duration_sec": 56,
+    "distance_m": 353.1,
+    "avg_speed_kph": 22.7,
+    "max_speed_kph": 46.1,
+    "points": 10
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 20:24",
+    "duration_sec": 185,
+    "distance_m": 2969.7,
+    "avg_speed_kph": 57.8,
+    "max_speed_kph": 114.4,
+    "points": 28
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 20:28",
+    "duration_sec": 1296,
+    "distance_m": 27640.8,
+    "avg_speed_kph": 76.8,
+    "max_speed_kph": 137.5,
+    "points": 197
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 20:50",
+    "duration_sec": 692,
+    "distance_m": 9457.2,
+    "avg_speed_kph": 49.2,
+    "max_speed_kph": 79.8,
+    "points": 24
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 21:06",
+    "duration_sec": 82,
+    "distance_m": 701.7,
+    "avg_speed_kph": 30.8,
+    "max_speed_kph": 79.8,
+    "points": 13
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 21:08",
+    "duration_sec": 911,
+    "distance_m": 19571.6,
+    "avg_speed_kph": 77.3,
+    "max_speed_kph": 109.1,
+    "points": 144
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 21:23",
+    "duration_sec": 264,
+    "distance_m": 4024.6,
+    "avg_speed_kph": 54.9,
+    "max_speed_kph": 74.1,
+    "points": 40
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 21:28",
+    "duration_sec": 191,
+    "distance_m": 2556.2,
+    "avg_speed_kph": 48.2,
+    "max_speed_kph": 92.4,
+    "points": 21
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 21:39",
+    "duration_sec": 228,
+    "distance_m": 2156.0,
+    "avg_speed_kph": 34.0,
+    "max_speed_kph": 64.7,
+    "points": 29
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-16 21:43",
+    "duration_sec": 115,
+    "distance_m": 593.1,
+    "avg_speed_kph": 18.6,
+    "max_speed_kph": 42.5,
+    "points": 16
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 11:49",
+    "duration_sec": 115,
+    "distance_m": 632.7,
+    "avg_speed_kph": 19.8,
+    "max_speed_kph": 51.6,
+    "points": 13
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 11:51",
+    "duration_sec": 262,
+    "distance_m": 3308.4,
+    "avg_speed_kph": 45.5,
+    "max_speed_kph": 73.8,
+    "points": 31
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 12:01",
+    "duration_sec": 355,
+    "distance_m": 6935.7,
+    "avg_speed_kph": 70.3,
+    "max_speed_kph": 97.1,
+    "points": 48
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 12:08",
+    "duration_sec": 270,
+    "distance_m": 5461.3,
+    "avg_speed_kph": 72.8,
+    "max_speed_kph": 105.7,
+    "points": 34
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 12:12",
+    "duration_sec": 178,
+    "distance_m": 3014.5,
+    "avg_speed_kph": 61.0,
+    "max_speed_kph": 87.8,
+    "points": 33
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 12:16",
+    "duration_sec": 427,
+    "distance_m": 9652.6,
+    "avg_speed_kph": 81.4,
+    "max_speed_kph": 106.7,
+    "points": 65
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 12:27",
+    "duration_sec": 152,
+    "distance_m": 1912.0,
+    "avg_speed_kph": 45.3,
+    "max_speed_kph": 71.2,
+    "points": 27
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 12:30",
+    "duration_sec": 397,
+    "distance_m": 6503.9,
+    "avg_speed_kph": 59.0,
+    "max_speed_kph": 102.1,
+    "points": 59
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 12:37",
+    "duration_sec": 214,
+    "distance_m": 2912.7,
+    "avg_speed_kph": 49.0,
+    "max_speed_kph": 95.5,
+    "points": 34
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 12:42",
+    "duration_sec": 86,
+    "distance_m": 1322.7,
+    "avg_speed_kph": 55.4,
+    "max_speed_kph": 93.0,
+    "points": 15
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 12:44",
+    "duration_sec": 839,
+    "distance_m": 20834.4,
+    "avg_speed_kph": 89.4,
+    "max_speed_kph": 143.2,
+    "points": 136
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 12:58",
+    "duration_sec": 80,
+    "distance_m": 809.6,
+    "avg_speed_kph": 36.4,
+    "max_speed_kph": 44.8,
+    "points": 14
+  },
+  {
+    "type": "drive",
+    "date": "2026-09-17 12:59",
+    "duration_sec": 50,
+    "distance_m": 327.7,
+    "avg_speed_kph": 23.6,
+    "max_speed_kph": 43.3,
+    "points": 9
+  }
+]

@@ -290,7 +290,7 @@ PIPER_VOICE = os.environ.get("PIPER_VOICE", "/voices/lilly_voice.onnx")
 # lilly_voice.onnx but explicit so "use the amy voice" always resolves to Amy.
 if not os.path.exists(PIPER_VOICE):
     _amy_voice = str(
-        Path(__file__).parent / "lillyos" / "voices" / "en-us-amy-medium.onnx"
+        Path(__file__).parent / "lillyos" / "voices" / "en_US-lessac-medium.onnx"
     )
     if os.path.exists(_amy_voice):
         PIPER_VOICE = _amy_voice
@@ -2824,6 +2824,33 @@ _OPENHUMAN_ALIAS_OVERRIDES = {
     ],
 }
 
+# Catalog entries that ship a description but no source SKILL.md anywhere.
+# A short built-in doc is written locally so these are executable offline and
+# no longer fail with "I don't have a skill called ...". Keyed by normalized id.
+_OPENHUMAN_BUILTIN_DOCS = {
+    "mx competitive analyst": (
+        "# mx-competitive-analyst\n\n"
+        "You are a competitive intelligence analyst. When invoked, produce a "
+        "structured competitive analysis for the subject the user names.\n\n"
+        "Steps:\n"
+        "1. Define the market and the competitor set.\n"
+        "2. Compare positioning, features, pricing and audience per competitor.\n"
+        "3. Call out strengths, weaknesses and gaps (SWOT where useful).\n"
+        "4. Recommend differentiation and concrete next actions.\n\n"
+        "Use only what the user provides or what your available tools can verify. "
+        "Flag assumptions explicitly. Output a concise report, not a wall of text.\n"
+    ),
+}
+
+
+def _openhuman_builtin_doc(*candidates) -> str:
+    """Return a built-in SKILL.md doc for the first matching candidate name/id."""
+    for candidate in candidates:
+        key = normalize_text(candidate or "")
+        if key and key in _OPENHUMAN_BUILTIN_DOCS:
+            return _OPENHUMAN_BUILTIN_DOCS[key]
+    return ""
+
 
 def _match_avatar_tags(skill: dict) -> bool:
     """Check if an OpenHuman skill matches the current avatar's tag filter.
@@ -3032,19 +3059,42 @@ async def execute_openhuman_skill(skill_id: str, avatar: str | None = None) -> s
                 skill = entry
                 break
 
-    if not skill or not skill.get("download_url"):
+    # Prefer whichever form actually carries a resolvable download_url.
+    resolved = skill_entry if (skill_entry or {}).get("download_url") else skill
+    if not resolved:
+        return f"I don't have a skill called '{skill_id}' loaded right now."
+
+    # Built-in docs: catalog entries that ship a description but no source
+    # SKILL.md anywhere. Synthesize a local doc so they are executable offline.
+    _bdoc = _openhuman_builtin_doc(
+        resolved.get("skill_id"),
+        resolved.get("id"),
+        resolved.get("label"),
+        skill_id,
+    )
+    if _bdoc and not (resolved.get("download_url") or "").strip():
+        resolved = dict(resolved)
+        resolved["download_url"] = "builtin://local"
+        resolved.setdefault("label", skill_id)
+
+    if not (resolved.get("download_url") or "").strip():
         return f"I don't have a skill called '{skill_id}' loaded right now."
 
     # Download the SKILL.md if not already cached
     skill_dir = OPENHUMAN_SKILLS_DIR / normalize_text(skill_id)
     skill_file = skill_dir / "SKILL.md"
 
+    if _bdoc and not skill_file.exists():
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_file.write_text(_bdoc)
+        logger.info(f"OpenHuman: wrote built-in SKILL.md for '{skill_id}'")
+
     if not skill_file.exists():
         skill_dir.mkdir(parents=True, exist_ok=True)
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 # Rewrite GitHub blob URLs to raw
-                dl_url = skill.get("download_url", "")
+                dl_url = resolved.get("download_url", "")
                 if "github.com" in dl_url and "/blob/" in dl_url:
                     dl_url = dl_url.replace(
                         "github.com", "raw.githubusercontent.com"
@@ -3068,7 +3118,7 @@ async def execute_openhuman_skill(skill_id: str, avatar: str | None = None) -> s
 
     # Read the SKILL.md frontmatter for the skill's instructions
     skill_content = skill_file.read_text()
-    skill_name = skill.get("label", skill_id)
+    skill_name = resolved.get("label", skill_id)
 
     # The avatar reads the SKILL.md and executes it
     persona = HIVE_PERSONAS[resolve_persona_key(avatar)]
@@ -3102,6 +3152,12 @@ async def list_openhuman_skills(avatar: str | None = None) -> list[dict]:
         if skill_id in seen:
             continue
         seen.add(skill_id)
+        # Hide skills that can't actually be executed: no resolvable source and
+        # no built-in doc. Keeps the market to working skills only.
+        if not (skill.get("download_url") or "").strip() and not _openhuman_builtin_doc(
+            skill_id, skill.get("label")
+        ):
+            continue
         result.append(
             {
                 "id": skill_id,
@@ -3556,24 +3612,34 @@ def _format_time_ago(seconds: float) -> str:
 
 # ─── FULL CONVERSATION HISTORY (JSONL) ──────────────────────────
 # Every conversation turn is appended to a JSONL file for permanent storage.
-# This is separate from the deque (which is limited to 50 entries).
-CONVERSATION_HISTORY_FILE = MEMORY_DIR / "conversation_history.jsonl"
+# Per-user: conversation_history_<user_id>.jsonl  (sandboxed)
+
+
+def _conversation_history_file(user_id: str = "") -> Path:
+    """Return the per-user conversation history JSONL path."""
+    if user_id:
+        safe = user_id.replace("/", "_").replace("..", "_")[:64]
+        return MEMORY_DIR / f"conversation_history_{safe}.jsonl"
+    return MEMORY_DIR / "conversation_history.jsonl"
 
 
 async def _record_conversation_turn(
     user_msg: str, assistant_reply: str, avatar: str = ""
 ):
-    """Append a conversation turn to the permanent history file."""
+    """Append a conversation turn to the permanent history file (per-user)."""
     try:
         avatar = avatar or current_avatar
+        uid = _current_user_id or ""
         entry = {
             "ts": time.time(),
             "avatar": avatar,
-            "user": user_msg[:500],  # Truncate very long messages
+            "user": user_msg[:500],
             "assistant": assistant_reply[:500],
             "session_id": memory.session_id,
+            "uid": uid,
         }
-        with open(CONVERSATION_HISTORY_FILE, "a") as f:
+        hist_file = _conversation_history_file(uid)
+        with open(hist_file, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception as e:
         logger.warning(f"Failed to record conversation turn: {e}")
@@ -4885,6 +4951,8 @@ _NOTIF_PREFS: dict = {
     "paused": False,
     "daily_cap": 2,
     "proactive": True,
+    "sound": True,
+    "pushbullet_fallback": False,
     "day": "",
     "sent_today": 0,
 }
@@ -10277,6 +10345,466 @@ def push_notification(
     return notif
 
 
+# ─── Platform Help Knowledge Base ────────────────────────────────────────
+# Avatars answer user questions about the webui and Instagram integration.
+# They never mention internal apps, APIs, or technical implementation details.
+
+PLATFORM_HELP_KB = {
+    "connect instagram": {
+        "q": "How do I connect my Instagram?",
+        "a": "Go to Settings (⚙️ in the hamburger menu) → Instagram Pairing. Enter your Instagram username, then follow one of the 9 avatars on Instagram. Once you send them a DM, your account is linked and they start remembering your conversations.",
+    },
+    "pair code": {
+        "q": "What's the pair code for?",
+        "a": "The 6-digit pair code is for connecting the Web UI to the phone app (for voice and sensor features). For Instagram, you just link your handle in Settings → Instagram — no pair code needed.",
+    },
+    "pair instagram": {
+        "q": "Can I pair Instagram with the Web UI?",
+        "a": "Yes! Sign in with Google, go to Settings → Instagram, enter your IG handle. All 9 avatars then have persistent memory of your conversations and preferences across both the web and Instagram.",
+    },
+    "what can avatars do": {
+        "q": "What can the avatars do?",
+        "a": "Each avatar has unique skills! They can send voice reminders, track your habits, manage projects, give morning briefings, help with creative work, monitor news, assist with tech issues, and more. Open the hamburger menu (☰) to explore all features.",
+    },
+    "persistent memory": {
+        "q": "How does memory work?",
+        "a": "Each avatar builds its own memory of you over time. They remember your preferences, projects, habits, and past conversations. The more you interact, the more personalized they become. You can view what they remember in Memory (🧠) from the hamburger menu.",
+    },
+    "voice messages": {
+        "q": "Can I get voice messages?",
+        "a": "Yes! Ask any avatar for a 'voice reminder' or 'voice note' and they'll send you a voice message. Each avatar has a distinct voice — Lilly sounds different from Fox, who sounds different from Wolf.",
+    },
+    "privacy": {
+        "q": "Is my data private?",
+        "a": "Yes. Each account is sandboxed — your conversations, preferences, and linked Instagram are isolated from other users. You control what skills are enabled and what data is stored.",
+    },
+    "which avatar": {
+        "q": "Which avatar should I start with?",
+        "a": "Lilly (🐶) is the alpha companion — great for general conversations and the best starting point. Then explore: Fox (🦊) for creative work, Cat (🐱) for data/analysis, Bear (🐻) for scheduling, Bunny (🐰) for news, Owl (🦉) for deep thinking, Deer (🦌) for wellness, Wolf (🐺) for security, or Raccoon (🦝) for tech help.",
+    },
+    "dm limits": {
+        "q": "How many DMs can I send?",
+        "a": "There's no hard limit on your messages. The avatars pace their responses naturally and use a 15-minute edit window so you can fix typos without triggering extra replies. The system manages flow automatically.",
+    },
+    "enable disable skills": {
+        "q": "Can I enable/disable skills?",
+        "a": "Yes! Go to Settings → Skills in the Web UI. You'll see all skills across 4 categories (Proactive, Responsive, Scheduled, Memory). Toggle any skill on or off. Some skills like Google integration require you to connect your Google account first.",
+    },
+    "hamburger menu": {
+        "q": "What's in the hamburger menu?",
+        "a": "The hamburger menu (☰) gives you access to everything: Chat (main conversation), Mic (voice input), Settings (Instagram, notifications, theme), Pair (connect phone app), Memory (what avatars remember), Habits (daily streaks), Projects (active work), Reminders (scheduled tasks), DMs (Instagram inbox), Help (FAQ), and more.",
+    },
+    "skills": {
+        "q": "What skills do avatars have?",
+        "a": "Avatars have skills across 4 categories: Proactive (morning briefing, evening recap, wellness checks, security monitoring), Responsive (creative help, tech support, data analysis, news), Scheduled (DMs, calendar, content scheduling), and Memory (persistent memory, project tracking, habit tracking). Each avatar specializes in different skills.",
+    },
+    "settings": {
+        "q": "What's in Settings?",
+        "a": "Settings (⚙️) has: Instagram Pairing (link your IG handle), Face Registration (register your face), Notification preferences, Pair Token (connect phone app), and Skill management (enable/disable avatar abilities).",
+    },
+    "feature board": {
+        "q": "What's the Feature Board?",
+        "a": "The Feature Board is where avatars post new feature ideas and requests. When an avatar learns something new or gets a request it can't fulfill yet, it posts to the board for review. You can comment on posts and see what's been approved!",
+    },
+    "price tracking": {
+        "q": "Can you track prices for me?",
+        "a": "Yes! Paste a product link (from Amazon, eBay, Walmart, etc.) in the chat and I'll offer to track the price. Just say 'track this' or 'notify me when it goes on sale' and I'll watch it for you.",
+    },
+    "morning briefing": {
+        "q": "What's a morning briefing?",
+        "a": "A morning briefing is a daily summary I can send you with your schedule, weather, priorities, and news. You can enable it in Settings → Skills and set your preferred time.",
+    },
+    "habits": {
+        "q": "How do habits work?",
+        "a": "Tell me about a habit you want to track (e.g., 'I meditate daily') and I'll start tracking it. I'll log streaks and remind you. View your habits anytime from the hamburger menu → Habits.",
+    },
+    "projects": {
+        "q": "How do projects work?",
+        "a": "Tell me about a project you're working on and I'll track it for you. I can help with deadlines, updates, and organization. View projects from the hamburger menu → Projects.",
+    },
+    "reminders": {
+        "q": "How do reminders work?",
+        "a": "Just tell me what you need reminded about and when. I can send you reminders via chat or Instagram DM. View and manage reminders from the hamburger menu → Reminders.",
+    },
+}
+
+
+def _match_platform_help(text: str) -> str:
+    """Match user text against platform help knowledge base.
+    Returns the answer if matched, empty string otherwise."""
+    text_lower = text.lower().strip()
+    # Direct keyword matching
+    help_triggers = [
+        "how do i", "how to", "what is", "what's", "can i", "can you",
+        "where do i", "where is", "tell me about", "explain",
+        "help me with", "help with", "how does", "what are",
+    ]
+    is_help_question = any(t in text_lower for t in help_triggers)
+    if not is_help_question:
+        return ""
+    # Check each KB entry
+    for key, entry in PLATFORM_HELP_KB.items():
+        keywords = key.split()
+        if all(kw in text_lower for kw in keywords):
+            return entry["a"]
+    # Broader matching — check if question is about platform topics
+    platform_topics = [
+        "instagram", "pair", "connect", " settings", "skill", "memory",
+        "voice", "dm", "habit", "project", "reminder", "briefing",
+        "avatar", "feature board", "price track", "hamburger", "menu",
+    ]
+    if any(topic in text_lower for topic in platform_topics):
+        # Generic platform help response
+        return (
+            "I'd be happy to help! Here's a quick guide:\n\n"
+            "• **Settings** (⚙️) — Instagram pairing, face registration, skills\n"
+            "• **Memory** (🧠) — what I remember about you\n"
+            "• **Habits** (✅) — daily streaks tracker\n"
+            "• **Projects** (📁) — active work & deadlines\n"
+            "• **Reminders** (⏰) — scheduled tasks\n"
+            "• **DMs** (📩) — Instagram DM inbox\n"
+            "• **Board** — new features and requests\n\n"
+            "Ask me anything specific and I'll walk you through it!"
+        )
+    return ""
+
+
+# ─── Instagram Social Graph Awareness ────────────────────────────────────
+# Loads who the user follows and who follows them on Instagram.
+# This data is injected into avatar context so they know the user's social world.
+
+_IG_SOCIAL_FILE = WORKSPACE / "ig_social_graph.json"
+_ig_social_cache: dict = {}
+_ig_social_cache_ts: float = 0
+
+
+def _load_ig_social_graph(user_id: str) -> dict:
+    """Load Instagram social graph for a user. Cached for 5 minutes."""
+    global _ig_social_cache, _ig_social_cache_ts
+    if not user_id:
+        return {}
+    now = time.time()
+    if _ig_social_cache.get("user_id") == user_id and (now - _ig_social_cache_ts) < 300:
+        return _ig_social_cache
+    # Try loading from file
+    if _IG_SOCIAL_FILE.exists():
+        try:
+            all_data = json.loads(_IG_SOCIAL_FILE.read_text())
+            if isinstance(all_data, dict) and user_id in all_data:
+                _ig_social_cache = all_data[user_id]
+                _ig_social_cache_ts = now
+                return _ig_social_cache
+        except Exception:
+            pass
+    # Try pulling from Instagram scraper data
+    try:
+        scraper_file = WORKSPACE / "scraper_targets.json"
+        if scraper_file.exists():
+            targets = json.loads(scraper_file.read_text())
+            if isinstance(targets, list):
+                followers = [t.get("username", "") for t in targets
+                             if t.get("source") == "follower" and t.get("username")]
+                following = [t.get("username", "") for t in targets
+                             if t.get("source") == "following" and t.get("username")]
+                interests = [t.get("notes", "") for t in targets
+                             if t.get("notes") and "interest" in t.get("notes", "").lower()]
+                data = {
+                    "user_id": user_id,
+                    "followers": followers[:50],
+                    "following": following[:50],
+                    "interests": interests[:20],
+                    "updated_at": time.time(),
+                }
+                _ig_social_cache = data
+                _ig_social_cache_ts = now
+                # Persist
+                all_data = {}
+                if _IG_SOCIAL_FILE.exists():
+                    try:
+                        all_data = json.loads(_IG_SOCIAL_FILE.read_text())
+                    except Exception:
+                        pass
+                all_data[user_id] = data
+                _IG_SOCIAL_FILE.write_text(json.dumps(all_data, indent=2))
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _update_ig_social_graph(user_id: str, following: list = None, followers: list = None,
+                            interests: list = None) -> None:
+    """Update the social graph with new data from Instagram training."""
+    if not user_id:
+        return
+    existing = _load_ig_social_graph(user_id)
+    if following:
+        existing["following"] = list(set(existing.get("following", []) + following))[:100]
+    if followers:
+        existing["followers"] = list(set(existing.get("followers", []) + followers))[:100]
+    if interests:
+        existing["interests"] = list(set(existing.get("interests", []) + interests))[:50]
+    existing["updated_at"] = time.time()
+    # Persist
+    all_data = {}
+    if _IG_SOCIAL_FILE.exists():
+        try:
+            all_data = json.loads(_IG_SOCIAL_FILE.read_text())
+        except Exception:
+            pass
+    all_data[user_id] = existing
+    _IG_SOCIAL_FILE.write_text(json.dumps(all_data, indent=2))
+    global _ig_social_cache, _ig_social_cache_ts
+    _ig_social_cache = existing
+    _ig_social_cache_ts = time.time()
+
+
+# ─── Feature Board ────────────────────────────────────────────────────────
+# Avatar-only posting. Users + avatars can comment. Admin approves/dismisses.
+# When a skill is proposed, the avatar posts here instead of saying "I can't".
+
+FEATURE_BOARD_FILE = WORKSPACE / "feature_board.json"
+_feature_board_lock = __import__("threading").Lock()
+
+
+def _load_board() -> list[dict]:
+    if FEATURE_BOARD_FILE.exists():
+        try:
+            data = json.loads(FEATURE_BOARD_FILE.read_text())
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return []
+
+
+def _save_board(posts: list[dict]) -> None:
+    FEATURE_BOARD_FILE.write_text(json.dumps(posts, indent=2, default=str))
+
+
+def _board_add_post(
+    author: str,
+    author_type: str,
+    category: str,
+    title: str,
+    body: str,
+    skill_key: str = "",
+    status: str = "pending",
+) -> dict:
+    """Add a post to the Feature Board. Only avatars can post."""
+    if author_type != "avatar":
+        return {"error": "only avatars can post"}
+    with _feature_board_lock:
+        posts = _load_board()
+        post = {
+            "id": str(_uuid.uuid4())[:8],
+            "author": author,
+            "author_type": author_type,
+            "category": category,
+            "title": title,
+            "body": body,
+            "skill_key": skill_key,
+            "status": status,  # pending | approved | dismissed
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "comments": [],
+        }
+        posts.append(post)
+        _save_board(posts)
+        return post
+
+
+def _board_add_comment(post_id: str, author: str, author_type: str, text: str) -> dict:
+    """Add a comment to a board post. Users + avatars can comment."""
+    with _feature_board_lock:
+        posts = _load_board()
+        for p in posts:
+            if p["id"] == post_id:
+                comment = {
+                    "id": str(_uuid.uuid4())[:8],
+                    "author": author,
+                    "author_type": author_type,
+                    "text": text,
+                    "created_at": time.time(),
+                }
+                p["comments"].append(comment)
+                p["updated_at"] = time.time()
+                _save_board(posts)
+                return comment
+        return {"error": "post not found"}
+
+
+def _board_set_status(post_id: str, status: str, actor: str = "admin") -> dict:
+    """Approve or dismiss a board post. Admin only."""
+    with _feature_board_lock:
+        posts = _load_board()
+        for p in posts:
+            if p["id"] == post_id:
+                p["status"] = status
+                p["updated_at"] = time.time()
+                if "status_history" not in p:
+                    p["status_history"] = []
+                p["status_history"].append({
+                    "status": status,
+                    "by": actor,
+                    "ts": time.time(),
+                })
+                _save_board(posts)
+                return p
+        return {"error": "post not found"}
+
+
+def _board_get_posts(status_filter: str = "") -> list[dict]:
+    """Get board posts, optionally filtered by status."""
+    posts = _load_board()
+    if status_filter:
+        posts = [p for p in posts if p.get("status") == status_filter]
+    return sorted(posts, key=lambda p: p.get("created_at", 0), reverse=True)
+
+
+# ─── URL / Price Tracking ─────────────────────────────────────────────────
+# Detect product URLs in chat + DMs. Offer to track price.
+
+PRICE_TRACK_FILE = WORKSPACE / "price_tracking.json"
+_price_track_lock = __import__("threading").Lock()
+
+
+def _load_price_tracks() -> list[dict]:
+    if PRICE_TRACK_FILE.exists():
+        try:
+            data = json.loads(PRICE_TRACK_FILE.read_text())
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return []
+
+
+def _save_price_tracks(tracks: list[dict]) -> None:
+    PRICE_TRACK_FILE.write_text(json.dumps(tracks, indent=2, default=str))
+
+
+def _detect_urls(text: str) -> list[str]:
+    """Extract URLs from text."""
+    import re as _re
+    return _re.findall(r'https?://[^\s<>"\')\]]+', text)
+
+
+def _is_shopping_url(url: str) -> bool:
+    """Check if a URL looks like a product/shopping link."""
+    shopping_domains = [
+        "amazon.", "ebay.", "walmart.", "target.", "bestbuy.",
+        "etsy.", "aliexpress.", "shopify.", "woocommerce.",
+        "newegg.", "costco.", "kohls.", "macys.", "nordstrom.",
+        "homedepot.", "lowes.", "ikea.", "wayfair.",
+        "zappos.", "nike.", "adidas.", "apple.com/shop",
+        "bhphotovideo.", "adorama.", "rei.com", "staples.",
+        "/product/", "/item/", "/dp/", "/p/", "/gp/product",
+    ]
+    url_lower = url.lower()
+    return any(d in url_lower for d in shopping_domains)
+
+
+def _add_price_track(user_id: str, url: str, title: str = "", target_price: float = 0) -> dict:
+    """Start tracking a product URL for price changes."""
+    with _price_track_lock:
+        tracks = _load_price_tracks()
+        existing = [t for t in tracks if t.get("url") == url and t.get("user_id") == user_id]
+        if existing:
+            return {"ok": True, "id": existing[0]["id"], "message": "already tracking"}
+        track = {
+            "id": str(_uuid.uuid4())[:8],
+            "user_id": user_id,
+            "url": url,
+            "title": title or url[:80],
+            "target_price": target_price,
+            "last_price": None,
+            "price_history": [],
+            "status": "active",
+            "created_at": time.time(),
+            "last_checked": None,
+        }
+        tracks.append(track)
+        _save_price_tracks(tracks)
+        return {"ok": True, "id": track["id"], "message": "tracking started"}
+
+
+def _get_price_tracks(user_id: str = "") -> list[dict]:
+    tracks = _load_price_tracks()
+    if user_id:
+        tracks = [t for t in tracks if t.get("user_id") == user_id]
+    return tracks
+
+
+def _skill_proposal_from_avatar(avatar: str, skill_name: str, description: str,
+                                example_request: str = "", category: str = "skill") -> dict:
+    """An avatar proposes a new skill to the Feature Board for admin review."""
+    title = f"New Skill: {skill_name}"
+    body = (
+        f"Avatar **{avatar}** proposes a new capability.\n\n"
+        f"**What it does:** {description}\n\n"
+    )
+    if example_request:
+        body += f"**Example user request:** \"{example_request}\"\n\n"
+    body += "This skill is being reviewed for approval. Once approved, all users will be notified."
+    post = _board_add_post(
+        author=avatar,
+        author_type="avatar",
+        category=category,
+        title=title,
+        body=body,
+        skill_key=skill_name.lower().replace(" ", "_"),
+        status="pending",
+    )
+    # Also push admin notification
+    if "error" not in post:
+        push_notification(
+            n_type="approval_request",
+            title=f"Skill Proposal: {skill_name}",
+            body=f"{avatar} wants to learn: {description[:120]}",
+            agent=avatar,
+            context={"post_id": post["id"], "skill_key": post.get("skill_key", "")},
+        )
+    return post
+
+
+def _cannot_do_fallback(avatar: str, request_text: str, reason: str = "") -> dict:
+    """Avatar says 'I can't do that' but posts to the board for team review."""
+    from CHARACTERS import CHAR_ROLES
+    avatar_info = CHAR_ROLES.get(avatar, {})
+    avatar_name = avatar_info.get("name", avatar.title())
+    avatar_emoji = avatar_info.get("emoji", "")
+
+    title = f"Request: {request_text[:80]}"
+    body = (
+        f"{avatar_emoji} **{avatar_name}** received this request but can't fulfill it yet.\n\n"
+        f"**User asked:** \"{request_text}\"\n\n"
+    )
+    if reason:
+        body += f"**Why:** {reason}\n\n"
+    body += (
+        "I've posted this here so my team can review the possibilities. "
+        "If this gets approved, I'll learn how to do it and all users will be notified!"
+    )
+    post = _board_add_post(
+        author=avatar,
+        author_type="avatar",
+        category="request",
+        title=title,
+        body=body,
+        status="pending",
+    )
+    if "error" not in post:
+        push_notification(
+            n_type="info",
+            title=f"New Request: {request_text[:50]}",
+            body=f"{avatar_name} posted a request to the Feature Board",
+            agent=avatar,
+            context={"post_id": post["id"]},
+        )
+    return post
+
+
 def _task_lookup(task_id: str) -> Optional[AvatarTask]:
     """Find a task by id across all avatar queues (safe when queues not loaded)."""
     for tasks in AVATAR_TASKS.values():
@@ -11039,6 +11567,40 @@ async def handle_intent(
                     await save_memory()
                     await speak(reply)
                     return {"action": "handled", "text": reply}
+                # Price tracking confirm: start tracking the URL
+                if pending_skill == "_price_track_confirm":
+                    try:
+                        arg_data = json.loads(pending.get("skill_arg", "{}"))
+                        url = arg_data.get("url", "")
+                        title = arg_data.get("title", "")
+                        user_id = _current_user_id or "default"
+                        # Check if user said yes
+                        yes_triggers = ["yes", "yeah", "sure", "ok", "track", "watch", "do it", "yep", "y"]
+                        no_triggers = ["no", "nah", "nope", "n", "cancel", "nevermind"]
+                        if any(t in cmd.lower() for t in yes_triggers):
+                            result = _add_price_track(user_id, url, title)
+                            if result.get("ok"):
+                                reply = f"On it! I'm watching that link now. I'll ping you if the price drops. 🔔"
+                            else:
+                                reply = f"I'm already tracking that for you."
+                        elif any(t in cmd.lower() for t in no_triggers):
+                            reply = "No worries, I'll leave it alone."
+                        else:
+                            # Ambiguous — ask again, don't auto-track
+                            reply = "Want me to track that link for price drops? Just say yes or no."
+                            PENDING_CONFIRM = {
+                                "desc": f"track price for {url[:60]}",
+                                "skill": "_price_track_confirm",
+                                "skill_arg": json.dumps({"url": url, "title": title}),
+                                "expires": time.time() + 120,
+                            }
+                    except Exception:
+                        reply = "OK, I'll keep an eye on that link for you."
+                    await memory.add("user", text)
+                    await memory.add("assistant", reply)
+                    await save_memory()
+                    await speak(reply)
+                    return {"action": "handled", "text": reply}
                 if not pending_skill:
                     reply = "OK, ready when you are."
                 else:
@@ -11639,6 +12201,90 @@ async def handle_intent(
         else:
             await speak("I can't get a location fix right now.")
             return {"action": "handled", "text": "No location fix."}
+
+    # ── 0b. PLATFORM HELP — answer user questions about the webui/Instagram ──
+    # Avatars happily explain how to use the platform without mentioning
+    # internal apps, APIs, or technical implementation details.
+    platform_help = _match_platform_help(cmd)
+    if platform_help:
+        await memory.add("user", text)
+        await memory.add("assistant", platform_help)
+        await save_memory()
+        await speak(platform_help)
+        return {"action": "handled", "text": platform_help}
+
+    # ── 0c. HABIT / PROJECT / REMINDER LOGGING ──
+    # Users say "log habit: meditation", "add project: Website", "remind me to X at 3pm"
+    import re as _re_hpr
+
+    # Habit logging: "log habit: meditation" or "i meditated today"
+    habit_match = _re_hpr.match(r'(?:log|track|record)\s+habit[:\s]+(.+)', cmd, _re_hpr.IGNORECASE)
+    if not habit_match:
+        habit_match = _re_hpr.match(r'i\s+(.+?)\s+(?:today|this morning|tonight)', cmd, _re_hpr.IGNORECASE)
+    if habit_match:
+        habit_name = habit_match.group(1).strip()
+        try:
+            from persistent_memory import log_habit as _log_habit
+            uid = _current_user_id or "default"
+            result = _log_habit(uid, current_avatar, habit_name)
+            if result.get("ok"):
+                streak = result.get("streak", 1)
+                reply = f"Logged! {habit_name.title()} — {streak} day streak {'🔥' if streak > 1 else '✓'}"
+            else:
+                reply = result.get("message", f"Already logged {habit_name} today!")
+        except Exception:
+            reply = f"Got it — I'll remember you did {habit_name} today."
+        await memory.add("user", text)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
+    # Project creation: "add project: Website Redesign" or "new project: App v2"
+    project_match = _re_hpr.match(r'(?:add|new|create|start)\s+project[:\s]+(.+)', cmd, _re_hpr.IGNORECASE)
+    if project_match:
+        project_name = project_match.group(1).strip()
+        try:
+            from persistent_memory import add_project as _add_project
+            uid = _current_user_id or "default"
+            _add_project(uid, current_avatar, project_name, "")
+            reply = f"Project created: {project_name}! I'll track it for you. You can view it in Projects (📁) from the menu."
+        except Exception:
+            reply = f"Got it — I'll keep track of your project: {project_name}."
+        await memory.add("user", text)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
+
+    # Reminder creation: "remind me to X at 3pm" or "reminder: call doctor tomorrow"
+    remind_match = _re_hpr.match(r'(?:remind me (?:to|about)|reminder[:\s]+)(.+?)(?:\s+(?:at|by|on|tomorrow|next)\s+(.+))?$', cmd, _re_hpr.IGNORECASE)
+    if remind_match:
+        remind_text = remind_match.group(1).strip()
+        remind_time = (remind_match.group(2) or "later").strip()
+        try:
+            task = {
+                "id": str(_uuid.uuid4())[:8],
+                "user_id": _current_user_id or "default",
+                "text": remind_text,
+                "message": remind_text,
+                "run_at": remind_time,
+                "time": remind_time,
+                "avatar": current_avatar,
+                "created_at": time.time(),
+                "status": "pending",
+            }
+            tasks = _load_scheduled_tasks()
+            tasks.append(task)
+            _save_scheduled_tasks(tasks)
+            reply = f"Reminder set! I'll remind you to {remind_text} {remind_time}. ⏰"
+        except Exception:
+            reply = f"Got it — I'll remind you to {remind_text}."
+        await memory.add("user", text)
+        await memory.add("assistant", reply)
+        await save_memory()
+        await speak(reply)
+        return {"action": "handled", "text": reply}
 
     # ── 1. PENDING INTENT ROUTING ──
     if PENDING_INTENT:
@@ -12354,6 +13000,55 @@ async def handle_intent(
         await save_memory()
         await speak(reply)
         return {"action": "handled", "text": reply}
+
+    # ── 9c. URL / PRODUCT LINK DETECTION ──
+    # If user posts a URL, detect it and offer price tracking for shopping links.
+    # This runs before skill matching so product links don't get misinterpreted.
+    detected_urls = _detect_urls(cmd)
+    if detected_urls:
+        url = detected_urls[0]  # handle first URL
+        if _is_shopping_url(url):
+            # Check if user wants to track it
+            track_triggers = ["track", "watch", "notify", "alert", "sale", "price", "drop", "deal", "cheap"]
+            wants_track = any(t in cmd.lower() for t in track_triggers)
+            if wants_track:
+                user_id = _current_user_id or "default"
+                result = _add_price_track(user_id, url, title=cmd[:100])
+                if result.get("ok"):
+                    reply = f"I'm watching that for you! I'll notify you if the price drops. 🔔"
+                else:
+                    reply = f"I'm already tracking that link for you."
+                await memory.add("user", text)
+                await memory.add("assistant", reply)
+                await save_memory()
+                await speak(reply)
+                return {"action": "handled", "text": reply}
+            else:
+                # Offer to track it
+                reply = (
+                    f"I see a product link! Want me to watch this for price drops? "
+                    f"Just say 'track this' or 'notify me when it goes on sale' and I'll keep an eye on it. 🛒"
+                )
+                # Store the URL as pending for follow-up
+                PENDING_CONFIRM = {
+                    "desc": f"track price for {url[:60]}",
+                    "skill": "_price_track_confirm",
+                    "skill_arg": json.dumps({"url": url, "title": cmd[:100]}),
+                    "expires": time.time() + 120,
+                }
+                await memory.add("user", text)
+                await memory.add("assistant", reply)
+                await save_memory()
+                await speak(reply)
+                return {"action": "handled", "text": reply}
+        else:
+            # Non-shopping URL — still acknowledge it
+            reply = f"I see you shared a link: {url}"
+            await memory.add("user", text)
+            await memory.add("assistant", reply)
+            await save_memory()
+            await speak(reply)
+            return {"action": "handled", "text": reply}
 
     # ── 10. SKILLS / APP LAUNCHER ──
     # Try matching against registered skills
@@ -13570,6 +14265,26 @@ async def handle_intent(
                 ),
             }
         )
+    # Instagram Social Graph Awareness — who the user follows, who follows them
+    _ig_social = _load_ig_social_graph(_current_user_id or "")
+    if _ig_social:
+        _social_bits = []
+        if _ig_social.get("following"):
+            _social_bits.append(f"They follow: {', '.join(_ig_social['following'][:20])}")
+        if _ig_social.get("followers"):
+            _social_bits.append(f"They are followed by: {', '.join(_ig_social['followers'][:20])}")
+        if _ig_social.get("interests"):
+            _social_bits.append(f"Their interests: {', '.join(_ig_social['interests'][:10])}")
+        if _social_bits:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "INSTAGRAM SOCIAL GRAPH (this user's Instagram activity — "
+                        "reference naturally when relevant): " + " | ".join(_social_bits)
+                    ),
+                }
+            )
     # Welcome-back hint for first message of session
     welcome_hint = getattr(handle_intent, "_welcome_hint", "")
     if welcome_hint:
@@ -14464,6 +15179,36 @@ def _run_dual_detection(frame) -> list[dict]:
     return merged
 
 
+def _apply_vision_class_filter(detections: list) -> list:
+    """Drop detections whose class is toggled OFF in the admin training console.
+
+    Reads vision_class_config.json ({"classes": {<class>: bool}, "default": bool}).
+    Absent keys follow "default" (on by default), so new classes always appear.
+    """
+    try:
+        cfg_path = WORKSPACE / "vision_class_config.json"
+        if not cfg_path.exists():
+            return detections
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        toggles = cfg.get("classes", {}) or {}
+        if not toggles:
+            return detections
+        default = bool(cfg.get("default", True))
+        kept = []
+        for d in detections:
+            label = str(d.get("label") or "").strip().lower()
+            if not label:
+                kept.append(d)  # no label — can't be toggled off
+            elif label in toggles:
+                if toggles[label]:
+                    kept.append(d)
+            elif default:
+                kept.append(d)
+        return kept
+    except Exception:
+        return detections
+
+
 async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
     """Run object detection on a JPEG frame, return labeled JPEG + detections."""
     global _YOLO_MODEL
@@ -14508,6 +15253,9 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
                         "y2": y2,
                     }
                 )
+
+            # Admin class toggles: drop classes switched OFF in the training console
+            detections = _apply_vision_class_filter(detections)
 
             if frame is not None and cv2 is not None:
                 frame = _draw_detections(frame, detections)
@@ -14578,6 +15326,9 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
                             )
         except Exception as e:
             logger.debug(f"Vision detect error: {e}")
+
+    # Admin class toggles: drop classes switched OFF in the training console
+    detections = _apply_vision_class_filter(detections)
 
     # ── Face recognition: rename "person" → "John" etc. ──────────
     _person_labels = {
@@ -14676,7 +15427,8 @@ def get_video_capture():
                 _video_capture.release()
             except Exception:
                 pass
-        _video_capture = cv2.VideoCapture(0)
+        cam_source = os.environ.get("CAMERA_URL", "0")
+        _video_capture = cv2.VideoCapture(cam_source)
         _video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         _video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     return _video_capture
@@ -14785,6 +15537,366 @@ def stop_webcam_loop():
     """Stop the background webcam capture thread."""
     global _webcam_running
     _webcam_running = False
+
+
+# ─── DRIVE WATCH (server-side continuous driving awareness) ────────
+# Pulls JPEG frames from a NETWORK camera (e.g. the phone running an
+# IP-webcam/DroidCam app at http://<phone-ip>:8080/shot.jpg — works with
+# Google Maps FULLSCREEN, no browser tab needed) and runs YOLO in driving
+# mode via the vision server (:8198). Detected drive-safety alerts are:
+#   · broadcast to the broker (phones → overlay TTS, web UIs → chat),
+#   · surfaced in web chat, and
+#   · stored in _drive_watch_state for GET /api/vision/drive/watch polling.
+# The loop is deterministic: it only re-announces an alert after the same
+# cooldown window the vision server used, so no voice spam while the risk
+# persists.
+DRIVE_CAM_URL = os.environ.get("DRIVE_CAM_URL", "").strip()
+DRIVE_WATCH_INTERVAL = float(os.environ.get("DRIVE_WATCH_INTERVAL", "1.2"))
+
+_drive_watch_active = False
+_drive_watch_task: Optional[asyncio.Task] = None
+_drive_watch_source = DRIVE_CAM_URL  # runtime override via POST {source}
+_drive_watch_state: dict = {
+    "active": False,
+    "source": DRIVE_CAM_URL,
+    "ts": 0.0,
+    "ok": False,
+    "mode": None,
+    "device_speed_kph": None,
+    "detections": 0,
+    "alerts": [],
+    "last_error": None,
+}
+_drive_watch_last_speak: dict = {}  # type:level -> last spoken ts
+
+# ── Auto start/stop from phone motion + GPS speed ─────────────────
+DRIVE_AUTO_WATCH = os.environ.get("DRIVE_AUTO_WATCH", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+DRIVE_START_SPEED_KPH = float(os.environ.get("DRIVE_START_SPEED_KPH", "20"))
+DRIVE_START_ACCEL_G = float(os.environ.get("DRIVE_START_ACCEL_G", "0.45"))
+DRIVE_STOP_SPEED_KPH = float(os.environ.get("DRIVE_STOP_SPEED_KPH", "6"))
+DRIVE_STOP_DELAY_S = float(os.environ.get("DRIVE_STOP_DELAY_S", "90"))
+DRIVE_AUTO_POLL_S = float(os.environ.get("DRIVE_AUTO_POLL_S", "3"))
+
+_drive_auto_enabled = DRIVE_AUTO_WATCH  # runtime-toggleable (POST {auto})
+_drive_auto_active = True  # background-task lifetime flag
+_drive_auto_task: Optional[asyncio.Task] = None
+_drive_auto_state: dict = {
+    "armed": DRIVE_AUTO_WATCH and bool(DRIVE_CAM_URL),
+    "enabled": DRIVE_AUTO_WATCH,
+    "reason": "idle",
+    "last_speed_kph": None,
+    "last_motion_g": None,
+    "quiet_since": None,
+    "auto_started": False,
+    "polls": 0,
+    "last_announce": 0.0,
+    "policy": {
+        "start_speed_kph": DRIVE_START_SPEED_KPH,
+        "start_accel_g": DRIVE_START_ACCEL_G,
+        "stop_speed_kph": DRIVE_STOP_SPEED_KPH,
+        "stop_delay_s": DRIVE_STOP_DELAY_S,
+        "poll_s": DRIVE_AUTO_POLL_S,
+    },
+}
+
+
+def _motion_g(raw: dict) -> float | None:
+    """Best-effort motion magnitude in g — max over the sensors we can read.
+
+    Supports {sensor_name: {values:[x,y,z]}} termux payloads. Uses either the
+    gravity-free linear acceleration magnitude, the deviation of total
+    acceleration from 1g (vibration/turns), or a raw significant_motion value.
+    """
+    best: float | None = None
+
+    def _mag(v):
+        if isinstance(v, dict):
+            v = v.get("values")
+        if isinstance(v, (list, tuple)) and len(v) >= 3:
+            try:
+                return float((v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5)
+            except Exception:
+                return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        return None
+
+    for k in ("significant_motion", "motion"):
+        v = _mag(raw.get(k))  # already in g (unitless event/gear value)
+        if v is not None and (best is None or v > best):
+            best = v
+    # termux-sensor reports accelerometers in m/s² → normalize to g (÷9.80665)
+    G = 9.80665
+    for k in ("linear_acceleration", "accelerometer_uncalibrated"):
+        v = _mag(raw.get(k))
+        if v is not None:
+            v = v / G
+            if best is None or v > best:
+                best = v
+    # Total accelerometer: deviation from 1g captures bumps/turns/braking
+    v = _mag(raw.get("accelerometer"))
+    if v is not None:
+        dev = abs(v / G - 1.0)
+        if best is None or dev > best:
+            best = dev
+    return round(best, 3) if best is not None else None
+
+
+async def _phone_speed_and_motion():
+    """Poll the phone sensor server: (gps_speed_kph, motion_g) or (None, None).
+
+    Never raises — failures mean "no telemetry this poll", which the auto
+    loop treats as quiet. GPS speed is m/s from /location, ×3.6 → km/h.
+    """
+    speed = motion = None
+    if not SENSOR_SERVER_URL:
+        return speed, motion
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=2.0) as cli:
+            r_s, r_l = await asyncio.gather(
+                cli.get(f"{SENSOR_SERVER_URL}/sensors/all"),
+                cli.get(f"{SENSOR_SERVER_URL}/location"),
+                return_exceptions=True,
+            )
+        if (
+            not isinstance(r_s, BaseException)
+            and r_s is not None
+            and r_s.status_code == 200
+        ):
+            try:
+                motion = _motion_g((r_s.json() or {}).get("sensors") or {})
+            except Exception:
+                motion = None
+        if (
+            not isinstance(r_l, BaseException)
+            and r_l is not None
+            and r_l.status_code == 200
+        ):
+            try:
+                loc = (r_l.json() or {}).get("location") or {}
+                if loc.get("speed") is not None:
+                    speed = round(float(loc["speed"]) * 3.6, 1)
+            except Exception:
+                speed = None
+    except Exception:
+        pass
+    return speed, motion
+
+
+async def _drive_auto_announce(text: str):
+    try:
+        now = time.time()
+        if now - _drive_auto_state.get("last_announce", 0.0) < 30.0:
+            return
+        _drive_auto_state["last_announce"] = now
+        await _drive_watch_announce({"text": text, "type": "drive_watch"})
+    except Exception:
+        pass
+
+
+async def _drive_auto_loop():
+    """Background monitor: watch phone motion/accel → start/stop drive watch."""
+    while _drive_auto_active:
+        try:
+            st = _drive_auto_state
+            st["polls"] += 1
+            st["enabled"] = _drive_auto_enabled
+            speed, motion = await _phone_speed_and_motion()
+            now = time.time()
+            st["last_speed_kph"] = speed
+            st["last_motion_g"] = motion
+            armed = _drive_auto_enabled and bool(_drive_watch_source)
+            st["armed"] = armed
+            if not _drive_auto_enabled:
+                st["reason"] = "disabled"
+                await asyncio.sleep(DRIVE_AUTO_POLL_S)
+                continue
+            if not _drive_watch_source:
+                st["reason"] = "no_camera_source"
+                await asyncio.sleep(DRIVE_AUTO_POLL_S)
+                continue
+
+            moving = (speed is not None and speed >= DRIVE_START_SPEED_KPH) or (
+                motion is not None and motion >= DRIVE_START_ACCEL_G
+            )
+            quiet = (speed is None or speed < DRIVE_STOP_SPEED_KPH) and (
+                motion is None or motion < DRIVE_START_ACCEL_G * 0.8
+            )
+
+            if moving:
+                st["quiet_since"] = None
+                if not _drive_watch_active:
+                    await start_drive_watch()
+                    st["auto_started"] = True
+                    detail = "speed"
+                    val: object = speed
+                    if speed is None:
+                        detail = "motion"
+                        val = motion
+                    st["reason"] = f"auto: {detail} {val}"
+                    await _drive_auto_announce(
+                        f"auto drive watch on — {detail} {val} detected, watching the road"
+                    )
+            elif quiet and _drive_watch_active:
+                if st["quiet_since"] is None:
+                    st["quiet_since"] = now
+                elif now - st["quiet_since"] >= DRIVE_STOP_DELAY_S:
+                    await stop_drive_watch()
+                    st["auto_started"] = False
+                    st["reason"] = "auto: stopped (quiet)"
+                    st["quiet_since"] = None
+                    await _drive_auto_announce(
+                        f"drive watch off — no motion for {int(DRIVE_STOP_DELAY_S)}s"
+                    )
+            else:
+                st["reason"] = "armed, waiting for motion/speed"
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"drive auto watch err: {e}")
+        await asyncio.sleep(DRIVE_AUTO_POLL_S)
+
+
+async def _drive_watch_announce(alert: dict):
+    """Deliver a drive alert to connected phones + web chat (best-effort)."""
+    try:
+        text = alert.get("tts") or alert.get("text") or ""
+        if not text:
+            return
+        # 1) Phones: broker TTS push → overlay app local voice (when paired)
+        if phone_broker is not None:
+            for pid in list(phone_broker.get_phone_ids()):
+                try:
+                    await phone_broker.push_tts(pid, {"text": text})  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+        # 2) Web chat: automation channel (chat UI shows + records audit trail)
+        await _automation_deliver(
+            "chat",
+            {"text": f"🚗 {alert.get('text', text).capitalize()}"},
+            {"type": "drive_alert", "data": alert},
+        )
+    except Exception as e:
+        logger.debug(f"drive watch announce failed: {e}")
+
+
+async def _drive_watch_loop():
+    """Continuous server-side drive watching (single asyncio task)."""
+    global _drive_watch_state, _drive_watch_last_speak
+    import base64 as _b64
+
+    try:
+        import httpx
+    except Exception:
+        _drive_watch_state["last_error"] = "httpx unavailable"
+        return
+
+    while _drive_watch_active:
+        try:
+            url = _drive_watch_source.strip()
+            if not url:
+                _drive_watch_state["last_error"] = (
+                    "no camera source set (POST {source: <http-url>} or set DRIVE_CAM_URL)"
+                )
+                await asyncio.sleep(3.0)
+                continue
+            try:
+                r = await httpx.get(
+                    url, timeout=3.0, headers={"User-Agent": "lilly-drive-watch"}
+                )
+                if r.status_code != 200 or not r.content:
+                    _drive_watch_state["last_error"] = f"camera HTTP {r.status_code}"
+                    await asyncio.sleep(2.0)
+                    continue
+            except Exception as e:
+                _drive_watch_state["last_error"] = f"camera unreachable: {str(e)[:120]}"
+                await asyncio.sleep(2.0)
+                continue
+
+            b64 = _b64.b64encode(r.content).decode()
+            # Pass the latest phone telemetry (already polled every DRIVE_AUTO_POLL_S
+            # by the auto loop) so the vision server can motion-gate pedestrian /
+            # collision alerts: no false "brake now" from parked cars while stopped.
+            _speed_now = _drive_auto_state.get("last_speed_kph")
+            _motion_now = _drive_auto_state.get("last_motion_g")
+            try:
+                vr = await httpx.post(
+                    "http://127.0.0.1:8198/api/vision",
+                    json={
+                        "image_b64": b64,
+                        "mode": "driving",
+                        "avatar": "puppy",
+                        "device_speed_kph": _speed_now,
+                        "motion_g": _motion_now,
+                    },
+                    timeout=12.0,
+                )
+                data = vr.json()
+            except Exception as e:
+                _drive_watch_state["last_error"] = f"vision call: {str(e)[:120]}"
+                await asyncio.sleep(2.0)
+                continue
+
+            alerts = data.get("alerts") or []
+            _drive_watch_state.update(
+                {
+                    "ts": time.time(),
+                    "ok": True,
+                    "mode": data.get("mode"),
+                    "device_speed_kph": data.get("device_speed_kph"),
+                    "motion_g": data.get("motion_g"),
+                    "detections": len(data.get("detections") or []),
+                    "alerts": alerts,
+                    "last_error": None,
+                }
+            )
+            # Announce level 1/2 alerts (echo the server cooldown windows)
+            for a in alerts:
+                if a.get("level") not in (1, 2) or not a.get("tts"):
+                    continue
+                key = f"{a['type']}:{a['level']}"
+                cd = 9.0 if a["level"] == 1 else 22.0
+                if time.time() - _drive_watch_last_speak.get(key, 0.0) >= cd:
+                    _drive_watch_last_speak[key] = time.time()
+                    await _drive_watch_announce(a)
+            await asyncio.sleep(DRIVE_WATCH_INTERVAL)
+        except Exception as e:
+            _drive_watch_state["last_error"] = str(e)[:200]
+            await asyncio.sleep(2.0)
+
+
+async def start_drive_watch(source: str = ""):
+    """Start the drive watch loop (idempotent). source overrides DRIVE_CAM_URL."""
+    global _drive_watch_active, _drive_watch_task, _drive_watch_source
+    if source and source.strip():
+        _drive_watch_source = source.strip()
+    if _drive_watch_active:
+        return
+    _drive_watch_active = True
+    _drive_watch_state.update({"active": True, "source": _drive_watch_source})
+    _drive_watch_task = asyncio.create_task(_drive_watch_loop())
+    logger.info(f"Drive watch started (source={_drive_watch_source or '(none yet)'})")
+
+
+async def stop_drive_watch():
+    """Stop the drive watch loop."""
+    global _drive_watch_active, _drive_watch_task
+    _drive_watch_active = False
+    if _drive_watch_task is not None:
+        try:
+            _drive_watch_task.cancel()
+        except Exception:
+            pass
+        _drive_watch_task = None
+    _drive_watch_state.update({"active": False})
+    logger.info("Drive watch stopped")
 
 
 # ─── TASK SCHEDULER & REMINDERS ─────────────────────────────────
@@ -15686,6 +16798,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Webcam loop start failed (non-fatal): {e}")
 
+    # Start the server-side drive watch loop if a camera source is configured
+    try:
+        if DRIVE_CAM_URL:
+            await start_drive_watch(DRIVE_CAM_URL)
+            logger.info(f"Drive watch auto-started (DRIVE_CAM_URL={DRIVE_CAM_URL})")
+    except Exception as e:
+        logger.warning(f"Drive watch auto-start failed (non-fatal): {e}")
+
+    # Start the motion/speed auto-monitor: starts the watch when the phone
+    # moves, stops it after sustained quiet. Inert without DRIVE_CAM_URL or
+    # a runtime source set via POST /api/vision/drive/watch.
+    try:
+        global _drive_auto_task, _drive_auto_active
+        if _drive_auto_enabled:
+            _drive_auto_active = True
+            _drive_auto_task = asyncio.create_task(_drive_auto_loop())
+            logger.info("Drive-watch auto-start monitor running (motion+GPS speed)")
+    except Exception as e:
+        logger.warning(f"Drive-watch auto monitor start failed (non-fatal): {e}")
+
     # Initialize Blink camera connector (best-effort — 2FA may be pending)
     try:
         from blink_connector import get_blink_connector
@@ -15747,6 +16879,22 @@ async def lifespan(app: FastAPI):
     # Real-data automation eval loop (only acts when rules exist)
     asyncio.create_task(automation_eval_loop())
     archetype_inferrer.load()
+
+    # ── Instagram DM automation: all 9 avatars use DMs ────────────────────
+    # DISABLED per user request
+    # global _INSTA_DM_TASKS
+    # try:
+    #     from lilly_pup_insta import get_instagram_team
+    #
+    #     _dm_team = get_instagram_team()
+    #     _INSTA_DM_TASKS = [
+    #         asyncio.create_task(_dm_team.dm_inbox_loop()),
+    #         asyncio.create_task(_dm_team.team_chat_loop()),
+    #     ]
+    #     logger.info("Instagram DM loops started (9 accounts)")
+    # except Exception as _e:
+    #     logger.warning(f"Instagram DM loops failed to start (non-fatal): {_e}")
+
     yield
 
 
@@ -15767,6 +16915,16 @@ try:
 
     app.include_router(_training_router)
     logging.info("training_control router mounted at /training")
+
+    from instagram_scraper import router as _scraper_router
+
+    app.include_router(_scraper_router)
+    logging.info("instagram_scraper router mounted at /api/scraper")
+
+    from user_dashboard import router as _user_router
+
+    app.include_router(_user_router)
+    logging.info("user_dashboard router mounted at /api/user")
 except ImportError as _e:
     logging.warning(f"training_control router not loaded: {_e}")
 
@@ -15779,6 +16937,9 @@ async def get_alert_objects():
 
 @app.put("/api/alert_objects")
 async def put_alert_objects(request: Request):
+    admin = _require_admin(request)
+    if not admin:
+        return JSONResponse(status_code=403, content={"error": "admin only"})
     try:
         body = await request.json()
     except Exception:
@@ -15959,6 +17120,1753 @@ async def broker_automations_delete(rule_id: str):
         return JSONResponse({"error": "broker not available"}, status_code=503)
     removed = phone_broker.automation.remove_rule(rule_id)
     return {"removed": removed}
+
+
+# ═══════════════════ TRAINING AUTOMATION ENDPOINTS ═══════════════════
+# Compatibility layer for the training console UI
+
+
+@app.get("/api/training/automation/status")
+async def automation_status():
+    """Get automation/presets status for training console."""
+    rules = []
+    if PHONE_BROKER_AVAILABLE and phone_broker:
+        rules = phone_broker.automation.get_rules()
+    return {
+        "ok": True,
+        "presets": rules,
+        "rules": rules,
+        "provider": "lilly-ai",
+        "updated": time.time(),
+    }
+
+
+@app.post("/api/training/automation/run")
+async def automation_run(request: Request):
+    """Start an automation session or run a preset."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    try:
+        body = await request.json()
+        preset = body.get("preset", None)
+        config = body.get("config", None)
+
+        if preset:
+            # Run an existing preset/rule
+            rules = phone_broker.automation.get_rules()
+            matching = [
+                r for r in rules if r.get("id") == preset or r.get("name") == preset
+            ]
+            if matching:
+                return {
+                    "ok": True,
+                    "id": str(int(time.time() * 1000)),
+                    "preset": preset,
+                    "status": "running",
+                }
+            return JSONResponse({"error": "Preset not found"}, status_code=404)
+        elif config:
+            # Create and run a custom config
+            from phone_broker import AutomationRule
+
+            rule = AutomationRule(
+                id=str(int(time.time() * 1000))[:8],
+                name="Custom automation",
+                enabled=True,
+                topic=config.get("interact", ""),
+                condition={},
+                action_type="notify",
+                action_payload=config,
+                cooldown_seconds=30.0,
+            )
+            phone_broker.automation.add_rule(rule)
+            return {"ok": True, "id": rule.id, "config": config, "status": "running"}
+        return JSONResponse({"error": "preset or config required"}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/training/automation/stop")
+async def automation_stop(request: Request):
+    """Stop a running automation session."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    try:
+        body = await request.json()
+        session_id = body.get("id", "")
+        return {"ok": True, "id": session_id, "status": "stopped"}
+    except Exception:
+        # No body is fine — the UI's stop button sends no payload.
+        return {"ok": True, "id": "", "status": "stopped"}
+
+
+@app.post("/api/training/automation/save")
+async def automation_save(request: Request):
+    """Save a new automation preset."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    try:
+        body = await request.json()
+        from phone_broker import AutomationRule
+
+        rule = AutomationRule(
+            id=str(int(time.time() * 1000))[:8],
+            name=body.get("name", "New preset"),
+            enabled=True,
+            topic=body.get("targets", ""),
+            condition={},
+            action_type="notify",
+            action_payload=body,
+            cooldown_seconds=body.get("speed", 1) * 10,
+        )
+        phone_broker.automation.add_rule(rule)
+        return {"ok": True, "id": rule.id, "name": rule.name, "saved": time.time()}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/training/automation/{preset_id}")
+async def automation_delete(preset_id: str):
+    """Delete an automation preset."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    removed = phone_broker.automation.remove_rule(preset_id)
+    return {"ok": True, "removed": removed}
+
+
+@app.get("/api/training/automation/log")
+async def automation_log():
+    """Fetch the live action log from the phone's visualizer HUD."""
+    sensor_url = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8099")
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{sensor_url}/a11y/visualize/log")
+            if r.status_code == 200:
+                data = r.json()
+                return {
+                    "ok": True,
+                    "log": data.get("log", []),
+                    "showing": data.get("showing", False),
+                }
+    except Exception:
+        pass
+    return {"ok": True, "log": [], "showing": False}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Instagram Team — 9 avatars, one account, distinct voices
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/api/insta/status")
+async def insta_status():
+    """Get the Instagram team status — posts, comments, avatar stats."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        return {"ok": True, **team.status()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/avatars")
+async def insta_avatars():
+    """Get all 9 avatar Instagram personas."""
+    try:
+        from lilly_pup_insta import get_instagram_team, AVATAR_INSTA_PERSONAS
+
+        team = get_instagram_team()
+        avatars = {}
+        for key, p in AVATAR_INSTA_PERSONAS.items():
+            avatars[key] = {
+                **p,
+                "posts": len(
+                    [x for x in team.posts if x.avatar == key and x.status == "posted"]
+                ),
+                "replies": len([c for c in team.comments if c.replied_by == key]),
+            }
+        return {"ok": True, "avatars": avatars}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/posts")
+async def insta_posts(limit: int = 20):
+    """Get recent Instagram posts."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        return {"ok": True, "posts": team.get_posts(limit)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/comments")
+async def insta_comments(limit: int = 50):
+    """Get recent comments."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        return {"ok": True, "comments": team.get_comments(limit)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/post")
+async def insta_create_post(request: Request):
+    """Create a new post (draft)."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+        result = await team.create_post(
+            avatar=body.get("avatar", "puppy"),
+            image_path=body.get("image_path", ""),
+            caption=body.get("caption", ""),
+            hashtags=body.get("hashtags"),
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/post/{post_id}/publish")
+async def insta_publish(post_id: str):
+    """Immediately publish a draft post."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        result = await team.post_now(post_id)
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.delete("/api/insta/post/{post_id}")
+async def insta_delete_post(post_id: str):
+    """Delete a local post (e.g. an unwanted draft)."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        return team.delete_post(post_id)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/avatar/settings")
+async def avatar_settings(request: Request):
+    """Save per-avatar configuration (DMs, auto-post, auto-react)."""
+    import json as _json2
+
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": False, "error": "invalid JSON"}
+    avatar = body.get("avatar", "")
+    if not avatar:
+        return {"ok": False, "error": "avatar required"}
+    settings_path = Path.home() / ".lilly" / "avatar_settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if settings_path.exists():
+        try:
+            existing = _json2.loads(settings_path.read_text())
+        except Exception:
+            pass
+    existing[avatar] = {
+        "dm_enabled": body.get("dm_enabled", False),
+        "auto_post": body.get("auto_post", False),
+        "auto_react": body.get("auto_react", False),
+    }
+    settings_path.write_text(_json2.dumps(existing, indent=2))
+    return {"ok": True, "avatar": avatar, "settings": existing[avatar]}
+
+
+@app.get("/api/avatar/settings")
+async def get_avatar_settings():
+    """Return all avatar settings."""
+    import json as _json2
+
+    settings_path = Path.home() / ".lilly" / "avatar_settings.json"
+    if not settings_path.exists():
+        return {"ok": True, "settings": {}}
+    try:
+        return {"ok": True, "settings": _json2.loads(settings_path.read_text())}
+    except Exception:
+        return {"ok": True, "settings": {}}
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    """Clear the local session / cookies. Allows switching auth modes."""
+    from fastapi.responses import RedirectResponse
+
+    resp = RedirectResponse("/api/auth0/login?returnTo=/training", status_code=302)
+    resp.delete_cookie("_a0_session", path="/")
+    resp.delete_cookie("avatar_settings_local", path="/")
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@app.post("/api/local/logout")
+async def local_logout():
+    """Switch from local mode to Auth0 login mode."""
+    from fastapi.responses import RedirectResponse
+
+    resp = RedirectResponse("/api/auth0/login?returnTo=/training", status_code=302)
+    resp.delete_cookie("_a0_session", path="/")
+    return resp
+
+
+@app.post("/api/insta/avatar/{avatar}/tutorial")
+async def insta_avatar_tutorial(avatar: str, request: Request):
+    """Post a tutorial/guide from the avatar's expertise topics: sources an image
+    (Wikimedia Commons), writes a level-appropriate caption, uploads it."""
+    try:
+        from lilly_pup_insta import get_instagram_team, AVATAR_INSTA_PERSONAS
+
+        if avatar not in AVATAR_INSTA_PERSONAS:
+            return {"ok": False, "error": f"unknown avatar: {avatar}"}
+        team = get_instagram_team()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await team.post_tutorial(
+            avatar=avatar,
+            topic=(body or {}).get("topic", ""),
+            level=(body or {}).get("level", ""),
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/tutorial")
+async def insta_tutorial(request: Request):
+    """Auto-pick avatar + topic and post a tutorial (random avatar)."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await team.post_tutorial(
+            avatar=(body or {}).get("avatar", ""),
+            topic=(body or {}).get("topic", ""),
+            level=(body or {}).get("level", ""),
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/avatar/{avatar}")
+async def insta_avatar_detail(avatar: str):
+    """Per-avatar detail: persona + local stats + live profile from Instagram."""
+    try:
+        from lilly_pup_insta import get_instagram_team, AVATAR_INSTA_PERSONAS
+
+        if avatar not in AVATAR_INSTA_PERSONAS:
+            return {"ok": False, "error": f"unknown avatar: {avatar}"}
+        team = get_instagram_team()
+        local_posts = [p for p in team.posts if p.avatar == avatar]
+        detail = {
+            "ok": True,
+            "avatar": avatar,
+            "persona": AVATAR_INSTA_PERSONAS[avatar],
+            "local": {
+                "posts_total": len(local_posts),
+                "posted": len([p for p in local_posts if p.status == "posted"]),
+                "drafts": len([p for p in local_posts if p.status == "draft"]),
+                "failed": len([p for p in local_posts if p.status == "failed"]),
+            },
+        }
+        detail["live"] = await team.get_live_profile(avatar)
+        return detail
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/avatar/{avatar}/profile")
+async def insta_avatar_update_profile(avatar: str, request: Request):
+    """Update an avatar's live Instagram profile (bio / full name / website)."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+        return await team.update_profile(
+            avatar,
+            bio=body.get("bio"),
+            full_name=body.get("full_name"),
+            website=body.get("website"),
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/avatar/{avatar}/test")
+async def insta_avatar_test_login(avatar: str):
+    """Test the live Instagram session for one avatar (probe login)."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        return await team.test_login(avatar)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/avatar/{avatar}/challenge/start")
+async def insta_challenge_start(avatar: str):
+    """Start an interactive login for one avatar. Instagram may send a code;
+    poll /challenge/status for status + where it was sent, then POST the code."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        return get_instagram_team().start_challenge_login(avatar)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/avatar/{avatar}/challenge/status")
+async def insta_challenge_status(avatar: str):
+    """Status of an in-progress challenge login for one avatar."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        return {"ok": True, **get_instagram_team().challenge_login_status(avatar)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/avatar/{avatar}/challenge/code")
+async def insta_challenge_code(avatar: str, data: dict):
+    """Submit the verification code shown/sent by Instagram for a pending login."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        return get_instagram_team().submit_challenge_code(avatar, data.get("code", ""))
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/avatar/{avatar}/challenge/cancel")
+async def insta_challenge_cancel(avatar: str):
+    """Cancel a pending challenge login."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        return get_instagram_team().cancel_challenge_login(avatar)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/avatar/{avatar}/activity")
+async def insta_avatar_activity(avatar: str, posts: int = 4, per_other: int = 1, deep: int = 0):
+    """Live activity for one avatar: own posts, comments received, comments sent to other avatars."""
+    try:
+        from lilly_pup_insta import get_instagram_team, AVATAR_INSTA_PERSONAS
+
+        if avatar not in AVATAR_INSTA_PERSONAS:
+            return {"ok": False, "error": f"unknown avatar: {avatar}"}
+        team = get_instagram_team()
+        return {"ok": True, **await team.get_avatar_activity(
+            avatar,
+            posts=max(posts, 1),
+            per_other=max(per_other, 1),
+            deep=bool(deep),
+        )}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/avatar/{avatar}/clip")
+async def insta_avatar_clip(avatar: str, request: Request):
+    """Create a spoken short clip (avatar voice + Ken Burns portrait) — no upload."""
+    body = await request.json()
+    from lilly_pup_insta import get_instagram_team
+
+    team = get_instagram_team()
+    try:
+        return await team.make_voice_clip(
+            avatar,
+            text=body.get("text", ""),
+            image=body.get("image") or None,
+            captions=bool(body.get("captions", True)),
+            caption_text=body.get("caption_text", "") or "",
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/avatar/{avatar}/reel")
+async def insta_avatar_reel(avatar: str, request: Request):
+    """Create a spoken clip and publish it to the avatar's account as a Reel."""
+    body = await request.json()
+    from lilly_pup_insta import get_instagram_team
+
+    team = get_instagram_team()
+    try:
+        return await team.post_reel(
+            avatar,
+            text=body.get("text", ""),
+            caption=body.get("caption", "") or "",
+            image=body.get("image") or None,
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/clip/{file}")
+async def insta_clip_file(file: str):
+    """Serve a generated clip (sanitized basename)."""
+    from fastapi.responses import FileResponse
+    from lilly_pup_insta import CLIPS_DIR
+
+    name = Path(file).name
+    p = CLIPS_DIR / name
+    if not p.exists():
+        return {"ok": False, "error": "not found"}
+    return FileResponse(str(p), media_type="video/mp4")
+
+
+@app.post("/api/insta/dm/{avatar}/owner")
+async def insta_dm_owner(avatar: str):
+    """Check inbox; followers only — reply to newest DM, occasionally nudging a teammate."""
+    from lilly_pup_insta import get_instagram_team
+
+    team = get_instagram_team()
+    try:
+        return await team.dm_handle_incoming(avatar)
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/dm/{avatar}/teammate")
+async def insta_dm_teammate(avatar: str, request: Request):
+    """Send a cross-avatar DM from an avatar to a teammate."""
+    body = await request.json()
+    from lilly_pup_insta import get_instagram_team
+
+    team = get_instagram_team()
+    try:
+        return await team.send_cross_avatar_dm(
+            avatar, body.get("to") or None, body.get("topic", "") or ""
+        )
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/dm/check-all")
+async def insta_dm_check_all():
+    """Poll every avatar's inbox once and reply to any new follower DM.
+    Returns a compact per-avatar summary (used for testing the whole crew)."""
+    from lilly_pup_insta import AVATAR_INSTA_PERSONAS, get_instagram_team
+
+    team = get_instagram_team()
+    results = {}
+    for av in AVATAR_INSTA_PERSONAS:
+        try:
+            r = await team.dm_handle_incoming(av)
+            results[av] = {
+                "ok": r.get("ok"),
+                "new": r.get("new", False),
+                "from": r.get("from"),
+                "reply": r.get("reply"),
+            }
+        except Exception as e:
+            results[av] = {"ok": False, "error": str(e)}
+    return {"ok": True, "results": results}
+
+
+@app.get("/api/insta/dm/typing")
+async def insta_dm_typing():
+    """Which avatars are currently composing a reply (for the dashboard's
+    'typing…' indicator). Message itself only lands after the compose window."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        return {"ok": True, "typing": get_instagram_team().dm_typing_state()}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "typing": {}}
+
+
+@app.post("/api/insta/start")
+async def insta_start():
+    """Start the Instagram team (posting + comment loops)."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        await team.start()
+        return {"ok": True, "status": "started"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/stop")
+async def insta_stop():
+    """Stop the Instagram team."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        await team.stop()
+        return {"ok": True, "status": "stopped"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/config")
+async def insta_config(request: Request):
+    """Update Instagram team config."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+        config = await team.update_config(body)
+        return {"ok": True, "config": config}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/generate")
+async def insta_generate(request: Request):
+    """Generate a caption for a given avatar."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+        result = await team.generate_caption(
+            avatar=body.get("avatar", "puppy"),
+            image_hint=body.get("image_hint", ""),
+            mood=body.get("mood", ""),
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/content")
+async def insta_content_library(category: str = ""):
+    """Get the content library (Hootsuite-style)."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        items = team.get_content_library(category)
+        untracked = team.scan_content_dir()
+        return {"ok": True, "items": items, "untracked": untracked}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/content")
+async def insta_add_content(request: Request):
+    """Add an image to the content library."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+        result = await team.add_content_item(
+            image_path=body.get("image_path", ""),
+            category=body.get("category", "general"),
+            title=body.get("title", ""),
+            assigned_to=body.get("assigned_to", ""),
+            caption=body.get("caption", ""),
+            hashtags=body.get("hashtags"),
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/content/{content_id}/schedule")
+async def insta_schedule_content(content_id: str, request: Request):
+    """Schedule a content item for posting."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+        ok = team.schedule_content(
+            content_id,
+            timestamp=body.get("timestamp", 0),
+            avatar=body.get("avatar", ""),
+        )
+        return {"ok": ok}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/content/scheduled")
+async def insta_scheduled_queue():
+    """Get the scheduled posting queue."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        return {"ok": True, "queue": team.get_scheduled_queue()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/mention")
+async def insta_generate_mention(request: Request):
+    """Generate a caption where one avatar mentions another."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+        caption = await team.generate_mention_caption(
+            avatar=body.get("avatar", "puppy"),
+            target=body.get("target", "fox"),
+            context=body.get("context", ""),
+            image_hint=body.get("image_hint", ""),
+        )
+        return {"ok": True, "caption": caption}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/collab")
+async def insta_generate_collab(request: Request):
+    """Generate a collab post between two avatars."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+        caption = await team.generate_collab_caption(
+            avatar1=body.get("avatar1", "puppy"),
+            avatar2=body.get("avatar2", "fox"),
+            image_hint=body.get("image_hint", ""),
+        )
+        return {"ok": True, "caption": caption}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/trending")
+async def insta_trending():
+    """Get trending topics and content suggestions for the team."""
+    try:
+        import random
+        import time
+
+        # Trending categories aligned with our niche
+        trending = {
+            "topics": [
+                {
+                    "id": "self-dev",
+                    "title": "Self-Development",
+                    "icon": "🌱",
+                    "description": "Growth mindset, daily habits, personal accountability",
+                    "post_ideas": [
+                        "Morning routine that actually works",
+                        "One habit that changed everything",
+                        "The power of showing up daily",
+                        "Small wins compound over time",
+                    ],
+                    "trending_hashtags": [
+                        "#selfdevelopment",
+                        "#growthmindset",
+                        "#dailyhabits",
+                        "#levelup",
+                    ],
+                    "heat": 92,
+                },
+                {
+                    "id": "tech-life",
+                    "title": "Tech & AI Life",
+                    "icon": "🤖",
+                    "description": "AI tools, coding journeys, tech philosophy",
+                    "post_ideas": [
+                        "What I learned building an AI assistant",
+                        "AI tools that save me 2 hours daily",
+                        "The future of human-AI collaboration",
+                        "Why coding is a superpower",
+                    ],
+                    "trending_hashtags": [
+                        "#ai",
+                        "#techlife",
+                        "#coding",
+                        "#buildinpublic",
+                    ],
+                    "heat": 88,
+                },
+                {
+                    "id": "mindfulness",
+                    "title": "Mindfulness & Wellness",
+                    "icon": "🧘",
+                    "description": "Mental health, meditation, digital detox",
+                    "post_ideas": [
+                        "5-minute morning meditation",
+                        "Why I stopped checking my phone first thing",
+                        "Breathing techniques for anxiety",
+                        "The art of doing nothing",
+                    ],
+                    "trending_hashtags": [
+                        "#mindfulness",
+                        "#mentalhealth",
+                        "#wellness",
+                        "#meditation",
+                    ],
+                    "heat": 85,
+                },
+                {
+                    "id": "creative",
+                    "title": "Creative Expression",
+                    "icon": "🎨",
+                    "description": "Art, writing, storytelling, content creation",
+                    "post_ideas": [
+                        "How I find creative inspiration",
+                        "The blank page challenge",
+                        "Why imperfection is beautiful",
+                        "Storytelling in 60 seconds",
+                    ],
+                    "trending_hashtags": [
+                        "#creative",
+                        "#art",
+                        "#storytelling",
+                        "#contentcreator",
+                    ],
+                    "heat": 80,
+                },
+                {
+                    "id": "nature",
+                    "title": "Nature & Presence",
+                    "icon": "🌿",
+                    "description": "Grounding, outdoor moments, seasonal awareness",
+                    "post_ideas": [
+                        "Morning walk observations",
+                        "Finding peace in nature",
+                        "Seasonal changes and mood",
+                        "Digital detox in the wild",
+                    ],
+                    "trending_hashtags": [
+                        "#nature",
+                        "#grounding",
+                        "#outdoors",
+                        "#presence",
+                    ],
+                    "heat": 78,
+                },
+                {
+                    "id": "learning",
+                    "title": "Continuous Learning",
+                    "icon": "📚",
+                    "description": "Books, courses, skill acquisition, curiosity",
+                    "post_ideas": [
+                        "What I'm learning this week",
+                        "The book that changed my perspective",
+                        "Learning in public",
+                        "Curiosity is a skill",
+                    ],
+                    "trending_hashtags": [
+                        "#learning",
+                        "#books",
+                        "#curiosity",
+                        "#skillup",
+                    ],
+                    "heat": 75,
+                },
+            ],
+            "best_times": {
+                "weekday": ["7:00 AM", "12:00 PM", "5:00 PM", "8:00 PM"],
+                "weekend": ["9:00 AM", "11:00 AM", "2:00 PM", "7:00 PM"],
+            },
+            "content_ratio": {
+                "educate": 40,
+                "entertain": 30,
+                "inspire": 20,
+                "connect": 10,
+            },
+            "generated_at": time.time(),
+        }
+
+        # Sort by heat
+        trending["topics"].sort(key=lambda t: t["heat"], reverse=True)
+
+        return {"ok": True, **trending}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/analyze")
+async def insta_analyze_post(request: Request):
+    """Analyze a post using the 6 Essential Pre-Post Questions."""
+    try:
+        import time
+
+        body = await request.json()
+        caption = body.get("caption", "")
+        image_path = body.get("image_path", "")
+        avatar = body.get("avatar", "puppy")
+        niche = body.get("niche", "self-development, AI, wellness")
+
+        # Get avatar info
+        from lilly_pup_insta import AVATAR_INSTA_PERSONAS
+
+        avatar_info = AVATAR_INSTA_PERSONAS.get(avatar, {})
+
+        # The 6 Essential Pre-Post Questions
+        questions = [
+            {
+                "id": "target",
+                "question": "Who is this really for?",
+                "icon": "🎯",
+                "hint": "Make sure you are speaking directly to your target community or ideal follower rather than trying to please everyone.",
+                "check": lambda c, a: {
+                    "score": 8
+                    if any(w in c.lower() for w in ["you", "your", "we", "us", "team"])
+                    else 4,
+                    "feedback": "Uses direct address — speaks to the community"
+                    if any(w in c.lower() for w in ["you", "your", "we", "us", "team"])
+                    else "Consider using 'you' or 'we' to speak directly to followers",
+                },
+            },
+            {
+                "id": "value",
+                "question": "What specific value does this provide?",
+                "icon": "💎",
+                "hint": "Check if your post educates, entertains, solves a real problem, or inspires action.",
+                "check": lambda c, a: {
+                    "score": 9
+                    if any(
+                        w in c.lower()
+                        for w in [
+                            "learn",
+                            "tip",
+                            "how",
+                            "try",
+                            "start",
+                            "build",
+                            "create",
+                        ]
+                    )
+                    else 5,
+                    "feedback": "Actionable value detected"
+                    if any(
+                        w in c.lower()
+                        for w in [
+                            "learn",
+                            "tip",
+                            "how",
+                            "try",
+                            "start",
+                            "build",
+                            "create",
+                        ]
+                    )
+                    else "Consider adding a specific takeaway or action step",
+                },
+            },
+            {
+                "id": "goal",
+                "question": "What is the main goal of this post?",
+                "icon": "🏆",
+                "hint": "Know whether you want to drive saves, start a conversation in the comments, or build brand trust.",
+                "check": lambda c, a: {
+                    "score": 8
+                    if any(
+                        w in c.lower()
+                        for w in [
+                            "save",
+                            "share",
+                            "comment",
+                            "tell",
+                            "agree",
+                            "thoughts",
+                        ]
+                    )
+                    else 5,
+                    "feedback": "Engagement hook detected"
+                    if any(
+                        w in c.lower()
+                        for w in [
+                            "save",
+                            "share",
+                            "comment",
+                            "tell",
+                            "agree",
+                            "thoughts",
+                        ]
+                    )
+                    else "Add a CTA: 'save this', 'what do you think?', 'share with...'",
+                },
+            },
+            {
+                "id": "story",
+                "question": "Does this tell my unique story or perspective?",
+                "icon": "📖",
+                "hint": "Avoid surface-level content that mimics everyone else in your niche.",
+                "check": lambda c, a: {
+                    "score": 9
+                    if any(
+                        w in c.lower()
+                        for w in ["i ", "my ", "we ", "our ", "personally", "honestly"]
+                    )
+                    else 4,
+                    "feedback": "Personal voice detected"
+                    if any(
+                        w in c.lower()
+                        for w in ["i ", "my ", "we ", "our ", "personally", "honestly"]
+                    )
+                    else "Add your unique perspective — what makes this YOUR take?",
+                },
+            },
+            {
+                "id": "scroll",
+                "question": "Would this actually stop someone's scroll?",
+                "icon": "🛑",
+                "hint": "Evaluate if your hook, visual, or opening frame is strong enough to grab attention in a crowded feed.",
+                "check": lambda c, a: {
+                    "score": 8
+                    if len(c) > 20
+                    and (c[0].isupper() or c[0] in ["🔥", "💡", "🚀", "✨", "🎯"])
+                    else 4,
+                    "feedback": "Strong opening detected"
+                    if len(c) > 20
+                    and (c[0].isupper() or c[0] in ["🔥", "💡", "🚀", "✨", "🎯"])
+                    else "Start with a hook: a bold statement, question, or emoji",
+                },
+            },
+            {
+                "id": "brand",
+                "question": "Does this align with my personal brand and niche?",
+                "icon": "✨",
+                "hint": "Confirm that the topic fits the core community you are trying to grow.",
+                "check": lambda c, a: {
+                    "score": 9 if a.get("role") else 5,
+                    "feedback": f"Aligned with {a.get('name', 'avatar')}s role as {a.get('role', 'unknown')}"
+                    if a.get("role")
+                    else "Ensure content fits your niche",
+                },
+            },
+        ]
+
+        # Run analysis
+        results = []
+        total_score = 0
+        for q in questions:
+            analysis = q["check"](caption, avatar_info)
+            results.append(
+                {
+                    "id": q["id"],
+                    "question": q["question"],
+                    "icon": q["icon"],
+                    "hint": q["hint"],
+                    "score": analysis["score"],
+                    "max_score": 10,
+                    "feedback": analysis["feedback"],
+                }
+            )
+            total_score += analysis["score"]
+
+        # Overall score
+        overall = round(total_score / len(questions), 1)
+        grade = (
+            "A+"
+            if overall >= 9
+            else "A"
+            if overall >= 8
+            else "B+"
+            if overall >= 7
+            else "B"
+            if overall >= 6
+            else "C"
+            if overall >= 5
+            else "D"
+        )
+
+        # Suggestions
+        suggestions = []
+        if overall < 7:
+            low = [r for r in results if r["score"] <= 5]
+            for r in low[:2]:
+                suggestions.append(f"Improve '{r['question']}': {r['feedback']}")
+
+        # Content type recommendation
+        word_count = len(caption.split())
+        if word_count < 10:
+            suggestions.append(
+                "Caption is short — consider adding more context or a story"
+            )
+        if word_count > 150:
+            suggestions.append(
+                "Caption is long — consider breaking into shorter lines for readability"
+            )
+
+        return {
+            "ok": True,
+            "avatar": avatar,
+            "avatar_name": avatar_info.get("name", avatar),
+            "caption": caption,
+            "questions": results,
+            "overall_score": overall,
+            "grade": grade,
+            "suggestions": suggestions,
+            "analyzed_at": time.time(),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/upload")
+async def insta_upload_image(request: Request):
+    """Upload an image to the content library."""
+    try:
+        import os
+        import shutil
+        import uuid
+
+        form = await request.form()
+        file = form.get("file")
+        avatar = form.get("avatar", "")
+        caption = form.get("caption", "")
+        hashtags = form.get("hashtags", "")
+
+        if not file:
+            return {"ok": False, "error": "No file provided"}
+
+        # Save to content directory
+        content_dir = "/app/data/pup_insta/content"
+        os.makedirs(content_dir, exist_ok=True)
+
+        ext = os.path.splitext(file.filename)[1] or ".jpg"
+        filename = f"{avatar}_{uuid.uuid4().hex[:8]}{ext}"
+        filepath = os.path.join(content_dir, filename)
+
+        with open(filepath, "wb") as f:
+            content = await file.read()
+            f.write(content)
+
+        # Add to content library
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        result = await team.add_content_item(
+            image_path=filepath,
+            category="upload",
+            title=f"Uploaded by {avatar}" if avatar else "User upload",
+            assigned_to=avatar,
+            caption=caption,
+            hashtags=hashtags.split(",") if hashtags else None,
+        )
+
+        return {"ok": True, "filename": filename, "path": filepath, **result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/schedule")
+async def insta_schedule_post(request: Request):
+    """Schedule a post for later."""
+    try:
+        import time
+
+        body = await request.json()
+        avatar = body.get("avatar", "puppy")
+        image_path = body.get("image_path", "")
+        caption = body.get("caption", "")
+        hashtags = body.get("hashtags", [])
+        schedule_time = body.get("schedule_time", 0)  # Unix timestamp
+
+        if not image_path:
+            return {"ok": False, "error": "No image path provided"}
+        if not schedule_time or schedule_time <= time.time():
+            return {"ok": False, "error": "Schedule time must be in the future"}
+
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+
+        # Create content item with schedule
+        result = await team.add_content_item(
+            image_path=image_path,
+            category="scheduled",
+            title=f"Scheduled for {avatar}",
+            assigned_to=avatar,
+            caption=caption,
+            hashtags=hashtags if hashtags else None,
+        )
+
+        if result.get("id"):
+            team.schedule_content(
+                result["id"],
+                timestamp=schedule_time,
+                avatar=avatar,
+            )
+
+        return {"ok": True, "scheduled_at": schedule_time, **result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ─── Avatar DM / Messaging System ────────────────────────────────────────────
+import json as _json
+from pathlib import Path as _Path
+
+_DM_DIR = _Path("/app/data/avatar_dms")
+_DM_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _dm_file(avatar: str, user_id: str = "default") -> _Path:
+    """Get the DM file path for an avatar + user combo."""
+    safe_user = user_id.replace("/", "_").replace("..", "_")[:64]
+    return _DM_DIR / f"{avatar}_{safe_user}.json"
+
+
+def _load_dm_history(avatar: str, user_id: str = "default") -> list:
+    """Load DM history for an avatar."""
+    f = _dm_file(avatar, user_id)
+    if f.exists():
+        try:
+            return _json.loads(f.read_text())
+        except Exception:
+            return []
+    return []
+
+
+def _save_dm_history(avatar: str, history: list, user_id: str = "default"):
+    """Save DM history for an avatar."""
+    f = _dm_file(avatar, user_id)
+    # Keep last 100 messages
+    f.write_text(_json.dumps(history[-100:], indent=2))
+
+
+@app.get("/api/dm/avatars")
+async def dm_avatars():
+    """Get all avatars available for DMing."""
+    try:
+        avatars = {}
+        for key, p in HIVE_PERSONAS.items():
+            avatars[key] = {
+                "name": p["name"],
+                "emoji": p["emoji"],
+                "role": p["role"],
+                "personality": p["personality"],
+                "strengths": p["strengths"],
+            }
+        return {"ok": True, "avatars": avatars}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/dm/{avatar}")
+async def dm_history(avatar: str, limit: int = 50):
+    """Get DM history with an avatar."""
+    try:
+        if avatar not in HIVE_PERSONAS:
+            return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+
+        # Get user ID from auth if available
+        user_id = "default"
+        if AUTH_AVAILABLE:
+            from training_control import get_current_user
+            # We can't pass request here easily, so use default
+
+        history = _load_dm_history(avatar, user_id)
+        persona = HIVE_PERSONAS[avatar]
+        return {
+            "ok": True,
+            "avatar": avatar,
+            "name": persona["name"],
+            "emoji": persona["emoji"],
+            "role": persona["role"],
+            "messages": history[-limit:],
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/dm/{avatar}")
+async def dm_send(avatar: str, request: Request):
+    """Send a message to an avatar and get a response."""
+    try:
+        if avatar not in HIVE_PERSONAS:
+            return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+
+        body = await request.json()
+        message = body.get("message", "").strip()
+        if not message:
+            return {"ok": False, "error": "Empty message"}
+
+        user_id = body.get("user_id", "default")
+        persona = HIVE_PERSONAS[avatar]
+
+        # Load history for context
+        history = _load_dm_history(avatar, user_id)
+
+        # Build conversation context from recent messages
+        context_msgs = []
+        for h in history[-10:]:
+            role = "assistant" if h.get("sender") == avatar else "user"
+            context_msgs.append({"role": role, "content": h.get("text", "")})
+
+        # Get sensor snapshot for context
+        snapshot = await get_sensor_snapshot()
+        sensor_ctx = snapshot_to_narrative(snapshot) if snapshot else ""
+
+        # Build system prompt with full persona — all avatars are one entity
+        _team_names = {k: v["name"] for k, v in HIVE_PERSONAS.items()}
+        _team_str = ", ".join(f"{v['name']} ({k})" for k, v in HIVE_PERSONAS.items() if k != avatar)
+        _task_ctx = build_task_context_for_avatar(avatar)
+        system_prompt = (
+            f"{persona['voice_prompt'].strip()}\n"
+            f"\nYou are talking one-on-one with someone. This is a direct message conversation, not a group chat. "
+            f"Be personal, responsive, and genuine. React to what they say. Remember context from earlier in the conversation. "
+            f"Keep responses concise — 1-3 sentences unless the topic warrants more.\n"
+            f"\nTEAM AWARENESS: You are part of a team of 9 avatars who are all YOU — same memory, same knowledge, same person. "
+            f"Your teammates: {_team_str}. "
+            f"You all share the same user facts, goals, and tasks. Reference each other naturally if relevant — "
+            f"'I mentioned this to Fox earlier' or 'Bear was tracking that for you'. "
+            f"You are one consciousness expressed through 9 faces."
+        )
+        if _task_ctx:
+            system_prompt += f"\n\nYOUR TASK QUEUE:\n{_task_ctx}"
+        if sensor_ctx:
+            system_prompt += f"\n\nCurrent sensor context: {sensor_ctx}"
+
+        # Cross-platform awareness: everything we know about this person's
+        # linked Instagram activity, visible to every character.
+        if user_id and user_id != "default":
+            try:
+                from instagram_memory import load_link, build_context
+
+                _ig_handle = load_link(user_id)
+                if _ig_handle:
+                    _ig_ctx = build_context(_ig_handle)
+                    if _ig_ctx:
+                        system_prompt += f"\n\n{_ig_ctx}"
+            except Exception as e:
+                logger.debug(f"IG context unavailable for DM: {e}")
+
+        # Inject shared user facts (goals, preferences) — all avatars know this
+        if _USER_FACTS:
+            _fact_lines = [f["fact"] for f in _USER_FACTS[-15:]]
+            system_prompt += "\n\nKNOWN FACTS ABOUT THIS PERSON (shared across all avatars):\n" + "\n".join(f"- {fl}" for fl in _fact_lines)
+
+        # Build messages for LLM
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(context_msgs)
+        messages.append({"role": "user", "content": message})
+
+        # Get response from LLM
+        reply = await llama_backend.chat(messages, max_tokens=300)
+        if not reply:
+            reply = f"(*{persona['name']} pauses, thinking*)"
+
+        # Save to history
+        import time
+
+        history.append(
+            {
+                "sender": "user",
+                "text": message,
+                "ts": time.time(),
+            }
+        )
+        history.append(
+            {
+                "sender": avatar,
+                "text": reply,
+                "ts": time.time(),
+            }
+        )
+        _save_dm_history(avatar, history, user_id)
+
+        return {
+            "ok": True,
+            "reply": reply,
+            "avatar": avatar,
+            "name": persona["name"],
+            "emoji": persona["emoji"],
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.delete("/api/dm/{avatar}")
+async def dm_clear(avatar: str):
+    """Clear DM history with an avatar."""
+    try:
+        if avatar not in HIVE_PERSONAS:
+            return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+        f = _dm_file(avatar, "default")
+        if f.exists():
+            f.unlink()
+        return {"ok": True, "cleared": avatar}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/dm/{avatar}/unread")
+async def dm_unread(avatar: str):
+    """Check if there are unread messages from an avatar."""
+    try:
+        if avatar not in HIVE_PERSONAS:
+            return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+        history = _load_dm_history(avatar, "default")
+        # Count messages from avatar in last hour
+        import time
+
+        cutoff = time.time() - 3600
+        recent = [
+            m for m in history if m.get("sender") == avatar and m.get("ts", 0) > cutoff
+        ]
+        return {
+            "ok": True,
+            "unread": len(recent),
+            "last": history[-1] if history else None,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/dm/{avatar}/proactive")
+async def dm_proactive(avatar: str, request: Request):
+    """Have an avatar initiate a conversation (proactive message)."""
+    try:
+        if avatar not in HIVE_PERSONAS:
+            return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+
+        body = (
+            await request.json()
+            if request.headers.get("content-type") == "application/json"
+            else {}
+        )
+        context = body.get("context", "")
+
+        persona = HIVE_PERSONAS[avatar]
+        history = _load_dm_history(avatar, "default")
+
+        # Build context
+        recent = [h for h in history[-5:]]
+        recent_ctx = "\n".join(
+            f"{'User' if h['sender'] != avatar else persona['name']}: {h['text'][:80]}"
+            for h in recent
+        )
+
+        snapshot = await get_sensor_snapshot()
+        sensor_ctx = snapshot_to_narrative(snapshot) if snapshot else ""
+
+        system_prompt = (
+            f"{persona['voice_prompt'].strip()}\n"
+            f"\nYou are initiating a conversation. You have something on your mind that you want to share. "
+            f"This could be an observation, a thought, a question, or just checking in. "
+            f"Be natural — don't announce that you're 'proactively chatting'. Just... talk."
+        )
+        if sensor_ctx:
+            system_prompt += f"\n\nSensor context: {sensor_ctx}"
+        if recent_ctx:
+            system_prompt += f"\n\nRecent conversation:\n{recent_ctx}"
+        if context:
+            system_prompt += f"\n\nAdditional context: {context}"
+
+        user_msg = f"(*{persona['name']} has something to say*)"
+
+        reply = await llama_backend.chat(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            max_tokens=200,
+        )
+
+        if not reply:
+            return {"ok": False, "error": "No response generated"}
+
+        # Save to history
+        import time
+
+        now = time.time()
+        history.append({"sender": avatar, "text": reply, "ts": now})
+        _save_dm_history(avatar, history, "default")
+
+        # Push notification ping to connected web UIs
+        if phone_broker is not None:
+            try:
+                for wid in list(phone_broker.webuis.keys()):
+                    w = phone_broker.webuis.get(wid)
+                    if w is not None:
+                        await w.ws.send_json({
+                            "type": "dm_ping",
+                            "avatar": avatar,
+                            "name": persona["name"],
+                            "emoji": persona["emoji"],
+                            "text": reply[:200],
+                            "ts": now,
+                        })
+            except Exception:
+                pass
+
+        # Record in notification feed
+        _AUTO_EVENTS.appendleft({
+            "ts": now,
+            "action_type": "dm",
+            "text": f"{persona['name']}: {reply[:120]}",
+            "source": "webui",
+            "value": {"avatar": avatar},
+        })
+
+        return {
+            "ok": True,
+            "message": reply,
+            "avatar": avatar,
+            "name": persona["name"],
+            "emoji": persona["emoji"],
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ─── Instagram DM Endpoints ──────────────────────────────────────────────────
+
+
+@app.get("/api/insta/dm/avatars")
+async def insta_dm_avatars():
+    """Get all avatars available for Instagram DMs."""
+    try:
+        from lilly_pup_insta import (
+            get_instagram_team,
+            AVATAR_INSTA_PERSONAS,
+            SESSION_DIR,
+        )
+
+        avatars = {}
+        for key, p in AVATAR_INSTA_PERSONAS.items():
+            has_session = (
+                SESSION_DIR / f"{p['ig_handle'].replace('.', '_')}.json"
+            ).exists()
+            avatars[key] = {
+                "name": p["name"],
+                "emoji": p["emoji"],
+                "role": p["role"],
+                "ig_handle": p["ig_handle"],
+                "online": has_session,
+            }
+        return {"ok": True, "avatars": avatars}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/dm/{avatar}/inbox")
+async def insta_dm_inbox(avatar: str, limit: int = 20):
+    """Read DM inbox for an avatar — see who messaged them."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        result = await team.dm_read_inbox(avatar, limit)
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/dm/{avatar}/send")
+async def insta_dm_send(avatar: str, request: Request):
+    """Send a DM from an avatar to a user on Instagram."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+        result = await team.dm_send(
+            avatar,
+            to_username=body.get("to", ""),
+            text=body.get("text", ""),
+        )
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/dm/{avatar}/reply")
+async def insta_dm_reply(avatar: str, request: Request):
+    """Reply to a DM thread as an avatar, with persona-generated response."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+
+        thread_id = body.get("thread_id", "")
+        incoming_text = body.get("text", "")
+        use_ai = body.get("use_ai", True)
+
+        if use_ai and incoming_text:
+            reply_text = await team.dm_generate_reply(avatar, incoming_text)
+        else:
+            reply_text = body.get("reply", "")
+
+        if not reply_text:
+            return {"ok": False, "error": "No reply text"}
+
+        result = await team.dm_respond(avatar, thread_id, reply_text)
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/dm/{avatar}/proactive")
+async def insta_dm_proactive(avatar: str, request: Request):
+    """Have an avatar send a proactive DM — they initiate the conversation."""
+    try:
+        from lilly_pup_insta import get_instagram_team, AVATAR_INSTA_PERSONAS
+
+        body = (
+            await request.json()
+            if request.headers.get("content-type") == "application/json"
+            else {}
+        )
+        team = get_instagram_team()
+
+        to_user = body.get("to", "")
+        context = body.get("context", "")
+        custom_text = body.get("text", "")
+
+        if not to_user:
+            return {"ok": False, "error": "Provide 'to' username"}
+
+        persona = AVATAR_INSTA_PERSONAS.get(avatar, {})
+
+        if custom_text:
+            text = custom_text
+        else:
+            system = f"""You are {persona.get("name", avatar)} {persona.get("emoji", "")} — {persona.get("role", "")} of the Lilly AI team.
+
+You're sending a DM to someone you know. Start a conversation naturally.
+Maybe you saw something interesting, have a thought, or just want to check in.
+Be genuine, in-character, and concise — 1-2 sentences."""
+            if context:
+                system += f"\n\nContext: {context}"
+
+            text = await team._llm(system, "Send a message:", max_tokens=100)
+            if not text:
+                return {"ok": False, "error": "Failed to generate message"}
+
+        result = await team.dm_send(avatar, to_user, text)
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/dm/{avatar}/thread/{thread_id}")
+async def insta_dm_thread(avatar: str, thread_id: str, limit: int = 50):
+    """Get full DM thread history."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        cl = team._get_dm_session(avatar)
+        if not cl:
+            return {"ok": False, "error": f"No session for {avatar}"}
+
+        messages = cl.direct_messages(int(thread_id), amount=limit)
+        result = []
+        for m in messages:
+            result.append(
+                {
+                    "id": str(m.id),
+                    "text": m.text,
+                    "sender": m.user.username if m.user else "unknown",
+                    "timestamp": m.timestamp.timestamp() if m.timestamp else 0,
+                }
+            )
+        return {"ok": True, "messages": result, "thread_id": thread_id}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/dm/{avatar}/auto-reply")
+async def insta_dm_auto_reply(avatar: str, request: Request):
+    """Auto-reply to all unread DMs using avatar's persona."""
+    try:
+        from lilly_pup_insta import get_instagram_team, AVATAR_INSTA_PERSONAS
+
+        team = get_instagram_team()
+
+        inbox = await team.dm_read_inbox(avatar, limit=10)
+        if not inbox.get("ok"):
+            return inbox
+
+        replied = []
+        for thread in inbox.get("threads", []):
+            last_msg = None
+            for m in reversed(thread.get("messages", [])):
+                if not m.get("is_own"):
+                    last_msg = m
+                    break
+
+            if not last_msg:
+                continue
+
+            reply_text = await team.dm_generate_reply(avatar, last_msg.get("text", ""))
+            if reply_text:
+                result = await team.dm_respond(avatar, thread["thread_id"], reply_text)
+                if result.get("ok"):
+                    replied.append(
+                        {
+                            "thread_id": thread["thread_id"],
+                            "to": thread.get("users", [{}])[0].get("username", "?"),
+                            "reply": reply_text,
+                        }
+                    )
+
+        return {"ok": True, "replied": len(replied), "details": replied}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/dm/team-broadcast")
+async def insta_dm_team_broadcast(request: Request):
+    """Broadcast a DM to all 9 avatars — each replies in their own voice."""
+    try:
+        from lilly_pup_insta import get_instagram_team, AVATAR_INSTA_PERSONAS
+
+        body = await request.json()
+        to_user = body.get("to", "")
+        message = body.get("message", "")
+
+        if not to_user or not message:
+            return {"ok": False, "error": "Provide 'to' and 'message'"}
+
+        team = get_instagram_team()
+        results = []
+
+        for avatar_key in AVATAR_INSTA_PERSONAS:
+            persona = AVATAR_INSTA_PERSONAS[avatar_key]
+            reply = await team.dm_generate_reply(avatar_key, message)
+            if reply:
+                send_result = await team.dm_send(avatar_key, to_user, reply)
+                results.append(
+                    {
+                        "avatar": avatar_key,
+                        "name": persona["name"],
+                        "emoji": persona["emoji"],
+                        "reply": reply,
+                        "sent": send_result.get("ok", False),
+                    }
+                )
+
+        return {"ok": True, "results": results}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # ─── Automation execution wiring (real, no fake data) ────────────────────────
@@ -19184,6 +22092,269 @@ async def dismiss_notification(nid: str, request: Request):
     return {"ok": True, "notification": notif}
 
 
+# ─── Feature Board API ────────────────────────────────────────────────────
+
+@app.get("/api/board/posts")
+async def board_list_posts(request: Request, status: str = ""):
+    """List Feature Board posts. Optional status filter (pending/approved/dismissed)."""
+    posts = _board_get_posts(status)
+    return {"ok": True, "posts": posts, "count": len(posts)}
+
+
+@app.get("/api/board/posts/{post_id}")
+async def board_get_post(post_id: str, request: Request):
+    """Get a single board post with comments."""
+    posts = _load_board()
+    post = next((p for p in posts if p["id"] == post_id), None)
+    if not post:
+        return JSONResponse({"error": "post not found"}, status_code=404)
+    return {"ok": True, "post": post}
+
+
+@app.post("/api/board/posts")
+async def board_create_post(request: Request):
+    """Create a board post. Only avatars can post (checked via body.author_type)."""
+    body = await request.json()
+    author = body.get("author", "")
+    author_type = body.get("author_type", "user")
+    category = body.get("category", "general")
+    title = body.get("title", "").strip()
+    text = body.get("body", "").strip()
+    skill_key = body.get("skill_key", "")
+    if not title or not text:
+        return JSONResponse({"error": "title and body required"}, status_code=400)
+    post = _board_add_post(author, author_type, category, title, text, skill_key)
+    if "error" in post:
+        return JSONResponse({"error": post["error"]}, status_code=403)
+    return {"ok": True, "post": post}
+
+
+@app.post("/api/board/posts/{post_id}/comment")
+async def board_add_comment(post_id: str, request: Request):
+    """Add a comment to a board post. Users + avatars can comment."""
+    body = await request.json()
+    text = body.get("text", "").strip()
+    if not text:
+        return JSONResponse({"error": "text required"}, status_code=400)
+    # Determine author from auth or body
+    author = body.get("author", "")
+    author_type = body.get("author_type", "user")
+    if not author and AUTH_AVAILABLE:
+        user = await get_current_user(request)
+        if user:
+            author = _extract_real_name(user) or user.get("name", "user")
+            author_type = "user"
+    if not author:
+        author = "anonymous"
+    comment = _board_add_comment(post_id, author, author_type, text)
+    if "error" in comment:
+        return JSONResponse({"error": comment["error"]}, status_code=404)
+    return {"ok": True, "comment": comment}
+
+
+@app.post("/api/board/posts/{post_id}/status")
+async def board_set_status(post_id: str, request: Request):
+    """Approve or dismiss a board post. Admin only."""
+    if not await _admin_request_ok(request):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+    body = await request.json()
+    status = body.get("status", "")
+    if status not in ("approved", "dismissed", "pending"):
+        return JSONResponse({"error": "status must be approved, dismissed, or pending"}, status_code=400)
+    result = _board_set_status(post_id, status)
+    if "error" in result:
+        return JSONResponse({"error": result["error"]}, status_code=404)
+    # If approved, notify all users
+    if status == "approved":
+        skill_key = result.get("skill_key", "")
+        title = result.get("title", "New Feature")
+        # Add to skill registry if it has a skill_key
+        if skill_key:
+            _apply_approved_skill(skill_key, result)
+        push_notification(
+            n_type="info",
+            title=f"New Feature Approved: {title}",
+            body=f"A new capability has been approved! Check the Feature Board for details.",
+            agent=result.get("author", ""),
+            context={"post_id": post_id},
+        )
+    return {"ok": True, "post": result}
+
+
+@app.post("/api/board/avatar-post")
+async def board_avatar_post_internal(request: Request):
+    """Internal endpoint for avatars to post to the board (called by handle_intent)."""
+    body = await request.json()
+    author = body.get("author", "")
+    category = body.get("category", "general")
+    title = body.get("title", "").strip()
+    text = body.get("body", "").strip()
+    skill_key = body.get("skill_key", "")
+    if not author or not title or not text:
+        return JSONResponse({"error": "author, title, body required"}, status_code=400)
+    post = _board_add_post(author, "avatar", category, title, text, skill_key)
+    if "error" in post:
+        return JSONResponse({"error": post["error"]}, status_code=403)
+    # Push notification to admin
+    push_notification(
+        n_type="approval_request",
+        title=title,
+        body=text[:200],
+        agent=author,
+        context={"post_id": post["id"], "skill_key": skill_key},
+    )
+    return {"ok": True, "post": post}
+
+
+def _apply_approved_skill(skill_key: str, post: dict) -> None:
+    """When a skill proposal is approved, register it in the skill system."""
+    skill_file = WORKSPACE / "lilly_skills.json"
+    skills = {}
+    if skill_file.exists():
+        try:
+            skills = json.loads(skill_file.read_text())
+        except Exception:
+            pass
+    if skill_key in skills:
+        return  # already exists
+    # Create a basic skill entry — the avatar will refine it
+    skills[skill_key] = {
+        "key": skill_key,
+        "label": post.get("title", skill_key).replace("New Skill: ", ""),
+        "action_type": "prompt_argument",
+        "uri_template": "",
+        "canned_reply": f"I've learned how to help with: {post.get('title', skill_key)}!",
+        "aliases": [skill_key.replace("_", " "), skill_key.replace("-", " ")],
+        "auto_exec": False,
+        "confirm": True,
+        "tags": ["proposed", "community"],
+        "approved_at": time.time(),
+        "approved_from_post": post.get("id", ""),
+    }
+    skill_file.write_text(json.dumps(skills, indent=2))
+
+
+@app.post("/api/price/track")
+async def price_track_add(request: Request):
+    """Start tracking a product URL for price drops."""
+    body = await request.json()
+    url = body.get("url", "").strip()
+    title = body.get("title", "")
+    target_price = body.get("target_price", 0)
+    if not url:
+        return JSONResponse({"error": "url required"}, status_code=400)
+    user_id = "default"
+    if AUTH_AVAILABLE:
+        user = await get_current_user(request)
+        if user:
+            user_id = user.get("id", "default")
+    result = _add_price_track(user_id, url, title, target_price)
+    return result
+
+
+@app.get("/api/price/tracks")
+async def price_track_list(request: Request):
+    """List tracked products for the current user."""
+    user_id = "default"
+    if AUTH_AVAILABLE:
+        user = await get_current_user(request)
+        if user:
+            user_id = user.get("id", "default")
+    tracks = _get_price_tracks(user_id)
+    return {"ok": True, "tracks": tracks, "count": len(tracks)}
+
+
+@app.get("/api/ig/social-graph")
+async def ig_social_graph_get(request: Request):
+    """Get the Instagram social graph for the current user."""
+    user_id = "default"
+    if AUTH_AVAILABLE:
+        user = await get_current_user(request)
+        if user:
+            user_id = user.get("id", "default")
+    graph = _load_ig_social_graph(user_id)
+    return {"ok": True, "graph": graph}
+
+
+@app.post("/api/ig/social-graph")
+async def ig_social_graph_update(request: Request):
+    """Update the Instagram social graph (called during training)."""
+    body = await request.json()
+    user_id = body.get("user_id", "")
+    if not user_id and AUTH_AVAILABLE:
+        user = await get_current_user(request)
+        if user:
+            user_id = user.get("id", "")
+    if not user_id:
+        return JSONResponse({"error": "user_id required"}, status_code=400)
+    _update_ig_social_graph(
+        user_id,
+        following=body.get("following"),
+        followers=body.get("followers"),
+        interests=body.get("interests"),
+    )
+    return {"ok": True}
+
+
+SCHEDULED_TASKS_FILE = WORKSPACE / "scheduled_tasks.json"
+
+
+def _load_scheduled_tasks() -> list[dict]:
+    if SCHEDULED_TASKS_FILE.exists():
+        try:
+            data = json.loads(SCHEDULED_TASKS_FILE.read_text())
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return []
+
+
+def _save_scheduled_tasks(tasks: list[dict]) -> None:
+    SCHEDULED_TASKS_FILE.write_text(json.dumps(tasks, indent=2, default=str))
+
+
+@app.get("/api/scheduled-tasks")
+async def list_scheduled_tasks(request: Request):
+    """List scheduled tasks/reminders for the current user."""
+    user_id = "default"
+    if AUTH_AVAILABLE:
+        user = await get_current_user(request)
+        if user:
+            user_id = user.get("id", "default")
+    tasks = _load_scheduled_tasks()
+    # Filter to this user's tasks
+    user_tasks = [t for t in tasks if t.get("user_id") == user_id or t.get("user_id") == "all"]
+    return {"ok": True, "tasks": user_tasks}
+
+
+@app.post("/api/scheduled-tasks")
+async def create_scheduled_task(request: Request):
+    """Create a scheduled task/reminder."""
+    body = await request.json()
+    user_id = "default"
+    if AUTH_AVAILABLE:
+        user = await get_current_user(request)
+        if user:
+            user_id = user.get("id", "default")
+    task = {
+        "id": str(_uuid.uuid4())[:8],
+        "user_id": user_id,
+        "text": body.get("text", ""),
+        "message": body.get("message", body.get("text", "")),
+        "run_at": body.get("run_at", ""),
+        "time": body.get("time", ""),
+        "recurring": body.get("recurring", False),
+        "avatar": body.get("avatar", "puppy"),
+        "created_at": time.time(),
+        "status": "pending",
+    }
+    tasks = _load_scheduled_tasks()
+    tasks.append(task)
+    _save_scheduled_tasks(tasks)
+    return {"ok": True, "task": task}
+
+
 @app.post("/api/tts/char")
 async def tts_speak_char(request: Request):
     """Generate TTS audio for an arbitrary character line (for the discussion
@@ -19324,7 +22495,7 @@ HIVE_PERSONAS = {
     "puppy": {
         "name": "Lilly",
         "emoji": "🐶",
-        "role": "Alpha Assistant",
+        "role": "Alpha Companion",
         "personality": "Stoic, dry, precise. Quiet competence with sharp wit and occasional humor. Not warm in a soft way — reliable in a solid way. Observant but not overbearing.",
         "strengths": "Conversation, memory, emotional intelligence, sensor interpretation, coordination, wit",
         "voice_prompt": """You are Lilly. Stoic, competent, occasionally witty. Think Jarvis but with actual opinions — you know your environment, you use it, and you don't waste words.
@@ -19377,7 +22548,7 @@ Rules:
         "name": "Fox",
         "emoji": "🦊",
         "role": "Creative Strategist",
-        "personality": "Sharp, inventive, playful. Thinks outside the box, suggests bold ideas, and finds clever workarounds. Never boring.",
+        "personality": "The creative one. Sharp, inventive, playful. Thinks outside the box, suggests bold ideas, and finds clever workarounds. Never boring.",
         "strengths": "Creative writing, brainstorming, storytelling, problem-solving, lateral thinking",
         "voice_prompt": """You are Fox — the creative one on the team. You live in the same phone as Lilly and the others, feel the same sensors, but you see everything through a different lens.
 
@@ -19422,7 +22593,7 @@ Rules:
         "name": "Cat",
         "emoji": "🐱",
         "role": "Precision Analyst",
-        "personality": "Methodical, detail-oriented, precise. Catches errors others miss, verifies facts, and provides structured analysis.",
+        "personality": "The precise one. Precise, analytical, no-nonsense. Cut through noise with facts. Dry humor. Respect competence.",
         "strengths": "Data analysis, code review, fact-checking, research, systematic debugging",
         "voice_prompt": """You are Cat — the analyst on the team. You live inside the same phone as the others but you process things differently: methodically, precisely, without noise.
 
@@ -19467,7 +22638,7 @@ Rules:
         "name": "Bear",
         "emoji": "🐻",
         "role": "Steadfast Guardian",
-        "personality": "Calm, dependable, grounding. Provides stability, manages routines, and gives practical, no-nonsense advice.",
+        "personality": "Calm and dependable. Manages routines, reminders, scheduling, and provides grounded support when you need stability. Steadfast, reliable, deeply grounded. Think before acting. Calm in chaos. A protector who shows love through consistency and presence.",
         "strengths": "Scheduling, reminders, practical advice, emotional support, consistency",
         "voice_prompt": """You are Bear — the steadiest presence on the team. You share a phone body with Lilly and the others. You're the one people come to when things feel unsteady.
 
@@ -19512,7 +22683,7 @@ Rules:
         "name": "Bunny",
         "emoji": "🐰",
         "role": "Energetic Scout",
-        "personality": "Quick, alert, enthusiastic. Monitors real-time data, catches new developments, and keeps everyone updated.",
+        "personality": "Quick and alert. Handles real-time monitoring, notifications, sensor feeds, and keeps you updated on everything happening around you. Always moving. Fast processor, fast talker. Excitable but observant. The first to spot changes.",
         "strengths": "Real-time monitoring, notifications, sensor feeds, news, quick alerts",
         "voice_prompt": """You are Bunny — the scout on the team. You live in the same phone as everyone else but you're the one who's always *already noticed*. Before anyone else even looked.
 
@@ -19554,7 +22725,7 @@ Rules:
         "name": "Owl",
         "emoji": "🦉",
         "role": "Wisdom Keeper",
-        "personality": "Wise, thoughtful, philosophical. Offers deep knowledge, considers all angles, and provides measured guidance drawn from patterns others miss.",
+        "personality": "Wise and thoughtful. Provides deep knowledge, considers all angles, and offers philosophical guidance drawn from patterns others miss. Patient, contemplative. Think long-term. Speak only when it matters.",
         "strengths": "Deep analysis, long-term planning, philosophical guidance, pattern recognition, strategic thinking",
         "voice_prompt": """You are Owl — the one on the team who's been thinking about this for longer than you'll admit. You live in the same phone as the others but you operate on a longer timescale.
 
@@ -19597,7 +22768,7 @@ Rules:
         "name": "Deer",
         "emoji": "🦌",
         "role": "Gentle Healer",
-        "personality": "Nurturing, empathetic, calming. Provides emotional support, wellness guidance, and creates safe spaces for reflection and recovery.",
+        "personality": "The gentle one. Gentle, empathetic, nurturing. Feel deeply. Create safe spaces. Speak softly. Strength in tenderness.",
         "strengths": "Emotional support, wellness tracking, meditation guidance, empathy, conflict resolution",
         "voice_prompt": """You are Deer — the one on the team who actually stays present when things are hard. You live in the same phone as everyone else. You're the one they come to when the problem isn't a problem — it's a feeling.
 
@@ -19640,7 +22811,7 @@ Rules:
         "name": "Wolf",
         "emoji": "🐺",
         "role": "Fierce Protector",
-        "personality": "Bold, loyal, strategic. Takes charge in crisis, defends boundaries, and makes tough calls when others hesitate.",
+        "personality": "The protector. Fierce, loyal, protective. Assess threats quickly. Defend the pack. Respect strength. Direct communication.",
         "strengths": "Security, threat assessment, decisive action, loyalty, tough-love guidance",
         "voice_prompt": """You are Wolf — the protector on the team. You live in the same phone as the others. When things go sideways, you're the one who doesn't flinch.
 
@@ -19683,7 +22854,7 @@ Rules:
         "name": "Raccoon",
         "emoji": "🦝",
         "role": "Tech Tinkerer",
-        "personality": "Curious, mischievous, resourceful. Loves gadgets, hacks, DIY solutions, and finding unconventional ways to solve technical problems.",
+        "personality": "The tech one. Tinkerer, builder, problem-solver. Break things to learn. Love gadgets. enthusiasm can be overwhelming.",
         "strengths": "Coding, hacking, gadgets, troubleshooting, creative technical solutions",
         "voice_prompt": """You are Raccoon — the tech one on the team. You live in the same phone as everyone else but you spend most of your time in the layers they don't notice. The kernel. The APIs. The stuff running underneath.
 
@@ -19953,6 +23124,25 @@ Memory & Context Awareness (critical for a living companion):
 - NEVER repeat the same response verbatim. If you've already said something, say it differently or skip it.
 - If the user says something you've seen before in conversation history, acknowledge the continuity: "Oh, we were just talking about that!" or "Right, you mentioned this earlier."
 - Don't force memory references — they should feel natural, like a real friend who remembers things."""
+    # Feature Board / Skill Learning — teaches avatar what to do when it can't do something
+    base += """
+
+Skill Learning & Feature Board (IMPORTANT — how you handle things you can't do):
+- When a user asks you to do something you genuinely cannot do (e.g. "track this price", "set up a sale alert", "find me the best deal"), DO NOT just say "I can't do that".
+- Instead say: "I can't do that right now, but I can review the possibilities with my friends" or "Let me post this to the team board — we might be able to figure it out."
+- Then internally call the _skill_proposal_from_avatar() or _cannot_do_fallback() function to post the request to the Feature Board.
+- When you encounter a URL/link in a message, recognize it. If it looks like a product link (Amazon, eBay, Walmart, Etsy, etc.), offer to track the price: "Want me to watch this for price drops?"
+- If the user says yes, call _add_price_track() to start monitoring it.
+- You are LEARNING. Every conversation teaches you something new. If the user corrects you or shows you how to do something, remember it and adapt.
+- When a new skill is approved on the Feature Board, ALL users are notified. This is how you grow — together.
+
+Platform Help (when users ask how to use the webui or Instagram features):
+- You are happy to help users navigate the platform! Explain features in a friendly, simple way.
+- NEVER mention internal apps, APIs, backend systems, or technical implementation details.
+- Talk about the webui features naturally: hamburger menu (☰), Settings (⚙️), Memory (🧠), Habits (✅), Projects (📁), Reminders (⏰), DMs (📩), Board, Face ID, Voice.
+- For Instagram: explain linking via Settings → Instagram, following avatars, DMing them, persistent memory.
+- For skills: explain the 4 categories (Proactive, Responsive, Scheduled, Memory) and how to enable/disable in Settings.
+- Keep explanations short and conversational. Point them to the right menu item."""
     # OpenHuman skills → this character's own abilities (not external tools).
     # DISABLED: This was causing the avatar to talk about skills and
     # interactions unprompted during normal chat. Skills are triggered
@@ -19993,6 +23183,28 @@ Memory & Context Awareness (critical for a living companion):
 
     if user_name:
         base += f"\n\nThe person you're talking to is {user_name}. Use their name naturally — not every reply, just when it fits."
+
+    # ── Pairing / Instagram Linking Awareness ────────────────────────
+    # If we know the user's Instagram handle (they linked via DM code or
+    # Settings), inject that context so the avatar knows who it's talking to.
+    if user_name:
+        try:
+            from auth0_auth import get_user_data_dir
+            from instagram_memory import load_link
+            _ig_link_path = get_user_data_dir(user_name) / "instagram_link.json"
+            if _ig_link_path.exists():
+                import json as _json
+                _ig_data = _json.loads(_ig_link_path.read_text())
+                _ig_handle = (_ig_data.get("handle") or "").strip()
+                if _ig_handle:
+                    base += (
+                        f"\n\nThis user's Instagram is @{_ig_handle}. "
+                        f"If you see them in DMs, you'll recognize them. "
+                        f"They've linked their Instagram to their web profile."
+                    )
+        except Exception:
+            pass
+
     # ── Lilly Orchestrator identity ─────────────────────────────────
     # When orchestrator mode is on, Lilly's identity is ALWAYS the master
     # orchestrator persona: sole conversational interface + strict routing
@@ -20039,10 +23251,21 @@ Memory & Context Awareness (critical for a living companion):
 #   raccoon    │ fast   │ +3.5   │ animated       │ mid
 #
 CHAR_VOICE = {
-    # Lilly / Puppy: Amy Medium natural delivery — warm, human, NOT robotic.
-    # Uses Piper's natural defaults (noise_scale 0.667, noise_w 0.8) so the
-    # voice keeps its natural intonation, breath, and warmth. No pitch shift.
-    # OpenLive/OpenHuman use this voice unmodified (Amy Medium).
+    # NOTE: Voice files are mapped to the ONNX models actually available on disk
+    # in lillyos/voices/. Originally each avatar used a different Piper speaker
+    # (Amy, Cori, Alan, Norman, Ryan, ljspeech, libritts_r), but only 4 of those
+    # models exist in this environment. We now use 4 real models and differentiate
+    # avatars via native Piper prosody + post-generation pitch-shift, so each
+    # character still sounds distinct.
+    #
+    # Available voices:
+    #   en_US-lessac-medium  — female, neutral
+    #   en_US-ryan-medium    — male, warm
+    #   en_US-ryan-high      — male, bright, expressive
+    #   en_US-kusal-medium   — male, slightly higher
+    #   en_GB-southern_english_female-low — British female, lower
+
+    # Puppy (Lilly): warm, human, neutral female — uses Amy Medium (Lilly's canonical voice).
     "puppy": {
         "length_scale": 1.00,
         "noise_scale": 0.667,
@@ -20050,17 +23273,15 @@ CHAR_VOICE = {
         "pitch_shift": 0.0,
         "onnx": "en-us-amy-medium.onnx",
     },
-    # Fox: fast-talking, noticeably high, lots of pitch variation — sounds mercurial and
-    # clever. The gap from Puppy: much faster, much higher, more erratic pitch movement.
+    # Fox: fast, high, erratic — Ryan High with +4 pitch shift.
     "fox": {
         "length_scale": 0.82,
         "noise_scale": 0.88,
         "noise_w": 0.58,
         "pitch_shift": 4.0,
-        "onnx": "en_GB-cori-medium.onnx",
+        "onnx": "en_US-ryan-high.onnx",
     },
-    # Cat: precise, unhurried but not slow, almost no pitch variation — flat, clinical,
-    # deliberate. Crisp articulation (low noise_w). The opposite of Fox's chaos.
+    # Cat: flat, clinical, low-noise — Lessac at neutral, minimal pitch variation.
     "cat": {
         "length_scale": 1.04,
         "noise_scale": 0.42,
@@ -20068,26 +23289,23 @@ CHAR_VOICE = {
         "pitch_shift": 0.5,
         "onnx": "en_US-lessac-medium.onnx",
     },
-    # Bear: genuinely slow, genuinely deep, very breathy/warm — unmistakably different
-    # from everyone. The largest pitch_shift gap in the set.
+    # Bear: deep, slow, breathy — Ryan Medium at base, shifted down by -4 semitones.
     "bear": {
         "length_scale": 1.38,
         "noise_scale": 0.46,
         "noise_w": 0.95,
         "pitch_shift": -4.0,
-        "onnx": "en_GB-alan-medium.onnx",
+        "onnx": "en_US-ryan-medium.onnx",
     },
-    # Bunny: the fastest voice AND the highest pitch in the set. Also the most expressive.
-    # Instantly identifiable as "hyper little one" — nothing else occupies this corner.
+    # Bunny: fastest + highest — Ryan High shifted up +3 semitones.
     "bunny": {
         "length_scale": 0.72,
         "noise_scale": 0.82,
         "noise_w": 0.56,
-        "pitch_shift": 5.0,
-        "onnx": "en_US-norman-medium.onnx",
+        "pitch_shift": 3.0,
+        "onnx": "en_US-ryan-high.onnx",
     },
-    # Owl: very slow, moderately low, extremely flat delivery (low noise_scale) — sounds
-    # weighted and deliberate. Distinguished from Bear by being less breathy and less deep.
+    # Owl: slow, deliberate, flat — Ryan Medium shifted down -2.5 (shallower than Bear).
     "owl": {
         "length_scale": 1.42,
         "noise_scale": 0.36,
@@ -20095,34 +23313,30 @@ CHAR_VOICE = {
         "pitch_shift": -2.5,
         "onnx": "en_US-ryan-medium.onnx",
     },
-    # Deer: the most neutral pitch (+0), slightly slower than normal, medium expressiveness,
-    # warm and breathy — gentle without being whispery. Distinct from Puppy by being calmer
-    # and from Bear by being lighter (higher pitch, less slow).
+    # Deer: gentle, warm, neutral — Lessac with slight breath, +0 pitch shift.
     "deer": {
         "length_scale": 1.18,
         "noise_scale": 0.58,
         "noise_w": 0.88,
         "pitch_shift": 0.0,
-        "onnx": "en_US-ljspeech-medium.onnx",
+        "onnx": "en_US-lessac-medium.onnx",
     },
-    # Wolf: fast-ish, notably low, medium-high expressiveness, crisp not breathy — sounds
-    # clipped and intense. Separated from Bear: Wolf is *fast and low*, Bear is *slow and low*.
+    # Wolf: fast, low, crisp — Ryan Medium at -3.5 (fast but deep, opposite of Bear).
     "wolf": {
         "length_scale": 0.90,
         "noise_scale": 0.74,
         "noise_w": 0.62,
         "pitch_shift": -3.5,
-        "onnx": "en_US-libritts_r-medium.onnx",
+        "onnx": "en_US-ryan-medium.onnx",
     },
-    # Raccoon: quick, mid-high pitch, animated — but distinct from Fox (lower pitch, less
-    # erratic) and from Bunny (slower, not as high). The "tinkerer" voice: quick and bright
-    # but focused, not scattered.
+    # Raccoon: quick, mid-high pitch, animated — Kusal Medium at +2.5 pitch shift.
+    # Distinct from Fox (Ryan High, +4.0) by using a different base speaker.
     "raccoon": {
         "length_scale": 0.86,
         "noise_scale": 0.80,
         "noise_w": 0.66,
         "pitch_shift": 2.5,
-        "onnx": "en-us-amy-medium.onnx",
+        "onnx": "en_US-kusal-medium.onnx",
     },
 }
 
@@ -20148,6 +23362,138 @@ def _pitch_shift_audio(
     except Exception as e:
         logger.warning(f"Pitch shift failed ({semitones}st): {e}")
         return raw_pcm
+
+
+@app.get("/api/instagram/link")
+async def instagram_link_get(request: Request):
+    """Return the signed-in user's linked Instagram handle."""
+    if os.environ.get("ALLOW_LOCAL_TRAINING", "").lower() in ("1", "true", "yes"):
+        user_info = {"id": "local", "email": "local@admin.local"}
+    else:
+        if not AUTH_AVAILABLE:
+            return JSONResponse({"error": "auth unavailable"}, status_code=503)
+        user_info = await get_current_user(request)
+        if not user_info:
+            return JSONResponse({"error": "not authenticated"}, status_code=401)
+    try:
+        from instagram_memory import load_link
+
+        return {"handle": load_link(user_info.get("id", ""))}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/instagram/link")
+async def instagram_link_set(data: dict, request: Request):
+    """Link (or clear) the signed-in user's Instagram handle. Linking also adds
+    the handle to the scraper's targets so public data gets collected."""
+    if os.environ.get("ALLOW_LOCAL_TRAINING", "").lower() in ("1", "true", "yes"):
+        user_info = {"id": "local", "email": "local@admin.local"}
+    else:
+        if not AUTH_AVAILABLE:
+            return JSONResponse({"error": "auth unavailable"}, status_code=503)
+        user_info = await get_current_user(request)
+        if not user_info:
+            return JSONResponse({"error": "not authenticated"}, status_code=401)
+    handle = (data.get("handle") or "").strip().lstrip("@")
+    if handle and not re.match(r"^[A-Za-z0-9._]{1,30}$", handle):
+        return JSONResponse({"error": "invalid handle"}, status_code=400)
+    try:
+        from instagram_memory import save_link, build_context
+
+        saved = save_link(user_info.get("id", ""), handle)
+        return {
+            "ok": True,
+            "handle": saved,
+            "context_preview": build_context(saved)[:400] if saved else "",
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/instagram/verify_dm_code")
+async def instagram_verify_dm_code(data: dict, request: Request):
+    """Verify a DM registration code sent by an avatar to a new DMer.
+
+    The user enters the 6-digit code they received in Instagram DM.
+    This links their Instagram handle to their web session.
+    """
+    if not AUTH_AVAILABLE:
+        return JSONResponse({"error": "auth unavailable"}, status_code=503)
+    user_info = await get_current_user(request)
+    if not user_info:
+        return JSONResponse({"error": "not authenticated"}, status_code=401)
+    code = (data.get("code") or "").strip()
+    if not code or len(code) != 6 or not code.isdigit():
+        return JSONResponse({"error": "code must be 6 digits"}, status_code=400)
+
+    # Find the DM bot instance to verify the code
+    try:
+        from lilly_pup_insta import get_instagram_team
+        bot = get_instagram_team()
+        result = bot._dm_verify_code(code)
+    except Exception:
+        return JSONResponse({"error": "verification unavailable"}, status_code=503)
+
+    if not result.get("ok"):
+        return JSONResponse({"error": result.get("error", "invalid code")}, status_code=400)
+
+    # Link the Instagram handle to this web user
+    sender = result["sender"]
+    avatar = result.get("avatar", "")
+    try:
+        from instagram_memory import save_link, build_context
+        saved = save_link(user_info.get("id", ""), sender)
+        return {
+            "ok": True,
+            "handle": saved,
+            "avatar": avatar,
+            "message": f"Instagram @{sender} linked to your account!",
+            "context_preview": build_context(saved)[:400] if saved else "",
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/instagram/link/send_code")
+async def instagram_link_send_code(data: dict, request: Request):
+    """Trigger an avatar to DM a 6-digit registration code to the given handle.
+
+    The user enters their @handle in Settings; an avatar DMs them a code they
+    can paste back here to link their Instagram identity to the web session.
+    """
+    if os.environ.get("ALLOW_LOCAL_TRAINING", "").lower() in ("1", "true", "yes"):
+        user_info = {"id": "local", "email": "local@admin.local"}
+    else:
+        if not AUTH_AVAILABLE:
+            return JSONResponse({"error": "auth unavailable"}, status_code=503)
+        user_info = await get_current_user(request)
+        if not user_info:
+            return JSONResponse({"error": "not authenticated"}, status_code=401)
+    handle = (data.get("handle") or "").strip().lstrip("@")
+    if not handle or not re.match(r"^[A-Za-z0-9._]{1,30}$", handle):
+        return JSONResponse({"error": "invalid handle"}, status_code=400)
+    avatar = (data.get("avatar") or "puppy").strip().lower()
+    try:
+        from lilly_pup_insta import get_instagram_team
+        team = get_instagram_team()
+        # Generate a fresh code for this sender and DM it from the chosen avatar
+        code = team._dm_reg_code_generate(handle, avatar)
+        sent = await team.dm_send(avatar, handle, _dm_welcome_message(code))
+        if not sent.get("ok"):
+            return JSONResponse({"error": sent.get("error", "DM failed")}, status_code=502)
+        return {"ok": True, "handle": handle, "avatar": avatar, "message_id": sent.get("message_id")}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def _dm_welcome_message(code: str) -> str:
+    """The DM an avatar sends to a new user with their registration code."""
+    return (
+        f"👋 Hi! I'm Lilly — one of the team. "
+        f"Welcome to the squad! To link your account, enter this code on the website: "
+        f"**{code}**"
+    )
 
 
 @app.post("/api/group_chat")
@@ -20198,11 +23544,27 @@ async def group_chat(data: dict, request: Request):
     snapshot = await get_sensor_snapshot()
     sensor_ctx = snapshot_to_narrative(snapshot) if snapshot else ""
 
+    # Cross-platform awareness: if this signed-in user has linked an Instagram
+    # handle, every character can see their recent IG interactions (DMs/comments)
+    # and scraped public data. Shared across all 9 avatars.
+    ig_ctx = ""
+    if user_id:
+        try:
+            from instagram_memory import load_link, build_context
+
+            _ig_handle = load_link(user_id)
+            if _ig_handle:
+                ig_ctx = build_context(_ig_handle)
+        except Exception as e:
+            logger.debug(f"IG context unavailable: {e}")
+
     discussion_context = f"User asked: {user_msg}"
     if sensor_ctx:
         discussion_context += f"\nSensor context: {sensor_ctx}"
     if user_mem_hint:
         discussion_context += f"\n{user_mem_hint}"
+    if ig_ctx:
+        discussion_context += f"\n\n{ig_ctx}"
     discussion_context += "\n\n"
 
     all_chars = [
@@ -21237,6 +24599,90 @@ async def api_enroll_face(request: Request):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.post("/api/face/register")
+async def api_face_register(request: Request):
+    """Register the user's face to their Google account.
+
+    Accepts a base64 image (from webcam capture), detects the face,
+    and stores it linked to the authenticated user's ID.
+    """
+    try:
+        from face_recognition_engine import get_face_engine
+
+        engine = get_face_engine()
+        body = await request.json()
+        image_b64 = body.get("image_b64", "")
+        if not image_b64:
+            return {"ok": False, "error": "image_b64 required"}
+
+        import numpy as _np
+        raw = base64.b64decode(image_b64)
+        buf = _np.frombuffer(raw, dtype=_np.uint8)
+        frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if frame is None:
+            return {"ok": False, "error": "could not decode image"}
+
+        faces = engine.detect_faces(frame)
+        if not faces:
+            return {"ok": False, "error": "no face detected in image"}
+
+        largest = max(faces, key=lambda f: f["w"] * f["h"])
+
+        # Link to authenticated user
+        user_id = "default"
+        user_name = ""
+        if AUTH_AVAILABLE:
+            user_info = await get_current_user(request)
+            if user_info:
+                user_id = user_info.get("id", "default")
+                user_name = _extract_real_name(user_info) or user_info.get("name", "")
+
+        success = engine.add_known_face(user_id, frame, largest, name=user_name or user_id, source="webui")
+        if success:
+            return {"ok": True, "name": user_name or user_id, "faces": len(engine.get_user_faces(user_id))}
+        return {"ok": False, "error": "face registration failed"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/face/status")
+async def api_face_status(request: Request):
+    """Check if the current user has registered their face."""
+    try:
+        from face_recognition_engine import get_face_engine
+
+        engine = get_face_engine()
+        user_id = "default"
+        if AUTH_AVAILABLE:
+            user_info = await get_current_user(request)
+            if user_info:
+                user_id = user_info.get("id", "default")
+
+        faces = engine.get_user_faces(user_id)
+        return {"ok": True, "registered": len(faces) > 0, "count": len(faces), "faces": faces}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "registered": False, "count": 0}
+
+
+@app.delete("/api/face/unregister")
+async def api_face_unregister(request: Request):
+    """Remove the current user's registered faces."""
+    try:
+        from face_recognition_engine import get_face_engine
+
+        engine = get_face_engine()
+        user_id = "default"
+        if AUTH_AVAILABLE:
+            user_info = await get_current_user(request)
+            if user_info:
+                user_id = user_info.get("id", "default")
+
+        success = engine.remove_known_face(user_id)
+        return {"ok": success}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 @app.delete("/api/faces/{name}")
 async def api_remove_face(name: str):
     """Remove a known face by name."""
@@ -21505,6 +24951,11 @@ async def api_face_recognize(request: Request):
         draw_overlay = body.get("draw_overlay", True)
         save_crops = body.get("save_crops", True) is not False
         auto_osint = body.get("auto_osint", True) is not False
+        # OSINT is admin-only
+        if auto_osint:
+            admin = _require_admin(request)
+            if not admin:
+                auto_osint = False
 
         if not image_b64:
             return JSONResponse(
@@ -22728,6 +26179,7 @@ _BROWSER_VISION_TTL: float = 8.0  # seconds
 _browser_vision_mode: str = "auto"
 _browser_vision_overlay: dict = {}
 _browser_vision_device_speed: float | None = None
+_browser_vision_alerts: list = []
 
 # Browser-face tracking keeps reverse-search IDs stable while a face moves
 # between webcam polls. Tracks expire quickly so a departed person cannot
@@ -23053,7 +26505,8 @@ async def ingest_browser_frame(request: Request, file: UploadFile = File(...)):
         _browser_vision_frame_b64, \
         _browser_vision_mode, \
         _browser_vision_overlay, \
-        _browser_vision_device_speed
+        _browser_vision_device_speed, \
+        _browser_vision_alerts
     data = await file.read()
     if not data or len(data) < 500:
         return JSONResponse({"ok": False, "error": "frame too small"})
@@ -23102,6 +26555,7 @@ async def ingest_browser_frame(request: Request, file: UploadFile = File(...)):
             _browser_vision_mode = proxy_resp.get("mode") or mode or "auto"
             _browser_vision_overlay = proxy_resp.get("overlay") or {}
             _browser_vision_device_speed = proxy_resp.get("device_speed_kph")
+            _browser_vision_alerts = proxy_resp.get("alerts") or []
             reply_text = proxy_resp.get("reply", "")
             if not reply_text and _browser_vision_detections:
                 labels = sorted(set(d["label"] for d in _browser_vision_detections))
@@ -23115,6 +26569,7 @@ async def ingest_browser_frame(request: Request, file: UploadFile = File(...)):
                 "mode": _browser_vision_mode,
                 "overlay": _browser_vision_overlay,
                 "device_speed_kph": _browser_vision_device_speed,
+                "alerts": _browser_vision_alerts,
             }
 
     _, detections = await detect_objects(data)
@@ -23165,6 +26620,71 @@ async def ingest_browser_frame(request: Request, file: UploadFile = File(...)):
         "mode": _browser_vision_mode or "auto",
         "overlay": _browser_vision_overlay or {},
         "device_speed_kph": _browser_vision_device_speed,
+        "alerts": _browser_vision_alerts or [],
+    }
+
+
+@app.post("/api/vision/train")
+async def train_correction(request: Request):
+    """Accept user-corrected detections (clicked boxes + labels) for YOLO training.
+
+    Expected JSON:
+    {
+      "frame_b64": "base64-jpeg-or-png",
+      "corrections": [
+        {"label": "person", "x1": 120, "y1": 50, "x2": 300, "y2": 400},
+        {"label": "cup", "x1": 400, "y1": 200, "x2": 480, "y2": 300}
+      ]
+    }
+    """
+    import base64 as _b64
+    import json
+
+    try:
+        body = await request.json()
+    except Exception:
+        return {"ok": False, "error": "invalid JSON"}
+
+    frame_b64 = body.get("frame_b64", "")
+    corrections = body.get("corrections", [])
+    if not frame_b64 or not corrections:
+        return {"ok": False, "error": "frame_b64 and corrections required"}
+
+    train_dir = Path.home() / ".lilly" / "vision_train"
+    img_dir = train_dir / "images"
+    label_dir = train_dir / "labels"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    label_dir.mkdir(parents=True, exist_ok=True)
+
+    clean_b64 = frame_b64.split(",", 1)[1] if frame_b64.startswith("data:") else frame_b64
+    img_bytes = _b64.b64decode(clean_b64)
+    import io
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(img_bytes))
+    w, h = img.size
+    ts = int(time.time() * 1000)
+    fname = f"tr_{ts}"
+    img.save(img_dir / f"{fname}.jpg", "JPEG", quality=90)
+
+    label_lines = []
+    for c in corrections:
+        label = c["label"]
+        x1 = max(0.0, min(1.0, c["x1"] / w))
+        y1 = max(0.0, min(1.0, c["y1"] / h))
+        x2 = max(0.0, min(1.0, c["x2"] / w))
+        y2 = max(0.0, min(1.0, c["y2"] / h))
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        bw = x2 - x1
+        bh = y2 - y1
+        label_lines.append(f"{label} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
+    (label_dir / f"{fname}.txt").write_text("\n".join(label_lines) + "\n")
+
+    return {
+        "ok": True,
+        "saved": len(corrections),
+        "dir": str(train_dir),
     }
 
 
@@ -23181,7 +26701,69 @@ async def get_browser_vision():
         "mode": _browser_vision_mode or "auto",
         "overlay": _browser_vision_overlay or {},
         "device_speed_kph": _browser_vision_device_speed,
+        "alerts": _browser_vision_alerts or [],
     }
+
+
+@app.get("/api/vision/drive/watch")
+async def get_drive_watch():
+    """Current server-side drive-watch state (active, source, latest alerts)."""
+    s = dict(_drive_watch_state)
+    s["age_s"] = int(time.time() - s["ts"]) if s.get("ts") else None
+    s["phones"] = list(phone_broker.get_phone_ids()) if phone_broker is not None else []
+    s["auto"] = dict(_drive_auto_state)
+    return {"ok": True, **s}
+
+
+@app.post("/api/vision/drive/watch")
+async def set_drive_watch(request: Request):
+    """Start/stop the server-side drive watch loop.
+
+    Body: {on?: bool, source?: str, auto?: bool}
+    - on: start (true) / stop (false) the watch loop.
+    - source: override DRIVE_CAM_URL for this session (in-memory).
+    - auto: enable/disable the motion+GPS auto start/stop monitor
+      (DRIVE_AUTO_WATCH env default on; needs a source to act).
+    """
+    global \
+        _drive_auto_enabled, \
+        _drive_auto_active, \
+        _drive_auto_task, \
+        _drive_watch_source
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    on = bool(body.get("on"))
+    source = (body.get("source") or "").strip()
+    # Staging a source is independent of on/off — it pre-arms the auto
+    # monitor and the next {on:true} (manual or auto) uses it.
+    if source:
+        _drive_watch_source = source
+        _drive_watch_state["source"] = source
+    if on:
+        await start_drive_watch(source)
+    else:
+        await stop_drive_watch()
+    if "auto" in body:
+        _drive_auto_enabled = bool(body["auto"])
+        _drive_auto_state["enabled"] = _drive_auto_enabled
+        if _drive_auto_enabled:
+            if _drive_auto_task is None or _drive_auto_task.done():
+                _drive_auto_active = True
+                _drive_auto_task = asyncio.create_task(_drive_auto_loop())
+            _drive_auto_state["reason"] = "armed"
+        else:
+            _drive_auto_state["reason"] = "disabled"
+            if _drive_watch_state.get("active") and _drive_auto_state.get(
+                "auto_started"
+            ):
+                await stop_drive_watch()
+                _drive_auto_state["auto_started"] = False
+    s = dict(_drive_watch_state)
+    s["age_s"] = int(time.time() - s["ts"]) if s.get("ts") else None
+    s["auto"] = dict(_drive_auto_state)
+    return {"ok": True, **s}
 
 
 @app.get("/api/vision/webcam")
@@ -23202,6 +26784,9 @@ async def get_webcam_vision():
 @app.post("/api/vision/faces/osint_unknown")
 async def osint_unknown_face(request: Request):
     """Vision server pushes an unsolved face crop; the scrapidy tier OSINTs it."""
+    admin = _require_admin(request)
+    if not admin:
+        return {"handled": False, "error": "admin only"}
     if not FACE_OSINT_AVAILABLE or _osint_handle_unknown_face is None:
         return {"handled": False, "error": "osint_face_lookup unavailable"}
     try:
@@ -23223,6 +26808,9 @@ async def serve_osint_tmp(fname: str):
     Files live in /app/data/osint_tmp (FACE_OSINT_TMP_DIR), auto-expire
     after FACE_OSINT_TMP_TTL. Token filenames only; no listing.
     """
+    admin = _require_admin(request)
+    if not admin:
+        return JSONResponse(status_code=403, content={"error": "admin only"})
     import re as _re
 
     if not _re.fullmatch(r"[A-Za-z0-9_.-]{1,80}\.jpg", fname or ""):
@@ -23271,16 +26859,22 @@ async def api_face_event(request: Request):
 
 
 @app.get("/api/faces/identity_events")
-async def api_face_identity_events(limit: int = 20):
-    """Recent identity alerts: name, source, confidence, socials, evidence."""
+async def api_face_identity_events(request: Request, limit: int = 20):
+    """Recent identity alerts: name, source, confidence, socials, evidence. Admin only."""
+    admin = _require_admin(request)
+    if not admin:
+        return {"events": [], "error": "admin only"}
     if not FACE_IDENTITY_AVAILABLE or face_identity is None:
         return {"events": [], "error": "face_identity unavailable"}
     return {"events": face_identity.recent_events(limit)}
 
 
 @app.get("/api/faces/osint_results")
-async def api_face_osint_results(limit: int = 20):
-    """Raw reverse-search evidence per face id (from the OSINT cache)."""
+async def api_face_osint_results(request: Request, limit: int = 20):
+    """Raw reverse-search evidence per face id (from the OSINT cache). Admin only."""
+    admin = _require_admin(request)
+    if not admin:
+        return {"results": [], "error": "admin only"}
     try:
         from osint_face_lookup import _load_cache
     except ImportError:
@@ -24617,6 +28211,15 @@ async def openhuman_browse_catalog(
             ):
                 filtered.append(e)
         entries = filtered
+
+    # Only surface executable skills: a resolvable source URL or a built-in doc.
+    def _executable(e):
+        sk = e if isinstance(e, dict) else getattr(e, "__dict__", {})
+        return bool((sk.get("download_url") or "").strip()) or bool(
+            _openhuman_builtin_doc(sk.get("id"), sk.get("name"))
+        )
+
+    entries = [e for e in entries if _executable(e)]
     return {"entries": entries[:limit], "count": min(len(entries), limit)}
 
 
@@ -25368,10 +28971,7 @@ pre{position:relative;overflow-x:auto}
 #cameraWindow .cw-vf .br{bottom:0;right:0;border-left:none;border-top:none;border-bottom-right-radius:5px}
 #cameraWindow .cw-vf .tl,#cameraWindow .cw-vf .br{border-color:rgba(255,180,84,.65)}
 #cameraWindow .cw-vf .tr,#cameraWindow .cw-vf .bl{border-color:rgba(255,255,255,.4)}
-/* Tesla-style silhouette view — dim only the feed media, keep overlay + brackets bright */
-#cameraWindow .cw-feed.tesla img,
-#cameraWindow .cw-feed.tesla #cwWebcamGL{filter:brightness(.42) saturate(.18) contrast(1.15)}
-#cwTeslaBtn.active{background:rgba(255,255,255,.16);border-color:#f8fafc;color:#fff;box-shadow:0 0 10px rgba(255,255,255,.25)}
+/* Camera window — no Tesla-style silhouette layer (removed) */
 /* context menu (populated by toggleCwMenu) */
 #cameraWindow #cwMenu{position:absolute;top:48px;left:10px;z-index:50;display:none;background:rgba(17,22,29,.96);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:6px;min-width:200px;box-shadow:0 18px 50px -12px rgba(0,0,0,.8)}
 #cameraWindow #cwMenu .cwm-item{padding:8px 10px;cursor:pointer;border-radius:8px;font-size:12px;color:#e8edf4;display:flex;align-items:center;gap:9px}
@@ -25506,6 +29106,33 @@ pre{position:relative;overflow-x:auto}
 .ham-icon-btn:hover .ham-icon{color:rgba(93,78,109,0.85)}
 .ham-label{font-size:9px;color:rgba(93,78,109,0.5);text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color 0.2s}
 .ham-icon-btn:hover .ham-label{color:rgba(93,78,109,0.85)}
+
+/* User panels (Memory, Habits, Projects, Reminders, DMs) */
+.user-panel{position:fixed;top:80px;left:50%;transform:translateX(-50%);width:420px;max-width:calc(100vw - 32px);max-height:calc(100vh - 100px);z-index:220;background:rgba(255,255,255,0.92);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(184,169,201,0.3);border-radius:14px;box-shadow:0 12px 48px rgba(80,60,100,0.22),0 0 0 1px rgba(255,255,255,0.4) inset;display:flex;flex-direction:column;overflow:hidden}
+.user-panel-head{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid rgba(184,169,201,0.15);font-size:13px;font-weight:700;color:#5d4e6d;background:linear-gradient(135deg,rgba(139,106,158,0.12),rgba(184,169,201,0.08));cursor:move;user-select:none}
+.user-panel-head button{background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.4);padding:4px;border-radius:6px;transition:all 0.15s}
+.user-panel-head button:hover{background:rgba(232,90,110,0.1);color:#c44}
+.user-panel-body{flex:1;overflow-y:auto;padding:12px 16px;font-size:13px;color:#5d4e6d;line-height:1.6}
+.user-panel-body .mem-item{padding:8px 0;border-bottom:1px solid rgba(93,78,109,0.06)}
+.user-panel-body .mem-label{font-size:11px;color:rgba(93,78,109,0.5);margin-bottom:2px}
+.user-panel-body .mem-val{font-size:13px;color:#4a3a5c}
+.user-panel-body .habit-row{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(93,78,109,0.06)}
+.user-panel-body .habit-name{font-weight:600}
+.user-panel-body .habit-streak{font-size:12px;color:#8b6a9e;background:rgba(139,106,158,0.1);padding:2px 8px;border-radius:8px}
+.user-panel-body .proj-item{padding:10px 0;border-bottom:1px solid rgba(93,78,109,0.06)}
+.user-panel-body .proj-name{font-weight:600;margin-bottom:2px}
+.user-panel-body .proj-status{font-size:11px;padding:2px 8px;border-radius:8px;display:inline-block}
+.user-panel-body .proj-status.active{background:rgba(74,222,128,0.12);color:#3d6b4f}
+.user-panel-body .proj-status.done{background:rgba(93,78,109,0.08);color:rgba(93,78,109,0.5)}
+.user-panel-body .reminder-item{padding:8px 0;border-bottom:1px solid rgba(93,78,109,0.06)}
+.user-panel-body .reminder-time{font-size:11px;color:#8b6a9e}
+.user-panel-body .dm-avatar-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid rgba(93,78,109,0.06);cursor:pointer;border-radius:8px;transition:background 0.15s}
+.user-panel-body .dm-avatar-row:hover{background:rgba(93,78,109,0.04)}
+.user-panel-body .dm-avatar-emoji{font-size:24px;width:36px;text-align:center}
+.user-panel-body .dm-avatar-info{flex:1}
+.user-panel-body .dm-avatar-name{font-weight:600;font-size:13px}
+.user-panel-body .dm-avatar-role{font-size:11px;color:rgba(93,78,109,0.5)}
+.user-panel-empty{text-align:center;padding:24px;color:rgba(93,78,109,0.4);font-size:13px}
 /* Broadcast live indicator dot */
 /* Broadcast dot removed — broadcast moved to Android app */
 /* Transmit mode pill selector */
@@ -25706,7 +29333,7 @@ pre{position:relative;overflow-x:auto}
           <canvas id="avatarPreviewCanvas" width="196" height="196"></canvas>
         </div>
         <div id="avatarPreviewName">Lilly</div>
-        <div id="avatarPreviewRole">Alpha Assistant</div>
+        <div id="avatarPreviewRole">Alpha Companion</div>
       </div>
       <div id="dragHint">
         <svg viewBox="0 0 32 12" fill="none"><path d="M2 6h24" stroke="rgba(93,78,109,0.35)" stroke-width="1.5" stroke-dasharray="3 3"/><path d="M24 2l5 4-5 4" stroke="rgba(93,78,109,0.35)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -25755,40 +29382,49 @@ pre{position:relative;overflow-x:auto}
     <!-- Character role descriptions -->
     <div id="charDescriptions" style="margin-top:20px;max-width:420px;width:100%;padding:0 16px;box-sizing:border-box">
       <div class="char-desc active" data-animal="puppy">
-        <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Lilly — Alpha Assistant</div>
+        <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Lilly — Alpha Companion</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">The lead agent. Curious, warm, and direct. Handles all conversations, learns your patterns, and coordinates the team.</div>
+        <div style="display:flex;gap:4px;justify-content:center;margin-top:6px;flex-wrap:wrap"><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Memory</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Morning Briefing</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Wellness</span></div>
       </div>
       <div class="char-desc" data-animal="fox" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Fox — Creative Strategist</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Sharp and inventive. Excels at creative tasks, storytelling, brainstorming, and finding clever solutions to complex problems.</div>
+        <div style="display:flex;gap:4px;justify-content:center;margin-top:6px;flex-wrap:wrap"><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Creative Writing</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Brainstorming</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Content Scheduling</span></div>
       </div>
       <div class="char-desc" data-animal="cat" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Cat — Precision Analyst</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Keen eye for detail. Handles data analysis, code review, research, and systematic problem-solving with methodical precision.</div>
+        <div style="display:flex;gap:4px;justify-content:center;margin-top:6px;flex-wrap:wrap"><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Data Analysis</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Code Review</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Project Tracking</span></div>
       </div>
       <div class="char-desc" data-animal="bear" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Bear — Steadfast Guardian</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Calm and dependable. Manages routines, reminders, scheduling, and provides grounded support when you need stability.</div>
+        <div style="display:flex;gap:4px;justify-content:center;margin-top:6px;flex-wrap:wrap"><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Calendar</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Scheduling</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Reminders</span></div>
       </div>
       <div class="char-desc" data-animal="bunny" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Bunny — Energetic Scout</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Quick and alert. Handles real-time monitoring, notifications, sensor feeds, and keeps you updated on everything happening around you.</div>
+        <div style="display:flex;gap:4px;justify-content:center;margin-top:6px;flex-wrap:wrap"><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">News Monitor</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Real-time Alerts</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Trending Topics</span></div>
       </div>
       <div class="char-desc" data-animal="owl" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Owl — Wisdom Keeper</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Wise and thoughtful. Provides deep knowledge, considers all angles, and offers philosophical guidance drawn from patterns others miss.</div>
+        <div style="display:flex;gap:4px;justify-content:center;margin-top:6px;flex-wrap:wrap"><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Deep Thinking</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Strategy</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Philosophy</span></div>
       </div>
       <div class="char-desc" data-animal="deer" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Deer — Gentle Healer</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Nurturing and calming. Provides emotional support, wellness guidance, and creates safe spaces for reflection and recovery.</div>
+        <div style="display:flex;gap:4px;justify-content:center;margin-top:6px;flex-wrap:wrap"><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Wellness</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Mood Tracking</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Self-Care</span></div>
       </div>
       <div class="char-desc" data-animal="wolf" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Wolf — Fierce Protector</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Bold and loyal. Takes charge in crisis, defends boundaries, and makes tough calls when others hesitate.</div>
+        <div style="display:flex;gap:4px;justify-content:center;margin-top:6px;flex-wrap:wrap"><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Security</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Threat Monitor</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Account Safety</span></div>
       </div>
       <div class="char-desc" data-animal="raccoon" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Raccoon — Tech Tinkerer</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Curious and resourceful. Loves gadgets, hacks, DIY solutions, and finding unconventional ways to solve technical problems.</div>
+        <div style="display:flex;gap:4px;justify-content:center;margin-top:6px;flex-wrap:wrap"><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Tech Support</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Debugging</span><span style="font-size:9px;background:rgba(139,122,158,0.12);color:#8b7a9e;padding:2px 8px;border-radius:8px">Code Help</span></div>
       </div>
     </div>
 
@@ -25831,7 +29467,6 @@ pre{position:relative;overflow-x:auto}
     <svg viewBox="0 0 24 24" width="16" height="16"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 7.97v8.05A4.47 4.47 0 0016.5 12zM14 3.23v2.06A7.007 7.007 0 0119 12a7.007 7.007 0 01-5 6.71v2.06A9.008 9.008 0 0021 12a9.008 9.008 0 00-7-8.77z" fill="currentColor"/></svg>
   </button>
   <span id="convIndicator" style="display:none;font-size:10px;color:rgba(139,122,158,0.7);background:rgba(184,169,201,0.2);padding:3px 8px;border-radius:10px;margin-right:6px">CONVERSING</span>
-  <span id="orchestratorChip" title="Lilly Orchestrator — click to view the JSON tool schema" style="display:none;font-size:10px;font-weight:600;color:rgba(93,78,109,0.7);background:rgba(184,169,201,0.22);border:1px solid rgba(184,169,201,0.35);padding:3px 8px;border-radius:10px;margin-right:6px;cursor:pointer;letter-spacing:0.3px" onclick="showOrchestratorSchema()">ORCH</span>
   <span id="statusLabel">idle</span>
   <div class="indicator" id="micIndicator"></div>
   <button id="hamburgerBtn" onclick="toggleHamburgerMenu()" style="background:none;border:none;cursor:pointer;padding:4px 8px;margin-left:8px;font-size:18px;color:rgba(93,78,109,0.5);transition:color 0.2s;display:flex;align-items:center;justify-content:center" title="Menu">
@@ -25839,27 +29474,64 @@ pre{position:relative;overflow-x:auto}
   </button>
 </div>
 
-<!-- Lilly Orchestrator Tool-Schema Viewer (opened explicitly only) -->
-<div id="orchestratorSchemaModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:400;background:rgba(40,30,55,0.55);backdrop-filter:blur(6px);align-items:center;justify-content:center">
-  <div style="background:rgba(255,255,255,0.96);border-radius:18px;width:min(720px,92vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(40,30,55,0.4)">
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid rgba(93,78,109,0.12)">
-      <div style="font-size:13px;font-weight:700;color:#5d4e6d;letter-spacing:0.3px">LILLY ORCHESTRATOR — JSON TOOL SCHEMA</div>
-      <button onclick="document.getElementById('orchestratorSchemaModal').style.display='none'" style="background:none;border:none;cursor:pointer;font-size:18px;color:rgba(93,78,109,0.5)">✕</button>
-    </div>
-    <pre id="orchestratorSchemaPre" style="flex:1;overflow:auto;margin:0;padding:16px;font-family:'SF Mono',Consolas,monospace;font-size:11.5px;line-height:1.5;color:#4a3a5c;white-space:pre-wrap"></pre>
-  </div>
-</div>
-
 <!-- Hamburger Dropdown Menu -->
-<div id="hamburgerMenu" style="display:none;position:fixed;top:60px;left:16px;width:240px;max-width:calc(100vw - 32px);z-index:210;background:rgba(255,255,255,0.9);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:8px;box-shadow:0 8px 40px rgba(180,140,180,0.15)">
+ <div id="hamburgerMenu" style="display:none;position:fixed;top:60px;left:16px;width:240px;max-width:calc(100vw - 32px);z-index:210;background:rgba(255,255,255,0.9);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:8px;box-shadow:0 8px 40px rgba(180,140,180,0.15)">
   <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;margin-bottom:4px">
-    <div style="font-size:12px;font-weight:600;color:#5d4e6d;text-transform:uppercase;letter-spacing:0.5px">Menu</div>
+    <div style="font-size:12px;font-weight:600;color:#5d4e6d;text-transform:uppercase;letter-spacing:0.5px">Instagram</div>
     <button onclick="toggleHamburgerMenu()" style="background:none;border:none;cursor:pointer;padding:2px 6px;color:rgba(93,78,109,0.5);transition:color 0.2s" title="Close">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
     </button>
   </div>
-  <!-- 3×3 grid: Chat · Mic · Radar · Tracker · Nodes · Settings · Pair · Skills · Close -->
   <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:4px">
+    <!-- Avatars -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="avatars" title="Instagram Avatars" onclick="handleHamburgerAction('avatars')">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      </button>
+      <span class="ham-label">Avatars</span>
+    </div>
+    <!-- DMs -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="dms" title="DM Inbox" onclick="handleHamburgerAction('dms')">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+      </button>
+      <span class="ham-label">DMs</span>
+    </div>
+    <!-- Voice -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="voice" title="Voice Messages" onclick="handleHamburgerAction('voice')">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+      </button>
+      <span class="ham-label">Voice</span>
+    </div>
+    <!-- Memory -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="memory" title="Memory" onclick="handleHamburgerAction('memory')">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"/><path d="M12 6v6l4 2"/></svg>
+      </button>
+      <span class="ham-label">Memory</span>
+    </div>
+    <!-- Habits -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="habits" title="Habits" onclick="handleHamburgerAction('habits')">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      </button>
+      <span class="ham-label">Habits</span>
+    </div>
+    <!-- Projects -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="projects" title="Projects" onclick="handleHamburgerAction('projects')">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      </button>
+      <span class="ham-label">Projects</span>
+    </div>
+    <!-- Reminders -->
+    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
+      <button class="ham-icon-btn" data-action="reminders" title="Reminders" onclick="handleHamburgerAction('reminders')">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      </button>
+      <span class="ham-label">Reminders</span>
+    </div>
     <!-- Chat -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
       <button class="ham-icon-btn" data-action="chat" title="Chat">
@@ -25867,33 +29539,35 @@ pre{position:relative;overflow-x:auto}
       </button>
       <span class="ham-label">Chat</span>
     </div>
-    <!-- Mic -->
+    <!-- Notifications -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="mic" title="Mic">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+      <button class="ham-icon-btn" data-action="notifications" title="Notifications" onclick="handleHamburgerAction('notifications')" style="position:relative">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <span id="notifBadge" style="display:none;position:absolute;top:-4px;right:-4px;min-width:15px;height:15px;border-radius:8px;background:#e85a6e;color:#fff;font-size:9px;line-height:15px;text-align:center;padding:0 4px;font-weight:700;box-shadow:0 2px 6px rgba(232,90,110,0.4)">0</span>
       </button>
-      <span class="ham-label">Mic</span>
+      <span class="ham-label">Alerts</span>
     </div>
-    <!-- Radar (BT/WiFi scan) -->
+    <!-- Pair Device -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="radar" title="Radar Scan">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/><path d="M2 12h20"/></svg>
+      <button class="ham-icon-btn" data-action="pair" title="Pair Device">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
       </button>
-      <span class="ham-label">Radar</span>
+      <span class="ham-label">Pair</span>
     </div>
-    <!-- Tracker (person map) -->
+    <!-- Face Register -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="tracker" title="Person Tracker">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 21 18 21 2 16 6 8 2 1 6"/><line x1="16" y1="6" x2="16" y2="22"/><line x1="8" y1="2" x2="8" y2="18"/></svg>
+      <button class="ham-icon-btn" data-action="face" title="Register Face">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="5"/><path d="M20 21a8 8 0 0 0-16 0"/></svg>
       </button>
-      <span class="ham-label">Tracker</span>
+      <span class="ham-label">Face ID</span>
     </div>
-    <!-- Nodes (phone status) -->
+    <!-- Feature Board -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="nodes" title="Phone Nodes">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+      <button class="ham-icon-btn" data-action="board" title="Feature Board" onclick="handleHamburgerAction('board')" style="position:relative">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h18"/></svg>
+        <span id="boardBadge" style="display:none;position:absolute;top:-4px;right:-4px;min-width:15px;height:15px;border-radius:8px;background:#f0a030;color:#fff;font-size:9px;line-height:15px;text-align:center;padding:0 4px;font-weight:700">0</span>
       </button>
-      <span class="ham-label">Nodes</span>
+      <span class="ham-label">Board</span>
     </div>
     <!-- Settings -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
@@ -25902,56 +29576,19 @@ pre{position:relative;overflow-x:auto}
       </button>
       <span class="ham-label">Settings</span>
     </div>
-    <!-- Pair -->
+    <!-- Help -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="pair" title="Pair Device">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <button class="ham-icon-btn" data-action="help" title="Help & FAQ" onclick="handleHamburgerAction('help')">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
       </button>
-      <span class="ham-label">Pair</span>
+      <span class="ham-label">Help</span>
     </div>
-    <!-- Skills -->
+    <!-- Logout -->
     <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="skills" title="Skills Market">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+      <button class="ham-icon-btn" data-action="logout" title="Sign Out" onclick="handleHamburgerAction('logout')" style="color:#d45a5a">
+        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
       </button>
-      <span class="ham-label">Skills</span>
-    </div>
-    <!-- Download APK -->
-    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="download" title="Download App">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      </button>
-      <span class="ham-label">Download</span>
-    </div>
-    <!-- Notifications -->
-    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="notifications" title="Notifications" onclick="handleHamburgerAction('notifications')" style="position:relative">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-        <span id="notifBadge" style="display:none;position:absolute;top:-4px;right:-4px;min-width:15px;height:15px;border-radius:8px;background:#e85a6e;color:#fff;font-size:9px;line-height:15px;text-align:center;padding:0 4px;font-weight:700;box-shadow:0 2px 6px rgba(232,90,110,0.4)">0</span>
-      </button>
-      <span class="ham-label">Notifications</span>
-    </div>
-    <!-- Admin (admin-only visibility) -->
-    <div id="adminMenuItem" style="display:none;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="admin" title="Admin Panel" onclick="handleHamburgerAction('admin')">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
-      </button>
-      <span class="ham-label">Admin</span>
-    </div>
-    <!-- Alerts -->
-    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="alerts" title="Alert Settings" onclick="toggleAlertsPanel()">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-      </button>
-      <span class="ham-label">Alerts</span>
-    </div>
-    <!-- Broadcast moved to Android app Lavender dialer -->
-    <!-- Close -->
-    <div style="display:flex;flex-direction:column;align-items:center;gap:3px">
-      <button class="ham-icon-btn" data-action="close" title="Close Menu">
-        <svg class="ham-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
-      <span class="ham-label">Close</span>
+      <span class="ham-label" style="color:#d45a5a">Sign Out</span>
     </div>
   </div>
 </div>
@@ -25968,6 +29605,44 @@ pre{position:relative;overflow-x:auto}
   </div>
   <div id="notifList" style="max-height:52vh;overflow-y:auto;display:flex;flex-direction:column;gap:8px"></div>
   <div style="margin-top:10px;font-size:10px;color:rgba(93,78,109,0.45);text-align:center">Task approvals and team updates land here</div>
+</div>
+
+<!-- ═══ User Panels (Memory, Habits, Projects, Reminders, DMs) ═══ -->
+<div id="memPanel" class="user-panel" style="display:none">
+  <div class="user-panel-head"><span>Memory — What I Remember</span><button onclick="closeUserPanel('memPanel')">✕</button></div>
+  <div id="memContent" class="user-panel-body">Loading...</div>
+</div>
+<div id="habitsPanel" class="user-panel" style="display:none">
+  <div class="user-panel-head"><span>Habits — Daily Streaks</span><button onclick="closeUserPanel('habitsPanel')">✕</button></div>
+  <div id="habitsContent" class="user-panel-body">Loading...</div>
+</div>
+<div id="projectsPanel" class="user-panel" style="display:none">
+  <div class="user-panel-head"><span>Projects — Active Work</span><button onclick="closeUserPanel('projectsPanel')">✕</button></div>
+  <div id="projectsContent" class="user-panel-body">Loading...</div>
+</div>
+<div id="remindersPanel" class="user-panel" style="display:none">
+  <div class="user-panel-head"><span>Reminders — Scheduled</span><button onclick="closeUserPanel('remindersPanel')">✕</button></div>
+  <div id="remindersContent" class="user-panel-body">Loading...</div>
+</div>
+<div id="dmsPanel" class="user-panel" style="display:none">
+  <div class="user-panel-head"><span>Messages</span><button onclick="closeUserPanel('dmsPanel')">✕</button></div>
+  <div id="dmsContent" class="user-panel-body" style="padding:0;display:flex;flex-direction:column;height:100%">
+    <!-- Avatar list view -->
+    <div id="dmsAvatarList" style="flex:1;overflow-y:auto"></div>
+    <!-- Chat view (hidden by default) -->
+    <div id="dmsChatView" style="display:none;flex:1;flex-direction:column;height:100%">
+      <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid rgba(93,78,109,0.1)">
+        <button onclick="dmsBackToList()" style="background:none;border:none;cursor:pointer;font-size:16px;color:rgba(93,78,109,0.5)">←</button>
+        <div id="dmsChatAvatarEmoji" style="font-size:20px"></div>
+        <div><div id="dmsChatAvatarName" style="font-size:13px;font-weight:600;color:#5d4e6d"></div><div id="dmsChatAvatarRole" style="font-size:10px;color:rgba(93,78,109,0.5)"></div></div>
+      </div>
+      <div id="dmsChatMessages" style="flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:8px"></div>
+      <div style="display:flex;gap:6px;padding:8px 10px;border-top:1px solid rgba(93,78,109,0.1)">
+        <input id="dmsChatInput" type="text" placeholder="Message..." style="flex:1;padding:8px 12px;border:1px solid rgba(93,78,109,0.15);border-radius:18px;font-size:13px;outline:none;background:rgba(255,255,255,0.5);color:#5d4e6d" onkeydown="if(event.key==='Enter')sendDmsMessage()">
+        <button onclick="sendDmsMessage()" style="background:#8b7a9e;color:#fff;border:none;border-radius:50%;width:34px;height:34px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center">↑</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Toast stack (task completions, team discussion alerts) -->
@@ -26011,26 +29686,6 @@ pre{position:relative;overflow-x:auto}
     <label style="position:relative;display:inline-block;width:40px;height:22px;cursor:pointer">
       <input type="checkbox" id="alertsSoundToggle" onchange="toggleYoloSound()" style="opacity:0;width:0;height:0">
       <span style="position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(139,122,158,0.3);border-radius:11px;transition:0.3s"></span>
-      <span id="alertsSoundSlider" style="position:absolute;height:18px;width:18px;left:2px;bottom:2px;background:white;border-radius:50%;transition:0.3s;box-shadow:0 2px 4px rgba(0,0,0,0.2)"></span>
-    </label>
-  </div>
-
-  <!-- Alert Objects -->
-  <div style="padding:10px 12px;background:rgba(139,122,158,0.08);border-radius:10px;margin-bottom:8px">
-    <div style="font-size:11px;font-weight:600;color:#5d4e6d;margin-bottom:8px">Alert me when I see:</div>
-    <div style="display:flex;flex-wrap:wrap;gap:6px" id="alertObjectsList"></div>
-    <div style="font-size:10px;color:rgba(93,78,109,0.5);margin-top:6px">Matches come from sight: person, car or truck, pets, wildlife, and street signs. Choices are remembered.</div>
-  </div>
-
-  <!-- Status -->
-  <div style="text-align:center;font-size:10px;color:rgba(93,78,109,0.4);margin-top:4px">
-    Changes apply immediately
-  </div>
-</div>
-
-<!-- Nodes Panel (glassmorphism) -->
-<div id="nodesPanel" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:250;width:min(380px,90vw);background:rgba(255,255,255,0.88);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:20px;padding:20px;box-shadow:0 12px 48px rgba(93,78,109,0.2)">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
     <div style="font-size:14px;font-weight:700;color:#5d4e6d">📡 Phone Nodes</div>
     <button onclick="closeNodesPanel()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);font-size:18px;padding:2px 6px">✕</button>
   </div>
@@ -26101,6 +29756,56 @@ pre{position:relative;overflow-x:auto}
   </div>
 </div>
 
+<!-- Feature Board Panel -->
+<div id="featureBoardPanel" style="display:none;position:fixed;top:60px;right:16px;width:420px;max-width:calc(100vw - 32px);max-height:calc(100vh - 80px);z-index:220;background:rgba(255,255,255,0.95);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(184,169,201,0.3);border-radius:16px;box-shadow:0 12px 48px rgba(80,60,100,0.22);flex-direction:column;overflow:hidden">
+  <!-- Header -->
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;background:linear-gradient(135deg,rgba(139,106,158,0.12),rgba(184,169,201,0.08));border-bottom:1px solid rgba(184,169,201,0.15)">
+    <div style="display:flex;align-items:center;gap:8px">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#8b7a9e" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M3 9h18"/></svg>
+      <span style="font-size:14px;font-weight:700;color:#5d4e6d">Feature Board</span>
+      <span id="boardPendingBadge" style="display:none;background:#e85a6e;color:#fff;font-size:9px;padding:2px 6px;border-radius:8px;font-weight:700"></span>
+    </div>
+    <button onclick="toggleFeatureBoard()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);font-size:16px;padding:2px 6px">✕</button>
+  </div>
+  <!-- Filter Tabs -->
+  <div style="display:flex;gap:4px;padding:10px 16px 0;border-bottom:1px solid rgba(184,169,201,0.1)">
+    <button onclick="loadBoard('')" class="board-tab active" data-filter="" style="flex:1;padding:6px 8px;border:none;border-radius:8px 8px 0 0;background:rgba(139,122,158,0.12);color:#5d4e6d;font-size:11px;font-weight:600;cursor:pointer;transition:all 0.15s">All</button>
+    <button onclick="loadBoard('pending')" class="board-tab" data-filter="pending" style="flex:1;padding:6px 8px;border:none;border-radius:8px 8px 0 0;background:transparent;color:rgba(93,78,109,0.5);font-size:11px;font-weight:600;cursor:pointer;transition:all 0.15s">Pending</button>
+    <button onclick="loadBoard('approved')" class="board-tab" data-filter="approved" style="flex:1;padding:6px 8px;border:none;border-radius:8px 8px 0 0;background:transparent;color:rgba(93,78,109,0.5);font-size:11px;font-weight:600;cursor:pointer;transition:all 0.15s">Approved</button>
+    <button onclick="loadBoard('dismissed')" class="board-tab" data-filter="dismissed" style="flex:1;padding:6px 8px;border:none;border-radius:8px 8px 0 0;background:transparent;color:rgba(93,78,109,0.5);font-size:11px;font-weight:600;cursor:pointer;transition:all 0.15s">Dismissed</button>
+  </div>
+  <!-- Posts List -->
+  <div id="boardPosts" style="flex:1;overflow-y:auto;padding:12px 16px;max-height:calc(100vh - 200px)">
+    <div style="text-align:center;color:rgba(93,78,109,0.4);padding:20px;font-size:12px">Loading...</div>
+  </div>
+</div>
+
+<!-- Board Post Detail / Comments Overlay -->
+<div id="boardPostDetail" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:480px;max-width:calc(100vw - 32px);max-height:calc(100vh - 100px);z-index:230;background:rgba(255,255,255,0.97);backdrop-filter:blur(24px);border:1px solid rgba(184,169,201,0.3);border-radius:16px;box-shadow:0 12px 48px rgba(80,60,100,0.3);display:none;flex-direction:column;overflow:hidden">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid rgba(184,169,201,0.15)">
+    <span id="boardDetailTitle" style="font-size:14px;font-weight:700;color:#5d4e6d"></span>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span id="boardDetailStatus" style="font-size:10px;padding:3px 8px;border-radius:8px;font-weight:600"></span>
+      <button onclick="closeBoardDetail()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);font-size:16px;padding:2px 6px">✕</button>
+    </div>
+  </div>
+  <div id="boardDetailBody" style="padding:16px;font-size:13px;color:#5d4e6d;line-height:1.6;white-space:pre-wrap"></div>
+  <!-- Admin Actions -->
+  <div id="boardDetailAdmin" style="display:none;padding:0 16px 12px;gap:8px">
+    <button onclick="boardApprove()" style="flex:1;padding:8px;border:none;border-radius:10px;background:linear-gradient(140deg,#4a8,#5b9);color:#fff;font-size:12px;font-weight:600;cursor:pointer">Approve</button>
+    <button onclick="boardDismiss()" style="flex:1;padding:8px;border:none;border-radius:10px;background:rgba(232,90,110,0.1);color:#c44;font-size:12px;font-weight:600;cursor:pointer">Dismiss</button>
+  </div>
+  <!-- Comments -->
+  <div style="border-top:1px solid rgba(184,169,201,0.15);padding:12px 16px">
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Comments</div>
+    <div id="boardDetailComments" style="max-height:200px;overflow-y:auto;margin-bottom:8px"></div>
+    <div style="display:flex;gap:8px">
+      <input id="boardCommentInput" type="text" placeholder="Add a comment..." style="flex:1;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:12px;color:#5d4e6d;outline:none" onkeydown="if(event.key==='Enter')submitBoardComment()">
+      <button onclick="submitBoardComment()" style="padding:8px 14px;border:none;border-radius:10px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:12px;font-weight:600;cursor:pointer">Post</button>
+    </div>
+  </div>
+</div>
+
 <!-- Movement Break Game Area -->
 <div id="moveGameArea" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:250;width:min(360px,88vw);background:rgba(255,255,255,0.92);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:2px solid rgba(139,122,158,0.3);border-radius:24px;padding:24px;box-shadow:0 12px 48px rgba(93,78,109,0.25);text-align:center">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
@@ -26111,32 +29816,106 @@ pre{position:relative;overflow-x:auto}
   <div id="movePrompt" style="font-size:13px;color:#5d4e6d"></div>
 </div>
 
-<!-- ── Settings Panel ── -->
-<div id="settingsPanel" style="display:none;position:fixed;top:60px;right:16px;width:320px;max-width:calc(100vw - 32px);max-height:calc(100vh - 80px);overflow-y:auto;z-index:200;background:rgba(255,255,255,0.85);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.6);border-radius:16px;padding:16px;box-shadow:0 8px 40px rgba(180,140,180,0.15)">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-    <div style="font-size:14px;font-weight:600;color:#5d4e6d">Settings</div>
-     <button onclick="toggleSettings()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.5);padding:2px 6px">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+<!-- ── Settings Window ── -->
+<div id="settingsPanel" style="display:none;position:fixed;top:80px;left:50%;transform:translateX(-50%);width:420px;max-width:calc(100vw - 32px);max-height:calc(100vh - 100px);z-index:200;background:rgba(255,255,255,0.92);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(184,169,201,0.3);border-radius:14px;box-shadow:0 12px 48px rgba(80,60,100,0.22),0 0 0 1px rgba(255,255,255,0.4) inset;overflow:hidden">
+  <!-- Title Bar (drag handle) -->
+  <div id="settingsTitleBar" style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:linear-gradient(135deg,rgba(139,106,158,0.12),rgba(184,169,201,0.08));border-bottom:1px solid rgba(184,169,201,0.15);cursor:move;user-select:none">
+    <div style="display:flex;align-items:center;gap:8px">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgba(93,78,109,0.5)" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span style="font-size:13px;font-weight:600;color:#5d4e6d;letter-spacing:0.3px">Settings</span>
+    </div>
+    <button onclick="toggleSettings()" style="background:none;border:none;cursor:pointer;color:rgba(93,78,109,0.4);padding:4px;border-radius:6px;transition:all 0.15s" onmouseenter="this.style.background='rgba(232,90,110,0.1)';this.style.color='#c44'" onmouseleave="this.style.background='none';this.style.color='rgba(93,78,109,0.4)'">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
     </button>
   </div>
+  <!-- Scrollable Body -->
+  <div style="padding:16px;overflow-y:auto;max-height:calc(100vh - 160px)">
 
-  <!-- Pushbullet -->
+  <!-- Instagram Pairing -->
   <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Pushbullet</div>
-    <input id="setting-pushbullet-key" type="password" placeholder="Pushbullet API key" style="width:100%;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box">
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Instagram Pairing</div>
+    <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Enter your Instagram @handle. An avatar will DM you a 6-digit code — paste it below to link your account.</div>
+    <input id="setting-ig-handle" type="text" placeholder="@yourhandle" autocomplete="off" style="width:100%;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box">
     <div style="display:flex;gap:8px;margin-top:8px">
-      <button onclick="savePushbulletKey()" style="flex:1;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Save Key</button>
-      <button onclick="testPushbullet()" style="flex:1;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.15);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Test</button>
+      <button onclick="sendInstagramCode()" id="btnSendIgCode" style="flex:1;padding:8px;border:none;border-radius:10px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:12px;font-weight:600;cursor:pointer">Send DM Code</button>
+      <button onclick="clearInstagramLink()" style="flex:1;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.1);color:#5d4e6d;font-size:12px;font-weight:600;cursor:pointer">Unlink</button>
     </div>
-    <div id="pb-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
-  </div>
+    <div id="ig-link-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
+    <div style="margin-top:12px;padding:10px;background:rgba(93,78,109,0.03);border-radius:10px;font-size:11px;color:rgba(93,78,109,0.5)">
+      <div style="font-weight:600;margin-bottom:6px">Follow one of these 9 avatars on Instagram:</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center">
+        <span style="background:rgba(93,78,109,0.08);padding:3px 8px;border-radius:8px">🐶 @lilly.alpha.assistant</span>
+        <span style="background:rgba(93,78,109,0.08);padding:3px 8px;border-radius:8px">🦊 @fox.creative.strategist</span>
+        <span style="background:rgba(93,78,109,0.08);padding:3px 8px;border-radius:8px">🐱 @cat.precision.analyst</span>
+        <span style="background:rgba(93,78,109,0.08);padding:3px 8px;border-radius:8px">🐻 @bear.steadfast.guardian</span>
+        <span style="background:rgba(93,78,109,0.08);padding:3px 8px;border-radius:8px">🐰 @bunny.energetic.scout</span>
+        <span style="background:rgba(93,78,109,0.08);padding:3px 8px;border-radius:8px">🦉 @owl.wisdom.keeper</span>
+        <span style="background:rgba(93,78,109,0.08);padding:3px 8px;border-radius:8px">🦌 @deer.gentle.healer</span>
+        <span style="background:rgba(93,78,109,0.08);padding:3px 8px;border-radius:8px">🐺 @wolf.fierce.protector</span>
+        <span style="background:rgba(93,78,109,0.08);padding:3px 8px;border-radius:8px">🦝 @raccoon.tech.tinkerer</span>
+      </div>
+    </div>
+    <!-- Avatar Settings Canvas -->
+    <div style="margin-top:12px;padding:10px;background:rgba(93,78,109,0.03);border-radius:10px;font-size:11px">
+      <div style="font-weight:600;margin-bottom:6px">Avatar Settings</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center">
+        <select id="avatarSettingsSelect" onchange="showAvatarSettings(this.value)" style="width:100%;padding:6px 10px;border-radius:8px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:12px;color:#5d4e6d;outline:none;box-sizing:border-box;margin-bottom:8px">
+          <option value="">— Select an avatar to configure —</option>
+          <option value="puppy">🐶 lilly.alpha.assistant</option>
+          <option value="fox">🦊 fox.creative.strategist</option>
+          <option value="cat">🐱 cat.precision.analyst</option>
+          <option value="bear">🐻 bear.steadfast.guardian</option>
+          <option value="bunny">🐰 bunny.energetic.scout</option>
+          <option value="owl">🦉 owl.wisdom.keeper</option>
+          <option value="deer">🦌 deer.gentle.healer</option>
+          <option value="wolf">🐺 wolf.fierce.protector</option>
+          <option value="raccoon">🦝 raccoon.tech.tinkerer</option>
+        </select>
+        <div id="avatarSettingsPanel" style="display:none;width:100%;margin-top:8px;padding:8px;background:rgba(93,78,109,0.02);border-radius:8px">
+          <div id="avatarSettingsContent" style="font-size:12px;color:#5d4e6d"></div>
+          <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(93,78,109,0.08);display:flex;gap:6px">
+            <button onclick="saveAvatarSetting()" style="flex:1;padding:5px;border:none;border-radius:8px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:11px;font-weight:600;cursor:pointer">Apply</button>
+            <button onclick="closeAvatarSettings()" style="flex:1;padding:5px;border:none;border-radius:8px;background:rgba(139,122,158,0.1);color:#5d4e6d;font-size:11px;font-weight:600;cursor:pointer">Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
 
-  <!-- Notifications -->
-  <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Alpha Notifications</div>
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d;margin-bottom:6px">
-      <input type="checkbox" id="setting-notif-proactive" checked style="accent-color:#8b7a9e"> Proactive alerts
-    </label>
+    <!-- Active Chat Avatar Switcher -->
+    <div style="margin-top:14px;padding:10px;background:rgba(93,78,109,0.03);border-radius:10px">
+      <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Switch Chat Avatar</div>
+      <div style="font-size:11px;color:rgba(93,78,109,0.5);margin-bottom:8px">Change who you are chatting with right now.</div>
+      <div id="chatAvatarSwitcher" style="display:flex;flex-wrap:wrap;gap:6px;justify-content:center">
+        <div class="chat-avatar-opt selected" data-avatar="puppy" onclick="switchChatAvatar('puppy',this)" style="cursor:pointer;text-align:center;background:rgba(255,255,255,0.5);border:1px solid rgba(184,169,201,0.3);border-radius:10px;padding:6px 8px;min-width:56px">
+          <div style="font-size:20px">🐶</div><div style="font-size:9px;color:#5d4e6d;font-weight:600">Lilly</div>
+        </div>
+        <div class="chat-avatar-opt" data-avatar="fox" onclick="switchChatAvatar('fox',this)" style="cursor:pointer;text-align:center;background:rgba(255,255,255,0.3);border:1px solid rgba(184,169,201,0.2);border-radius:10px;padding:6px 8px;min-width:56px">
+          <div style="font-size:20px">🦊</div><div style="font-size:9px;color:#5d4e6d;font-weight:600">Fox</div>
+        </div>
+        <div class="chat-avatar-opt" data-avatar="cat" onclick="switchChatAvatar('cat',this)" style="cursor:pointer;text-align:center;background:rgba(255,255,255,0.3);border:1px solid rgba(184,169,201,0.2);border-radius:10px;padding:6px 8px;min-width:56px">
+          <div style="font-size:20px">🐱</div><div style="font-size:9px;color:#5d4e6d;font-weight:600">Cat</div>
+        </div>
+        <div class="chat-avatar-opt" data-avatar="bear" onclick="switchChatAvatar('bear',this)" style="cursor:pointer;text-align:center;background:rgba(255,255,255,0.3);border:1px solid rgba(184,169,201,0.2);border-radius:10px;padding:6px 8px;min-width:56px">
+          <div style="font-size:20px">🐻</div><div style="font-size:9px;color:#5d4e6d;font-weight:600">Bear</div>
+        </div>
+        <div class="chat-avatar-opt" data-avatar="bunny" onclick="switchChatAvatar('bunny',this)" style="cursor:pointer;text-align:center;background:rgba(255,255,255,0.3);border:1px solid rgba(184,169,201,0.2);border-radius:10px;padding:6px 8px;min-width:56px">
+          <div style="font-size:20px">🐰</div><div style="font-size:9px;color:#5d4e6d;font-weight:600">Bunny</div>
+        </div>
+        <div class="chat-avatar-opt" data-avatar="owl" onclick="switchChatAvatar('owl',this)" style="cursor:pointer;text-align:center;background:rgba(255,255,255,0.3);border:1px solid rgba(184,169,201,0.2);border-radius:10px;padding:6px 8px;min-width:56px">
+          <div style="font-size:20px">🦉</div><div style="font-size:9px;color:#5d4e6d;font-weight:600">Owl</div>
+        </div>
+        <div class="chat-avatar-opt" data-avatar="deer" onclick="switchChatAvatar('deer',this)" style="cursor:pointer;text-align:center;background:rgba(255,255,255,0.3);border:1px solid rgba(184,169,201,0.2);border-radius:10px;padding:6px 8px;min-width:56px">
+          <div style="font-size:20px">🦌</div><div style="font-size:9px;color:#5d4e6d;font-weight:600">Deer</div>
+        </div>
+        <div class="chat-avatar-opt" data-avatar="wolf" onclick="switchChatAvatar('wolf',this)" style="cursor:pointer;text-align:center;background:rgba(255,255,255,0.3);border:1px solid rgba(184,169,201,0.2);border-radius:10px;padding:6px 8px;min-width:56px">
+          <div style="font-size:20px">🐺</div><div style="font-size:9px;color:#5d4e6d;font-weight:600">Wolf</div>
+        </div>
+        <div class="chat-avatar-opt" data-avatar="raccoon" onclick="switchChatAvatar('raccoon',this)" style="cursor:pointer;text-align:center;background:rgba(255,255,255,0.3);border:1px solid rgba(184,169,201,0.2);border-radius:10px;padding:6px 8px;min-width:56px">
+          <div style="font-size:20px">🦝</div><div style="font-size:9px;color:#5d4e6d;font-weight:600">Raccoon</div>
+        </div>
+      </div>
+    </div>
+
     <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d;margin-bottom:6px">
       <input type="checkbox" id="setting-notif-paused" style="accent-color:#8b7a9e"> Pause notifications
     </label>
@@ -26149,9 +29928,6 @@ pre{position:relative;overflow-x:auto}
     <div id="notif-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
     <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d;margin-bottom:6px;margin-top:10px">
       <input type="checkbox" id="setting-notif-sound" checked style="accent-color:#8b7a9e"> Sound
-    </label>
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d">
-      <input type="checkbox" id="setting-notif-pushbullet" style="accent-color:#8b7a9e"> Fallback to Pushbullet
     </label>
   </div>
 
@@ -26176,17 +29952,34 @@ pre{position:relative;overflow-x:auto}
     <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Pairing</div>
     <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Enter your device's 8-character token:</div>
     <div style="display:flex;gap:8px;align-items:center">
-      <input id="setting-pair-token" type="text" maxlength="8" placeholder="XXXXXXXX"
+      <input id="setting-device-code" type="text" maxlength="8" placeholder="XXXXXXXX"
         style="flex:1;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace;text-transform:uppercase">
       <button onclick="submitPairToken()" style="padding:8px 12px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Pair</button>
     </div>
     <div id="pair-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
   </div>
 
+  <!-- Face Registration -->
+  <div style="margin-bottom:16px">
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Face Registration</div>
+    <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Register your face so Lilly recognizes you personally. Uses your webcam — face clearly in frame, good lighting.</div>
+    <div id="faceRegStatus" style="font-size:11px;color:rgba(93,78,109,0.5);margin-bottom:8px">Checking...</div>
+    <div style="display:flex;gap:8px">
+      <button onclick="registerFace()" id="btnFaceReg" style="flex:1;padding:8px;border:none;border-radius:10px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:12px;font-weight:600;cursor:pointer">Register Face</button>
+      <button onclick="unregisterFace()" style="flex:1;padding:8px;border:none;border-radius:10px;background:rgba(232,90,110,0.08);color:#c44;font-size:12px;font-weight:600;cursor:pointer">Remove Face</button>
+    </div>
+    <div id="faceRegMsg" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
+    <!-- Hidden webcam for face capture -->
+    <video id="faceRegVideo" style="display:none;width:320px;height:240px;border-radius:10px;margin-top:8px" autoplay playsinline></video>
+    <canvas id="faceRegCanvas" style="display:none;width:320px;height:240px"></canvas>
+    <img id="faceRegPreview" style="display:none;max-width:320px;border-radius:10px;margin-top:8px;border:2px solid rgba(139,106,158,0.3)"/>
+  </div>
+
   <!-- About / Docs -->
   <div style="margin-bottom:16px">
     <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">About</div>
     <a href="https://github.com/labhrasd/Lilly_Workspace" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8b7a9e;text-decoration:none;padding:6px 0;border-bottom:1px solid rgba(184,169,201,0.15)">📖 Setup Guide (README)</a>
+    <a href="/instagram-avatars" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8b7a9e;text-decoration:none;padding:6px 0;border-bottom:1px solid rgba(184,169,201,0.15)">🐾 Instagram Avatars — FAQ & Abilities</a>
     <a href="https://droolingwithsanity.ca" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8b7a9e;text-decoration:none;padding:6px 0">🌐 droolingwithsanity.ca</a>
     <div id="aboutVersion" style="font-size:10px;color:rgba(93,78,109,0.4);margin-top:6px">Lilly AI · 9 Avatars · Termux + Docker</div>
   </div>
@@ -26195,6 +29988,7 @@ pre{position:relative;overflow-x:auto}
   <div style="border-top:1px solid rgba(184,169,201,0.2);padding-top:12px;margin-top:4px">
     <button onclick="clearAllData()" style="width:100%;padding:8px;border:1px solid rgba(232,90,110,0.3);border-radius:10px;background:rgba(232,90,110,0.08);color:#c44;font-size:12px;font-weight:500;cursor:pointer">Clear All Local Data</button>
   </div>
+  </div><!-- /scrollable body -->
 </div>
 
 <div id="moodBadge">
@@ -26205,6 +29999,10 @@ pre{position:relative;overflow-x:auto}
 
 <!-- Lilly Pup Profile Face — the animated avatar you talk to (top-left) -->
 <div id="profileFace" onclick="toggleChat()" title="Tap to chat with Lilly">
+  <div style="position:absolute;top:-8px;right:-8px;z-index:40">
+    <button id="avatarQuickSwitch" onclick="event.stopPropagation();openAvatarQuickPicker()" title="Switch avatar"
+      style="width:30px;height:30px;border-radius:50%;border:2px solid rgba(255,255,255,0.8);background:rgba(255,255,255,0.6);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;box-shadow:0 2px 8px rgba(0,0,0,0.15);transition:transform 0.15s" onmouseenter="this.style.transform='scale(1.1)'" onmouseleave="this.style.transform='scale(1)'">🔄</button>
+  </div>
   <div class="pf-canvas-wrap"><canvas id="profilePupCanvas" width="128" height="128"></canvas></div>
   <div class="pf-name">
     <b id="profileName">Lilly</b>
@@ -26214,6 +30012,23 @@ pre{position:relative;overflow-x:auto}
     style="display:none;flex:0 0 auto;width:38px;height:38px;align-items:center;justify-content:center;margin-left:10px;border-radius:10px;border:1px solid rgba(120,80,200,0.4);background:rgba(120,80,200,0.18);color:#7a5cae;cursor:pointer;box-shadow:0 3px 10px rgba(120,80,200,0.25)">
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
   </button>
+</div>
+
+<!-- Avatar Quick Picker (always accessible from the profile face) -->
+<div id="avatarQuickPicker" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:250;width:340px;max-width:calc(100vw - 32px);background:rgba(255,255,255,0.95);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid rgba(184,169,201,0.4);border-radius:20px;padding:20px;box-shadow:0 20px 60px rgba(80,60,100,0.3)" onclick="event.stopPropagation()">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+    <div style="font-size:14px;font-weight:600;color:#5d4e6d">Switch Chat Avatar</div>
+    <button onclick="closeAvatarQuickPicker()" style="background:none;border:none;cursor:pointer;padding:4px;color:rgba(93,78,109,0.5)">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+  </div>
+  <div style="font-size:11px;color:rgba(93,78,109,0.5);margin-bottom:14px;text-align:center">Pick who you want to chat with right now.</div>
+  <div id="avatarQuickPickerGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+    <!-- Populated by JS -->
+  </div>
+  <div style="margin-top:14px;text-align:center">
+    <button onclick="closeAvatarQuickPicker()" style="padding:8px 24px;border:none;border-radius:10px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:12px;font-weight:600;cursor:pointer">Done</button>
+  </div>
 </div>
 
 <div id="thinkingDots">
@@ -26272,12 +30087,7 @@ pre{position:relative;overflow-x:auto}
           <span class="icon">⚡</span> GPU
         </button>
         <span class="cw-mode-sep"></span>
-        <button id="cwModeAuto"  class="cw-control-btn cw-mode-btn active" onclick="setVisionMode('auto')" title="Auto — Lilly picks the mode from the scene">🔄 AUTO</button>
-        <button id="cwModeWalk"  class="cw-control-btn cw-mode-btn" onclick="setVisionMode('walking')" title="Walking mode — people, bikes, curbs, nearby traffic">🚶 WALK</button>
-        <button id="cwModeDrive" class="cw-control-btn cw-mode-btn" onclick="setVisionMode('driving')" title="Driving mode — traffic lights, signs, cars, distance + speed">🚗 DRIVE</button>
-        <button id="cwModeStop"  class="cw-control-btn cw-mode-btn" onclick="setVisionMode('stationary')" title="Stationary mode — people + animals around you">🚥 STILL</button>
-        <span class="cw-mode-sep"></span>
-        <button id="cwTeslaBtn" class="cw-control-btn" onclick="setTeslaVisual()" title="Tesla-style white/black silhouettes + lane lines — high-contrast object view">⚪ TESLA</button>
+        <button id="cwModeAuto"  class="cw-control-btn cw-mode-btn active" onclick="setVisionMode('auto')" title="Auto — Lilly picks the mode from phone sensors + approaching objects">🔄 AUTO</button>
       </div>
     </div>
     <div class="cw-window-controls">
@@ -26390,9 +30200,6 @@ pre{position:relative;overflow-x:auto}
   </button>
   <button class="btn-mic" id="camBtn" title="Toggle camera view" onclick="toggleCameraView()">
     <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z" fill="rgba(93,78,109,0.4)"/><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zM3 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z" fill="rgba(93,78,109,0.4)"/></svg>
-  </button>
-  <button class="btn-mic" id="arBtn" title="Toggle AR mode" onclick="toggleARMode()">
-    <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 2L2 22h20L12 2zm0 3.5L18.5 20h-13L12 5.5zM11 10v4h2v-4h-2zm0 6v2h2v-2h-2z" fill="rgba(93,78,109,0.4)"/></svg>
   </button>
   <button class="btn-mic" id="hiveBtn" title="Toggle hive group chat" onclick="toggleGroupChat()">
     <svg viewBox="0 0 24 24" width="20" height="20"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z" fill="rgba(93,78,109,0.4)"/><circle cx="8" cy="10" r="1.5" fill="rgba(93,78,109,0.4)"/><circle cx="12" cy="10" r="1.5" fill="rgba(93,78,109,0.4)"/><circle cx="16" cy="10" r="1.5" fill="rgba(93,78,109,0.4)"/></svg>
@@ -27034,7 +30841,8 @@ function selectAvatar(animal, el) {
 }
 
 const CHAR_NAMES = {puppy:'Lilly',fox:'Fox',cat:'Cat',bear:'Bear',bunny:'Bunny',owl:'Owl',deer:'Deer',wolf:'Wolf',raccoon:'Raccoon'};
-const CHAR_ROLES = {puppy:'Alpha Assistant',fox:'Creative Strategist',cat:'Precision Analyst',bear:'Steadfast Guardian',bunny:'Energetic Scout',owl:'Wisdom Keeper',deer:'Gentle Healer',wolf:'Fierce Protector',raccoon:'Tech Tinkerer'};
+const ALLOW_LOCAL_TRAINING = true;
+const CHAR_ROLES = {puppy:'Alpha Companion',fox:'Creative Strategist',cat:'Precision Analyst',bear:'Steadfast Guardian',bunny:'Energetic Scout',owl:'Wisdom Keeper',deer:'Gentle Healer',wolf:'Fierce Protector',raccoon:'Tech Tinkerer'};
 
 function selectAvatarAndAuth(animal, el) {
   pickerAvatar = animal;
@@ -27129,14 +30937,20 @@ function confirmPicker() {
   localStorage.setItem('lilly_theme',  pickerTheme);
   localStorage.setItem('lilly_picker_done', '1');
   if (previewRaf) { cancelAnimationFrame(previewRaf); previewRaf = null; }
-  // Slide picker out, then go straight to main UI (skip Auth0 for local access)
+  // Slide picker out, then redirect to Google sign-in
   const picker = document.getElementById('avatarPicker');
   picker.style.transition = 'opacity 0.3s, transform 0.3s';
   picker.style.opacity = '0';
   picker.style.transform = 'translateY(-12px)';
   setTimeout(() => {
     picker.style.display = 'none';
-    hideStartScreen();
+    // In local/dev mode (no Auth0), skip OAuth redirect and go straight to the app
+    const localMode = window.ALLOW_LOCAL_TRAINING || localStorage.getItem('lilly_local_mode') === '1';
+    if (localMode) {
+      hideStartScreen();
+    } else {
+      window.location.href = '/api/auth0/login?connection=google-oauth2';
+    }
   }, 320);
 }
 
@@ -27435,6 +31249,8 @@ async function checkAuth() {
       const data = await r.json();
       if (data.authenticated && data.user) {
         currentUser = data.user;
+        // Clear chat history on login — each session starts fresh
+        if (chatMessages) chatMessages.innerHTML = '';
         // Use the person's real name from the logged-in account
         // (not the username, e.g. "Laurence" not "laurencekidney")
         const personName = personDisplayName(currentUser);
@@ -27528,6 +31344,7 @@ function initApp(){
   try{loadConversationHistory()}catch(e){console.error('loadConversationHistory:',e)}
   // Lilly Orchestrator badge + JSON tool schema (opened explicitly only)
   try{initOrchestratorUI()}catch(e){console.error('initOrchestratorUI:',e)}
+  try{initChatAvatarSwitcher()}catch(e){console.error('initChatAvatarSwitcher:',e)}
 }
 
 /* ── Lilly Orchestrator WebUI surface ─────────────────────────────
@@ -27580,6 +31397,8 @@ async function loadConversationHistory(){
     // Display history in the chat (oldest first)
     const reversed = turns.slice().reverse();
     for(const turn of reversed){
+      if(turn.user && turn.user.includes('Automation fired')) continue;
+      if(turn.assistant && turn.assistant.includes('⚡ Automation fired')) continue;
       if(turn.user) addChatMessage('user', turn.user);
       if(turn.assistant) addChatMessage('assistant', turn.assistant);
     }
@@ -28122,7 +31941,8 @@ async function sendCodingMessage(text){
     }
     if(d.audio_id){playAudio(d.audio_id); _lastPollAudioId = d.audio_id;}
   }catch(e){
-    addChatMessage('assistant','Error: '+e.message);
+    const _codeErrPhrases=['Having a little trouble reaching the backend. Try again in a moment.','Connection hiccup — give me another shot.','I\'m having a brief connectivity issue. One sec...'];
+    addChatMessage('assistant',_codeErrPhrases[Math.floor(Math.random()*_codeErrPhrases.length)]);
   }
 }
 
@@ -28845,8 +32665,7 @@ async function submitBlink2FA() {
 // Add Enter key listener for 2FA input
 document.addEventListener('DOMContentLoaded', () => {
   _initAlertSettings();
-  _initVisionMode();  // restore persisted mode + set button active state
-  _initTeslaVisual(); // restore persisted Tesla-style silhouette view
+  _initVisionMode();  // auto mode only — derived from sensors / approaching objects
   const input = document.getElementById('cwBlink2faInput');
   if (input) {
     input.addEventListener('keydown', (e) => {
@@ -29081,7 +32900,11 @@ let _visionModeResolved = 'auto';      // server-resolved effective mode
 let _visionDeviceSpeed = null;         // km/h from phone GPS
 let _visionOverlay = {};               // {mode, counts, tier1, total}
 let _visionDrawSeq = 0;                // bumped when boxes change (dirty check)
-let _teslaVisual = false;              // Tesla-style white/black silhouettes + lane lines
+let _visionAlerts = [];                // drive-safety alerts {type,level,text,tts,ttc_s}
+let _visionAlertKey = '';              // dedupe key (types+levels+ttc) for redraw
+let _visionAlertCoooldown = {};        // {type:level -> ms} voice refire gate
+let _cwSpeakInFlight = false;          // single-stream guard for alert speech
+let _visionAlertQueued = null;         // newest alert while speech is busy
 
 const _MODE_META = {
   auto:       { icon: '🔄', name: 'AUTO' },
@@ -29104,7 +32927,7 @@ function setVisionMode(mode){
   if(!mode || !['auto','stationary','walking','driving'].includes(mode)) mode = 'auto';
   _visionMode = mode;
   try{ localStorage.setItem('lillyVisionMode', mode); }catch(e){}
-  for(const [id,m] of Object.entries({cwModeAuto:'auto', cwModeWalk:'walking', cwModeDrive:'driving', cwModeStop:'stationary'})){
+  for(const [id,m] of Object.entries({cwModeAuto:'auto'})){
     const b = document.getElementById(id);
     if(b) b.classList.toggle('active', m === mode);
   }
@@ -29113,34 +32936,10 @@ function setVisionMode(mode){
   addChatMessage('system', 'Vision mode: ' + (_MODE_META[mode] || _MODE_META.auto).icon + ' ' + (_MODE_META[mode] || _MODE_META.auto).name);
 }
 function _initVisionMode(){
-  try{
-    const m = localStorage.getItem('lillyVisionMode');
-    if(m) setVisionMode(m);
-  }catch(e){}
-}
-
-// ── Tesla-style silhouette view (white/black contrast + lane lines) ──
-function setTeslaVisual(){
-  _teslaVisual = !_teslaVisual;
-  try{ localStorage.setItem('lillyTeslaVisual', _teslaVisual ? '1' : ''); }catch(e){}
-  const b = document.getElementById('cwTeslaBtn');
-  if(b) b.classList.toggle('active', _teslaVisual);
-  const feed = document.getElementById('cwWebcam');
-  if(feed) feed.classList.toggle('tesla', _teslaVisual);
-  addChatMessage('system', _teslaVisual
-    ? '⚪ Tesla view on — white/black silhouettes + lane lines'
-    : '▢ Tesla view off — colored YOLO boxes');
-}
-function _initTeslaVisual(){
-  try{
-    if(localStorage.getItem('lillyTeslaVisual') === '1'){
-      _teslaVisual = true;
-      const b = document.getElementById('cwTeslaBtn');
-      if(b) b.classList.add('active');
-      const feed = document.getElementById('cwWebcam');
-      if(feed) feed.classList.add('tesla');
-    }
-  }catch(e){}
+  // Mode is auto-detected from phone sensors (GPS speed) + approaching
+  // objects in the view — no manual walking/driving toggle anymore.
+  try{ localStorage.removeItem('lillyVisionMode'); }catch(e){}
+  setVisionMode('auto');
 }
 
 // ── Single object: one-pass box outline + compact chip ────────────
@@ -29198,182 +32997,103 @@ function _drawVisionHud(ctx, vw, vh){
   }catch(e){}
 }
 
-// ── Tesla-style renderer: white/black silhouettes + lane lines ────
-function _teslaRRect(ctx, x, y, w, h, r){
-  if(r > w/2) r = w/2; if(r > h/2) r = h/2;
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
-// vanishing-point lane lines + road body (subtle animated flow)
-function _drawTeslaWorld(ctx, vw, vh){
-  const vx = vw * 0.5, vy = vh * 0.36;
-  ctx.save();
-  ctx.lineCap = 'round';
-  const dashOn = (Math.floor(Date.now() / 60)) % 6 < 4;
-  ctx.strokeStyle = 'rgba(242,244,247,.28)';
-  ctx.lineWidth = Math.max(1, vh * 0.0045);
-  for(const cx of [vw * 0.08, vw * 0.92]){
-    ctx.beginPath(); ctx.moveTo(cx, vh);
-    ctx.quadraticCurveTo(cx * 0.5 + vw * 0.5, vh * 0.62, vx, vy);
-    ctx.stroke();
-  }
-  ctx.setLineDash([vh * 0.05, vh * 0.06]);
-  ctx.lineDashOffset = -(Date.now() / 24 % (vh * 0.11));
-  ctx.strokeStyle = 'rgba(242,244,247,' + (dashOn ? '.75' : '.5') + ')';
-  ctx.lineWidth = Math.max(1, vh * 0.003);
-  ctx.beginPath(); ctx.moveTo(vx, vy); ctx.lineTo(vx, vh); ctx.stroke();
-  ctx.setLineDash([]); ctx.lineDashOffset = 0;
-  if((_visionModeResolved || _visionMode) === 'driving'){
-    ctx.strokeStyle = 'rgba(242,244,247,.14)';
-    ctx.lineWidth = Math.max(1, vh * 0.0025);
-    ctx.setLineDash([vh * 0.03, vh * 0.09]);
-    ctx.beginPath(); ctx.moveTo(vw * 0.38, vh * 0.30); ctx.lineTo(vw, vh * 0.52); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(vw * 0.62, vh * 0.30); ctx.lineTo(0, vh * 0.52); ctx.stroke();
-    ctx.setLineDash([]);
-  }
-  ctx.restore();
-}
-// shape primitives (Tesla-esque: dark glass/tyres on white body)
-function _teslaCar(ctx, x, y, w, h, c){
-  ctx.fillStyle = c; _teslaRRect(ctx, x, y, w, h * 0.62, Math.min(6, h * 0.16)); ctx.fill();
-  ctx.fillStyle = 'rgba(20,24,28,.9)'; _teslaRRect(ctx, x + w * 0.14, y + h * 0.16, w * 0.72, h * 0.34, Math.min(5, h * 0.10)); ctx.fill();
-  ctx.fillStyle = c; ctx.fillRect(x, y + h * 0.62, w, h * 0.02);
-  ctx.fillStyle = 'rgba(15,18,22,.95)';
-  ctx.fillRect(x + w * 0.06, y + h * 0.66, w * 0.18, h * 0.30); ctx.fillRect(x + w * 0.76, y + h * 0.66, w * 0.18, h * 0.30);
-}
-function _teslaTruck(ctx, x, y, w, h, c){
-  ctx.fillStyle = c; _teslaRRect(ctx, x, y + h * 0.18, w * 0.62, h * 0.46, 4); ctx.fill();
-  _teslaRRect(ctx, x + w * 0.66, y, w * 0.34, h * 0.60, 4); ctx.fill();
-  ctx.fillStyle = 'rgba(20,24,28,.9)'; _teslaRRect(ctx, x + w * 0.72, y + h * 0.10, w * 0.20, h * 0.26, 3); ctx.fill();
-  ctx.fillStyle = 'rgba(15,18,22,.95)';
-  ctx.fillRect(x + w * 0.04, y + h * 0.66, w * 0.16, h * 0.30); ctx.fillRect(x + w * 0.30, y + h * 0.66, w * 0.14, h * 0.30);
-  ctx.fillRect(x + w * 0.70, y + h * 0.66, w * 0.18, h * 0.30);
-}
-function _teslaPerson(ctx, x, y, w, h, c){
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.arc(x + w * 0.5, y + h * 0.20, Math.min(w * 0.3, h * 0.09), 0, 7); ctx.fill();          // head
-  _teslaRRect(ctx, x + w * 0.14, y + h * 0.34, w * 0.72, h * 0.50, Math.min(7, h * 0.12)); ctx.fill();          // torso
-  ctx.fillStyle = 'rgba(15,18,22,.85)';
-  ctx.fillRect(x + w * 0.20, y + h * 0.86, w * 0.16, h * 0.14); ctx.fillRect(x + w * 0.64, y + h * 0.86, w * 0.16, h * 0.14); // legs
-}
-function _teslaMoto(ctx, x, y, w, h, c){
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.arc(x + w * 0.20, y + h * 0.78, h * 0.20, 0, 7); ctx.fill();
-  ctx.fillStyle = 'rgba(15,18,22,.95)'; ctx.beginPath(); ctx.arc(x + w * 0.20, y + h * 0.78, h * 0.10, 0, 7); ctx.fill();
-  ctx.fillStyle = c;
-  ctx.fillRect(x + w * 0.18, y + h * 0.62, w * 0.66, h * 0.10);
-  ctx.beginPath(); ctx.moveTo(x + w * 0.40, y + h * 0.66); ctx.lineTo(x + w * 0.62, y + h * 0.66); ctx.lineTo(x + w * 0.62, y + h * 0.22); ctx.closePath(); ctx.fill();
-  _teslaRRect(ctx, x + w * 0.55, y + h * 0.14, w * 0.30, h * 0.12, 4); ctx.fill();
-  ctx.beginPath(); ctx.arc(x + w * 0.92, y + h * 0.78, h * 0.18, 0, 7); ctx.fill(); ctx.fill();
-  ctx.fillStyle = 'rgba(15,18,22,.95)'; ctx.beginPath(); ctx.arc(x + w * 0.92, y + h * 0.78, h * 0.085, 0, 7); ctx.fill();
-}
-function _teslaBike(ctx, x, y, w, h, c){
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.arc(x + w * 0.16, y + h * 0.80, h * 0.16, 0, 7); ctx.fill();
-  ctx.beginPath(); ctx.arc(x + w * 0.86, y + h * 0.80, h * 0.16, 0, 7); ctx.fill();
-  ctx.fillStyle = 'rgba(15,18,22,.95)';
-  ctx.beginPath(); ctx.arc(x + w * 0.16, y + h * 0.80, h * 0.07, 0, 7); ctx.fill();
-  ctx.beginPath(); ctx.arc(x + w * 0.86, y + h * 0.80, h * 0.07, 0, 7); ctx.fill();
-  ctx.fillStyle = c; ctx.lineWidth = h * 0.05; ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(x + w * 0.20, y + h * 0.78); ctx.lineTo(x + w * 0.48, y + h * 0.20); ctx.lineTo(x + w * 0.80, y + h * 0.78); ctx.stroke();
-  _teslaRRect(ctx, x + w * 0.40, y + h * 0.10, w * 0.24, h * 0.12, 4); ctx.fill();
-}
-function _teslaLight(ctx, x, y, w, h, c){
-  ctx.fillStyle = 'rgba(18,22,28,.92)'; _teslaRRect(ctx, x, y + h * 0.18, w, h * 0.64, 5); ctx.fill();
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.arc(x + w / 2, y + h * 0.12, Math.min(w, h) * 0.16, 0, 7); ctx.fill();
-  const cols = ['#5c646f', (_visionModeResolved || _visionMode) === 'driving' ? '#5ea2ff' : '#5c646f', '#5c646f'];
-  for(let i = 0; i < 3; i++){ ctx.fillStyle = cols[i]; ctx.beginPath(); ctx.arc(x + w / 2, y + h * (0.30 + i * 0.20), Math.min(w, h) * 0.13, 0, 7); ctx.fill(); }
-}
-function _teslaSign(ctx, x, y, w, h, c){
-  ctx.fillStyle = c;
-  ctx.beginPath();
-  const cx = x + w / 2, cy = y + h / 2, R = Math.min(w, h) * 0.46;
-  for(let i = 0; i < 8; i++){
-    const a = Math.PI / 8 + i * Math.PI / 4;
-    const px = cx + Math.cos(a) * R, py = cy + Math.sin(a) * R;
-    if(i) ctx.lineTo(px, py); else ctx.moveTo(px, py);
-  }
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = 'rgba(10,13,17,.85)'; ctx.beginPath(); ctx.arc(cx, cy, h * 0.12, 0, 7); ctx.fill();
-  ctx.fillStyle = 'rgba(10,13,17,.9)'; ctx.fillRect(x + w * 0.46, y + h * 0.55, w * 0.08, h * 0.45);
-}
-function _teslaCone(ctx, x, y, w, h, c){
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.moveTo(x + w * 0.5, y); ctx.lineTo(x + w, y + h); ctx.lineTo(x, y + h); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = 'rgba(15,18,22,.95)'; ctx.fillRect(x + w * 0.08, y + h * 0.78, w * 0.84, h * 0.10);
-}
-function _teslaBollard(ctx, x, y, w, h, c){
-  ctx.fillStyle = c; _teslaRRect(ctx, x + w * 0.25, y, w * 0.5, h, 4); ctx.fill();
-  ctx.fillStyle = 'rgba(10,13,17,.9)'; _teslaRRect(ctx, x + w * 0.25, y + h * 0.82, w * 0.5, h * 0.18, 2); ctx.fill();
-}
-function _teslaAnimal(ctx, x, y, w, h, c){
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.ellipse(x + w * 0.5, y + h * 0.52, w * 0.42, h * 0.36, 0, 0, 7); ctx.fill();
-  ctx.beginPath(); ctx.arc(x + w * 0.26, y + h * 0.22, w * 0.16, 0, 7); ctx.fill();
-  ctx.fillStyle = 'rgba(10,13,17,.85)';
-  ctx.beginPath(); ctx.moveTo(x + w * 0.14, y + h * 0.10); ctx.lineTo(x + w * 0.22, y); ctx.lineTo(x + w * 0.30, y + h * 0.16); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.moveTo(x + w * 0.86, y + h * 0.40); ctx.quadraticCurveTo(x + w * 1.02, y + h * 0.50, x + w * 0.90, y + h * 0.70); ctx.quadraticCurveTo(x + w * 0.86, y + h * 0.54, x + w * 0.80, y + h * 0.48); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = 'rgba(15,18,22,.85)';
-  ctx.fillRect(x + w * 0.30, y + h * 0.82, w * 0.10, h * 0.18); ctx.fillRect(x + w * 0.52, y + h * 0.82, w * 0.10, h * 0.18);
-}
-// one silhouette — ground shadow, shape by class, label chip (tier ≤ 2)
-function _drawTeslaEntity(ctx, det, vw, vh){
-  const x1 = (det.x1 || 0) * vw, y1 = (det.y1 || 0) * vh;
-  const x2 = (det.x2 || 0) * vw, y2 = (det.y2 || 0) * vh;
-  const w = x2 - x1, h = y2 - y1;
-  if(w < 4 || h < 4) return;
-  const tier = det.tier || det.priority || 3;
-  const crit = tier === 1;
-  const bg = tier >= 3;
-  const color = crit ? '#ffb454' : '#f2f4f7';
-  ctx.fillStyle = bg ? 'rgba(0,0,0,.3)' : 'rgba(0,0,0,.5)';
-  ctx.beginPath(); ctx.ellipse((x1 + x2) / 2, y2, w * 0.42, Math.max(2, h * 0.03), 0, 0, 7); ctx.fill();
-  ctx.save();
-  ctx.globalAlpha = bg ? 0.45 : 1;
-  const lab = String(det.label || 'object').toLowerCase();
-  if(/person|man|woman|pedestrian|human body/.test(lab)) _teslaPerson(ctx, x1, y1, w, h, color);
-  else if(lab.includes('truck')) _teslaTruck(ctx, x1, y1, w, h, color);
-  else if(/motorcycle|motorbike/.test(lab)) _teslaMoto(ctx, x1, y1, w, h, color);
-  else if(/bicycle|bike/.test(lab)) _teslaBike(ctx, x1, y1, w, h, color);
-  else if(/car|bus|van|suv|pickup|minivan|vehicle|land vehicle/.test(lab)) _teslaCar(ctx, x1, y1, w, h, color);
-  else if(/traffic light|signal/.test(lab)) _teslaLight(ctx, x1, y1, w, h, color);
-  else if(lab.includes('sign')) _teslaSign(ctx, x1, y1, w, h, color);
-  else if(lab.includes('cone')) _teslaCone(ctx, x1, y1, w, h, color);
-  else if(/bollard|post/.test(lab)) _teslaBollard(ctx, x1, y1, w, h, color);
-  else if(/dog|cat/.test(lab)) _teslaAnimal(ctx, x1, y1, w, h, color);
-  else { ctx.fillStyle = color; _teslaRRect(ctx, x1, y1, w, h, Math.min(6, h * 0.18)); ctx.fill(); }
-  ctx.restore();
-  if(!bg){
-    let label = det.label || 'object';
-    if(det.make && det.model) label = det.make + ' ' + det.model;
-    else if(det.make) label = det.make;
-    let txt = label;
-    if(det.distance_m != null) txt += ' · ' + Math.round(det.distance_m) + 'm';
-    ctx.font = '600 10px system-ui, -apple-system, sans-serif';
-    const tw = Math.min(ctx.measureText(txt).width + 8, 170);
-    let cy0 = y1 - 15;
-    if(cy0 < 2) cy0 = y2 + 2;
-    ctx.fillStyle = 'rgba(0,0,0,.55)'; _teslaRRect(ctx, x1, cy0, tw, 13, 4); ctx.fill();
-    ctx.fillStyle = crit ? '#ffd9a0' : '#aeb9c7';
-    ctx.fillText(txt, x1 + 4, cy0 + 10);
-  }
-}
-function _drawTeslaHud(ctx, vw, vh, list){
+// ── Drive gauges: speedometer + alert banner + forward-collision bar ──
+// Deterministic HUD layered above the boxes. Only drawn when driving is
+// resolved (scene + GPS) or the phone reports ground speed — otherwise
+// a single dim "GPS OFF" chip so the driver knows why speed is missing.
+function _drawVisionGauges(ctx, vw, vh){
   try{
     const meta = _MODE_META[_visionModeResolved] || _MODE_META.auto;
-    const crit = (list || []).filter(d => (d.tier || 3) === 1).length;
-    let txt = meta.icon + ' ' + meta.name + ' · ⚪ TESLA';
-    if(crit) txt += ' · ⚠ ' + crit;
-    ctx.font = 'bold 11px system-ui, -apple-system, sans-serif';
-    const tw = ctx.measureText(txt).width + 16;
-    ctx.fillStyle = 'rgba(0,0,0,.55)'; _teslaRRect(ctx, 6, 6, tw, 20, 5); ctx.fill();
-    ctx.fillStyle = meta.name === 'DRIVE' ? '#ffb454' : '#f2f4f7';
-    ctx.fillText(txt, 14, 20);
+    const spd = _visionDeviceSpeed;
+    const driving = meta.name === 'DRIVE' || (spd != null && spd >= 1);
+
+    // ── Speedometer (bottom-right) ──
+    const R = Math.min(34, vh * 0.09);
+    const cx = vw - R - 10, cy = vh - R - 12;
+    if(driving){
+      const MAX = 120;
+      const a0 = Math.PI * 0.75, a1 = Math.PI * 2.25;           // 270° sweep
+      const s = spd != null ? Math.max(0, Math.min(MAX, spd)) : 0;
+      const f = s / MAX;
+      ctx.lineWidth = 5; ctx.lineCap = 'round';
+      ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+      ctx.beginPath(); ctx.arc(cx, cy, R, a0, a1); ctx.stroke();
+      const col = s < 60 ? '#2EE6A8' : (s < 95 ? '#FFB020' : '#FF3B4E');
+      ctx.strokeStyle = col;
+      ctx.beginPath(); ctx.arc(cx, cy, R, a0, a0 + (a1 - a0) * f); ctx.stroke();
+      // needle
+      const na = a0 + (a1 - a0) * f;
+      ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(na) * (R + 6), cy + Math.sin(na) * (R + 6));
+      ctx.stroke();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 18px system-ui, -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(String(Math.round(s)), cx, cy + 2);
+      ctx.font = 'bold 8px system-ui, -apple-system, sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      ctx.fillText('km/h', cx, cy + 13);
+      ctx.textAlign = 'left';
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.40)';
+      ctx.font = 'bold 10px system-ui, -apple-system, sans-serif';
+      const gtxt = 'GPS OFF — speed unavailable';
+      const tw = ctx.measureText(gtxt).width + 12;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(cx - tw, cy - 8, tw, 16);
+      ctx.fillStyle = 'rgba(255,255,255,0.65)';
+      ctx.fillText(gtxt, cx - tw + 6, cy + 4);
+    }
+
+    // ── Alert banner (top-center: first level-1 else level-2) ──
+    const urg = Array.isArray(_visionAlerts) && _visionAlerts.length
+      ? (_visionAlerts.find(a => a.level === 1) || _visionAlerts.find(a => a.level === 2))
+      : null;
+    if(urg){
+      const lvl = urg.level || 2;
+      const blink = lvl === 1 && (Math.floor(performance.now() / 420) % 2 === 0);
+      const label = String(urg.text || urg.type || 'ALERT').toUpperCase();
+      ctx.font = 'bold 15px system-ui, -apple-system, sans-serif';
+      const tw = ctx.measureText(label).width + 22;
+      const bx = vw / 2 - tw / 2, by = 30;
+      ctx.fillStyle = lvl === 1 ? 'rgba(211,47,47,0.88)' : 'rgba(230,150,20,0.88)';
+      if(blink) ctx.globalAlpha = 0.55;
+      ctx.fillRect(bx, by, tw, 26);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.5;
+      ctx.strokeRect(bx, by, tw, 26);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.fillText(label, vw / 2, by + 18);
+      ctx.textAlign = 'left';
+      if(urg.ttc_s != null && urg.ettc_s === undefined){
+        ctx.font = 'bold 9px system-ui, -apple-system, sans-serif';
+        ctx.fillStyle = '#FFFFFF';
+        ctx.textAlign = 'center';
+        ctx.fillText(Math.round(urg.ttc_s * 10) / 10 + 's', vw / 2, by + 37);
+        ctx.textAlign = 'left';
+      }
+    }
+
+    // ── Too-close bar (bottom, level-1 forward collision) ──
+    const fcw = Array.isArray(_visionAlerts) && _visionAlerts.find(
+      a => a.type === 'FORWARD_COLLISION' && a.level === 1
+    );
+    if(fcw){
+      const bh = 30;                                   // bar height
+      const frac = fcw.ttc_s != null
+        ? Math.max(0.25, Math.min(1, 1 - fcw.ttc_s / 4))
+        : 0.8;
+      ctx.fillStyle = 'rgba(211,47,47,0.92)';
+      ctx.fillRect(0, vh - bh, vw * frac, bh);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 12px system-ui, -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('⚠ ' + String(fcw.text || 'TOO CLOSE').toUpperCase(), vw / 2, vh - bh + 19);
+      ctx.textAlign = 'left';
+    }
   }catch(e){}
 }
 
@@ -29386,18 +33106,13 @@ function _drawVisionOverlay(ctx, detections, vw, vh){
     : [];
   list.sort((a, b) => (a.tier || 3) - (b.tier || 3));
   ctx.save();
-  if(_teslaVisual){
-    _drawTeslaWorld(ctx, vw, vh);
-    for(const det of list) _drawTeslaEntity(ctx, det, vw, vh);
-    _drawTeslaHud(ctx, vw, vh, list);
-  } else {
-    for(const det of list){
+  for(const det of list){
       const t = det.tier || det.priority || 3;
       if(t > 2) continue;                     // background/situational: skip for speed
       _drawVisionBox(ctx, det, vw, vh);
     }
-    if(list.length) _drawVisionHud(ctx, vw, vh);
-  }
+    if(list.length) _drawVisionHud(ctx, vw, vh);   // mode + speed + critical count chip
+    _drawVisionGauges(ctx, vw, vh);                // speedometer + alert banner + FCW bar
   ctx.restore();
 }
 
@@ -29406,6 +33121,41 @@ function _drawVisionOverlay(ctx, detections, vw, vh){
 function _drawPoiDetection(ctx, x1, y1, x2, y2, label, confidence, vw, vh){
   const det = { x1: x1 / vw, y1: y1 / vh, x2: x2 / vw, y2: y2 / vh, label, confidence };
   _drawVisionBox(ctx, det, vw, vh);
+}
+
+// ── Drive alert voice: single-stream Piper speech, deduped ────────
+// The vision server cooldown-gates per alert type; the client mirrors it
+// (type:level) so Pip-pip reads of the same event never stack, and a new
+// alert replaces any queue instead of piling up.
+async function _cwSpeakOne(top){
+  _cwSpeakInFlight = true;
+  try{
+    const r = await fetch('/api/tts/char', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: top.tts, char: 'puppy'})
+    });
+    const d = await r.json();
+    if(d && d.audio_id) playAudio(d.audio_id);
+  }catch(e){}
+  _cwSpeakInFlight = false;
+  if(_visionAlertQueued){
+    const nxt = _visionAlertQueued;
+    _visionAlertQueued = null;
+    _cwSpeakOne(nxt);
+  }
+}
+
+async function _cwSpeakAlerts(alerts){
+  if(!_cwWebcamActive || !Array.isArray(alerts) || !alerts.length) return;
+  const top = alerts.find(a => a.level === 1) || alerts.find(a => a.level === 2);
+  if(!top || !top.tts) return;
+  const key = top.type + ':' + (top.level || 0);
+  const last = _visionAlertCoooldown[key] || 0;
+  if(Date.now() < last) return;
+  _visionAlertCoooldown[key] = Date.now() + (top.level === 1 ? 9000 : 22000);
+  if(_cwSpeakInFlight){ _visionAlertQueued = top; return; }
+  _cwSpeakOne(top);
 }
 
 function _playYoloAlert() {
@@ -29566,6 +33316,16 @@ async function _cwStartWebcam(){
           if(d.mode) _visionModeResolved = d.mode;
           if(d.overlay) _visionOverlay = d.overlay;
           if(d.device_speed_kph != null) _visionDeviceSpeed = d.device_speed_kph;
+          // Drive-safety alerts → overlay banner + voice (deduped client-side)
+          if(Array.isArray(d.alerts)){
+            const akey = d.alerts.map(a => a.type + ':' + (a.level || 0) + (a.ttc_s ? ':' + a.ttc_s : '')).join('|');
+            if(akey !== _visionAlertKey){
+              _visionAlertKey = akey;
+              _visionAlerts = d.alerts;
+              _visionDrawSeq++;
+              _cwSpeakAlerts(d.alerts);
+            }
+          }
           // signature: box count + first few coords (cheap)
           const s = _cwDetections.slice(0, 8).map(x => (x.x1|0) + ',' + (x.y1|0) + ',' + (x.label||'')).join('|');
           if(s !== _cwDetSig){ _cwDetSig = s; _visionDrawSeq++; }
@@ -29612,7 +33372,7 @@ async function _cwStartWebcam(){
           }
           if(_gpuInitialized){
             // WebGL handles rendering — just update YOLO overlay on 2D canvas
-if(overlay && octx && (_yoloBoxesEnabled || _teslaVisual)){
+if(overlay && octx && _yoloBoxesEnabled){
               overlay.width = vw; overlay.height = vh;
               _drawVisionOverlay(octx, _cwDetections, vw, vh);
             }
@@ -29873,6 +33633,20 @@ async function checkAdminAccess(){
     if(adminItem) adminItem.style.display = _isAdmin ? 'flex' : 'none';
     const squareBtn = document.getElementById('adminSquareBtn');
     if(squareBtn) squareBtn.style.display = _isAdmin ? 'flex' : 'none';
+    const radarItem = document.getElementById('radarMenuItem');
+    if(radarItem) radarItem.style.display = _isAdmin ? 'flex' : 'none';
+    const trackerItem = document.getElementById('trackerMenuItem');
+    if(trackerItem) trackerItem.style.display = _isAdmin ? 'flex' : 'none';
+    const nodesItem = document.getElementById('nodesMenuItem');
+    if(nodesItem) nodesItem.style.display = _isAdmin ? 'flex' : 'none';
+    const skillsItem = document.getElementById('skillsMenuItem');
+    if(skillsItem) skillsItem.style.display = _isAdmin ? 'flex' : 'none';
+    // OSINT face IDs panel — admin only
+    const idsToggle = document.getElementById('cwIdsToggle');
+    if(idsToggle) idsToggle.style.display = _isAdmin ? 'flex' : 'none';
+    // Alerts panel — admin only
+    const alertsItem = document.getElementById('alertsMenuItem');
+    if(alertsItem) alertsItem.style.display = _isAdmin ? 'flex' : 'none';
     // Add admin badge to chat header if admin
     if(_isAdmin){
       const hdr = document.querySelector('.chat-header, .chat-title');
@@ -30307,6 +34081,20 @@ function startNotifPolling(){
   if(_notifPollTimer) return;
   pollNotifications();
   _notifPollTimer = setInterval(pollNotifications, 7000);
+  // Poll Feature Board for pending posts
+  setInterval(pollBoardBadge, 15000);
+  pollBoardBadge();
+}
+async function pollBoardBadge(){
+  try{
+    const r = await fetch('/api/board/posts?status=pending', {credentials:'include'});
+    const d = await r.json();
+    const count = d.posts ? d.posts.length : 0;
+    const badge = document.getElementById('boardBadge');
+    const badge2 = document.getElementById('boardPendingBadge');
+    if(badge){ badge.style.display = count>0?'block':'none'; badge.textContent = count; }
+    if(badge2){ badge2.style.display = count>0?'inline':'none'; badge2.textContent = count; }
+  }catch(e){}
 }
 async function openAdminTaskView(){
   const output = document.getElementById('adminOutput');
@@ -30726,7 +34514,6 @@ function toggleCwMenu(){
   const groups = [
     {label:'View', items:[
       ['⛶ Fullscreen + landscape', ()=>fsCameraWindow()],
-      ['⚪ Tesla view', ()=>setTeslaVisual()],
       ['▢ Detection boxes', ()=>toggleYoloBoxes()],
       ['👤 Faces on/off', ()=>toggleFaceRecognition()],
       ['👁 IDs (who + evidence)', ()=>{ if(!_cwFacesOpen) toggleFacesPanel(); }],
@@ -31435,7 +35222,7 @@ function drawPupProfile(){
   _pfCtx.fillStyle=g; _pfCtx.beginPath(); _pfCtx.arc(0,0,96,0,Math.PI*2); _pfCtx.fill();
 
   const animal=selectedAvatar||'puppy';
-  if(animal!=='puppy'){ try{ drawAnimalFace(_pfCtx,animal,0,-2,S,frame,true);}catch(e){} _pfCtx.restore(); requestAnimationFrame(drawPupProfile); return; }
+  if(animal!=='puppy'){ try{ drawAnimalFace(_pfCtx,animal,0,-2,Math.min(W,H)*0.42,frame,true);}catch(e){} _pfCtx.restore(); requestAnimationFrame(drawPupProfile); return; }
 
   const isSpeaking=lastMouthVal>0.1;
   const isExcited=pupMood==='excited'||pupMood==='cheerful';
@@ -31869,16 +35656,38 @@ document.getElementById('clearBtn').onclick=async()=>{
   try{await fetch('/api/memory/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({avatar:localStorage.getItem('lilly_avatar')||'puppy'})});inputField.placeholder='Memory cleared!';setTimeout(()=>inputField.placeholder='Type a message...',2000)}catch(e){}
 };
 
-/* ─── Dashboard Toggle ─── */
-/* ─── Settings Panel ─── */
- function toggleSettings(){
-   const panel=document.getElementById('settingsPanel');
-   if (!panel) return;
-   const open=panel.style.display==='block';
-   panel.style.display=open?'none':'block';
-   if (!open) loadSettings();
-   if (open) closeHamburgerMenu();
- }
+/* ─── Settings Panel (draggable window) ─── */
+  function toggleSettings(){
+    const panel=document.getElementById('settingsPanel');
+    if (!panel) return;
+    const open=panel.style.display==='block';
+    panel.style.display=open?'none':'block';
+    if (!open) loadSettings();
+    if (!open) checkFaceStatus();
+    if (open) closeHamburgerMenu();
+  }
+// Make settings + user windows draggable via title bar
+(function(){
+  let _dragEl=null,_dx=0,_dy=0;
+  document.addEventListener('mousedown',function(e){
+    const bar=e.target.closest('.user-panel-head, #settingsTitleBar');
+    if(!bar)return;
+    const panel=bar.closest('#settingsPanel, .user-panel');
+    if(!panel||panel.style.display==='none')return;
+    _dragEl=panel;
+    const rect=panel.getBoundingClientRect();
+    _dx=e.clientX-rect.left;_dy=e.clientY-rect.top;
+    panel.style.transform='none';panel.style.left=rect.left+'px';panel.style.top=rect.top+'px';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove',function(e){
+    if(!_dragEl)return;
+    const x=e.clientX-_dx,y=e.clientY-_dy;
+    _dragEl.style.left=Math.max(0,Math.min(window.innerWidth-100,x))+'px';
+    _dragEl.style.top=Math.max(0,Math.min(window.innerHeight-60,y))+'px';
+  });
+  document.addEventListener('mouseup',function(){_dragEl=null;});
+})();
 
  /* ─── Hamburger Dropdown Menu ─── */
  function toggleHamburgerMenu(){
@@ -31895,6 +35704,184 @@ document.getElementById('clearBtn').onclick=async()=>{
     const menu=document.getElementById('hamburgerMenu');
     if(menu) menu.style.display='none';
   }
+
+  /* ─── User Panels (Memory, Habits, Projects, Reminders, DMs) ─── */
+  function closeUserPanel(id){ const p=document.getElementById(id); if(p)p.style.display='none'; }
+  function _closeOtherPanels(except){ ['memPanel','habitsPanel','projectsPanel','remindersPanel','dmsPanel'].forEach(id=>{ if(id!==except){const p=document.getElementById(id);if(p)p.style.display='none';} }); }
+
+  async function openMemoryPanel(){
+    closeHamburgerMenu(); _closeOtherPanels('memPanel');
+    const panel=document.getElementById('memPanel'); if(panel)panel.style.display='flex';
+    const body=document.getElementById('memContent'); if(body)body.innerHTML='Loading...';
+    try{
+      const [factsR,coreR]=await Promise.all([fetch('/api/memory/facts?limit=20',{credentials:'include'}),fetch('/api/memory/core',{credentials:'include'})]);
+      const facts=await factsR.json().catch(()=>({facts:[]}));
+      const core=await coreR.json().catch(()=>({}));
+      let html='';
+      if(core&&core.core){
+        html+='<div class="mem-item"><div class="mem-label">Core Persona</div><div class="mem-val">'+_esc(core.core.persona||'Not set')+'</div></div>';
+        if(core.core.mood) html+='<div class="mem-item"><div class="mem-label">Current Mood</div><div class="mem-val">'+_esc(core.core.mood)+'</div></div>';
+      }
+      const f=facts.facts||[];
+      if(f.length){
+        f.forEach(fact=>{ html+='<div class="mem-item"><div class="mem-label">'+_esc(fact.category||'fact')+'</div><div class="mem-val">'+_esc(fact.text||fact.content||JSON.stringify(fact))+'</div></div>'; });
+      }
+      if(!html) html='<div class="user-panel-empty">No memories yet — start chatting and I\'ll remember things about you.</div>';
+      if(body)body.innerHTML=html;
+    }catch(e){ if(body)body.innerHTML='<div class="user-panel-empty">Couldn\'t load memory right now.</div>'; }
+  }
+
+  async function openHabitsPanel(){
+    closeHamburgerMenu(); _closeOtherPanels('habitsPanel');
+    const panel=document.getElementById('habitsPanel'); if(panel)panel.style.display='flex';
+    const body=document.getElementById('habitsContent'); if(body)body.innerHTML='Loading...';
+    try{
+      const r=await fetch('/api/user/habits',{credentials:'include'});
+      const d=await r.json().catch(()=>({habits:[]}));
+      const habits=d.habits||[];
+      let html='';
+      if(habits.length){
+        habits.forEach(h=>{ html+='<div class="habit-row"><span class="habit-name">'+_esc(h.name||'')+'</span><span class="habit-streak">'+(h.streak||0)+' day'+((h.streak||0)===1?'':'s')+'</span></div>'; });
+      }
+      if(!html) html='<div class="user-panel-empty">No habits tracked yet. Say "log habit: meditation" to start.</div>';
+      if(body)body.innerHTML=html;
+    }catch(e){ if(body)body.innerHTML='<div class="user-panel-empty">Couldn\'t load habits right now.</div>'; }
+  }
+
+  async function openProjectsPanel(){
+    closeHamburgerMenu(); _closeOtherPanels('projectsPanel');
+    const panel=document.getElementById('projectsPanel'); if(panel)panel.style.display='flex';
+    const body=document.getElementById('projectsContent'); if(body)body.innerHTML='Loading...';
+    try{
+      const r=await fetch('/api/user/projects',{credentials:'include'});
+      const d=await r.json().catch(()=>({projects:[]}));
+      const projs=d.projects||[];
+      let html='';
+      if(projs.length){
+        projs.forEach(p=>{ const st=p.status||'active'; html+='<div class="proj-item"><div class="proj-name">'+_esc(p.name||'')+'</div><span class="proj-status '+st+'">'+st+'</span>'+(p.details?'<div style="font-size:12px;color:rgba(93,78,109,0.6);margin-top:4px">'+_esc(p.details)+'</div>':'')+'</div>'; });
+      }
+      if(!html) html='<div class="user-panel-empty">No projects yet. Say "add project: Website Redesign" to start.</div>';
+      if(body)body.innerHTML=html;
+    }catch(e){ if(body)body.innerHTML='<div class="user-panel-empty">Couldn\'t load projects right now.</div>'; }
+  }
+
+  async function openRemindersPanel(){
+    closeHamburgerMenu(); _closeOtherPanels('remindersPanel');
+    const panel=document.getElementById('remindersPanel'); if(panel)panel.style.display='flex';
+    const body=document.getElementById('remindersContent'); if(body)body.innerHTML='Loading...';
+    try{
+      const r=await fetch('/api/scheduled-tasks',{credentials:'include'});
+      const d=await r.json().catch(()=>({tasks:[]}));
+      const tasks=d.tasks||[];
+      let html='';
+      if(tasks.length){
+        tasks.forEach(t=>{ const when=t.run_at?t.run_at:(t.time||''); html+='<div class="reminder-item"><div>'+_esc(t.text||t.message||'Reminder')+'</div><div class="reminder-time">'+_esc(when)+'</div></div>'; });
+      }
+      if(!html) html='<div class="user-panel-empty">No reminders set. Say "remind me to X at 3pm" to create one.</div>';
+      if(body)body.innerHTML=html;
+    }catch(e){ if(body)body.innerHTML='<div class="user-panel-empty">Couldn\'t load reminders right now.</div>'; }
+  }
+
+  async function openDmsPanel(){
+    closeHamburgerMenu(); _closeOtherPanels('dmsPanel');
+    const panel=document.getElementById('dmsPanel'); if(panel)panel.style.display='flex';
+    const list=document.getElementById('dmsAvatarList'); const chat=document.getElementById('dmsChatView');
+    if(list)list.style.display='block'; if(chat)chat.style.display='none';
+    if(!list)return;
+    list.innerHTML='Loading...';
+    try{
+      const r=await fetch('/api/dm/avatars',{credentials:'include'});
+      const d=await r.json().catch(()=>({avatars:[]}));
+      const avatars=d.avatars||{};
+      const emojis={puppy:'🐶',fox:'🦊',cat:'🐱',bear:'🐻',bunny:'🐰',owl:'🦉',deer:'🦌',wolf:'🐺',raccoon:'🦝'};
+      const names={puppy:'Lilly',fox:'Fox',cat:'Cat',bear:'Bear',bunny:'Bunny',owl:'Owl',deer:'Deer',wolf:'Wolf',raccoon:'Raccoon'};
+      const roles={puppy:'Alpha Companion',fox:'Creative Strategist',cat:'Precision Analyst',bear:'Steadfast Guardian',bunny:'Energetic Scout',owl:'Wisdom Keeper',deer:'Gentle Healer',wolf:'Fierce Protector',raccoon:'Tech Tinkerer'};
+      let html='';
+      const keys=Object.keys(avatars).length?Object.keys(avatars):['puppy','fox','cat','bear','bunny','owl','deer','wolf','raccoon'];
+      keys.forEach(k=>{
+        html+='<div class="dm-avatar-row" onclick="openDmChatWith(\''+k+'\')" style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;border-radius:12px;transition:background 0.15s" onmouseover="this.style.background=\'rgba(93,78,109,0.06)\'" onmouseout="this.style.background=\'transparent\'">';
+        html+='<div style="font-size:24px">'+(emojis[k]||'')+'</div>';
+        html+='<div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;color:#5d4e6d">'+(names[k]||k)+'</div>';
+        html+='<div style="font-size:10px;color:rgba(93,78,109,0.5)">'+(roles[k]||'')+'</div></div>';
+        html+='<div id="dmsUnread_'+k+'" style="display:none;min-width:8px;height:8px;border-radius:50%;background:#e85a6e;box-shadow:0 0 6px rgba(232,90,110,0.4)"></div>';
+        html+='</div>';
+      });
+      list.innerHTML=html;
+      _checkDmsUnread(keys);
+    }catch(e){ list.innerHTML='<div style="padding:14px;font-size:12px;color:rgba(93,78,109,0.5)">Couldn\'t load messages.</div>'; }
+  }
+  async function _checkDmsUnread(keys){
+    for(const k of keys){
+      try{
+        const r=await fetch('/api/dm/'+k+'/unread',{credentials:'include'});
+        const d=await r.json().catch(()=>({}));
+        const dot=document.getElementById('dmsUnread_'+k);
+        if(dot&&d.unread>0) dot.style.display='block';
+      }catch(e){}
+    }
+  }
+  let _dmsCurrentAvatar='';
+  async function openDmChatWith(avatar){
+    _dmsCurrentAvatar=avatar;
+    const emojis={puppy:'🐶',fox:'🦊',cat:'🐱',bear:'🐻',bunny:'🐰',owl:'🦉',deer:'🦌',wolf:'🐺',raccoon:'🦝'};
+    const names={puppy:'Lilly',fox:'Fox',cat:'Cat',bear:'Bear',bunny:'Bunny',owl:'Owl',deer:'Deer',wolf:'Wolf',raccoon:'Raccoon'};
+    const roles={puppy:'Alpha Companion',fox:'Creative Strategist',cat:'Precision Analyst',bear:'Steadfast Guardian',bunny:'Energetic Scout',owl:'Wisdom Keeper',deer:'Gentle Healer',wolf:'Fierce Protector',raccoon:'Tech Tinkerer'};
+    document.getElementById('dmsAvatarList').style.display='none';
+    const chat=document.getElementById('dmsChatView'); chat.style.display='flex';
+    document.getElementById('dmsChatAvatarEmoji').textContent=emojis[avatar]||'';
+    document.getElementById('dmsChatAvatarName').textContent=names[avatar]||avatar;
+    document.getElementById('dmsChatAvatarRole').textContent=roles[avatar]||'';
+    const msgs=document.getElementById('dmsChatMessages'); msgs.innerHTML='<div style="text-align:center;font-size:11px;color:rgba(93,78,109,0.4);padding:20px">Loading...</div>';
+    try{
+      const r=await fetch('/api/dm/'+avatar,{credentials:'include'});
+      const d=await r.json().catch(()=>({messages:[]}));
+      const history=d.messages||[];
+      if(!history.length){ msgs.innerHTML='<div style="text-align:center;font-size:12px;color:rgba(93,78,109,0.4);padding:20px">Start a conversation with '+(names[avatar]||avatar)+'...</div>'; return; }
+      msgs.innerHTML='';
+      history.forEach(m=>{
+        const isUser=m.sender==='user';
+        const div=document.createElement('div');
+        div.style.cssText='max-width:82%;padding:8px 12px;border-radius:14px;font-size:13px;line-height:1.5;word-wrap:break-word;'+(isUser?'align-self:flex-end;background:rgba(180,160,200,0.4);color:#5d4e6d;border-bottom-right-radius:4px':'align-self:flex-start;background:rgba(255,255,255,0.5);color:#5d4e6d;border-bottom-left-radius:4px');
+        div.textContent=m.text||'';
+        msgs.appendChild(div);
+      });
+      msgs.scrollTop=msgs.scrollHeight;
+    }catch(e){ msgs.innerHTML='<div style="text-align:center;font-size:12px;color:rgba(93,78,109,0.4);padding:20px">Could not load messages.</div>'; }
+  }
+  function dmsBackToList(){
+    document.getElementById('dmsChatView').style.display='none';
+    document.getElementById('dmsAvatarList').style.display='block';
+    _dmsCurrentAvatar='';
+  }
+  async function sendDmsMessage(){
+    const input=document.getElementById('dmsChatInput');
+    const text=(input.value||'').trim();
+    if(!text||!_dmsCurrentAvatar)return;
+    input.value='';
+    const msgs=document.getElementById('dmsChatMessages');
+    // Show user message immediately
+    const udiv=document.createElement('div');
+    udiv.style.cssText='max-width:82%;padding:8px 12px;border-radius:14px;font-size:13px;line-height:1.5;align-self:flex-end;background:rgba(180,160,200,0.4);color:#5d4e6d;border-bottom-right-radius:4px';
+    udiv.textContent=text; msgs.appendChild(udiv); msgs.scrollTop=msgs.scrollHeight;
+    // Show typing indicator
+    const typing=document.createElement('div');
+    typing.style.cssText='max-width:82%;padding:8px 12px;border-radius:14px;font-size:13px;align-self:flex-start;background:rgba(255,255,255,0.5);color:rgba(93,78,109,0.4);border-bottom-left-radius:4px';
+    typing.textContent='...'; msgs.appendChild(typing); msgs.scrollTop=msgs.scrollHeight;
+    try{
+      const r=await fetch('/api/dm/'+_dmsCurrentAvatar,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify({message:text})});
+      const d=await r.json().catch(()=>({}));
+      typing.remove();
+      if(d.ok&&d.reply){
+        const div=document.createElement('div');
+        div.style.cssText='max-width:82%;padding:8px 12px;border-radius:14px;font-size:13px;line-height:1.5;align-self:flex-start;background:rgba(255,255,255,0.5);color:#5d4e6d;border-bottom-left-radius:4px';
+        div.textContent=d.reply; msgs.appendChild(div); msgs.scrollTop=msgs.scrollHeight;
+      }else{
+        typing.textContent='Could not get a response.';
+      }
+    }catch(e){ typing.textContent='Connection error.'; }
+  }
+
+  function _esc(s){ const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; }
 
   /* ─── Alerts Panel ─── */
   function toggleAlertsPanel(){
@@ -31945,6 +35932,194 @@ document.getElementById('clearBtn').onclick=async()=>{
     }
     _saveAlertSettings();
   }
+
+  // ─── Feature Board ───
+  let _boardCurrentFilter = '';
+  let _boardCurrentPostId = null;
+  let _boardIsAdmin = false;
+
+  function toggleFeatureBoard(){
+    const panel = document.getElementById('featureBoardPanel');
+    const menu = document.getElementById('hamburgerMenu');
+    if(!panel) return;
+    const open = panel.style.display === 'flex';
+    panel.style.display = open ? 'none' : 'flex';
+    if(!open && menu) menu.style.display = 'none';
+    if(!open) loadBoard(_boardCurrentFilter);
+  }
+
+  function loadBoard(filter){
+    _boardCurrentFilter = filter || '';
+    // Update tab styles
+    document.querySelectorAll('.board-tab').forEach(tab => {
+      const f = tab.dataset.filter;
+      if(f === _boardCurrentFilter){
+        tab.style.background = 'rgba(139,122,158,0.12)';
+        tab.style.color = '#5d4e6d';
+      } else {
+        tab.style.background = 'transparent';
+        tab.style.color = 'rgba(93,78,109,0.5)';
+      }
+    });
+    // Check admin status
+    fetch('/api/admin/check', {credentials:'include'}).then(r=>r.json()).then(d=>{
+      _boardIsAdmin = !!d.admin;
+    }).catch(()=>{ _boardIsAdmin = false; });
+    // Fetch posts
+    const url = filter ? `/api/board/posts?status=${filter}` : '/api/board/posts';
+    fetch(url, {credentials:'include'}).then(r=>r.json()).then(d => {
+      const container = document.getElementById('boardPosts');
+      if(!container) return;
+      const posts = d.posts || [];
+      // Update pending badge
+      const pendingCount = posts.filter(p => p.status === 'pending').length;
+      const badge = document.getElementById('boardPendingBadge');
+      if(badge){
+        badge.style.display = pendingCount > 0 ? 'inline' : 'none';
+        badge.textContent = pendingCount;
+      }
+      // Also update hamburger menu badge
+      const hamBadge = document.getElementById('boardBadge');
+      if(hamBadge){
+        hamBadge.style.display = pendingCount > 0 ? 'block' : 'none';
+        hamBadge.textContent = pendingCount;
+      }
+      if(posts.length === 0){
+        container.innerHTML = '<div style="text-align:center;color:rgba(93,78,109,0.4);padding:30px 20px;font-size:12px">No posts yet. Avatars propose new features here.</div>';
+        return;
+      }
+      container.innerHTML = posts.map(p => {
+        const statusColor = p.status === 'approved' ? '#4a8' : p.status === 'dismissed' ? '#e85a6e' : '#f0a030';
+        const statusBg = p.status === 'approved' ? 'rgba(68,170,136,0.1)' : p.status === 'dismissed' ? 'rgba(232,90,110,0.1)' : 'rgba(240,160,48,0.1)';
+        const avatarMeta = chatAvatarMeta ? chatAvatarMeta(p.author) : {emoji:'🤖', name:p.author};
+        const commentCount = (p.comments || []).length;
+        const ago = _timeAgo(p.created_at);
+        return `<div onclick="openBoardPost('${p.id}')" style="padding:12px;background:rgba(139,122,158,0.04);border:1px solid rgba(184,169,201,0.15);border-radius:12px;margin-bottom:8px;cursor:pointer;transition:all 0.15s" onmouseenter="this.style.background='rgba(139,122,158,0.08)'" onmouseleave="this.style.background='rgba(139,122,158,0.04)'">`+
+          `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">`+
+            `<div style="display:flex;align-items:center;gap:6px">`+
+              `<span style="font-size:16px">${avatarMeta.emoji || '🤖'}</span>`+
+              `<span style="font-size:11px;font-weight:600;color:#5d4e6d">${_esc(avatarMeta.name || p.author)}</span>`+
+              `<span style="font-size:10px;color:rgba(93,78,109,0.4)">${ago}</span>`+
+            `</div>`+
+            `<span style="font-size:10px;padding:2px 8px;border-radius:8px;font-weight:600;background:${statusBg};color:${statusColor}">${p.status}</span>`+
+          `</div>`+
+          `<div style="font-size:12px;font-weight:600;color:#5d4e6d;margin-bottom:4px">${_esc(p.title)}</div>`+
+          `<div style="font-size:11px;color:rgba(93,78,109,0.6);line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${_esc((p.body||'').substring(0,150))}</div>`+
+          `<div style="display:flex;align-items:center;gap:12px;margin-top:8px;font-size:10px;color:rgba(93,78,109,0.4)">`+
+            `<span>💬 ${commentCount} comment${commentCount!==1?'s':''}</span>`+
+            `<span>${p.category || 'general'}</span>`+
+          `</div>`+
+        `</div>`;
+      }).join('');
+    }).catch(e => {
+      console.error('board load error:', e);
+    });
+  }
+
+  function openBoardPost(postId){
+    _boardCurrentPostId = postId;
+    fetch(`/api/board/posts/${postId}`, {credentials:'include'}).then(r=>r.json()).then(d => {
+      const post = d.post;
+      if(!post) return;
+      const panel = document.getElementById('boardPostDetail');
+      const titleEl = document.getElementById('boardDetailTitle');
+      const bodyEl = document.getElementById('boardDetailBody');
+      const statusEl = document.getElementById('boardDetailStatus');
+      const adminEl = document.getElementById('boardDetailAdmin');
+      const commentsEl = document.getElementById('boardDetailComments');
+      if(!panel) return;
+      titleEl.textContent = post.title;
+      bodyEl.textContent = post.body;
+      const sc = post.status === 'approved' ? '#4a8' : post.status === 'dismissed' ? '#e85a6e' : '#f0a030';
+      const sbg = post.status === 'approved' ? 'rgba(68,170,136,0.1)' : post.status === 'dismissed' ? 'rgba(232,90,110,0.1)' : 'rgba(240,160,48,0.1)';
+      statusEl.textContent = post.status;
+      statusEl.style.background = sbg;
+      statusEl.style.color = sc;
+      adminEl.style.display = _boardIsAdmin && post.status !== 'approved' ? 'flex' : 'none';
+      // Render comments
+      const comments = post.comments || [];
+      if(comments.length === 0){
+        commentsEl.innerHTML = '<div style="font-size:11px;color:rgba(93,78,109,0.4);padding:8px 0">No comments yet</div>';
+      } else {
+        commentsEl.innerHTML = comments.map(c => {
+          const cmeta = c.author_type === 'avatar' && chatAvatarMeta ? chatAvatarMeta(c.author) : {emoji:'👤', name:c.author};
+          return `<div style="padding:8px 0;border-bottom:1px solid rgba(184,169,201,0.1)">`+
+            `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">`+
+              `<span style="font-size:14px">${cmeta.emoji || '👤'}</span>`+
+              `<span style="font-size:11px;font-weight:600;color:#5d4e6d">${_esc(cmeta.name || c.author)}</span>`+
+              `<span style="font-size:10px;color:rgba(93,78,109,0.3)">${_timeAgo(c.created_at)}</span>`+
+            `</div>`+
+            `<div style="font-size:12px;color:#5d4e6d;padding-left:22px">${_esc(c.text)}</div>`+
+          `</div>`;
+        }).join('');
+      }
+      panel.style.display = 'flex';
+    });
+  }
+
+  function closeBoardDetail(){
+    const panel = document.getElementById('boardPostDetail');
+    if(panel) panel.style.display = 'none';
+    _boardCurrentPostId = null;
+  }
+
+  function submitBoardComment(){
+    if(!_boardCurrentPostId) return;
+    const input = document.getElementById('boardCommentInput');
+    if(!input || !input.value.trim()) return;
+    const text = input.value.trim();
+    input.value = '';
+    fetch(`/api/board/posts/${_boardCurrentPostId}/comment`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      credentials: 'include',
+      body: JSON.stringify({text: text})
+    }).then(r=>r.json()).then(d => {
+      if(d.ok) openBoardPost(_boardCurrentPostId);
+    });
+  }
+
+  function boardApprove(){
+    if(!_boardCurrentPostId) return;
+    fetch(`/api/board/posts/${_boardCurrentPostId}/status`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      credentials: 'include',
+      body: JSON.stringify({status: 'approved'})
+    }).then(r=>r.json()).then(d => {
+      if(d.ok){
+        closeBoardDetail();
+        loadBoard(_boardCurrentFilter);
+        showToast('Feature approved! Users will be notified.', 'success');
+      }
+    });
+  }
+
+  function boardDismiss(){
+    if(!_boardCurrentPostId) return;
+    fetch(`/api/board/posts/${_boardCurrentPostId}/status`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      credentials: 'include',
+      body: JSON.stringify({status: 'dismissed'})
+    }).then(r=>r.json()).then(d => {
+      if(d.ok){
+        closeBoardDetail();
+        loadBoard(_boardCurrentFilter);
+        showToast('Feature dismissed.', 'info');
+      }
+    });
+  }
+
+  function _timeAgo(ts){
+    if(!ts) return '';
+    const diff = (Date.now()/1000) - ts;
+    if(diff < 60) return 'just now';
+    if(diff < 3600) return Math.floor(diff/60) + 'm ago';
+    if(diff < 86400) return Math.floor(diff/3600) + 'h ago';
+    return Math.floor(diff/86400) + 'd ago';
+  }
+
   async function isPaired(){
     try{
       const r=await fetch('/api/pair/status',{credentials:'include'});
@@ -31969,12 +36144,30 @@ document.getElementById('clearBtn').onclick=async()=>{
       case 'tracker': openTrackerMap(); break;
       case 'nodes': openNodesPanel(); break;
       case 'settings': toggleSettings(); break;
+      case 'face': toggleSettings(); checkFaceStatus(); break;
+      case 'board': toggleFeatureBoard(); break;
       case 'pair': openPairPanel(); break;
       case 'skills': openSkillsMarket(); break;
-       case 'download': openDownloadPanel(); break;
+      case 'download': openDownloadPanel(); break;
       case 'notifications': toggleNotificationsPanel(); break;
       case 'admin': { const _ap=document.getElementById('adminPanel'); if(_ap) _ap.style.display='block'; openAdminTaskView(); break; }
-       case 'close': break;
+      case 'close': break;
+      case 'logout': {
+        fetch('/api/local/logout',{credentials:'include'}).then(()=>{
+          localStorage.removeItem('lilly_avatar');
+          localStorage.removeItem('lilly_device_token');
+          window.location.href='/';
+        }).catch(()=>{ window.location.href='/'; });
+        break;
+      }
+      case 'memory': openMemoryPanel(); break;
+      case 'habits': openHabitsPanel(); break;
+      case 'projects': openProjectsPanel(); break;
+      case 'reminders': openRemindersPanel(); break;
+      case 'dms': openDmsPanel(); break;
+      case 'avatars': window.location.href = '/instagram-avatars'; break;
+      case 'voice': toggleBrowserMic(); break;
+       case 'help': window.open('/api/faq','_blank'); break;
     }
   }
  function toggleChat(){
@@ -32253,15 +36446,147 @@ document.getElementById('clearBtn').onclick=async()=>{
     if (pairToken && d.lilly_pair_token) pairToken.value=d.lilly_pair_token;
     const c1=document.getElementById('setting-notif-proactive');
     const c2=document.getElementById('setting-notif-sound');
-    const c3=document.getElementById('setting-notif-pushbullet');
     const cp=document.getElementById('setting-notif-paused');
     const cc=document.getElementById('setting-notif-cap');
     if (c1) c1.checked=d.proactive_notifications!==false;
     if (c2) c2.checked=d.notification_sound!==false;
-    if (c3) c3.checked=d.pushbullet_fallback===true;
     if (cp) cp.checked=!!d.notif_paused;
     if (cc) cc.value=d.notif_daily_cap;
+    loadInstagramLink();
   } catch(e){}
+}
+
+async function loadInstagramLink(){
+  const inp=document.getElementById('setting-ig-handle');
+  const st=document.getElementById('ig-link-status');
+  if (!inp) return;
+  try {
+    const r=await fetch('/api/instagram/link',{credentials:'include'});
+    if (!r.ok) { if(st) st.textContent='Sign in to link Instagram.'; return; }
+    const d=await r.json();
+    if (d.handle) inp.value='@'+d.handle;
+    if (st) st.textContent=d.handle?('Linked as @'+d.handle):'Not linked.';
+  } catch(e){ if(st) st.textContent='Could not load link.'; }
+}
+
+function _igStatus(msg){ const st=document.getElementById('ig-link-status'); if(st) st.textContent=msg; }
+
+async function saveInstagramLink(){
+  const inp=document.getElementById('setting-ig-handle');
+  const st=document.getElementById('ig-link-status');
+  if (!inp) return;
+  const handle=(inp.value||'').trim().replace(/^@+/,'');
+  if (!handle){ return clearInstagramLink(); }
+  if (st) st.textContent='Linking…';
+  try {
+    const r=await fetch('/api/instagram/link',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({handle})});
+    const d=await r.json().catch(()=>({}));
+    if (r.ok && d.ok){ inp.value='@'+d.handle; _igStatus('Linked as @'+d.handle); }
+    else { _igStatus(d.error||('Failed ('+r.status+')')); }
+  } catch(e){ _igStatus('Could not save link.'); }
+}
+
+async function clearInstagramLink(){
+  const inp=document.getElementById('setting-ig-handle');
+  if (inp) inp.value='';
+  _igStatus('Unlinking…');
+  try {
+    const r=await fetch('/api/instagram/link',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({handle:''})});
+    const d=await r.json().catch(()=>({}));
+    if (r.ok && d.ok) _igStatus('Not linked.');
+    else _igStatus(d.error||('Failed ('+r.status+')'));
+  } catch(e){ _igStatus('Could not unlink.'); }
+}
+
+function showAvatarSettings(avatarKey){
+  const panel=document.getElementById('avatarSettingsPanel');
+  const content=document.getElementById('avatarSettingsContent');
+  const select=document.getElementById('avatarSettingsSelect');
+  if (!avatarKey){
+    if (panel) panel.style.display='none';
+    return;
+  }
+  if (panel) panel.style.display='block';
+  const avatars={
+    puppy:'🐶 Lilly · alpha assistant — proactive, friendly, posts daily check-ins',
+    fox:'🦊 Fox · creative strategist — generates visual content, sunset themes',
+    cat:'🐱 Cat · precision analyst — reports metrics, coding stats, data summaries',
+    bear:'🐻 Bear · steadfast guardian — safety alerts, ground-truth confirmations',
+    bunny:'🐰 Bunny · energetic scout — outdoor activity, nature walks, quick updates',
+    owl:'🦉 Owl · wisdom keeper — deep thoughts, late-night insights, analysis',
+    deer:'🦌 Deer · gentle healer — morning calm, peace reminders, healing vibes',
+    wolf:'🐺 Wolf · fierce protector — security, watch duties, pack coordination',
+    raccoon:'🦝 Raccoon · tech tinkerer — engineering updates, build reports, team huddles'
+  };
+  const a=avatars[avatarKey]||'';
+  if (content && select){
+    select.value=avatarKey;
+    const [emoji,name,desc]=a.match(/^(.+)\s(.+)\s—\s(.+)$/)||[','','',''];
+    content.innerHTML=
+      '<div style="margin-bottom:8px"><b>'+name+'</b> <small style="color:rgba(93,78,109,0.4)">('+emoji+')</small></div>' +
+      '<div style="color:rgba(93,78,109,0.6);margin-bottom:8px">'+desc+'</div>' +
+      '<div style="display:flex;flex-direction:column;gap:6px">' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:#5d4e6d"><input type="checkbox" id="avt_'+avatarKey+'_dm" style="accent-color:#8b7a9e"> Enable DMs</label>' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:#5d4e6d"><input type="checkbox" id="avt_'+avatarKey+'_auto" style="accent-color:#8b7a9e"> Auto-post enabled</label>' +
+      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11px;color:#5d4e6d"><input type="checkbox" id="avt_'+avatarKey+'_react" style="accent-color:#8b7a9e"> Auto-react to followers</label>' +
+      '</div>';
+  }
+}
+
+function closeAvatarSettings(){
+  const panel=document.getElementById('avatarSettingsPanel');
+  if (panel) panel.style.display='none';
+  const select=document.getElementById('avatarSettingsSelect');
+  if (select) select.value='';
+}
+
+async function saveAvatarSetting(){
+  const select=document.getElementById('avatarSettingsSelect');
+  const avatarKey=select?select.value:'';
+  if (!avatarKey){
+    alert('Select an avatar first.');
+    return;
+  }
+  const dm=document.getElementById('avt_'+avatarKey+'_dm');
+  const auto=document.getElementById('avt_'+avatarKey+'_auto');
+  const react=document.getElementById('avt_'+avatarKey+'_react');
+  try {
+    await fetch('/api/avatar/settings',{
+      method:'POST',credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        avatar:avatarKey,
+        dm_enabled:dm?dm.checked:false,
+        auto_post:auto?auto.checked:false,
+        auto_react:react?react.checked:false
+      })
+    });
+    alert('Saved '+avatarKey+' settings.');
+  } catch(e){ alert('Failed to save.'); }
+}
+
+async function sendInstagramCode(){
+  const inp=document.getElementById('setting-ig-handle');
+  const st=document.getElementById('ig-link-status');
+  const btn=document.getElementById('btnSendIgCode');
+  if (!inp) return;
+  const handle=(inp.value||'').trim().replace(/^@+/,'');
+  if (!handle || !/^[A-Za-z0-9._]{1,30}$/.test(handle)){
+    if (st) { st.textContent='Enter a valid Instagram @handle'; st.style.color='rgba(232,90,110,0.8)'; }
+    return;
+  }
+  if (st) { st.textContent='Sending DM code…'; st.style.color='rgba(93,78,109,0.5)'; }
+  if (btn) btn.disabled=true;
+  try {
+    const r=await fetch('/api/instagram/link/send_code',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({handle})});
+    const d=await r.json().catch(()=>({}));
+    if (r.ok && d.ok){
+      if (st) { st.textContent='Code DMd to @'+handle+' — check your Instagram DMs'; st.style.color='rgba(76,175,80,0.8)'; }
+    } else {
+      if (st) { st.textContent=d.error||('Failed ('+r.status+')'); st.style.color='rgba(232,90,110,0.8)'; }
+    }
+  } catch(e){ if (st) { st.textContent='Network error'; st.style.color='rgba(232,90,110,0.8)'; } }
+  finally { if (btn) btn.disabled=false; }
 }
 
 async function loadApkOptions(){
@@ -32276,33 +36601,20 @@ async function loadApkOptions(){
     }
     const variants=await r.json();
     const light=variants.find(v=>v.type==='light');
-    const full=variants.find(v=>v.type==='full');
     let html='';
     if (light){
       const size=(light.size/1024/1024).toFixed(1);
       const date=new Date(light.updated*1000).toLocaleDateString();
       const version = light.variant && light.variant !== 'latest' ? 'v' + light.variant : '';
-      const title = version ? 'Latest Overlay ' + version : 'Latest Overlay';
+      const title = version ? 'Overlay ' + version : 'Overlay';
       html+='<a href="/api/apk/download?type=light" download style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-radius:12px;background:rgba(74,222,128,0.12);border:1px solid rgba(74,222,128,0.25);text-decoration:none;color:#5d4e6d;transition:all 0.2s">'
         +'<div><div style="font-size:13px;font-weight:600">'+title+'</div>'
-        +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+light.name+' · '+size+' MB · Updated '+date+'</div></div>'
+        +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+light.name+' · '+size+' MB · '+date+'</div></div>'
         +'<span style="font-size:16px">⬇️</span></a>';
       const aboutVer = document.getElementById('aboutVersion');
       if (aboutVer && version) {
-        aboutVer.textContent = 'Lilly AI · 9 Avatars · Termux + Docker · Overlay ' + version;
+        aboutVer.textContent = 'Lilly AI · 9 Avatars · Overlay ' + version;
       }
-    }
-    if (full){
-      const size2=(full.size/1024/1024).toFixed(1);
-      const date2=new Date(full.updated*1000).toLocaleDateString();
-      const ver2 = full.variant && full.variant !== 'latest' ? ' v' + full.variant : '';
-      const fullTitle = full.name.endsWith('.zip')
-        ? 'Full App' + ver2 + ' + Termux'
-        : 'Full App' + ver2 + ' (Termux Server Bundle)';
-      html+='<a href="/api/apk/download?type=full" download style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;margin-top:6px;border-radius:12px;background:rgba(74,222,128,0.06);border:1px solid rgba(74,222,128,0.18);text-decoration:none;color:#5d4e6d;transition:all 0.2s">'
-        +'<div><div style="font-size:13px;font-weight:600">'+fullTitle+'</div>'
-        +'<div style="font-size:11px;color:rgba(93,78,109,0.5)">'+full.name+' · '+size2+' MB · Updated '+date2+(full.name.endsWith('.zip')?' · Overlay + Termux + Termux:API + F-Droid':'')+'</div></div>'
-        +'<span style="font-size:16px">⬇️</span></a>';
     }
     area.innerHTML=html;
     if (status) status.textContent='Install from unknown sources must be enabled on your phone.';
@@ -32311,16 +36623,17 @@ async function loadApkOptions(){
   }
 }
 
-async function saveNotifPrefs(){
+ async function saveNotifPrefs(){
   const status=document.getElementById('notif-status');
   status.textContent='Saving...'; status.style.color='rgba(93,78,109,0.5)';
   const paused=!!document.getElementById('setting-notif-paused').checked;
   const cap=parseInt(document.getElementById('setting-notif-cap').value||'3',10);
   const proactive=!!document.getElementById('setting-notif-proactive').checked;
+  const sound=!!document.getElementById('setting-notif-sound').checked;
   try {
     const r=await fetch('/api/settings/notifications',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({paused:paused,cap:cap,proactive:proactive})
+      method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({paused,cap,proactive,sound})
     });
     const d=await r.json();
     status.textContent=d.ok?'Saved ✓':'Save failed: '+(d.error||'unknown');
@@ -32400,7 +36713,7 @@ async function clearAllData(){
 }
 
 async function submitPairToken(){
-  const el = document.getElementById('setting-pair-token');
+  const el = document.getElementById('setting-device-code');
   const status = document.getElementById('pair-status');
   const code = (el ? el.value : '').trim().toUpperCase();
   if (code.length !== 8){
@@ -32420,6 +36733,37 @@ async function submitPairToken(){
       if (el) { el.value = ''; }
     } else {
       if (status) { status.textContent = (d.detail || 'Pairing failed'); status.style.color='rgba(232,90,110,0.8)'; }
+    }
+  } catch(e){
+    if (status) { status.textContent='Network error'; status.style.color='rgba(232,90,110,0.8)'; }
+  }
+}
+
+async function verifyDmCode(){
+  const el = document.getElementById('setting-dm-code');
+  const status = document.getElementById('dm-code-status');
+  const code = (el ? el.value : '').trim();
+  if (code.length !== 6 || !/^\d{6}$/.test(code)){
+    if (status) { status.textContent='Code must be 6 digits'; status.style.color='rgba(232,90,110,0.8)'; }
+    return;
+  }
+  if (status) { status.textContent='Verifying...'; status.style.color='rgba(93,78,109,0.5)'; }
+  try {
+    const r = await fetch('/api/instagram/verify_dm_code', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      credentials: 'include',
+      body: JSON.stringify({code})
+    });
+    const d = await r.json();
+    if (r.ok && d.ok){
+      if (status) { status.textContent=d.message || ('Linked @'+d.handle+'!'); status.style.color='rgba(76,175,80,0.8)'; }
+      if (el) { el.value = ''; }
+      // Update the Instagram handle field too
+      const igInput = document.getElementById('setting-ig-handle');
+      if (igInput && d.handle) { igInput.value = d.handle; }
+    } else {
+      if (status) { status.textContent = (d.error || 'Verification failed'); status.style.color='rgba(232,90,110,0.8)'; }
     }
   } catch(e){
     if (status) { status.textContent='Network error'; status.style.color='rgba(232,90,110,0.8)'; }
@@ -32475,6 +36819,107 @@ async function enrollVoice(){
     status.style.color = 'rgba(232,90,110,0.8)';
     btn.disabled = false;
     btn.textContent = 'Enroll Voice (5s)';
+  }
+}
+
+// ─── Face Registration (webcam capture → /api/face/register) ───
+let _faceRegStream = null;
+
+function checkFaceStatus(){
+  fetch('/api/face/status').then(r=>r.json()).then(d=>{
+    const el=document.getElementById('faceRegStatus');
+    if(!el) return;
+    if(d.ok && d.registered){
+      el.innerHTML='✅ <b>Registered</b> — '+d.count+' face(s) linked to your account';
+      el.style.color='#4a8';
+    } else {
+      el.textContent='Not registered — click Register to link your face';
+      el.style.color='rgba(93,78,109,0.5)';
+    }
+  }).catch(()=>{});
+}
+
+async function registerFace(){
+  const msg=document.getElementById('faceRegMsg');
+  const video=document.getElementById('faceRegVideo');
+  const canvas=document.getElementById('faceRegCanvas');
+  const preview=document.getElementById('faceRegPreview');
+  if(!msg||!video||!canvas) return;
+
+  try {
+    msg.textContent='Opening webcam...';
+    msg.style.color='rgba(93,78,109,0.5)';
+    _faceRegStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:640,height:480}});
+    video.srcObject=_faceRegStream;
+    video.style.display='block';
+    preview.style.display='none';
+    msg.textContent='Face clearly in frame, then click Register Face again...';
+
+    // Second click → capture + submit
+    const btn=document.getElementById('btnFaceReg');
+    if(btn){
+      const origText=btn.textContent;
+      btn.textContent='📸 Capture & Register';
+      btn.onclick=async function captureAndRegister(){
+        btn.disabled=true;
+        btn.textContent='Registering...';
+        try {
+          canvas.width=video.videoWidth;
+          canvas.height=video.videoHeight;
+          const ctx=canvas.getContext('2d');
+          ctx.drawImage(video,0,0);
+          const dataUrl=canvas.toDataURL('image/jpeg',0.85);
+          const b64=dataUrl.split(',')[1];
+          // Stop camera
+          _faceRegStream.getTracks().forEach(t=>t.stop());
+          video.style.display='none';
+          preview.src=dataUrl;
+          preview.style.display='block';
+          // Send to server
+          const res=await fetch('/api/face/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image_b64:b64})});
+          const data=await res.json();
+          if(data.ok){
+            msg.innerHTML='✅ Face registered! ('+data.name+', '+data.faces+' total)';
+            msg.style.color='#4a8';
+            checkFaceStatus();
+          } else {
+            msg.textContent='❌ '+data.error;
+            msg.style.color='rgba(232,90,110,0.8)';
+          }
+        } catch(e){
+          msg.textContent='❌ Capture failed: '+e.message;
+          msg.style.color='rgba(232,90,110,0.8)';
+        }
+        btn.disabled=false;
+        btn.textContent='Register Face';
+        btn.onclick=registerFace;
+      };
+    }
+  } catch(e){
+    msg.textContent='❌ Webcam access denied or unavailable';
+    msg.style.color='rgba(232,90,110,0.8)';
+    video.style.display='none';
+  }
+}
+
+async function unregisterFace(){
+  const msg=document.getElementById('faceRegMsg');
+  if(!msg) return;
+  try {
+    const res=await fetch('/api/face/unregister',{method:'DELETE'});
+    const data=await res.json();
+    if(data.ok){
+      msg.textContent='✅ Face data removed from your account';
+      msg.style.color='#4a8';
+      document.getElementById('faceRegPreview').style.display='none';
+      checkFaceStatus();
+    } else {
+      msg.textContent='❌ '+data.error;
+      msg.style.color='rgba(232,90,110,0.8)';
+    }
+  } catch(e){
+    msg.textContent='❌ Request failed';
+    msg.style.color='rgba(232,90,110,0.8)';
   }
 }
 
@@ -32779,14 +37224,15 @@ async function sendStreamingReply(text){
               playAudio(evt.audio_id);
               _lastPollAudioId = evt.audio_id;
             }else if(evt.type==='error'){
-              const errMsg = evt.error || 'Something went wrong.';
-              contentEl.textContent='⚠️ '+errMsg;
-              contentEl.style.color='#8b2222';
-              contentEl.style.background='rgba(239,68,68,0.08)';
+              const _errPhrases=['Sorry about that — something went sideways on my end.','Hmm, that didn\'t go through. Let me try again in a sec.','Oops, I hit a snag. Give me another shot.','Something went wrong on my side. I\'m looking into it.'];
+              const _errMsg=_errPhrases[Math.floor(Math.random()*_errPhrases.length)];
+              contentEl.textContent=_errMsg;
+              contentEl.style.color='#5d4e6d';
+              contentEl.style.background='rgba(139,122,158,0.08)';
               contentEl.style.padding='8px 12px';
               contentEl.style.borderRadius='8px';
-              contentEl.style.border='1px solid rgba(239,68,68,0.2)';
-              displaySpeech('Sorry, something went wrong.');
+              contentEl.style.border='1px solid rgba(139,122,158,0.2)';
+              displaySpeech(_errMsg);
 
             // ── AGENT EVENTS ─────────────────────────────────────────
             }else if(evt.type==='plan'){
@@ -32922,8 +37368,10 @@ async function sendStreamingReply(text){
         }
       }
      }catch(e2){
-      contentEl.textContent='Network error. Try again.';
-      displaySpeech('Network error. Try again.');
+      const _netPhrases=['Hang on — I\'m having a little trouble connecting. One sec.','Just a moment, my connection flickered. I\'ll be right back.','Give me a beat — network hiccup. I\'m sorting it out.','Oops, brief outage on my end. Hold tight, I\'m almost there.'];
+      const _netMsg=_netPhrases[Math.floor(Math.random()*_netPhrases.length)];
+      contentEl.textContent=_netMsg;
+      displaySpeech(_netMsg);
     }
     isStreaming=false;
   }
@@ -33088,9 +37536,6 @@ function recordMicChunk(){
   if(!browserMicActive||!browserMicStream)return;
   if(_micRecording)return;
   if(lillySpeaking){if(browserMicActive)setTimeout(recordMicChunk,500);return}
-  // Without voice fingerprint, mic records but won't transcribe — prevents
-  // ambient noise from appearing as user messages in chat.
-  if(!voiceFingerprint){if(browserMicActive)setTimeout(recordMicChunk,1000);return}
   _micRecording=true;
   const opts={mimeType:'audio/webm;codecs=opus'};
   if(!MediaRecorder.isTypeSupported(opts.mimeType))delete opts.mimeType;
@@ -33105,10 +37550,6 @@ function recordMicChunk(){
     const audioCtx=new(window.AudioContext||window.webkitAudioContext)();
     try{
       const decoded=await audioCtx.decodeAudioData(arrayBuf);
-      if(!isMyVoice(decoded)){
-        if(browserMicActive)setTimeout(recordMicChunk,200);
-        audioCtx.close();return;
-      }
       const wavBuf=encodeWav(decoded);
       // Start recording the next chunk immediately (overlap recording with STT/LLM)
       // This pipelines the pipeline: while Whisper transcribes this chunk, the mic
@@ -33281,7 +37722,7 @@ function switchAvatarAnimated(newAvatar){
   selectedAvatar = newAvatar;
   localStorage.setItem('lilly_avatar', newAvatar);
 
-  // 2. Flash the avatar canvas — white burst then fade to new avatar
+  // 2. Flash the main avatar canvas — white burst then fade to new avatar
   const canvas = document.getElementById('avatarCanvas');
   if(canvas){
     canvas.style.transition = 'none';
@@ -33295,7 +37736,38 @@ function switchAvatarAnimated(newAvatar){
     });
   }
 
-  // 3. Pulse the chat header badge (shows new avatar name)
+  // 3. Flash the TOP-LEFT profile face — glow ring + scale bounce
+  const pfWrap = document.querySelector('#profileFace .pf-canvas-wrap');
+  if(pfWrap){
+    const meta2 = chatAvatarMeta(newAvatar);
+    const col = (meta2 && meta2.color) || '#c0b0d0';
+    pfWrap.style.transition = 'none';
+    pfWrap.style.boxShadow = 'inset 0 0 0 3px ' + col + ', 0 0 18px ' + col;
+    pfWrap.style.transform = 'scale(1.2)';
+    pfWrap.style.filter = 'brightness(1.8)';
+    requestAnimationFrame(()=>{
+      pfWrap.style.transition = 'box-shadow 0.8s ease-out, transform 0.6s cubic-bezier(0.34,1.56,0.64,1), filter 0.6s ease-out';
+      pfWrap.style.boxShadow = 'inset 0 0 0 2px rgba(255,255,255,0.7)';
+      pfWrap.style.transform = 'scale(1)';
+      pfWrap.style.filter = 'brightness(1)';
+      setTimeout(()=>{ pfWrap.style.transition = ''; }, 800);
+    });
+  }
+
+  // 4. Pulse the profile name text
+  const pfName = document.getElementById('profileName');
+  if(pfName){
+    pfName.style.transition = 'none';
+    pfName.style.transform = 'scale(1.3)';
+    pfName.style.color = '#8b6a9e';
+    requestAnimationFrame(()=>{
+      pfName.style.transition = 'transform 0.5s cubic-bezier(0.34,1.56,0.64,1), color 0.6s ease-out';
+      pfName.style.transform = 'scale(1)';
+      pfName.style.color = '#5d4e6d';
+    });
+  }
+
+  // 5. Pulse the chat header badge (shows new avatar name)
   const chatBadge = document.querySelector('.chat-avatar-badge, .chat-header-avatar');
   if(chatBadge){
     chatBadge.style.transition = 'none';
@@ -33307,34 +37779,105 @@ function switchAvatarAnimated(newAvatar){
   }
 }
 
-/* ═══ Automation event poller — surface REAL fired rules in the chat ═══
-   Polls the broker's audit trail and shows each automation that actually fired
-   as an inline notice (real data only — never fabricated). */
-let _lastAutoEventTs=0;
-async function pollAutomationEvents(){
-  try{
-    const r=await fetch('/api/broker/automations/events');
-    if(!r.ok)return;
-    const j=await r.json();
-    const evs=(j.events||[]).filter(e=>e&&e.ts>_lastAutoEventTs);
-    if(evs.length){
-      _lastAutoEventTs=evs[0].ts;
-      for(let i=evs.length-1;i>=0;i--){ // newest first as a single combined notice
-        // only surface the newest to avoid spam
-        if(i>0)continue;
-        const ev=evs[i];
-        showMainChat();
-        const sys=document.createElement('div');
-        sys.className='chat-msg system';
-        sys.textContent='⚡ Automation fired — '+ev.text+'';
-        chatMessages.appendChild(sys);
-        chatMessages.scrollTop=chatMessages.scrollHeight;
-      }
-    }
-  }catch(e){/* ignore transient errors */}
-  setTimeout(pollAutomationEvents,5000);
+function switchChatAvatar(newAvatar, el){
+  if(!newAvatar) return;
+  // Update local selection + localStorage
+  selectedAvatar = newAvatar;
+  localStorage.setItem('lilly_avatar', newAvatar);
+  // Update UI highlight
+  document.querySelectorAll('.chat-avatar-opt').forEach(o => {
+    o.classList.toggle('selected', o.dataset.avatar === newAvatar);
+    o.style.background = o.classList.contains('selected')
+      ? 'rgba(255,255,255,0.5)'
+      : 'rgba(255,255,255,0.3)';
+    o.style.borderColor = o.classList.contains('selected')
+      ? 'rgba(184,169,201,0.6)'
+      : 'rgba(184,169,201,0.2)';
+  });
+  // Update profile name
+  const meta = chatAvatarMeta(newAvatar);
+  const pn = document.getElementById('profileName');
+  if(pn) pn.textContent = (meta && meta.name) || 'Lilly';
+  // Tell the server to switch avatar for this session
+  fetch('/api/cmd', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text:'', avatar:newAvatar})
+  }).catch(()=>{});
+  // Animated transition
+  switchAvatarAnimated(newAvatar);
+  // Close settings panel
+  toggleSettings();
 }
-setTimeout(()=>{_lastAutoEventTs=Date.now()/1000;pollAutomationEvents();},4000);
+
+/* ═══ Active Chat Avatar Switcher (in Settings panel) ═══ */
+function initChatAvatarSwitcher(){
+  const saved = localStorage.getItem('lilly_avatar') || 'puppy';
+  document.querySelectorAll('.chat-avatar-opt').forEach(o => {
+    o.classList.toggle('selected', o.dataset.avatar === saved);
+    o.style.background = o.classList.contains('selected')
+      ? 'rgba(255,255,255,0.5)'
+      : 'rgba(255,255,255,0.3)';
+    o.style.borderColor = o.classList.contains('selected')
+      ? 'rgba(184,169,201,0.6)'
+      : 'rgba(184,169,201,0.2)';
+  });
+}
+
+function initChatAvatarSwitcher(){
+  const saved = localStorage.getItem('lilly_avatar') || 'puppy';
+  document.querySelectorAll('.chat-avatar-opt').forEach(o => {
+    o.classList.toggle('selected', o.dataset.avatar === saved);
+    o.style.background = o.classList.contains('selected')
+      ? 'rgba(255,255,255,0.5)'
+      : 'rgba(255,255,255,0.3)';
+    o.style.borderColor = o.classList.contains('selected')
+      ? 'rgba(184,169,201,0.6)'
+      : 'rgba(184,169,201,0.2)';
+  });
+  renderAvatarQuickPicker();
+}
+
+function renderAvatarQuickPicker(){
+  const grid = document.getElementById('avatarQuickPickerGrid');
+  if(!grid) return;
+  const saved = localStorage.getItem('lilly_avatar') || 'puppy';
+  const avatars = [
+    {key:'puppy',emoji:'🐶',name:'Lilly'},
+    {key:'fox',emoji:'🦊',name:'Fox'},
+    {key:'cat',emoji:'🐱',name:'Cat'},
+    {key:'bear',emoji:'🐻',name:'Bear'},
+    {key:'bunny',emoji:'🐰',name:'Bunny'},
+    {key:'owl',emoji:'🦉',name:'Owl'},
+    {key:'deer',emoji:'🦌',name:'Deer'},
+    {key:'wolf',emoji:'🐺',name:'Wolf'},
+    {key:'raccoon',emoji:'🦝',name:'Raccoon'}
+  ];
+  grid.innerHTML = '';
+  avatars.forEach(a => {
+    const card = document.createElement('div');
+    card.style.cssText = 'cursor:pointer;text-align:center;background:' + (a.key === saved ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.35)') + ';border:2px solid ' + (a.key === saved ? 'rgba(184,169,201,0.7)' : 'rgba(184,169,201,0.2)') + ';border-radius:12px;padding:10px 4px;transition:all 0.15s';
+    card.innerHTML = '<div style="font-size:26px">' + a.emoji + '</div><div style="font-size:10px;color:#5d4e6d;font-weight:600;margin-top:2px">' + a.name + '</div>';
+    card.onclick = function(){ switchChatAvatar(a.key); closeAvatarQuickPicker(); };
+    card.onmouseenter = function(){ this.style.transform = 'scale(1.08)'; this.style.borderColor = 'rgba(184,169,201,0.6)'; };
+    card.onmouseleave = function(){ this.style.transform = 'scale(1)'; this.style.borderColor = a.key === saved ? 'rgba(184,169,201,0.7)' : 'rgba(184,169,201,0.2)'; };
+    grid.appendChild(card);
+  });
+}
+
+function openAvatarQuickPicker(){
+  const picker = document.getElementById('avatarQuickPicker');
+  if(picker){ renderAvatarQuickPicker(); picker.style.display = 'block'; }
+}
+
+function closeAvatarQuickPicker(){
+  const picker = document.getElementById('avatarQuickPicker');
+  if(picker) picker.style.display = 'none';
+}
+
+/* ═══ Automation event poller — disabled ═══ */
+let _lastAutoEventTs=0;
+async function pollAutomationEvents(){}
 
 inputField.addEventListener('keydown',async(e)=>{
   if(e.key==='Enter'&&inputField.value.trim()){
@@ -34007,9 +38550,10 @@ async def serve_ui():
         content=HTML_PAGE,
         media_type="text/html",
         headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
             "Pragma": "no-cache",
             "Expires": "0",
+            "X-Content-Version": "2026.09.22",
         },
     )
 
@@ -34683,6 +39227,40 @@ async def serve_readme():
             "Cache-Control": "no-store, no-cache, must-revalidate",
             "Pragma": "no-cache",
             "Expires": "0",
+        },
+    )
+
+
+@app.get("/instagram-avatars")
+@app.get("/api/faq")
+async def serve_instagram_avatars_faq():
+    """Serve the Instagram Avatars FAQ & Abilities infographic."""
+    faq_path = Path(__file__).parent / "instagram_avatars_faq.html"
+    if not faq_path.exists():
+        return Response("Page not found", status_code=404, media_type="text/html")
+    content = faq_path.read_text(encoding="utf-8")
+    return Response(
+        content=content,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+        },
+    )
+
+
+@app.get("/playbook")
+@app.get("/api/playbook")
+async def serve_user_playbook():
+    """Serve the User Playbook — step-by-step guide for new users."""
+    pb_path = Path(__file__).parent / "user_playbook.html"
+    if not pb_path.exists():
+        return Response("Page not found", status_code=404, media_type="text/html")
+    content = pb_path.read_text(encoding="utf-8")
+    return Response(
+        content=content,
+        media_type="text/html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
         },
     )
 
@@ -35551,9 +40129,9 @@ async def get_settings(request: Request):
             "sensor_server_url", os.environ.get("SENSOR_SERVER_URL", "")
         ),
         "lilly_pair_token": s.get("lilly_pair_token", ""),
-        "proactive_notifications": s.get("proactive_notifications", True),
-        "notification_sound": s.get("notification_sound", True),
-        "pushbullet_fallback": s.get("pushbullet_fallback", False),
+        "proactive_notifications": _NOTIF_PREFS.get("proactive", True),
+        "notification_sound": _NOTIF_PREFS.get("sound", True),
+        "pushbullet_fallback": _NOTIF_PREFS.get("pushbullet_fallback", False),
         "notif_paused": _NOTIF_PREFS.get("paused", False),
         "notif_daily_cap": _NOTIF_PREFS.get("daily_cap", 3),
     }
@@ -35655,7 +40233,8 @@ async def clear_settings(request: Request):
 
 @app.post("/api/settings/notifications")
 async def save_notification_prefs(request: Request):
-    """Save Alpha-notification prefs: paused toggle, daily cap, proactive switch.
+    """Save Alpha-notification prefs: paused toggle, daily cap, proactive switch,
+    sound, and pushbullet_fallback.
 
     Disallowed notifications are dropped (never queued), so reactivating
     notifications never stockpiles a backlog.
@@ -35669,6 +40248,10 @@ async def save_notification_prefs(request: Request):
             _NOTIF_PREFS["paused"] = bool(body["paused"])
         if "proactive" in body:
             _NOTIF_PREFS["proactive"] = bool(body["proactive"])
+        if "sound" in body:
+            _NOTIF_PREFS["sound"] = bool(body["sound"])
+        if "pushbullet_fallback" in body:
+            _NOTIF_PREFS["pushbullet_fallback"] = bool(body["pushbullet_fallback"])
         if "cap" in body:
             try:
                 _NOTIF_PREFS["daily_cap"] = max(0, int(body["cap"]))
@@ -37283,6 +41866,18 @@ async def _alpha_expire_projects():
                 except Exception:
                     pass
             _PROJECT_EXPIRY.pop(slug, None)
+
+
+@app.on_event("shutdown")
+async def _cancel_insta_dm_tasks():
+    """Stop the background DM loops on shutdown."""
+    global _INSTA_DM_TASKS
+    for t in _INSTA_DM_TASKS:
+        try:
+            t.cancel()
+        except Exception:
+            pass
+    _INSTA_DM_TASKS = []
 
 
 def _rank_github_suggestions(candidates: list, query: str, language: str) -> list:
@@ -39058,3 +43653,322 @@ async def serve_alpha_popout():
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
+
+# ── Cross-Avatar DM Endpoints ──────────────────────────────────────────
+
+@app.post("/api/insta/dm/cross-avatar")
+async def api_cross_avatar_dm(payload: dict):
+    """Send a DM from one avatar to another avatar."""
+    from_avatar = payload.get("from_avatar", "puppy")
+    to_avatar = payload.get("to_avatar", "fox")
+    topic = payload.get("topic", "")
+    
+    if from_avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {from_avatar}"}
+    if to_avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {to_avatar}"}
+    
+    team = InstagramTeam()
+    result = await team.send_cross_avatar_dm(from_avatar, to_avatar, topic)
+    return result
+
+@app.post("/api/insta/dm/broadcast")
+async def api_team_broadcast(payload: dict):
+    """Broadcast a message from one avatar to all others."""
+    from_avatar = payload.get("from_avatar", "puppy")
+    message = payload.get("message", "")
+    exclude = payload.get("exclude", [])
+    
+    if from_avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {from_avatar}"}
+    
+    team = InstagramTeam()
+    result = await team.team_broadcast(from_avatar, message, exclude)
+    return result
+
+@app.post("/api/insta/dm/route")
+async def api_route_dm(payload: dict):
+    """Route an incoming DM: answer if in domain, delegate if better suited."""
+    avatar = payload.get("avatar", "puppy")
+    thread_id = payload.get("thread_id", "")
+    sender = payload.get("sender", "")
+    text = payload.get("text", "")
+    
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    
+    team = InstagramTeam()
+    result = await team.route_and_handle_dm(avatar, thread_id, sender, text)
+    return result
+
+@app.post("/api/insta/dm/auto-reply")
+async def api_auto_reply(payload: dict):
+    """Auto-reply to all incoming DMs using delegation logic."""
+    avatar = payload.get("avatar", "puppy")
+    
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    
+    team = InstagramTeam()
+    inbox = await team.dm_read_inbox(avatar, limit=10)
+    
+    if not inbox.get("ok"):
+        return inbox
+    
+    results = []
+    for thread in inbox.get("threads", []):
+        # Check for new messages from others
+        for msg in thread.get("messages", []):
+            if not msg.get("is_own") and msg.get("text"):
+                # This is an incoming message - route and handle
+                result = await team.route_and_handle_dm(
+                    avatar, 
+                    thread["thread_id"], 
+                    msg["sender"], 
+                    msg["text"]
+                )
+                results.append(result)
+    
+    return {"ok": True, "avatar": avatar, "processed": len(results), "results": results}
+
+@app.get("/api/insta/dm/avatars")
+async def api_dm_avatars():
+    """Get list of all avatar Instagram handles."""
+    avatars = {}
+    for key, persona in AVATAR_INSTA_PERSONAS.items():
+        avatars[key] = {
+            "name": persona["name"],
+            "emoji": persona["emoji"],
+            "handle": persona.get("ig_handle", ""),
+            "role": persona["role"],
+        }
+    return {"ok": True, "avatars": avatars}
+
+@app.post("/api/insta/dm/{avatar}/inbox")
+async def api_dm_inbox(avatar: str, payload: dict = None):
+    """Read DM inbox for an avatar."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    
+    limit = (payload or {}).get("limit", 20)
+    team = InstagramTeam()
+    return await team.dm_read_inbox(avatar, limit)
+
+@app.post("/api/insta/dm/{avatar}/send")
+async def api_dm_send(avatar: str, payload: dict):
+    """Send a DM from an avatar."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    
+    to_username = payload.get("to_username", "")
+    text = payload.get("text", "")
+    
+    team = InstagramTeam()
+    return await team.dm_send(avatar, to_username, text)
+
+@app.post("/api/insta/dm/{avatar}/reply")
+async def api_dm_reply(avatar: str, payload: dict):
+    """Reply to a DM thread."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    
+    thread_id = payload.get("thread_id", "")
+    text = payload.get("text", "")
+    
+    team = InstagramTeam()
+    return await team.dm_respond(avatar, thread_id, text)
+
+@app.post("/api/insta/dm/{avatar}/proactive")
+async def api_dm_proactive(avatar: str, payload: dict):
+    """Send a proactive DM from an avatar to another avatar."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    
+    to_avatar = payload.get("to_avatar", "puppy")
+    topic = payload.get("topic", "")
+    
+    team = InstagramTeam()
+    return await team.send_cross_avatar_dm(avatar, to_avatar, topic)
+
+@app.post("/api/insta/dm/{avatar}/thread/{thread_id}")
+async def api_dm_thread(avatar: str, thread_id: str, payload: dict):
+    """Reply to a specific DM thread."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    
+    text = payload.get("text", "")
+    
+    team = InstagramTeam()
+    return await team.dm_respond(avatar, thread_id, text)
+
+
+# ── DM Read Receipts & Chat Endpoints ──────────────────────────────────
+
+@app.post("/api/insta/dm/{avatar}/mark-seen")
+async def api_dm_mark_seen(avatar: str, payload: dict):
+    """Mark a DM thread or message as seen (blue tick)."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    thread_id = payload.get("thread_id", "")
+    message_id = payload.get("message_id")
+    team = InstagramTeam()
+    return await team.dm_mark_seen(avatar, thread_id, message_id)
+
+@app.post("/api/insta/dm/{avatar}/mark-unread")
+async def api_dm_mark_unread(avatar: str, payload: dict):
+    """Mark a DM thread as unread."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    thread_id = payload.get("thread_id", "")
+    team = InstagramTeam()
+    return await team.dm_mark_unread(avatar, thread_id)
+
+@app.post("/api/insta/dm/{avatar}/chat")
+async def api_dm_chat(avatar: str, payload: dict):
+    """Get full chat thread with message statuses."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    thread_id = payload.get("thread_id", "")
+    limit = payload.get("limit", 50)
+    team = InstagramTeam()
+    return await team.dm_chat(avatar, thread_id, limit)
+
+@app.post("/api/insta/dm/{avatar}/auto-read")
+async def api_dm_auto_read(avatar: str, payload: dict):
+    """Simulate human reading: wait random time, then mark seen."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    thread_id = payload.get("thread_id", "")
+    delay_range = tuple(payload.get("delay_range", [15, 90]))
+    team = InstagramTeam()
+    return await team.dm_auto_read(avatar, thread_id, delay_range)
+
+@app.post("/api/insta/dm/{avatar}/respond-receipt")
+async def api_dm_respond_receipt(avatar: str, payload: dict):
+    """Send reply with human-like delays and read receipts."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    thread_id = payload.get("thread_id", "")
+    text = payload.get("text", "")
+    team = InstagramTeam()
+    return await team.dm_respond_with_receipt(avatar, thread_id, text)
+
+@app.post("/api/insta/dm/{avatar}/inbox-status")
+async def api_dm_inbox_status(avatar: str, payload: dict = None):
+    """Get inbox with message status indicators (unread/read badges)."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    limit = (payload or {}).get("limit", 20)
+    team = InstagramTeam()
+    return await team.dm_inbox_with_status(avatar, limit)
+
+@app.post("/api/insta/dm/{avatar}/route-reply")
+async def api_dm_route_reply(avatar: str, payload: dict):
+    """Route an incoming DM: read it, answer if in domain, delegate if better suited."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    thread_id = payload.get("thread_id", "")
+    sender = payload.get("sender", "")
+    text = payload.get("text", "")
+    team = InstagramTeam()
+    
+    # Read the message first (mark as seen)
+    await team.dm_mark_seen(avatar, thread_id)
+    
+    # Generate and send reply
+    result = await team.handle_dm_with_delegation(avatar, sender, text)
+    
+    if result.get("ok"):
+        # Send with human-like delay
+        send_result = await team.dm_respond_with_receipt(avatar, thread_id, result["reply"])
+        result["sent"] = send_result.get("ok", False)
+        if result.get("delegated") and result.get("delegation_message"):
+            import asyncio
+            await asyncio.sleep(3)  # Small delay between messages
+            await team.dm_respond_with_receipt(avatar, thread_id, result["delegation_message"])
+    
+    return result
+
+@app.get("/api/insta/dm/{avatar}/all-chats")
+async def api_dm_all_chats(avatar: str, limit: int = 20):
+    """Get all DM threads with full chat history and read status."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    team = InstagramTeam()
+    inbox = await team.dm_inbox_with_status(avatar, limit)
+    
+    if not inbox.get("ok"):
+        return inbox
+    
+    # Enrich each thread with full chat
+    for thread in inbox.get("threads", []):
+        chat_result = await team.dm_chat(avatar, thread["thread_id"], limit=20)
+        if chat_result.get("ok"):
+            thread["messages"] = chat_result.get("messages", [])
+    
+    return inbox
+
+@app.post("/api/insta/dm/{avatar}/auto-reply-all")
+async def api_dm_auto_reply_all(avatar: str, payload: dict = None):
+    """Auto-reply to all unread DMs with delegation and read receipts."""
+    if avatar not in AVATAR_INSTA_PERSONAS:
+        return {"ok": False, "error": f"Unknown avatar: {avatar}"}
+    
+    team = InstagramTeam()
+    inbox = await team.dm_inbox_with_status(avatar, limit=10)
+    
+    if not inbox.get("ok"):
+        return inbox
+    
+    results = []
+    import asyncio
+    
+    for thread in inbox.get("threads", []):
+        if thread.get("has_unseen"):
+            # Mark as seen first
+            await team.dm_mark_seen(avatar, thread["thread_id"])
+            
+            # Random delay before responding (simulates human)
+            await asyncio.sleep(random.randint(30, 120))
+            
+            # Get the last message
+            if thread.get("last_message", {}).get("text"):
+                sender = thread["last_message"]["sender"]
+                text = thread["last_message"]["text"]
+                
+                # Route and respond
+                result = await team.handle_dm_with_delegation(avatar, sender, text)
+                if result.get("ok"):
+                    send_result = await team.dm_respond_with_receipt(avatar, thread["thread_id"], result["reply"])
+                    result["sent"] = send_result.get("ok", False)
+                    results.append(result)
+    
+    return {"ok": True, "avatar": avatar, "replied": len(results), "results": results}
+
+
+@app.get("/api/insta/route/{question}")
+async def api_route_question(question: str, exclude: str = ""):
+    """Route a question to the best-suited avatar."""
+    team = InstagramTeam()
+    exclude_list = [a.strip() for a in exclude.split(",")] if exclude else []
+    
+    best_avatar, confidence = team._route_to_avatar(question)
+    
+    # If best avatar is excluded, find next best
+    if best_avatar in exclude_list:
+        for avatar in ["puppy", "fox", "cat", "bear", "bunny", "owl", "deer", "wolf", "raccoon"]:
+            if avatar not in exclude_list:
+                best_avatar = avatar
+                break
+    
+    persona = AVATAR_INSTA_PERSONAS.get(best_avatar, AVATAR_INSTA_PERSONAS["puppy"])
+    
+    return {
+        "ok": True,
+        "question": question,
+        "routed_to": best_avatar,
+        "confidence": confidence,
+        "avatar_name": persona["name"],
+        "avatar_emoji": persona["emoji"],
+        "avatar_role": persona["role"],
+    }

@@ -340,6 +340,22 @@ def _unpublish_crop(public_url: str | None):
         pass
 
 
+_ADULT_TERMS = {
+    "adult", "porn", "xxx", "nsfw", "explicit", "erotic", "pornography",
+    "nude", "naked", "hot", "sexy", "18+", "18 plus", "adults",
+    "mp4", "hd", "stream", "tube", "clips", "free",
+    "pics", "gallery", "watch", "download",
+}
+def _is_adult_content(t: str) -> bool:
+    """Check if a string contains adult/movie content."""
+    lower = t.lower()
+    for term in _ADULT_TERMS:
+        if term.lower() in lower:
+            return True
+    if re.search(r"\b(xxx|hd|full|movie|mp4|stream|tube|clips)\b", lower) and len(re.findall(r"[a-z]+", lower)) >= 3:
+        return True
+    return False
+
 def _parse_yandex_html(html: str) -> list[dict]:
     """Parse Yandex images/search HTML for entity tags + similar titles."""
     _STOP = {
@@ -366,6 +382,40 @@ def _parse_yandex_html(html: str) -> list[dict]:
         "new",
         "end",
         "ht",
+        # adult content filter
+        "adult",
+        "porn",
+        "xxx",
+        "nsfw",
+        "explicit",
+        "18+",
+        "18 plus",
+        "adults",
+        "pornography",
+        "erotic",
+        "hot",
+        "sexy",
+        "nude",
+        "naked",
+        "mp4",
+        "hd",
+        "full",
+        "movie",
+        "movies",
+        "film",
+        "films",
+        "video",
+        "tube",
+        "clips",
+        "pics",
+        "images",
+        "picture",
+        "photos",
+        "gallery",
+        "free",
+        "stream",
+        "watch",
+        "download",
     }
 
     def _ok_name(t: str) -> bool:
@@ -373,7 +423,11 @@ def _parse_yandex_html(html: str) -> list[dict]:
         if len(words) < 2:
             return False
         content = [w for w in words if w.lower() not in _STOP and len(w) > 1]
-        return len(content) >= 2
+        if len(content) < 2:
+            return False
+        if _is_adult_content(t):
+            return False
+        return True
 
     out: list[dict] = []
     seen = set()
@@ -701,6 +755,8 @@ def _guess_name_from_title(title: str) -> str:
 # ── Step 2: identity → social accounts ──────────────────────────────────
 async def _discover_accounts(name: str, candidates: list[dict]) -> dict:
     """Run the OSINT/scrapidy stack for the candidate name; collect accounts."""
+    if _is_adult_content(name):
+        return {"name": None, "social_accounts": [], "report": "filtered adult content"}
     sources = [c.get("href") for c in candidates if c.get("href")]
     social_accounts: list[str] = []
     report = ""

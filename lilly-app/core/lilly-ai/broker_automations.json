@@ -1,0 +1,21 @@
+{
+  "rules": [
+    {
+      "id": "17896741",
+      "name": "Custom automation",
+      "enabled": true,
+      "topic": "",
+      "condition": {},
+      "action_type": "notify",
+      "action_payload": {
+        "targets": "#fall",
+        "qty": "30",
+        "speed": "3",
+        "follow": true,
+        "comment": true,
+        "story": true
+      },
+      "cooldown_seconds": 30.0
+    }
+  ]
+}

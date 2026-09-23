@@ -23,7 +23,8 @@ from auth0_server_python.auth_types import (
 from auth0_server_python.store.abstract import AbstractDataStore
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response, HTTPException
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse, JSONResponse, HTMLResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 load_dotenv()
 
@@ -65,7 +66,30 @@ class FastAPICookieStore(AbstractDataStore):
         if response is None:
             return
         data = state.model_dump() if hasattr(state, "model_dump") else state
-        is_https = APP_BASE_URL.startswith("https://")
+
+        # Detect actual request scheme — don't just trust APP_BASE_URL.
+        # When behind Cloudflare → cloudflared, the external URL is HTTPS
+        # but the backend receives HTTP. However, the *browser* still
+        # connects over HTTPS so Secure cookies are appropriate.
+        # BUT if the user hits the server directly via Tailscale (HTTP),
+        # Secure cookies won't be sent.  Check X-Forwarded-Proto (set by
+        # Cloudflare/nginx) or the request URL scheme to decide.
+        request = options.get("request") if options else None
+        is_https = False
+        if request:
+            # Cloudflare / nginx set X-Forwarded-Proto: https
+            fwd_proto = request.headers.get("x-forwarded-proto", "").lower()
+            if fwd_proto:
+                is_https = fwd_proto == "https"
+            else:
+                # No proxy header — check the actual request scheme
+                is_https = request.url.scheme == "https"
+        # NOTE: intentionally do NOT fall back to APP_BASE_URL here.
+        # APP_BASE_URL is the external HTTPS URL, but the backend may
+        # receive HTTP requests (e.g. via Tailscale direct access).
+        # Setting Secure on cookies when the request is HTTP means the
+        # browser won't send them back — breaking the Auth0 flow.
+
         response.set_cookie(
             key=self.cookie_name,
             value=self.encrypt(identifier, data),
@@ -83,12 +107,30 @@ class FastAPICookieStore(AbstractDataStore):
         try:
             request = options.get("request") if options else None
             if request is None:
+                logger.warning("CookieStore.get: no request in options")
                 return None
             encrypted = request.cookies.get(self.cookie_name)
             if not encrypted:
+                # Log all cookies received for debugging
+                all_cookies = dict(request.cookies)
+                logger.warning(
+                    "CookieStore.get: cookie '%s' not found. "
+                    "Available cookies: %s | URL: %s | Client: %s",
+                    self.cookie_name,
+                    list(all_cookies.keys()),
+                    getattr(request, "url", "unknown"),
+                    getattr(request.client, "host", "unknown")
+                    if request.client
+                    else "unknown",
+                )
                 return None
             return self.model.model_validate(self.decrypt(identifier, encrypted))
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "CookieStore.get: decrypt/model failed for '%s': %s",
+                self.cookie_name,
+                e,
+            )
             return None
 
     async def delete(self, identifier, options=None):
@@ -289,6 +331,37 @@ def user_permissions(user: Optional[Dict[str, Any]]) -> Dict[str, bool]:
     }
 
 
+# ─── Terms & Conditions helpers ──────────────────────────────
+
+
+def _terms_file(user_id: str) -> Path:
+    return get_user_file(user_id, "terms_accepted.json")
+
+
+def has_accepted_terms(user_id: str) -> bool:
+    path = _terms_file(user_id)
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+        return bool(data.get("accepted"))
+    except Exception:
+        return False
+
+
+def record_terms_acceptance(user_id: str):
+    path = _terms_file(user_id)
+    path.write_text(
+        json.dumps(
+            {
+                "accepted": True,
+                "accepted_at": datetime.utcnow().isoformat(),
+            },
+            indent=2,
+        )
+    )
+
+
 async def get_current_user(
     request: Request, response: Optional[Response] = None
 ) -> Optional[dict]:
@@ -471,11 +544,165 @@ async def calendar_list_events(
         return []
 
 
+# ─── Terms & Conditions HTML ─────────────────────────────────
+
+TERMS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terms & Conditions — Lilly AI</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0f;color:#e0e0e0;
+       min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .card{max-width:680px;width:100%;background:#12121a;border:1px solid #2a2a3a;border-radius:16px;
+        padding:40px;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+  .logo{text-align:center;margin-bottom:24px}
+  .logo span{font-size:48px}
+  h1{font-size:24px;font-weight:700;text-align:center;margin-bottom:8px;color:#fff}
+  .subtitle{text-align:center;color:#888;font-size:14px;margin-bottom:32px}
+  .section{margin-bottom:20px}
+  .section h2{font-size:15px;font-weight:600;color:#c0c0d0;margin-bottom:8px;
+              display:flex;align-items:center;gap:8px}
+  .section p,.section li{font-size:13px;line-height:1.7;color:#999}
+  .section ul{padding-left:18px;margin-top:6px}
+  .section li{margin-bottom:4px}
+  .badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:4px;
+         background:#1a2a1a;color:#4ade80;border:1px solid #2a4a2a}
+  .privacy-badge{background:#1a1a2a;color:#818cf8;border-color:#2a2a4a}
+  .divider{height:1px;background:#2a2a3a;margin:24px 0}
+  .checkbox-row{display:flex;align-items:flex-start;gap:10px;margin:20px 0}
+  .checkbox-row input{margin-top:3px;accent-color:#818cf8;width:16px;height:16px}
+  .checkbox-row label{font-size:13px;color:#bbb;line-height:1.5}
+  .btn{display:block;width:100%;padding:14px;border:none;border-radius:10px;font-size:15px;
+       font-weight:600;cursor:pointer;transition:all .2s;margin-top:16px}
+  .btn-primary{background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff}
+  .btn-primary:disabled{opacity:.4;cursor:not-allowed}
+  .btn-primary:not(:disabled):hover{filter:brightness(1.15);transform:translateY(-1px)}
+  .footer{text-align:center;margin-top:20px;font-size:11px;color:#555}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo"><span>💜</span></div>
+  <h1>Terms & Conditions</h1>
+  <p class="subtitle">Please review before continuing</p>
+
+  <div class="section">
+    <h2>🤖 What Lilly AI Does</h2>
+    <p>Lilly is a personal AI companion. She chats, learns your interests, manages reminders, and helps with daily tasks. Lilly may be configured to connect with third-party services you authorize (email, calendar, social accounts).</p>
+  </div>
+
+  <div class="section">
+    <h2>What Data Is Logged</h2>
+    <p>To provide a personalized experience, Lilly stores the following locally:</p>
+    <ul>
+      <li><strong>Conversation history</strong> — your messages and Lilly's responses, used to maintain context and memory.</li>
+      <li><strong>Interests & habits</strong> — topics you discuss, activity patterns, and preferences Lilly learns over time.</li>
+      <li><strong>User facts</strong> — things you tell Lilly to remember (name, preferences, location, etc.).</li>
+      <li><strong>Interaction metadata</strong> — timestamps, active hours, and engagement patterns to personalize responses.</li>
+      <li><strong>Notification content</strong> — phone notifications you choose to share, used for proactive suggestions.</li>
+      <li><strong>Camera frames</strong> — only when you explicitly ask Lilly to look at something; never recorded or stored.</li>
+      <li><strong>Instagram data</strong> — if you pair your Instagram, we may use session cookies to access public profile info, posts, and hashtags to learn your interests. This data stays local and is never shared.</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2><span class="badge">PRIVATE</span> Your Data Is Yours</h2>
+    <ul>
+      <li>All data is stored locally on the server you are connecting to.</li>
+      <li><strong>We do not sell, share, or transmit your data to third parties.</strong></li>
+      <li><strong>We do not use your data for advertising or profiling.</strong></li>
+      <li>You can request deletion of all your data at any time.</li>
+      <li>No data leaves your server unless you explicitly configure a third-party integration.</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2><span class="badge privacy-badge">NO SELLING</span> No Data Sales</h2>
+    <p>Your personal data — including conversations, interests, habits, and any information you share with Lilly — is <strong>never sold, licensed, or monetized</strong> in any form. There are no data brokers, no analytics resellers, and no advertising networks involved.</p>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="section">
+    <h2>⚖️ Acceptance Required</h2>
+    <p>By clicking "I Agree" below, you confirm that you have read and agree to these Terms & Conditions and the Data Privacy statement above. You must accept to use Lilly AI.</p>
+  </div>
+
+  <div class="checkbox-row">
+    <input type="checkbox" id="agree-check">
+    <label for="agree-check">I have read and agree to the Terms & Conditions and Privacy Policy</label>
+  </div>
+
+  <button class="btn btn-primary" id="agree-btn" disabled onclick="accept()">I Agree — Continue</button>
+
+  <div class="footer">
+    All data is stored locally and is never shared or sold.<br>
+    For questions, contact the server administrator.
+  </div>
+</div>
+
+<script>
+document.getElementById('agree-check').addEventListener('change', function() {
+  document.getElementById('agree-btn').disabled = !this.checked;
+});
+async function accept() {
+  const btn = document.getElementById('agree-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/terms/accept', {method:'POST'});
+    if (r.ok) { window.location.href = '/'; }
+    else { btn.textContent = 'Error — try again'; btn.disabled = false; }
+  } catch(e) { btn.textContent = 'Error — try again'; btn.disabled = false; }
+}
+</script>
+</body>
+</html>"""
+
+# ─── Terms gate middleware ─────────────────────────────────────
+# Redirects authenticated users to /terms if they haven't accepted yet.
+# Skips API endpoints, static assets, and the terms page itself.
+
+_TERMS_SKIP_PREFIXES = (
+    "/api/",
+    "/ws/",
+    "/static/",
+    "/favicon",
+    "/terms",
+    "/.well-known/",
+    "/openapi.json",
+    "/docs",
+    "/redoc",
+)
+
+
+class TermsGateMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if any(path.startswith(p) for p in _TERMS_SKIP_PREFIXES):
+            return await call_next(request)
+        try:
+            user = await get_current_user(request)
+            if user and not has_accepted_terms(user["id"]):
+                return RedirectResponse(url="/terms", status_code=302)
+        except Exception:
+            pass
+        return await call_next(request)
+
+
 # ─── Auth0 route factory ─────────────────────────────────────
 
 
 def add_auth0_routes(app: FastAPI):
     """Attach /api/auth0/* and /api/auth/* endpoints to a FastAPI app."""
+
+    # NOTE: TermsGateMiddleware must NOT be registered here. add_middleware()
+    # raises RuntimeError once the app has started (this factory is invoked
+    # from the lifespan startup). The middleware is registered alongside
+    # CORSMiddleware at import time in lilly_ai.py instead.
 
     @app.get("/api/auth0/login")
     async def auth0_login(request: Request):
@@ -488,9 +715,35 @@ def add_auth0_routes(app: FastAPI):
             )
         client = get_client()
         resp = RedirectResponse(url="", status_code=302)
+
+        # Optional returnTo (e.g. ?returnTo=/training) so the user is dropped
+        # back where they started after login. Stashed in a short-lived cookie;
+        # deliberately NOT forwarded to Auth0 as an authorize param, and
+        # sanitised to a local path to avoid open-redirect.
+        params = dict(request.query_params)
+        return_to = (params.pop("returnTo", "") or "/")[:500]
+        if return_to and not return_to.startswith("/"):
+            return_to = "/"
+        if return_to != "/":
+            # Detect actual request scheme (same logic as FastAPICookieStore.set)
+            fwd_proto = request.headers.get("x-forwarded-proto", "").lower()
+            if fwd_proto:
+                is_https = fwd_proto == "https"
+            else:
+                is_https = request.url.scheme == "https"
+            resp.set_cookie(
+                key="_a0_return",
+                value=return_to,
+                httponly=True,
+                samesite="none" if is_https else "lax",
+                secure=is_https,
+                max_age=600,
+                path="/",
+            )
+
         url = await client.start_interactive_login(
             options=StartInteractiveLoginOptions(
-                authorization_params=dict(request.query_params),
+                authorization_params=params,
             ),
             store_options={"request": request, "response": resp},
         )
@@ -503,6 +756,14 @@ def add_auth0_routes(app: FastAPI):
             return JSONResponse(
                 status_code=503, content={"error": "Auth0 not configured"}
             )
+        # Diagnostic logging
+        all_cookies = dict(request.cookies)
+        logger.warning(
+            "Auth0 callback: cookies=%s, url=%s, client=%s",
+            list(all_cookies.keys()),
+            str(request.url)[:200],
+            request.client.host if request.client else "unknown",
+        )
         resp = RedirectResponse(url="/", status_code=302)
         try:
             await get_client().complete_interactive_login(
@@ -524,13 +785,26 @@ def add_auth0_routes(app: FastAPI):
             return JSONResponse(
                 status_code=400, content={"error": f"Auth0 callback failed: {err_msg}"}
             )
+        # Drop the user back where they started (default "/"), e.g. /training.
+        # But first check terms acceptance — gate behind /terms on first login.
+        try:
+            user = await get_current_user(request, resp)
+            if user and not has_accepted_terms(user["id"]):
+                resp.headers["location"] = "/terms"
+                return resp
+            return_to = request.cookies.get("_a0_return")
+            if return_to and return_to.startswith("/"):
+                resp.headers["location"] = return_to
+            resp.delete_cookie("_a0_return", path="/")
+        except Exception:
+            pass
         return resp
 
     @app.get("/api/auth0/logout")
     async def auth0_logout(request: Request):
         resp = RedirectResponse(url="", status_code=302)
         try:
-            url = await get_client().logout(
+            url = await client.logout(
                 options=LogoutOptions(return_to=APP_BASE_URL),
                 store_options={"request": request, "response": resp},
             )
@@ -538,6 +812,25 @@ def add_auth0_routes(app: FastAPI):
             url = f"https://{AUTH0_DOMAIN}/v2/logout?returnTo={APP_BASE_URL}"
         resp.headers["location"] = url
         return resp
+
+    @app.get("/terms")
+    async def terms_page(request: Request):
+        user = await get_current_user(request)
+        if not user:
+            return RedirectResponse(
+                url="/api/auth0/login?returnTo=/terms", status_code=302
+            )
+        if has_accepted_terms(user["id"]):
+            return RedirectResponse(url="/", status_code=302)
+        return HTMLResponse(TERMS_HTML)
+
+    @app.post("/api/terms/accept")
+    async def terms_accept(request: Request):
+        user = await get_current_user(request)
+        if not user:
+            return JSONResponse(status_code=401, content={"error": "Not authenticated"})
+        record_terms_acceptance(user["id"])
+        return {"ok": True, "redirect": "/"}
 
     @app.get("/api/auth0/me")
     async def auth0_me(request: Request):

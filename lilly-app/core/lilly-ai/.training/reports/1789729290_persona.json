@@ -1,0 +1,49 @@
+{
+  "id": "1789729290_persona",
+  "type": "persona",
+  "started_at": 1789729290.7907195,
+  "ended_at": 1789729337.6999395,
+  "duration_s": 46.9,
+  "args": [
+    "refresh",
+    "persona",
+    "--epochs",
+    "155",
+    "--batch-size",
+    "14",
+    "--gpu"
+  ],
+  "data_sources": [
+    {
+      "name": "persona dialogue + backgrounds (trainer/dataset cache)",
+      "origin": "HuggingFace (persona-chat etc.) / trainer/persona_backgrounds.py",
+      "cache_dir": null,
+      "datasets_seen": []
+    }
+  ],
+  "what_trained": [
+    "all"
+  ],
+  "stats": {
+    "log": "/app/trainer/logs/persona_20260918_110130.log",
+    "avatars_in_log": [
+      "puppy"
+    ],
+    "datasets": [],
+    "steps_completed": null,
+    "losses": [],
+    "loss_first": null,
+    "loss_last": null,
+    "exported_gguf": false,
+    "errors": [],
+    "artifacts": {}
+  },
+  "outcome": "no model produced",
+  "confidence": {
+    "level": "low",
+    "score": 0,
+    "evidence": [
+      "no steps completed \u2014 run did not reach training (download/startup bottleneck?)"
+    ]
+  }
+}

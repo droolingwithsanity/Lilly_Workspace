@@ -239,8 +239,4 @@ public class LocalPhoneClient {
             Thread.currentThread().interrupt();
         }
     }
-
-    public String getCurrentServerUrl() {
-        return currentServerUrl;
-    }
 }

@@ -1,0 +1,52 @@
+{
+  "id": "1789676478_persona",
+  "type": "persona",
+  "started_at": 1789676478.6328895,
+  "ended_at": 1789676506.3328707,
+  "duration_s": 27.7,
+  "args": [
+    "start",
+    "persona",
+    "--epochs",
+    "155",
+    "--batch-size",
+    "14",
+    "--gpu",
+    "--avatar",
+    "puppy"
+  ],
+  "data_sources": [
+    {
+      "name": "persona dialogue + backgrounds (trainer/dataset cache)",
+      "origin": "HuggingFace (persona-chat etc.) / trainer/persona_backgrounds.py",
+      "cache_dir": null,
+      "datasets_seen": []
+    }
+  ],
+  "what_trained": [
+    "puppy"
+  ],
+  "stats": {
+    "log": "/app/trainer/logs/persona_20260917_202118.log",
+    "avatars_in_log": [],
+    "datasets": [],
+    "steps_completed": null,
+    "losses": [],
+    "loss_first": null,
+    "loss_last": null,
+    "exported_gguf": false,
+    "errors": [
+      "train_all_avatars.py: error: unrecognized arguments: --max-steps 155"
+    ],
+    "artifacts": {}
+  },
+  "outcome": "no model produced",
+  "confidence": {
+    "level": "low",
+    "score": -1,
+    "evidence": [
+      "1 error line in log",
+      "no steps completed \u2014 run did not reach training (download/startup bottleneck?)"
+    ]
+  }
+}

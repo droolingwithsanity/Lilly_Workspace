@@ -118,6 +118,17 @@ class YOLOSelfTrainer:
         self.detection_buffer: List[DetectionMetrics] = []
         self.max_buffer_size = 1000
 
+        # Live training progress (updated via ultralytics callbacks)
+        self.training_progress: Dict[str, Any] = {
+            "running": False,
+            "phase": "",
+            "epoch": 0,
+            "total_epochs": 0,
+            "loss": None,
+            "started_at": None,
+            "eta_seconds": None,
+        }
+
         # Performance tracking
         self.stats = PerformanceStats(
             total_detections=0,
@@ -530,6 +541,19 @@ class YOLOSelfTrainer:
         )
         self.current_job = job
 
+        # Reset live progress
+        self.training_progress.update(
+            {
+                "running": True,
+                "phase": "preparing",
+                "epoch": 0,
+                "total_epochs": job.epochs,
+                "loss": None,
+                "started_at": time.time(),
+                "eta_seconds": None,
+            }
+        )
+
         try:
             # Prepare dataset
             logger.info("Preparing dataset...")
@@ -544,6 +568,36 @@ class YOLOSelfTrainer:
             from ultralytics import YOLO
 
             model = YOLO(self.base_model)
+
+            # Live progress callback (fires at each epoch end)
+            self.training_progress["phase"] = "training"
+
+            def _on_train_epoch_end(trainer) -> None:
+                try:
+                    self.training_progress["epoch"] = int(
+                        getattr(trainer, "epoch", 0) or 0
+                    )
+                    self.training_progress["total_epochs"] = int(
+                        getattr(trainer, "epochs", job.epochs) or job.epochs
+                    )
+                    m = getattr(trainer, "metrics", None) or {}
+                    loss = None
+                    for k in ("train/box_loss", "loss", "train/loss"):
+                        if m.get(k) is not None:
+                            loss = float(m[k])
+                            break
+                    if loss is not None:
+                        self.training_progress["loss"] = round(loss, 4)
+                        self.training_progress["phase"] = f"training (loss {loss:.3f})"
+                    else:
+                        self.training_progress["phase"] = "training"
+                except Exception:
+                    pass
+
+            try:
+                model.add_callback("on_train_epoch_end", _on_train_epoch_end)
+            except Exception:
+                pass
 
             # Train
             logger.info(f"Starting training: {job.epochs} epochs")
@@ -566,6 +620,7 @@ class YOLOSelfTrainer:
 
             # Evaluate model
             logger.info("Evaluating trained model...")
+            self.training_progress["phase"] = "evaluating"
             eval_results = model.val()
 
             job.metrics = {
@@ -577,6 +632,9 @@ class YOLOSelfTrainer:
 
             job.status = TrainingStatus.IDLE
             self.status = TrainingStatus.IDLE
+            self.training_progress.update(
+                {"running": False, "phase": "complete", "epoch": job.epochs}
+            )
 
             # Save job to database
             self._save_training_job(job)
@@ -587,6 +645,9 @@ class YOLOSelfTrainer:
             job.status = TrainingStatus.ERROR
             job.error = str(e)
             self.status = TrainingStatus.ERROR
+            self.training_progress.update(
+                {"running": False, "phase": "error", "epoch": 0}
+            )
             logger.error(f"Training failed: {e}")
 
         self.current_job = job

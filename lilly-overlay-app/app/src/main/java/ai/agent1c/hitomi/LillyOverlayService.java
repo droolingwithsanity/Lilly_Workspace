@@ -421,7 +421,10 @@ public class LillyOverlayService extends Service {
             }
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                Log.e("LillyWebView", "Error loading " + request.getUrl() + ": " + error.getDescription());
+                String description = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                        ? error.getDescription().toString()
+                        : error.toString();
+                Log.e("LillyWebView", "Error loading " + request.getUrl() + ": " + description);
             }
         });
 

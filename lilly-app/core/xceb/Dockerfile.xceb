@@ -1,0 +1,45 @@
+###############################################
+# XCEB — Face + OSINT Evidence Broker
+# Build context: lilly-app/  (dockerfile: core/xceb/Dockerfile.xceb)
+#
+# Standalone FastAPI service for autonomous reverse-face search, constrained
+# FAISS face index ("faces file"), dossier profiles, and the sleep-window
+# scheduler. Reuses the shared SCRFD + ArcFace models from data/lilly/models.
+###############################################
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl libgl1 libglib2.0-0 && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Core deps
+RUN pip install --no-cache-dir \
+    fastapi uvicorn python-multipart \
+    httpx \
+    numpy \
+    opencv-python-headless \
+    faiss-cpu \
+    onnxruntime
+
+# Optional: stealth fetch tier (scrapling) — if it fails to resolve, the
+# httpx + curl paths in xceb_core.stealth_fetch still work fine.
+RUN pip install --no-cache-dir scrapling 2>/dev/null || echo "scrapling optional — skipping"
+
+# XCEB broker code (xceb_core/faces/engines/agents/pipeline/profile/graph/
+# scheduler/server) + the vendored SCRFD/ArcFace engine (top-level import).
+COPY core/xceb/xceb_*.py /app/
+COPY core/xceb/lib/face_recognition_engine.py /app/face_recognition_engine.py
+
+# Vision crops are small (256px) — relax the SCRFD detector floor so faces
+# still embed. The main vision container keeps its own SCRFD_CONF=0.5.
+ENV SCRFD_CONF=0.15 \
+    FACES_DIR=/app/data/faces
+
+# Web dashboard that ships with the server
+COPY core/xceb/xceb.html /app/xceb.html
+
+EXPOSE 8200
+
+CMD ["python3", "xceb_server.py"]

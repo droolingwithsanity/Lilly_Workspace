@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <defs><linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color:#87CEEB"/><stop offset="60%" style="stop-color:#98FB98"/><stop offset="100%" style="stop-color:#228B22"/></linearGradient></defs>
+  <rect width="400" height="400" fill="url(#bg)"/>
+  <circle cx="320" cy="60" r="40" fill="#FFD700" opacity="0.9"/>
+  <polygon points="100,350 130,200 160,350" fill="#2E8B57"/>
+  <polygon points="180,350 220,150 260,350" fill="#3CB371"/>
+  <polygon points="260,350 290,220 320,350" fill="#228B22"/>
+  <text x="200" y="380" text-anchor="middle" font-family="Georgia" font-size="20" fill="#fff">nature walk 🌿</text>
+</svg>

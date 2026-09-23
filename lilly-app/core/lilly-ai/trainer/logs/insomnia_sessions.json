@@ -1,0 +1,118 @@
+{
+  "id": "1789879271",
+  "running": false,
+  "stopped": false,
+  "finished": true,
+  "finish_reason": "No launch capability on the phone (am / termux-open-url unavailable)",
+  "started": 1789879271.317509,
+  "elapsed": 3.2515625953674316,
+  "current": "idle",
+  "counts": {
+    "likes": 0,
+    "follows": 0,
+    "comments": 0,
+    "stories_watched": 0,
+    "targets_opened": 0,
+    "profiles_interacted": 0,
+    "errors": 3,
+    "blocked_indicators": 0
+  },
+  "block_detection": {
+    "empty_profile": {
+      "curr": 0,
+      "threshold": 5
+    },
+    "action_blocked": {
+      "curr": 0,
+      "threshold": 3
+    },
+    "target_open_fail": {
+      "curr": 0,
+      "threshold": 5
+    }
+  },
+  "blocked": false,
+  "source_state": {},
+  "speed_mbps": 0.0,
+  "caps": {
+    "am": false,
+    "pm": false,
+    "termux_open_url": false,
+    "uiautomator": false,
+    "a11y": false,
+    "a11y_reason": "bridge up but accessibility service not enabled on the phone",
+    "a11y_foreground": null,
+    "mode": "intent"
+  },
+  "config": {
+    "speed": "1",
+    "follow": true,
+    "comment": true,
+    "story": true,
+    "interact": "#AI",
+    "likes_count": "30",
+    "follow_percentage": 100,
+    "comment_percentage": 100,
+    "comments_list": [
+      "great post!",
+      "love this angle",
+      "save-worthy",
+      "this made my day"
+    ],
+    "stories_count": 1,
+    "log_file": "/app/trainer/logs/insomnia_20260920_044111.log",
+    "registry_file": "/app/trainer/logs/insomnia_sessions.json"
+  },
+  "log": [
+    {
+      "t": 1789879271.3190541,
+      "s": "idle",
+      "m": "Probing phone Termux capabilities..."
+    },
+    {
+      "t": 1789879271.3405423,
+      "s": "idle",
+      "m": "shell error: too many values to unpack (expected 2)"
+    },
+    {
+      "t": 1789879271.3405972,
+      "s": "idle",
+      "m": "capability am: unavailable"
+    },
+    {
+      "t": 1789879271.3471365,
+      "s": "idle",
+      "m": "shell error: too many values to unpack (expected 2)"
+    },
+    {
+      "t": 1789879271.34718,
+      "s": "idle",
+      "m": "capability pm: unavailable"
+    },
+    {
+      "t": 1789879271.3537529,
+      "s": "idle",
+      "m": "shell error: too many values to unpack (expected 2)"
+    },
+    {
+      "t": 1789879271.3538003,
+      "s": "idle",
+      "m": "capability termux_open_url: unavailable"
+    },
+    {
+      "t": 1789879271.4329445,
+      "s": "idle",
+      "m": "a11y bridge: not enabled foreground=None"
+    },
+    {
+      "t": 1789879271.4330006,
+      "s": "idle",
+      "m": "driver mode: intent (deep-link only \u2014 enable the overlay accessibility service for tap mode)"
+    },
+    {
+      "t": 1789879271.4330332,
+      "s": "idle",
+      "m": "No launch capability on the phone (am / termux-open-url unavailable)"
+    }
+  ]
+}

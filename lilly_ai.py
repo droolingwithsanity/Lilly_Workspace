@@ -9292,21 +9292,6 @@ async def notification_monitor_loop():
                             announcement += f" — {title}"
                     follow_up = "Let me know if you want it opened."
 
-                elif app_key == "desk":
-                    if ticket_id:
-                        announcement = f"{addr}ticket {ticket_id}"
-                        if content:
-                            spoken_content = re.sub(
-                                r"https?://\S+", "", content
-                            ).strip()
-                            if spoken_content:
-                                announcement += f" — {spoken_content}"
-                    else:
-                        announcement = f"{addr}new support ticket"
-                        if title:
-                            announcement += f" — {title}"
-                    follow_up = "Let me know if you want it opened."
-
                 elif app_key == "gmail":
                     if sender:
                         announcement = f"{addr}email from {sender}"
@@ -14464,6 +14449,36 @@ def _run_dual_detection(frame) -> list[dict]:
     return merged
 
 
+def _apply_vision_class_filter(detections: list) -> list:
+    """Drop detections whose class is toggled OFF in the admin training console.
+
+    Reads vision_class_config.json ({"classes": {<class>: bool}, "default": bool}).
+    Absent keys follow "default" (on by default), so new classes always appear.
+    """
+    try:
+        cfg_path = WORKSPACE / "vision_class_config.json"
+        if not cfg_path.exists():
+            return detections
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        toggles = cfg.get("classes", {}) or {}
+        if not toggles:
+            return detections
+        default = bool(cfg.get("default", True))
+        kept = []
+        for d in detections:
+            label = str(d.get("label") or "").strip().lower()
+            if not label:
+                kept.append(d)  # no label — can't be toggled off
+            elif label in toggles:
+                if toggles[label]:
+                    kept.append(d)
+            elif default:
+                kept.append(d)
+        return kept
+    except Exception:
+        return detections
+
+
 async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
     """Run object detection on a JPEG frame, return labeled JPEG + detections."""
     global _YOLO_MODEL
@@ -14508,6 +14523,9 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
                         "y2": y2,
                     }
                 )
+
+            # Admin class toggles: drop classes switched OFF in the training console
+            detections = _apply_vision_class_filter(detections)
 
             if frame is not None and cv2 is not None:
                 frame = _draw_detections(frame, detections)
@@ -14578,6 +14596,9 @@ async def detect_objects(frame_bytes: bytes) -> tuple[bytes, list[dict]]:
                             )
         except Exception as e:
             logger.debug(f"Vision detect error: {e}")
+
+    # Admin class toggles: drop classes switched OFF in the training console
+    detections = _apply_vision_class_filter(detections)
 
     # ── Face recognition: rename "person" → "John" etc. ──────────
     _person_labels = {
@@ -14785,6 +14806,366 @@ def stop_webcam_loop():
     """Stop the background webcam capture thread."""
     global _webcam_running
     _webcam_running = False
+
+
+# ─── DRIVE WATCH (server-side continuous driving awareness) ────────
+# Pulls JPEG frames from a NETWORK camera (e.g. the phone running an
+# IP-webcam/DroidCam app at http://<phone-ip>:8080/shot.jpg — works with
+# Google Maps FULLSCREEN, no browser tab needed) and runs YOLO in driving
+# mode via the vision server (:8198). Detected drive-safety alerts are:
+#   · broadcast to the broker (phones → overlay TTS, web UIs → chat),
+#   · surfaced in web chat, and
+#   · stored in _drive_watch_state for GET /api/vision/drive/watch polling.
+# The loop is deterministic: it only re-announces an alert after the same
+# cooldown window the vision server used, so no voice spam while the risk
+# persists.
+DRIVE_CAM_URL = os.environ.get("DRIVE_CAM_URL", "").strip()
+DRIVE_WATCH_INTERVAL = float(os.environ.get("DRIVE_WATCH_INTERVAL", "1.2"))
+
+_drive_watch_active = False
+_drive_watch_task: Optional[asyncio.Task] = None
+_drive_watch_source = DRIVE_CAM_URL  # runtime override via POST {source}
+_drive_watch_state: dict = {
+    "active": False,
+    "source": DRIVE_CAM_URL,
+    "ts": 0.0,
+    "ok": False,
+    "mode": None,
+    "device_speed_kph": None,
+    "detections": 0,
+    "alerts": [],
+    "last_error": None,
+}
+_drive_watch_last_speak: dict = {}  # type:level -> last spoken ts
+
+# ── Auto start/stop from phone motion + GPS speed ─────────────────
+DRIVE_AUTO_WATCH = os.environ.get("DRIVE_AUTO_WATCH", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+DRIVE_START_SPEED_KPH = float(os.environ.get("DRIVE_START_SPEED_KPH", "20"))
+DRIVE_START_ACCEL_G = float(os.environ.get("DRIVE_START_ACCEL_G", "0.45"))
+DRIVE_STOP_SPEED_KPH = float(os.environ.get("DRIVE_STOP_SPEED_KPH", "6"))
+DRIVE_STOP_DELAY_S = float(os.environ.get("DRIVE_STOP_DELAY_S", "90"))
+DRIVE_AUTO_POLL_S = float(os.environ.get("DRIVE_AUTO_POLL_S", "3"))
+
+_drive_auto_enabled = DRIVE_AUTO_WATCH  # runtime-toggleable (POST {auto})
+_drive_auto_active = True  # background-task lifetime flag
+_drive_auto_task: Optional[asyncio.Task] = None
+_drive_auto_state: dict = {
+    "armed": DRIVE_AUTO_WATCH and bool(DRIVE_CAM_URL),
+    "enabled": DRIVE_AUTO_WATCH,
+    "reason": "idle",
+    "last_speed_kph": None,
+    "last_motion_g": None,
+    "quiet_since": None,
+    "auto_started": False,
+    "polls": 0,
+    "last_announce": 0.0,
+    "policy": {
+        "start_speed_kph": DRIVE_START_SPEED_KPH,
+        "start_accel_g": DRIVE_START_ACCEL_G,
+        "stop_speed_kph": DRIVE_STOP_SPEED_KPH,
+        "stop_delay_s": DRIVE_STOP_DELAY_S,
+        "poll_s": DRIVE_AUTO_POLL_S,
+    },
+}
+
+
+def _motion_g(raw: dict) -> float | None:
+    """Best-effort motion magnitude in g — max over the sensors we can read.
+
+    Supports {sensor_name: {values:[x,y,z]}} termux payloads. Uses either the
+    gravity-free linear acceleration magnitude, the deviation of total
+    acceleration from 1g (vibration/turns), or a raw significant_motion value.
+    """
+    best: float | None = None
+
+    def _mag(v):
+        if isinstance(v, dict):
+            v = v.get("values")
+        if isinstance(v, (list, tuple)) and len(v) >= 3:
+            try:
+                return float((v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5)
+            except Exception:
+                return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        return None
+
+    for k in ("significant_motion", "motion"):
+        v = _mag(raw.get(k))  # already in g (unitless event/gear value)
+        if v is not None and (best is None or v > best):
+            best = v
+    # termux-sensor reports accelerometers in m/s² → normalize to g (÷9.80665)
+    G = 9.80665
+    for k in ("linear_acceleration", "accelerometer_uncalibrated"):
+        v = _mag(raw.get(k))
+        if v is not None:
+            v = v / G
+            if best is None or v > best:
+                best = v
+    # Total accelerometer: deviation from 1g captures bumps/turns/braking
+    v = _mag(raw.get("accelerometer"))
+    if v is not None:
+        dev = abs(v / G - 1.0)
+        if best is None or dev > best:
+            best = dev
+    return round(best, 3) if best is not None else None
+
+
+async def _phone_speed_and_motion():
+    """Poll the phone sensor server: (gps_speed_kph, motion_g) or (None, None).
+
+    Never raises — failures mean "no telemetry this poll", which the auto
+    loop treats as quiet. GPS speed is m/s from /location, ×3.6 → km/h.
+    """
+    speed = motion = None
+    if not SENSOR_SERVER_URL:
+        return speed, motion
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=2.0) as cli:
+            r_s, r_l = await asyncio.gather(
+                cli.get(f"{SENSOR_SERVER_URL}/sensors/all"),
+                cli.get(f"{SENSOR_SERVER_URL}/location"),
+                return_exceptions=True,
+            )
+        if (
+            not isinstance(r_s, BaseException)
+            and r_s is not None
+            and r_s.status_code == 200
+        ):
+            try:
+                motion = _motion_g((r_s.json() or {}).get("sensors") or {})
+            except Exception:
+                motion = None
+        if (
+            not isinstance(r_l, BaseException)
+            and r_l is not None
+            and r_l.status_code == 200
+        ):
+            try:
+                loc = (r_l.json() or {}).get("location") or {}
+                if loc.get("speed") is not None:
+                    speed = round(float(loc["speed"]) * 3.6, 1)
+            except Exception:
+                speed = None
+    except Exception:
+        pass
+    return speed, motion
+
+
+async def _drive_auto_announce(text: str):
+    try:
+        now = time.time()
+        if now - _drive_auto_state.get("last_announce", 0.0) < 30.0:
+            return
+        _drive_auto_state["last_announce"] = now
+        await _drive_watch_announce({"text": text, "type": "drive_watch"})
+    except Exception:
+        pass
+
+
+async def _drive_auto_loop():
+    """Background monitor: watch phone motion/accel → start/stop drive watch."""
+    while _drive_auto_active:
+        try:
+            st = _drive_auto_state
+            st["polls"] += 1
+            st["enabled"] = _drive_auto_enabled
+            speed, motion = await _phone_speed_and_motion()
+            now = time.time()
+            st["last_speed_kph"] = speed
+            st["last_motion_g"] = motion
+            armed = _drive_auto_enabled and bool(_drive_watch_source)
+            st["armed"] = armed
+            if not _drive_auto_enabled:
+                st["reason"] = "disabled"
+                await asyncio.sleep(DRIVE_AUTO_POLL_S)
+                continue
+            if not _drive_watch_source:
+                st["reason"] = "no_camera_source"
+                await asyncio.sleep(DRIVE_AUTO_POLL_S)
+                continue
+
+            moving = (speed is not None and speed >= DRIVE_START_SPEED_KPH) or (
+                motion is not None and motion >= DRIVE_START_ACCEL_G
+            )
+            quiet = (speed is None or speed < DRIVE_STOP_SPEED_KPH) and (
+                motion is None or motion < DRIVE_START_ACCEL_G * 0.8
+            )
+
+            if moving:
+                st["quiet_since"] = None
+                if not _drive_watch_active:
+                    await start_drive_watch()
+                    st["auto_started"] = True
+                    detail = "speed"
+                    val: object = speed
+                    if speed is None:
+                        detail = "motion"
+                        val = motion
+                    st["reason"] = f"auto: {detail} {val}"
+                    await _drive_auto_announce(
+                        f"auto drive watch on — {detail} {val} detected, watching the road"
+                    )
+            elif quiet and _drive_watch_active:
+                if st["quiet_since"] is None:
+                    st["quiet_since"] = now
+                elif now - st["quiet_since"] >= DRIVE_STOP_DELAY_S:
+                    await stop_drive_watch()
+                    st["auto_started"] = False
+                    st["reason"] = "auto: stopped (quiet)"
+                    st["quiet_since"] = None
+                    await _drive_auto_announce(
+                        f"drive watch off — no motion for {int(DRIVE_STOP_DELAY_S)}s"
+                    )
+            else:
+                st["reason"] = "armed, waiting for motion/speed"
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"drive auto watch err: {e}")
+        await asyncio.sleep(DRIVE_AUTO_POLL_S)
+
+
+async def _drive_watch_announce(alert: dict):
+    """Deliver a drive alert to connected phones + web chat (best-effort)."""
+    try:
+        text = alert.get("tts") or alert.get("text") or ""
+        if not text:
+            return
+        # 1) Phones: broker TTS push → overlay app local voice (when paired)
+        if phone_broker is not None:
+            for pid in list(phone_broker.get_phone_ids()):
+                try:
+                    await phone_broker.push_tts(pid, {"text": text})  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+        # 2) Web chat: automation channel (chat UI shows + records audit trail)
+        await _automation_deliver(
+            "chat",
+            {"text": f"🚗 {alert.get('text', text).capitalize()}"},
+            {"type": "drive_alert", "data": alert},
+        )
+    except Exception as e:
+        logger.debug(f"drive watch announce failed: {e}")
+
+
+async def _drive_watch_loop():
+    """Continuous server-side drive watching (single asyncio task)."""
+    global _drive_watch_state, _drive_watch_last_speak
+    import base64 as _b64
+
+    try:
+        import httpx
+    except Exception:
+        _drive_watch_state["last_error"] = "httpx unavailable"
+        return
+
+    while _drive_watch_active:
+        try:
+            url = _drive_watch_source.strip()
+            if not url:
+                _drive_watch_state["last_error"] = (
+                    "no camera source set (POST {source: <http-url>} or set DRIVE_CAM_URL)"
+                )
+                await asyncio.sleep(3.0)
+                continue
+            try:
+                r = await httpx.get(
+                    url, timeout=3.0, headers={"User-Agent": "lilly-drive-watch"}
+                )
+                if r.status_code != 200 or not r.content:
+                    _drive_watch_state["last_error"] = f"camera HTTP {r.status_code}"
+                    await asyncio.sleep(2.0)
+                    continue
+            except Exception as e:
+                _drive_watch_state["last_error"] = f"camera unreachable: {str(e)[:120]}"
+                await asyncio.sleep(2.0)
+                continue
+
+            b64 = _b64.b64encode(r.content).decode()
+            # Pass the latest phone telemetry (already polled every DRIVE_AUTO_POLL_S
+            # by the auto loop) so the vision server can motion-gate pedestrian /
+            # collision alerts: no false "brake now" from parked cars while stopped.
+            _speed_now = _drive_auto_state.get("last_speed_kph")
+            _motion_now = _drive_auto_state.get("last_motion_g")
+            try:
+                vr = await httpx.post(
+                    "http://127.0.0.1:8198/api/vision",
+                    json={
+                        "image_b64": b64,
+                        "mode": "driving",
+                        "avatar": "puppy",
+                        "device_speed_kph": _speed_now,
+                        "motion_g": _motion_now,
+                    },
+                    timeout=12.0,
+                )
+                data = vr.json()
+            except Exception as e:
+                _drive_watch_state["last_error"] = f"vision call: {str(e)[:120]}"
+                await asyncio.sleep(2.0)
+                continue
+
+            alerts = data.get("alerts") or []
+            _drive_watch_state.update(
+                {
+                    "ts": time.time(),
+                    "ok": True,
+                    "mode": data.get("mode"),
+                    "device_speed_kph": data.get("device_speed_kph"),
+                    "motion_g": data.get("motion_g"),
+                    "detections": len(data.get("detections") or []),
+                    "alerts": alerts,
+                    "last_error": None,
+                }
+            )
+            # Announce level 1/2 alerts (echo the server cooldown windows)
+            for a in alerts:
+                if a.get("level") not in (1, 2) or not a.get("tts"):
+                    continue
+                key = f"{a['type']}:{a['level']}"
+                cd = 9.0 if a["level"] == 1 else 22.0
+                if time.time() - _drive_watch_last_speak.get(key, 0.0) >= cd:
+                    _drive_watch_last_speak[key] = time.time()
+                    await _drive_watch_announce(a)
+            await asyncio.sleep(DRIVE_WATCH_INTERVAL)
+        except Exception as e:
+            _drive_watch_state["last_error"] = str(e)[:200]
+            await asyncio.sleep(2.0)
+
+
+async def start_drive_watch(source: str = ""):
+    """Start the drive watch loop (idempotent). source overrides DRIVE_CAM_URL."""
+    global _drive_watch_active, _drive_watch_task, _drive_watch_source
+    if source and source.strip():
+        _drive_watch_source = source.strip()
+    if _drive_watch_active:
+        return
+    _drive_watch_active = True
+    _drive_watch_state.update({"active": True, "source": _drive_watch_source})
+    _drive_watch_task = asyncio.create_task(_drive_watch_loop())
+    logger.info(f"Drive watch started (source={_drive_watch_source or '(none yet)'})")
+
+
+async def stop_drive_watch():
+    """Stop the drive watch loop."""
+    global _drive_watch_active, _drive_watch_task
+    _drive_watch_active = False
+    if _drive_watch_task is not None:
+        try:
+            _drive_watch_task.cancel()
+        except Exception:
+            pass
+        _drive_watch_task = None
+    _drive_watch_state.update({"active": False})
+    logger.info("Drive watch stopped")
 
 
 # ─── TASK SCHEDULER & REMINDERS ─────────────────────────────────
@@ -15686,6 +16067,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Webcam loop start failed (non-fatal): {e}")
 
+    # Start the server-side drive watch loop if a camera source is configured
+    try:
+        if DRIVE_CAM_URL:
+            await start_drive_watch(DRIVE_CAM_URL)
+            logger.info(f"Drive watch auto-started (DRIVE_CAM_URL={DRIVE_CAM_URL})")
+    except Exception as e:
+        logger.warning(f"Drive watch auto-start failed (non-fatal): {e}")
+
+    # Start the motion/speed auto-monitor: starts the watch when the phone
+    # moves, stops it after sustained quiet. Inert without DRIVE_CAM_URL or
+    # a runtime source set via POST /api/vision/drive/watch.
+    try:
+        global _drive_auto_task, _drive_auto_active
+        if _drive_auto_enabled:
+            _drive_auto_active = True
+            _drive_auto_task = asyncio.create_task(_drive_auto_loop())
+            logger.info("Drive-watch auto-start monitor running (motion+GPS speed)")
+    except Exception as e:
+        logger.warning(f"Drive-watch auto monitor start failed (non-fatal): {e}")
+
     # Initialize Blink camera connector (best-effort — 2FA may be pending)
     try:
         from blink_connector import get_blink_connector
@@ -15746,6 +16147,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(tracker_node_scan_loop())
     # Real-data automation eval loop (only acts when rules exist)
     asyncio.create_task(automation_eval_loop())
+    # Admin Bot: background monitoring → suggestions → toast progress
+    asyncio.create_task(admin_bot_loop())
     archetype_inferrer.load()
     yield
 
@@ -15759,6 +16162,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Terms gate (Auth0) — must be registered here at import time, NOT inside the
+# lifespan startup. add_middleware() after startup raises RuntimeError and
+# crashes the app (keep alongside CORSMiddleware).
+if AUTH_AVAILABLE:
+    try:
+        from auth0_auth import TermsGateMiddleware
+
+        app.add_middleware(TermsGateMiddleware)
+    except Exception as _e:
+        logging.warning(f"TermsGateMiddleware not registered: {_e}")
 
 # ── Training dashboard (training_control.py) ────────────────────────────
 # Served at /training, gated to the owner email (laurencekidney@gmail.com).
@@ -15959,6 +16373,817 @@ async def broker_automations_delete(rule_id: str):
         return JSONResponse({"error": "broker not available"}, status_code=503)
     removed = phone_broker.automation.remove_rule(rule_id)
     return {"removed": removed}
+
+
+# ═══════════════════ TRAINING AUTOMATION ENDPOINTS ═══════════════════
+# Compatibility layer for the training console UI
+
+
+@app.get("/api/training/automation/status")
+async def automation_status():
+    """Get automation/presets status for training console."""
+    rules = []
+    if PHONE_BROKER_AVAILABLE and phone_broker:
+        rules = phone_broker.automation.get_rules()
+    return {
+        "ok": True,
+        "presets": rules,
+        "rules": rules,
+        "provider": "lilly-ai",
+        "updated": time.time(),
+    }
+
+
+@app.post("/api/training/automation/run")
+async def automation_run(request: Request):
+    """Start an automation session or run a preset."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    try:
+        body = await request.json()
+        preset = body.get("preset", None)
+        config = body.get("config", None)
+
+        if preset:
+            # Run an existing preset/rule
+            rules = phone_broker.automation.get_rules()
+            matching = [
+                r for r in rules if r.get("id") == preset or r.get("name") == preset
+            ]
+            if matching:
+                return {
+                    "ok": True,
+                    "id": str(int(time.time() * 1000)),
+                    "preset": preset,
+                    "status": "running",
+                }
+            return JSONResponse({"error": "Preset not found"}, status_code=404)
+        elif config:
+            # Create and run a custom config
+            from phone_broker import AutomationRule
+
+            rule = AutomationRule(
+                id=str(int(time.time() * 1000))[:8],
+                name="Custom automation",
+                enabled=True,
+                topic=config.get("interact", ""),
+                condition={},
+                action_type="notify",
+                action_payload=config,
+                cooldown_seconds=30.0,
+            )
+            phone_broker.automation.add_rule(rule)
+            return {"ok": True, "id": rule.id, "config": config, "status": "running"}
+        return JSONResponse({"error": "preset or config required"}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/training/automation/stop")
+async def automation_stop(request: Request):
+    """Stop a running automation session."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    try:
+        body = await request.json()
+        session_id = body.get("id", "")
+        return {"ok": True, "id": session_id, "status": "stopped"}
+    except Exception:
+        # No body is fine — the UI's stop button sends no payload.
+        return {"ok": True, "id": "", "status": "stopped"}
+
+
+@app.post("/api/training/automation/save")
+async def automation_save(request: Request):
+    """Save a new automation preset."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    try:
+        body = await request.json()
+        from phone_broker import AutomationRule
+
+        rule = AutomationRule(
+            id=str(int(time.time() * 1000))[:8],
+            name=body.get("name", "New preset"),
+            enabled=True,
+            topic=body.get("targets", ""),
+            condition={},
+            action_type="notify",
+            action_payload=body,
+            cooldown_seconds=body.get("speed", 1) * 10,
+        )
+        phone_broker.automation.add_rule(rule)
+        return {"ok": True, "id": rule.id, "name": rule.name, "saved": time.time()}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.delete("/api/training/automation/{preset_id}")
+async def automation_delete(preset_id: str):
+    """Delete an automation preset."""
+    if not PHONE_BROKER_AVAILABLE or not phone_broker:
+        return JSONResponse({"error": "broker not available"}, status_code=503)
+    removed = phone_broker.automation.remove_rule(preset_id)
+    return {"ok": True, "removed": removed}
+
+
+@app.get("/api/training/automation/log")
+async def automation_log():
+    """Fetch the live action log from the phone's visualizer HUD."""
+    sensor_url = os.environ.get("SENSOR_SERVER_URL", "http://100.115.234.87:8099")
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{sensor_url}/a11y/visualize/log")
+            if r.status_code == 200:
+                data = r.json()
+                return {
+                    "ok": True,
+                    "log": data.get("log", []),
+                    "showing": data.get("showing", False),
+                }
+    except Exception:
+        pass
+    return {"ok": True, "log": [], "showing": False}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Instagram Team — 9 avatars, one account, distinct voices
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/api/insta/status")
+async def insta_status():
+    """Get the Instagram team status — posts, comments, avatar stats."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        return {"ok": True, **team.status()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/avatars")
+async def insta_avatars():
+    """Get all 9 avatar Instagram personas."""
+    try:
+        from lilly_pup_insta import get_instagram_team, AVATAR_INSTA_PERSONAS
+
+        team = get_instagram_team()
+        avatars = {}
+        for key, p in AVATAR_INSTA_PERSONAS.items():
+            avatars[key] = {
+                **p,
+                "posts": len(
+                    [x for x in team.posts if x.avatar == key and x.status == "posted"]
+                ),
+                "replies": len([c for c in team.comments if c.replied_by == key]),
+            }
+        return {"ok": True, "avatars": avatars}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/avatars/instagram")
+async def insta_avatar_instagram():
+    """Get Instagram handles for all avatars."""
+    try:
+        from lilly_pup_insta import AVATAR_INSTA_PERSONAS
+
+        avatars = {}
+        for key, p in AVATAR_INSTA_PERSONAS.items():
+            avatars[key] = {
+                "name": p.get("name", ""),
+                "emoji": p.get("emoji", ""),
+                "role": p.get("role", ""),
+                "instagram": p.get("instagram", ""),
+                "instagram_url": f"https://instagram.com/{p.get('instagram', '')}"
+                if p.get("instagram")
+                else "",
+            }
+        return {"ok": True, "avatars": avatars}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/posts")
+async def insta_posts(limit: int = 20):
+    """Get recent Instagram posts."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        return {"ok": True, "posts": team.get_posts(limit)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/insta/comments")
+async def insta_comments(limit: int = 50):
+    """Get recent comments."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        return {"ok": True, "comments": team.get_comments(limit)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/post")
+async def insta_create_post(request: Request):
+    """Create a new post (draft)."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+        result = await team.create_post(
+            avatar=body.get("avatar", "puppy"),
+            image_path=body.get("image_path", ""),
+            caption=body.get("caption", ""),
+            hashtags=body.get("hashtags"),
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/post/{post_id}/publish")
+async def insta_publish(post_id: str):
+    """Immediately publish a draft post."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        result = await team.post_now(post_id)
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/start")
+async def insta_start():
+    """Start the Instagram team (posting + comment loops)."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        await team.start()
+        return {"ok": True, "status": "started"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/stop")
+async def insta_stop():
+    """Stop the Instagram team."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        await team.stop()
+        return {"ok": True, "status": "stopped"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/config")
+async def insta_config(request: Request):
+    """Update Instagram team config."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+        config = await team.update_config(body)
+        return {"ok": True, "config": config}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/generate")
+async def insta_generate(request: Request):
+    """Generate a caption for a given avatar."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        body = await request.json()
+        team = get_instagram_team()
+        result = await team.generate_caption(
+            avatar=body.get("avatar", "puppy"),
+            image_hint=body.get("image_hint", ""),
+            mood=body.get("mood", ""),
+        )
+        return {"ok": True, **result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ─── Instagram Pairing ───────────────────────────────────────────────────────
+_insta_pair_codes: dict[str, dict] = {}
+
+# ─── Persistent Paired Users ────────────────────────────────────────────────
+PAIRED_USERS_FILE = Path("data/pup_insta/paired_users.json")
+
+
+def _load_paired_users() -> dict:
+    if PAIRED_USERS_FILE.exists():
+        try:
+            return json.loads(PAIRED_USERS_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_paired_users(data: dict):
+    PAIRED_USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    PAIRED_USERS_FILE.write_text(json.dumps(data, indent=2))
+
+
+def _record_pair(username: str, avatar: str, user_id: str = ""):
+    """Persist a paired user and link to auth0 account."""
+    paired = _load_paired_users()
+    paired[username.lower()] = {
+        "avatar": avatar,
+        "paired_at": datetime.utcnow().isoformat(),
+        "user_id": user_id,
+        "interests_extracted": False,
+        "auto_followed": False,
+    }
+    _save_paired_users(paired)
+    # Also link instagram handle to auth0 user if available
+    if user_id:
+        try:
+            from instagram_memory import save_link
+
+            save_link(user_id, username)
+        except Exception:
+            pass
+
+
+def get_paired_users() -> dict:
+    return _load_paired_users()
+
+
+async def _auto_follow_all_avatars(username: str):
+    """Have all 9 avatars follow the paired user."""
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        results = {}
+        for avatar_key in [
+            "puppy",
+            "fox",
+            "cat",
+            "bear",
+            "bunny",
+            "owl",
+            "deer",
+            "wolf",
+            "raccoon",
+        ]:
+            try:
+                r = await team.follow_user(avatar_key, username)
+                results[avatar_key] = r.get("ok", False)
+            except Exception as e:
+                results[avatar_key] = False
+        return results
+    except Exception:
+        return {}
+
+
+async def _extract_user_interests(username: str, avatar: str = "puppy"):
+    """Scrape a paired user's public profile and extract interests."""
+    try:
+        from lilly_pup_insta import (
+            get_instagram_team,
+            get_session_manager,
+            HAS_INSTAGRAPI,
+        )
+
+        if not HAS_INSTAGRAPI:
+            return {}
+
+        team = get_instagram_team()
+        mgr = get_session_manager()
+        cl = mgr.get_client(avatar)
+        if not cl:
+            return {}
+
+        loop = asyncio.get_event_loop()
+        profile = await loop.run_in_executor(None, cl.user_info_by_username, username)
+        if not profile:
+            return {}
+
+        interests = {
+            "bio": getattr(profile, "biography", "") or "",
+            "full_name": getattr(profile, "full_name", "") or "",
+            "followers": getattr(profile, "follower_count", 0),
+            "following": getattr(profile, "following_count", 0),
+            "posts_count": getattr(profile, "media_count", 0),
+            "is_private": getattr(profile, "is_private", False),
+            "hashtags": [],
+            "topics": [],
+            "caption_words": [],
+        }
+
+        if profile.is_private:
+            return interests
+
+        # Get recent posts for interest extraction
+        try:
+            user_id = str(profile.pk)
+            if user_id:
+                medias = await loop.run_in_executor(
+                    None, lambda: cl.user_medias(int(user_id), amount=20)
+                )
+                all_captions = []
+                all_hashtags = []
+                for media in medias or []:
+                    caption = getattr(media, "caption_text", "") or ""
+                    if caption:
+                        all_captions.append(caption)
+                    tags = getattr(media, "hashtags", []) or []
+                    all_hashtags.extend(tags)
+
+                interests["hashtags"] = list(set(all_hashtags))[:50]
+                interests["caption_words"] = _extract_keywords_from_text(
+                    " ".join(all_captions)
+                )[:30]
+        except Exception:
+            pass
+
+        return interests
+    except Exception:
+        return {}
+
+
+def _extract_keywords_from_text(text: str) -> list[str]:
+    """Extract meaningful keywords from text."""
+    stop_words = {
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "shall",
+        "should",
+        "may",
+        "might",
+        "must",
+        "can",
+        "could",
+        "i",
+        "me",
+        "my",
+        "mine",
+        "we",
+        "us",
+        "our",
+        "ours",
+        "you",
+        "your",
+        "yours",
+        "he",
+        "him",
+        "his",
+        "she",
+        "her",
+        "hers",
+        "it",
+        "its",
+        "they",
+        "them",
+        "their",
+        "theirs",
+        "this",
+        "that",
+        "these",
+        "those",
+        "and",
+        "but",
+        "or",
+        "nor",
+        "for",
+        "yet",
+        "so",
+        "at",
+        "by",
+        "in",
+        "of",
+        "on",
+        "to",
+        "with",
+        "from",
+        "as",
+        "into",
+        "about",
+        "between",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "up",
+        "down",
+        "out",
+        "off",
+        "over",
+        "under",
+        "again",
+        "further",
+        "then",
+        "once",
+        "here",
+        "there",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "not",
+        "only",
+        "own",
+        "same",
+        "than",
+        "too",
+        "very",
+        "just",
+        "also",
+        "now",
+        "get",
+        "got",
+        "go",
+        "going",
+        "like",
+        "dont",
+        "im",
+        "ive",
+        "thats",
+        "its",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "one",
+        "two",
+        "three",
+        "first",
+        "new",
+        "good",
+        "day",
+        "time",
+        "know",
+        "think",
+        "see",
+        "come",
+        "make",
+        "want",
+        "look",
+        "use",
+        "find",
+        "give",
+        "tell",
+        "say",
+        "said",
+        "let",
+    }
+    words = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
+    freq = {}
+    for w in words:
+        if w not in stop_words:
+            freq[w] = freq.get(w, 0) + 1
+    return [w for w, _ in sorted(freq.items(), key=lambda x: -x[1]) if _ >= 2]
+
+
+def _sync_interests_to_keywords(interests: dict, username: str):
+    """Sync extracted Instagram interests into learned_keywords.json."""
+    try:
+        from pathlib import Path as _P
+
+        kw_file = _P("learned_keywords.json")
+        existing = {}
+        if kw_file.exists():
+            existing = json.loads(kw_file.read_text())
+
+        now = time.time()
+        context = f"instagram:{username}"
+
+        for word in interests.get("caption_words", []):
+            if word in existing:
+                existing[word]["count"] += 3
+                existing[word]["last_seen"] = now
+                if context not in existing[word].get("contexts", []):
+                    existing[word].setdefault("contexts", []).append(context)
+            else:
+                existing[word] = {"count": 3, "last_seen": now, "contexts": [context]}
+
+        for tag in interests.get("hashtags", []):
+            tag_l = tag.lower().lstrip("#")
+            if tag_l in existing:
+                existing[tag_l]["count"] += 2
+                existing[tag_l]["last_seen"] = now
+            else:
+                existing[tag_l] = {"count": 2, "last_seen": now, "contexts": [context]}
+
+        # Keep top 500 by count
+        if len(existing) > 500:
+            sorted_kw = sorted(existing.items(), key=lambda x: -x[1]["count"])[:500]
+            existing = dict(sorted_kw)
+
+        kw_file.write_text(json.dumps(existing, indent=2))
+    except Exception:
+        pass
+
+
+def _sync_interests_to_facts(interests: dict, username: str):
+    """Add Instagram-derived facts to user_facts.json."""
+    try:
+        from pathlib import Path as _P
+
+        facts_file = _P("user_facts.json")
+        facts = []
+        if facts_file.exists():
+            facts = json.loads(facts_file.read_text())
+
+        now = time.time()
+        new_facts = []
+
+        bio = interests.get("bio", "")
+        if bio and len(bio) > 5:
+            new_facts.append(
+                {
+                    "kind": "instagram_bio",
+                    "fact": f"Instagram @{username} bio: {bio[:200]}",
+                    "ts": now,
+                }
+            )
+
+        top_hashtags = interests.get("hashtags", [])[:10]
+        if top_hashtags:
+            new_facts.append(
+                {
+                    "kind": "instagram_interests",
+                    "fact": f"@{username} uses hashtags: {', '.join(top_hashtags)}",
+                    "ts": now,
+                }
+            )
+
+        top_words = interests.get("caption_words", [])[:10]
+        if top_words:
+            new_facts.append(
+                {
+                    "kind": "instagram_interests",
+                    "fact": f"@{username} frequently posts about: {', '.join(top_words)}",
+                    "ts": now,
+                }
+            )
+
+        # Deduplicate by kind+fact
+        existing_facts = {(f.get("kind", ""), f.get("fact", "")) for f in facts}
+        for nf in new_facts:
+            if (nf["kind"], nf["fact"]) not in existing_facts:
+                facts.append(nf)
+
+        # Trim to 60
+        if len(facts) > 60:
+            facts = facts[-60:]
+
+        facts_file.write_text(json.dumps(facts, indent=2))
+    except Exception:
+        pass
+
+
+@app.post("/api/insta/pair/send")
+async def insta_pair_send(request: Request):
+    """Generate a 6-digit code and DM it from the selected avatar."""
+    body = await request.json()
+    avatar = (body.get("avatar") or "puppy").strip()
+    username = (body.get("username") or "").strip().lstrip("@")
+    if not username:
+        return {"ok": False, "error": "Enter your Instagram username"}
+    code = f"{random.randint(0, 999999):06d}"
+    _insta_pair_codes[code] = {
+        "avatar": avatar,
+        "username": username,
+        "created": time.time(),
+        "expires": time.time() + 300,
+    }
+    try:
+        from lilly_pup_insta import get_instagram_team
+
+        team = get_instagram_team()
+        msg = f"Hey! Here's your pairing code: {code}\nEnter this in the Lilly web UI to confirm it's you. 🐾"
+        await team.dm_send(avatar, username, msg)
+        return {"ok": True, "expires_in": 300}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/insta/pair/verify")
+async def insta_pair_verify(request: Request):
+    """Verify the 6-digit code, persist pairing, auto-follow, and extract interests."""
+    body = await request.json()
+    code = (body.get("code") or "").strip()
+    username = (body.get("username") or "").strip().lstrip("@")
+    avatar = (body.get("avatar") or "").strip()
+    if not code or len(code) != 6:
+        return {"ok": False, "error": "Enter the 6-digit code"}
+    entry = _insta_pair_codes.pop(code, None)
+    if not entry:
+        return {"ok": False, "error": "Invalid or expired code"}
+    if time.time() > entry["expires"]:
+        return {"ok": False, "error": "Code expired — send a new one"}
+    if entry["username"].lower() != username.lower():
+        _insta_pair_codes[code] = entry
+        return {"ok": False, "error": "Code was sent to a different username"}
+
+    # Get auth0 user ID if available
+    user_id = ""
+    try:
+        user = await get_current_user(request)
+        if user:
+            user_id = user.get("id", "")
+    except Exception:
+        pass
+
+    # Persist pairing
+    _record_pair(username, entry["avatar"], user_id)
+
+    # Auto-follow in background (all 9 avatars follow the paired user)
+    import asyncio
+
+    asyncio.create_task(_background_symbiosis(username, entry["avatar"]))
+
+    return {"ok": True, "avatar": entry["avatar"], "username": entry["username"]}
+
+
+async def _background_symbiosis(username: str, avatar: str):
+    """Background: auto-follow + extract interests + sync to knowledge."""
+    try:
+        # Auto-follow with all avatars
+        await _auto_follow_all_avatars(username)
+
+        # Update paired record
+        paired = _load_paired_users()
+        if username.lower() in paired:
+            paired[username.lower()]["auto_followed"] = True
+            _save_paired_users(paired)
+
+        # Wait a moment for follows to propagate
+        await asyncio.sleep(5)
+
+        # Extract interests from profile + posts
+        interests = await _extract_user_interests(username, avatar)
+        if interests:
+            # Sync to learned_keywords.json
+            _sync_interests_to_keywords(interests, username)
+            # Sync to user_facts.json
+            _sync_interests_to_facts(interests, username)
+
+            paired = _load_paired_users()
+            if username.lower() in paired:
+                paired[username.lower()]["interests_extracted"] = True
+                paired[username.lower()]["interests_summary"] = {
+                    "hashtags": interests.get("hashtags", [])[:10],
+                    "topics": interests.get("caption_words", [])[:10],
+                }
+                _save_paired_users(paired)
+    except Exception as e:
+        logging.warning(f"Background symbiosis for @{username} failed: {e}")
+
+
+@app.get("/api/insta/paired")
+async def insta_paired_list():
+    """List all paired Instagram users."""
+    paired = _load_paired_users()
+    return {"paired": paired, "count": len(paired)}
 
 
 # ─── Automation execution wiring (real, no fake data) ────────────────────────
@@ -19271,6 +20496,526 @@ async def admin_list_sessions(request: Request):
     return {"sessions": sessions[:50]}
 
 
+# ─── ADMIN BOT: SUGGESTIONS + TOAST PROGRESS (Alpha Admin Bot) ────────
+# Background monitoring bot scans system health, code quality, and
+# improvement opportunities. Posts suggestions that the admin can
+# approve/dismiss. Approved suggestions become tracked tasks with
+# real-time toast progress via WebSocket.
+
+ADMIN_SUGGESTIONS_FILE = MEMORY_DIR / "admin_suggestions.json"
+ADMIN_SUGGESTIONS: list[dict] = []
+
+
+def _load_admin_suggestions() -> list[dict]:
+    global ADMIN_SUGGESTIONS
+    if ADMIN_SUGGESTIONS_FILE.exists():
+        try:
+            data = json.loads(ADMIN_SUGGESTIONS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                ADMIN_SUGGESTIONS = data
+                return ADMIN_SUGGESTIONS
+        except Exception:
+            pass
+    ADMIN_SUGGESTIONS = []
+    return ADMIN_SUGGESTIONS
+
+
+def _save_admin_suggestions():
+    try:
+        ADMIN_SUGGESTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ADMIN_SUGGESTIONS_FILE.write_text(
+            json.dumps(ADMIN_SUGGESTIONS[-200:], indent=2, default=str)
+        )
+    except Exception as e:
+        logger.warning(f"[admin_bot] save suggestions failed: {e}")
+
+
+def _add_suggestion(
+    title: str,
+    description: str,
+    category: str = "improvement",
+    priority: str = "medium",
+    metadata: Optional[dict] = None,
+) -> dict:
+    """Create a new suggestion and persist it. Returns the suggestion dict."""
+    suggestion = {
+        "id": str(_uuid.uuid4())[:8],
+        "title": title,
+        "description": description,
+        "category": category,  # upgrade | fix | optimization | feature | health
+        "priority": priority,  # low | medium | high | critical
+        "status": "pending",  # pending | approved | dismissed | running | done
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "task_id": "",  # linked AdminTask id once approved
+        "metadata": metadata or {},
+    }
+    ADMIN_SUGGESTIONS.append(suggestion)
+    _save_admin_suggestions()
+    # Push real-time toast to connected admin UIs
+    _broadcast_admin_ws(
+        {
+            "type": "suggestion",
+            "data": suggestion,
+        }
+    )
+    # Also push a notification so the hamburger panel shows it
+    push_notification(
+        "admin_suggestion",
+        title=f"💡 {title}",
+        body=description[:200],
+        agent="admin_bot",
+        context={
+            "suggestion_id": suggestion["id"],
+            "category": category,
+            "priority": priority,
+        },
+    )
+    logger.info(f"[admin_bot] new suggestion: {title} ({category}/{priority})")
+    return suggestion
+
+
+# ── AdminTask (separate from AvatarTask — tracks approved suggestions) ──
+
+ADMIN_TASKS_FILE = MEMORY_DIR / "admin_tasks.json"
+ADMIN_TASKS: list[dict] = []
+
+
+def _load_admin_tasks() -> list[dict]:
+    global ADMIN_TASKS
+    if ADMIN_TASKS_FILE.exists():
+        try:
+            data = json.loads(ADMIN_TASKS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                ADMIN_TASKS = data
+                return ADMIN_TASKS
+        except Exception:
+            pass
+    ADMIN_TASKS = []
+    return ADMIN_TASKS
+
+
+def _save_admin_tasks():
+    try:
+        ADMIN_TASKS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ADMIN_TASKS_FILE.write_text(
+            json.dumps(ADMIN_TASKS[-100:], indent=2, default=str)
+        )
+    except Exception as e:
+        logger.warning(f"[admin_bot] save admin tasks failed: {e}")
+
+
+def _create_admin_task(suggestion_id: str, title: str, description: str) -> dict:
+    """Create a tracked task from an approved suggestion."""
+    task = {
+        "id": str(_uuid.uuid4())[:8],
+        "suggestion_id": suggestion_id,
+        "title": title,
+        "description": description,
+        "status": "queued",  # queued | running | done | failed
+        "progress": 0.0,  # 0.0 - 1.0
+        "steps": [],  # list of {name, status, progress}
+        "result": "",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    ADMIN_TASKS.append(task)
+    _save_admin_tasks()
+    _broadcast_admin_ws({"type": "task_created", "data": task})
+    return task
+
+
+def _update_admin_task(task_id: str, **kwargs) -> Optional[dict]:
+    """Update an admin task and broadcast progress via WebSocket."""
+    for task in ADMIN_TASKS:
+        if task["id"] == task_id:
+            for k, v in kwargs.items():
+                if k in task:
+                    task[k] = v
+            task["updated_at"] = time.time()
+            _save_admin_tasks()
+            _broadcast_admin_ws(
+                {
+                    "type": "progress",
+                    "data": {
+                        "task_id": task["id"],
+                        "title": task["title"],
+                        "status": task["status"],
+                        "progress": task["progress"],
+                        "steps": task["steps"][-5:],
+                        "result": task["result"][:500] if task["result"] else "",
+                    },
+                }
+            )
+            if task["status"] in ("done", "failed"):
+                _broadcast_admin_ws(
+                    {
+                        "type": "complete",
+                        "data": {
+                            "task_id": task["id"],
+                            "title": task["title"],
+                            "status": task["status"],
+                            "result": task["result"][:500] if task["result"] else "",
+                        },
+                    }
+                )
+            return task
+    return None
+
+
+# ── WebSocket manager for real-time admin push ────────────────────────
+# All connected admin WebSocket clients receive suggestions + task progress.
+
+_ADMIN_WS_CLIENTS: list[WebSocket] = []
+
+
+async def _broadcast_admin_ws(message: dict):
+    """Send a JSON message to all connected admin WebSocket clients."""
+    dead = []
+    payload = json.dumps(message, default=str)
+    for ws in _ADMIN_WS_CLIENTS:
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        try:
+            _ADMIN_WS_CLIENTS.remove(ws)
+        except ValueError:
+            pass
+
+
+# ── Admin Bot API Routes ──────────────────────────────────────────────
+
+
+@app.get("/api/admin/suggestions")
+async def admin_list_suggestions(request: Request):
+    """List all suggestions (newest first). Supports ?status=pending filter."""
+    if not await _admin_request_ok(request):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+    _load_admin_suggestions()
+    status = request.query_params.get("status", "")
+    items = list(reversed(ADMIN_SUGGESTIONS))
+    if status:
+        items = [s for s in items if s["status"] == status]
+    return {"suggestions": items, "total": len(items)}
+
+
+@app.post("/api/admin/suggestions/{sid}/approve")
+async def admin_approve_suggestion(sid: str, request: Request):
+    """Approve a suggestion — creates an AdminTask and optionally triggers the coding agent."""
+    if not await _admin_request_ok(request):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+    _load_admin_suggestions()
+    suggestion = next((s for s in ADMIN_SUGGESTIONS if s["id"] == sid), None)
+    if not suggestion:
+        return JSONResponse({"error": "suggestion not found"}, status_code=404)
+    if suggestion["status"] != "pending":
+        return JSONResponse(
+            {"error": f"suggestion already {suggestion['status']}"}, status_code=400
+        )
+    suggestion["status"] = "approved"
+    suggestion["updated_at"] = time.time()
+    # Create a tracked task
+    task = _create_admin_task(sid, suggestion["title"], suggestion["description"])
+    suggestion["task_id"] = task["id"]
+    _save_admin_suggestions()
+    _broadcast_admin_ws({"type": "suggestion_update", "data": suggestion})
+    # Optionally auto-run via coding agent
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    auto_run = body.get("auto_run", False)
+    if auto_run and AGENT_CORE_AVAILABLE:
+        asyncio.create_task(
+            _run_admin_task_agent(task["id"], suggestion["description"])
+        )
+    return {"ok": True, "suggestion": suggestion, "task": task}
+
+
+@app.post("/api/admin/suggestions/{sid}/dismiss")
+async def admin_dismiss_suggestion(sid: str, request: Request):
+    """Dismiss a suggestion."""
+    if not await _admin_request_ok(request):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+    _load_admin_suggestions()
+    suggestion = next((s for s in ADMIN_SUGGESTIONS if s["id"] == sid), None)
+    if not suggestion:
+        return JSONResponse({"error": "suggestion not found"}, status_code=404)
+    suggestion["status"] = "dismissed"
+    suggestion["updated_at"] = time.time()
+    _save_admin_suggestions()
+    _broadcast_admin_ws({"type": "suggestion_update", "data": suggestion})
+    return {"ok": True, "suggestion": suggestion}
+
+
+@app.get("/api/admin/tasks/{tid}")
+async def admin_get_task(tid: str, request: Request):
+    """Get a single admin task by ID."""
+    if not await _admin_request_ok(request):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+    _load_admin_tasks()
+    task = next((t for t in ADMIN_TASKS if t["id"] == tid), None)
+    if not task:
+        return JSONResponse({"error": "task not found"}, status_code=404)
+    return {"task": task}
+
+
+@app.post("/api/admin/tasks/{tid}/progress")
+async def admin_update_task_progress(tid: str, request: Request):
+    """Update an admin task's progress (called by the background bot or coding agent)."""
+    if not await _admin_request_ok(request):
+        return JSONResponse({"error": "Admin access required"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    _load_admin_tasks()
+    task = _update_admin_task(
+        tid,
+        status=body.get("status", ""),
+        progress=body.get("progress", 0.0),
+        result=body.get("result", ""),
+        steps=body.get("steps", []),
+    )
+    if not task:
+        return JSONResponse({"error": "task not found"}, status_code=404)
+    return {"ok": True, "task": task}
+
+
+@app.websocket("/api/admin/ws")
+async def admin_websocket(websocket: WebSocket):
+    """WebSocket for real-time admin suggestions + task progress updates."""
+    await websocket.accept()
+    _ADMIN_WS_CLIENTS.append(websocket)
+    logger.info(f"[admin_bot] WS client connected ({len(_ADMIN_WS_CLIENTS)} total)")
+    try:
+        # Send initial state
+        _load_admin_suggestions()
+        _load_admin_tasks()
+        pending = [s for s in ADMIN_SUGGESTIONS if s["status"] == "pending"]
+        running = [t for t in ADMIN_TASKS if t["status"] in ("queued", "running")]
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "init",
+                    "data": {
+                        "pending_suggestions": pending[-20:],
+                        "running_tasks": running[-10:],
+                    },
+                },
+                default=str,
+            )
+        )
+        # Keep alive and listen for commands
+        while True:
+            try:
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=60)
+                data = json.loads(msg) if msg.strip() else {}
+                cmd = data.get("cmd", "")
+                if cmd == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+                elif cmd == "scan":
+                    # Trigger an immediate bot scan
+                    asyncio.create_task(_run_admin_bot_scan())
+                    await websocket.send_text(json.dumps({"type": "scan_started"}))
+            except asyncio.TimeoutError:
+                # Send keepalive ping
+                try:
+                    await websocket.send_text(json.dumps({"type": "ping"}))
+                except Exception:
+                    break
+            except Exception:
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.warning(f"[admin_bot] WS error: {e}")
+    finally:
+        try:
+            _ADMIN_WS_CLIENTS.remove(websocket)
+        except ValueError:
+            pass
+        logger.info(
+            f"[admin_bot] WS client disconnected ({len(_ADMIN_WS_CLIENTS)} total)"
+        )
+
+
+# ── Admin Bot: run approved suggestion via coding agent ───────────────
+
+
+async def _run_admin_task_agent(task_id: str, description: str):
+    """Execute an approved admin task via the coding agent."""
+    if not AGENT_CORE_AVAILABLE:
+        _update_admin_task(task_id, status="failed", result="agent_core not available")
+        return
+    _update_admin_task(task_id, status="running", progress=0.1)
+    try:
+        from agent_core import execute_task
+
+        _update_admin_task(
+            task_id,
+            progress=0.3,
+            steps=[{"name": "agent_started", "status": "running", "progress": 0.3}],
+        )
+        result = await execute_task(description, user_email=ADMIN_EMAIL)
+        _update_admin_task(
+            task_id,
+            status="done",
+            progress=1.0,
+            result=str(result)[:5000],
+            steps=[{"name": "completed", "status": "done", "progress": 1.0}],
+        )
+    except Exception as e:
+        _update_admin_task(
+            task_id,
+            status="failed",
+            result=f"Error: {e}",
+            steps=[{"name": "failed", "status": "failed", "progress": 0}],
+        )
+
+
+# ── Admin Bot: background monitoring scan ─────────────────────────────
+
+
+async def _run_admin_bot_scan():
+    """Run a single scan cycle of the admin monitoring bot."""
+    try:
+        suggestions = []
+        # 1. System health
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=8) as client:
+                r = await client.get(f"{SENSOR_SERVER_URL}/health")
+                if r.status_code != 200:
+                    suggestions.append(
+                        {
+                            "title": "Sensor server unreachable",
+                            "description": f"Phone sensor server returned HTTP {r.status_code}. Check Tailscale and Termux.",
+                            "category": "health",
+                            "priority": "high",
+                        }
+                    )
+        except Exception as e:
+            suggestions.append(
+                {
+                    "title": "Sensor server offline",
+                    "description": f"Cannot reach phone sensor server: {e}",
+                    "category": "health",
+                    "priority": "high",
+                }
+            )
+
+        # 2. Disk space
+        try:
+            stat = shutil.disk_usage(str(WORKSPACE))
+            pct_free = stat.free / stat.total * 100
+            if pct_free < 10:
+                suggestions.append(
+                    {
+                        "title": "Low disk space",
+                        "description": f"Only {pct_free:.1f}% disk free ({stat.free // (1024**3)} GB). Consider cleanup.",
+                        "category": "health",
+                        "priority": "high" if pct_free < 5 else "medium",
+                    }
+                )
+        except Exception:
+            pass
+
+        # 3. Docker health
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                "docker ps --format '{{.Status}}' 2>/dev/null | head -5",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            output = stdout.decode(errors="replace").strip()
+            if "Up" not in output and output:
+                suggestions.append(
+                    {
+                        "title": "Docker containers not running",
+                        "description": f"Docker status: {output[:200]}",
+                        "category": "health",
+                        "priority": "high",
+                    }
+                )
+        except Exception:
+            pass
+
+        # 4. Check for TODO/FIXME in main files
+        try:
+            todo_count = 0
+            for py_file in [WORKSPACE / "lilly_ai.py", WORKSPACE / "phone_broker.py"]:
+                if py_file.exists():
+                    content = py_file.read_text(encoding="utf-8", errors="replace")
+                    todo_count += content.count("TODO") + content.count("FIXME")
+            if todo_count > 20:
+                suggestions.append(
+                    {
+                        "title": f"{todo_count} TODO/FIXME comments in codebase",
+                        "description": "Consider addressing outstanding TODO/FIXME items for code quality.",
+                        "category": "optimization",
+                        "priority": "low",
+                    }
+                )
+        except Exception:
+            pass
+
+        # 5. YOLO model check
+        try:
+            yolo_file = WORKSPACE / "yolov8n.pt"
+            if yolo_file.exists():
+                age_days = (time.time() - yolo_file.stat().st_mtime) / 86400
+                if age_days > 90:
+                    suggestions.append(
+                        {
+                            "title": "YOLO model may be outdated",
+                            "description": f"yolov8n.pt is {age_days:.0f} days old. Check for newer versions.",
+                            "category": "upgrade",
+                            "priority": "low",
+                        }
+                    )
+        except Exception:
+            pass
+
+        # Create suggestions for any new findings
+        _load_admin_suggestions()
+        existing_titles = {
+            s["title"] for s in ADMIN_SUGGESTIONS if s["status"] == "pending"
+        }
+        for s in suggestions:
+            if s["title"] not in existing_titles:
+                _add_suggestion(**s)
+
+    except Exception as e:
+        logger.warning(f"[admin_bot] scan error: {e}")
+
+
+# ── Admin Bot background loop (runs every 5 minutes) ─────────────────
+
+
+async def admin_bot_loop():
+    """Background loop that periodically scans system health and posts suggestions."""
+    logger.info("[admin_bot] background monitoring loop started")
+    while True:
+        try:
+            await asyncio.sleep(300)  # every 5 minutes
+            await _run_admin_bot_scan()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning(f"[admin_bot] loop error: {e}")
+            await asyncio.sleep(60)
+
+
+_load_admin_suggestions()
+_load_admin_tasks()
+
+
 @app.post("/api/wake")
 async def trigger_wake():
     """Wake endpoint — signals next mic chunk to be treated as a command."""
@@ -22462,7 +24207,7 @@ async def api_health():
 
 
 # ─── LILLY ORCHESTRATOR API ────────────────────────────────────────────────
-# Unified multi-agent surface: Lilly = sole user-facing persona, strict
+# Unified multi-agent surface: Lilly orchestrates strict
 # routing to the Vision (see), Builder (build), and Execution (do) pipelines.
 
 
@@ -22508,7 +24253,6 @@ async def orchestrator_status_endpoint():
     return {
         "ok": True,
         "mode": ORCHESTRATOR_MODE,
-        "persona": "Lilly — sole user-facing orchestrator of the Vision/Builder/Execution pipelines",
         "runtime": runtime,
         "hive": hive,
         "pipeline_handlers": {
@@ -22728,6 +24472,7 @@ _BROWSER_VISION_TTL: float = 8.0  # seconds
 _browser_vision_mode: str = "auto"
 _browser_vision_overlay: dict = {}
 _browser_vision_device_speed: float | None = None
+_browser_vision_alerts: list = []
 
 # Browser-face tracking keeps reverse-search IDs stable while a face moves
 # between webcam polls. Tracks expire quickly so a departed person cannot
@@ -23053,7 +24798,8 @@ async def ingest_browser_frame(request: Request, file: UploadFile = File(...)):
         _browser_vision_frame_b64, \
         _browser_vision_mode, \
         _browser_vision_overlay, \
-        _browser_vision_device_speed
+        _browser_vision_device_speed, \
+        _browser_vision_alerts
     data = await file.read()
     if not data or len(data) < 500:
         return JSONResponse({"ok": False, "error": "frame too small"})
@@ -23102,6 +24848,7 @@ async def ingest_browser_frame(request: Request, file: UploadFile = File(...)):
             _browser_vision_mode = proxy_resp.get("mode") or mode or "auto"
             _browser_vision_overlay = proxy_resp.get("overlay") or {}
             _browser_vision_device_speed = proxy_resp.get("device_speed_kph")
+            _browser_vision_alerts = proxy_resp.get("alerts") or []
             reply_text = proxy_resp.get("reply", "")
             if not reply_text and _browser_vision_detections:
                 labels = sorted(set(d["label"] for d in _browser_vision_detections))
@@ -23115,6 +24862,7 @@ async def ingest_browser_frame(request: Request, file: UploadFile = File(...)):
                 "mode": _browser_vision_mode,
                 "overlay": _browser_vision_overlay,
                 "device_speed_kph": _browser_vision_device_speed,
+                "alerts": _browser_vision_alerts,
             }
 
     _, detections = await detect_objects(data)
@@ -23165,6 +24913,7 @@ async def ingest_browser_frame(request: Request, file: UploadFile = File(...)):
         "mode": _browser_vision_mode or "auto",
         "overlay": _browser_vision_overlay or {},
         "device_speed_kph": _browser_vision_device_speed,
+        "alerts": _browser_vision_alerts or [],
     }
 
 
@@ -23181,7 +24930,69 @@ async def get_browser_vision():
         "mode": _browser_vision_mode or "auto",
         "overlay": _browser_vision_overlay or {},
         "device_speed_kph": _browser_vision_device_speed,
+        "alerts": _browser_vision_alerts or [],
     }
+
+
+@app.get("/api/vision/drive/watch")
+async def get_drive_watch():
+    """Current server-side drive-watch state (active, source, latest alerts)."""
+    s = dict(_drive_watch_state)
+    s["age_s"] = int(time.time() - s["ts"]) if s.get("ts") else None
+    s["phones"] = list(phone_broker.get_phone_ids()) if phone_broker is not None else []
+    s["auto"] = dict(_drive_auto_state)
+    return {"ok": True, **s}
+
+
+@app.post("/api/vision/drive/watch")
+async def set_drive_watch(request: Request):
+    """Start/stop the server-side drive watch loop.
+
+    Body: {on?: bool, source?: str, auto?: bool}
+    - on: start (true) / stop (false) the watch loop.
+    - source: override DRIVE_CAM_URL for this session (in-memory).
+    - auto: enable/disable the motion+GPS auto start/stop monitor
+      (DRIVE_AUTO_WATCH env default on; needs a source to act).
+    """
+    global \
+        _drive_auto_enabled, \
+        _drive_auto_active, \
+        _drive_auto_task, \
+        _drive_watch_source
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    on = bool(body.get("on"))
+    source = (body.get("source") or "").strip()
+    # Staging a source is independent of on/off — it pre-arms the auto
+    # monitor and the next {on:true} (manual or auto) uses it.
+    if source:
+        _drive_watch_source = source
+        _drive_watch_state["source"] = source
+    if on:
+        await start_drive_watch(source)
+    else:
+        await stop_drive_watch()
+    if "auto" in body:
+        _drive_auto_enabled = bool(body["auto"])
+        _drive_auto_state["enabled"] = _drive_auto_enabled
+        if _drive_auto_enabled:
+            if _drive_auto_task is None or _drive_auto_task.done():
+                _drive_auto_active = True
+                _drive_auto_task = asyncio.create_task(_drive_auto_loop())
+            _drive_auto_state["reason"] = "armed"
+        else:
+            _drive_auto_state["reason"] = "disabled"
+            if _drive_watch_state.get("active") and _drive_auto_state.get(
+                "auto_started"
+            ):
+                await stop_drive_watch()
+                _drive_auto_state["auto_started"] = False
+    s = dict(_drive_watch_state)
+    s["age_s"] = int(time.time() - s["ts"]) if s.get("ts") else None
+    s["auto"] = dict(_drive_auto_state)
+    return {"ok": True, **s}
 
 
 @app.get("/api/vision/webcam")
@@ -25368,10 +27179,7 @@ pre{position:relative;overflow-x:auto}
 #cameraWindow .cw-vf .br{bottom:0;right:0;border-left:none;border-top:none;border-bottom-right-radius:5px}
 #cameraWindow .cw-vf .tl,#cameraWindow .cw-vf .br{border-color:rgba(255,180,84,.65)}
 #cameraWindow .cw-vf .tr,#cameraWindow .cw-vf .bl{border-color:rgba(255,255,255,.4)}
-/* Tesla-style silhouette view — dim only the feed media, keep overlay + brackets bright */
-#cameraWindow .cw-feed.tesla img,
-#cameraWindow .cw-feed.tesla #cwWebcamGL{filter:brightness(.42) saturate(.18) contrast(1.15)}
-#cwTeslaBtn.active{background:rgba(255,255,255,.16);border-color:#f8fafc;color:#fff;box-shadow:0 0 10px rgba(255,255,255,.25)}
+/* Camera window — no Tesla-style silhouette layer (removed) */
 /* context menu (populated by toggleCwMenu) */
 #cameraWindow #cwMenu{position:absolute;top:48px;left:10px;z-index:50;display:none;background:rgba(17,22,29,.96);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:6px;min-width:200px;box-shadow:0 18px 50px -12px rgba(0,0,0,.8)}
 #cameraWindow #cwMenu .cwm-item{padding:8px 10px;cursor:pointer;border-radius:8px;font-size:12px;color:#e8edf4;display:flex;align-items:center;gap:9px}
@@ -25445,6 +27253,7 @@ pre{position:relative;overflow-x:auto}
 /* Canvas inside each sphere — rendered fully by JS */
 .avatar-card canvas{width:68px;height:68px;border-radius:50%;display:block;overflow:hidden}
 .avatar-card span{font-size:9px;color:rgba(93,78,109,0.65);font-weight:700;letter-spacing:0.4px;text-transform:uppercase;margin-top:1px}
+.avatar-card .avatar-insta{font-size:7px;color:rgba(139,122,158,0.7);font-weight:500;letter-spacing:0.3px;text-transform:lowercase;margin-top:2px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:70px}
 /* Selected tick badge */
 .avatar-card.selected::after{content:'✓';position:absolute;top:-2px;right:-2px;width:20px;height:20px;border-radius:50%;background:rgba(139,122,158,0.9);color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;line-height:20px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,0.2)}
 .theme-swatches{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;flex-shrink:0}
@@ -25724,31 +27533,49 @@ pre{position:relative;overflow-x:auto}
     <div class="picker-section-label">choose your assistant</div>
     <div class="avatar-cards" id="avatarCards">
       <div class="avatar-card selected" data-animal="puppy" onclick="selectAvatarAndAuth('puppy',this)">
-        <canvas width="80" height="80" id="previewPuppy"></canvas><span>Lilly</span>
+        <canvas width="80" height="80" id="previewPuppy"></canvas>
+        <span>Lilly</span>
+        <span class="avatar-insta">@lilly.alpha.assistant</span>
       </div>
       <div class="avatar-card" data-animal="fox" onclick="selectAvatarAndAuth('fox',this)">
-        <canvas width="80" height="80" id="previewFox"></canvas><span>Fox</span>
+        <canvas width="80" height="80" id="previewFox"></canvas>
+        <span>Fox</span>
+        <span class="avatar-insta">@fox.creative.strategist</span>
       </div>
       <div class="avatar-card" data-animal="cat" onclick="selectAvatarAndAuth('cat',this)">
-        <canvas width="80" height="80" id="previewCat"></canvas><span>Cat</span>
+        <canvas width="80" height="80" id="previewCat"></canvas>
+        <span>Cat</span>
+        <span class="avatar-insta">@cat.precision.analyst</span>
       </div>
       <div class="avatar-card" data-animal="bear" onclick="selectAvatarAndAuth('bear',this)">
-        <canvas width="80" height="80" id="previewBear"></canvas><span>Bear</span>
+        <canvas width="80" height="80" id="previewBear"></canvas>
+        <span>Bear</span>
+        <span class="avatar-insta">@bear.steadfast.guardian</span>
       </div>
       <div class="avatar-card" data-animal="bunny" onclick="selectAvatarAndAuth('bunny',this)">
-        <canvas width="80" height="80" id="previewBunny"></canvas><span>Bunny</span>
+        <canvas width="80" height="80" id="previewBunny"></canvas>
+        <span>Bunny</span>
+        <span class="avatar-insta">@bunny.energetic.scout</span>
       </div>
       <div class="avatar-card" data-animal="owl" onclick="selectAvatarAndAuth('owl',this)">
-        <canvas width="80" height="80" id="previewOwl"></canvas><span>Owl</span>
+        <canvas width="80" height="80" id="previewOwl"></canvas>
+        <span>Owl</span>
+        <span class="avatar-insta">@owl.wisdom.keeper</span>
       </div>
       <div class="avatar-card" data-animal="deer" onclick="selectAvatarAndAuth('deer',this)">
-        <canvas width="80" height="80" id="previewDeer"></canvas><span>Deer</span>
+        <canvas width="80" height="80" id="previewDeer"></canvas>
+        <span>Deer</span>
+        <span class="avatar-insta">@deer.gentle.healer</span>
       </div>
       <div class="avatar-card" data-animal="wolf" onclick="selectAvatarAndAuth('wolf',this)">
-        <canvas width="80" height="80" id="previewWolf"></canvas><span>Wolf</span>
+        <canvas width="80" height="80" id="previewWolf"></canvas>
+        <span>Wolf</span>
+        <span class="avatar-insta">@wolf.fierce.protector</span>
       </div>
       <div class="avatar-card" data-animal="raccoon" onclick="selectAvatarAndAuth('raccoon',this)">
-        <canvas width="80" height="80" id="previewRaccoon"></canvas><span>Raccoon</span>
+        <canvas width="80" height="80" id="previewRaccoon"></canvas>
+        <span>Raccoon</span>
+        <span class="avatar-insta">@raccoon.tech.tinkerer</span>
       </div>
     </div>
 
@@ -25757,38 +27584,47 @@ pre{position:relative;overflow-x:auto}
       <div class="char-desc active" data-animal="puppy">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Lilly — Alpha Assistant</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">The lead agent. Curious, warm, and direct. Handles all conversations, learns your patterns, and coordinates the team.</div>
+        <div style="font-size:10px;color:rgba(139,122,158,0.7);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:4px">@lilly.alpha.assistant</div>
       </div>
       <div class="char-desc" data-animal="fox" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Fox — Creative Strategist</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Sharp and inventive. Excels at creative tasks, storytelling, brainstorming, and finding clever solutions to complex problems.</div>
+        <div style="font-size:10px;color:rgba(139,122,158,0.7);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:4px">@fox.creative.strategist</div>
       </div>
       <div class="char-desc" data-animal="cat" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Cat — Precision Analyst</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Keen eye for detail. Handles data analysis, code review, research, and systematic problem-solving with methodical precision.</div>
+        <div style="font-size:10px;color:rgba(139,122,158,0.7);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:4px">@cat.precision.analyst</div>
       </div>
       <div class="char-desc" data-animal="bear" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Bear — Steadfast Guardian</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Calm and dependable. Manages routines, reminders, scheduling, and provides grounded support when you need stability.</div>
+        <div style="font-size:10px;color:rgba(139,122,158,0.7);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:4px">@bear.steadfast.guardian</div>
       </div>
       <div class="char-desc" data-animal="bunny" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Bunny — Energetic Scout</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Quick and alert. Handles real-time monitoring, notifications, sensor feeds, and keeps you updated on everything happening around you.</div>
+        <div style="font-size:10px;color:rgba(139,122,158,0.7);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:4px">@bunny.energetic.scout</div>
       </div>
       <div class="char-desc" data-animal="owl" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Owl — Wisdom Keeper</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Wise and thoughtful. Provides deep knowledge, considers all angles, and offers philosophical guidance drawn from patterns others miss.</div>
+        <div style="font-size:10px;color:rgba(139,122,158,0.7);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:4px">@owl.wisdom.keeper</div>
       </div>
       <div class="char-desc" data-animal="deer" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Deer — Gentle Healer</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Nurturing and calming. Provides emotional support, wellness guidance, and creates safe spaces for reflection and recovery.</div>
+        <div style="font-size:10px;color:rgba(139,122,158,0.7);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:4px">@deer.gentle.healer</div>
       </div>
       <div class="char-desc" data-animal="wolf" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Wolf — Fierce Protector</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Bold and loyal. Takes charge in crisis, defends boundaries, and makes tough calls when others hesitate.</div>
+        <div style="font-size:10px;color:rgba(139,122,158,0.7);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:4px">@wolf.fierce.protector</div>
       </div>
       <div class="char-desc" data-animal="raccoon" style="display:none">
         <div style="font-size:13px;font-weight:600;color:#8b7a9e;margin-bottom:4px">Raccoon — Tech Tinkerer</div>
         <div style="font-size:11px;color:rgba(93,78,109,0.55);line-height:1.5">Curious and resourceful. Loves gadgets, hacks, DIY solutions, and finding unconventional ways to solve technical problems.</div>
+        <div style="font-size:10px;color:rgba(139,122,158,0.7);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-top:4px">@raccoon.tech.tinkerer</div>
       </div>
     </div>
 
@@ -26120,80 +27956,43 @@ pre{position:relative;overflow-x:auto}
     </button>
   </div>
 
-  <!-- Pushbullet -->
+  <!-- Instagram Pairing -->
   <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Pushbullet</div>
-    <input id="setting-pushbullet-key" type="password" placeholder="Pushbullet API key" style="width:100%;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box">
-    <div style="display:flex;gap:8px;margin-top:8px">
-      <button onclick="savePushbulletKey()" style="flex:1;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Save Key</button>
-      <button onclick="testPushbullet()" style="flex:1;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.15);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Test</button>
+    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Instagram Pairing</div>
+    <div style="font-size:12px;color:#5d4e6d;margin-bottom:10px">Pick an avatar. She'll DM you a 6-digit code on Instagram to confirm pairing.</div>
+
+    <!-- Avatar Grid -->
+    <div id="instaAvatarGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:12px">
+      <button class="insta-avatar-btn" data-avatar="puppy" onclick="selectInstaAvatar(this)" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;border-radius:12px;border:2px solid rgba(184,169,201,0.2);background:rgba(255,255,255,0.5);cursor:pointer;transition:all 0.15s"><span style="font-size:20px">🐶</span><span style="font-size:10px;color:#5d4e6d">Lilly</span></button>
+      <button class="insta-avatar-btn" data-avatar="fox" onclick="selectInstaAvatar(this)" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;border-radius:12px;border:2px solid rgba(184,169,201,0.2);background:rgba(255,255,255,0.5);cursor:pointer;transition:all 0.15s"><span style="font-size:20px">🦊</span><span style="font-size:10px;color:#5d4e6d">Fox</span></button>
+      <button class="insta-avatar-btn" data-avatar="cat" onclick="selectInstaAvatar(this)" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;border-radius:12px;border:2px solid rgba(184,169,201,0.2);background:rgba(255,255,255,0.5);cursor:pointer;transition:all 0.15s"><span style="font-size:20px">🐱</span><span style="font-size:10px;color:#5d4e6d">Cat</span></button>
+      <button class="insta-avatar-btn" data-avatar="bear" onclick="selectInstaAvatar(this)" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;border-radius:12px;border:2px solid rgba(184,169,201,0.2);background:rgba(255,255,255,0.5);cursor:pointer;transition:all 0.15s"><span style="font-size:20px">🐻</span><span style="font-size:10px;color:#5d4e6d">Bear</span></button>
+      <button class="insta-avatar-btn" data-avatar="bunny" onclick="selectInstaAvatar(this)" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;border-radius:12px;border:2px solid rgba(184,169,201,0.2);background:rgba(255,255,255,0.5);cursor:pointer;transition:all 0.15s"><span style="font-size:20px">🐰</span><span style="font-size:10px;color:#5d4e6d">Bunny</span></button>
+      <button class="insta-avatar-btn" data-avatar="owl" onclick="selectInstaAvatar(this)" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;border-radius:12px;border:2px solid rgba(184,169,201,0.2);background:rgba(255,255,255,0.5);cursor:pointer;transition:all 0.15s"><span style="font-size:20px">🦉</span><span style="font-size:10px;color:#5d4e6d">Owl</span></button>
+      <button class="insta-avatar-btn" data-avatar="deer" onclick="selectInstaAvatar(this)" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;border-radius:12px;border:2px solid rgba(184,169,201,0.2);background:rgba(255,255,255,0.5);cursor:pointer;transition:all 0.15s"><span style="font-size:20px">🦌</span><span style="font-size:10px;color:#5d4e6d">Deer</span></button>
+      <button class="insta-avatar-btn" data-avatar="wolf" onclick="selectInstaAvatar(this)" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;border-radius:12px;border:2px solid rgba(184,169,201,0.2);background:rgba(255,255,255,0.5);cursor:pointer;transition:all 0.15s"><span style="font-size:20px">🐺</span><span style="font-size:10px;color:#5d4e6d">Wolf</span></button>
+      <button class="insta-avatar-btn" data-avatar="raccoon" onclick="selectInstaAvatar(this)" style="display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 4px;border-radius:12px;border:2px solid rgba(184,169,201,0.2);background:rgba(255,255,255,0.5);cursor:pointer;transition:all 0.15s"><span style="font-size:20px">🦝</span><span style="font-size:10px;color:#5d4e6d">Raccoon</span></button>
     </div>
-    <div id="pb-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
-  </div>
 
-  <!-- Notifications -->
-  <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Alpha Notifications</div>
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d;margin-bottom:6px">
-      <input type="checkbox" id="setting-notif-proactive" checked style="accent-color:#8b7a9e"> Proactive alerts
-    </label>
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d;margin-bottom:6px">
-      <input type="checkbox" id="setting-notif-paused" style="accent-color:#8b7a9e"> Pause notifications
-    </label>
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d;margin-bottom:6px">
-      <span style="white-space:nowrap">Max per day</span>
-      <input id="setting-notif-cap" type="number" min="0" value="3" style="width:64px;padding:5px 8px;border-radius:8px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none">
-      <span style="font-size:11px;color:rgba(93,78,109,0.5)">(0 = unlimited)</span>
-    </label>
-    <button onclick="saveNotifPrefs()" style="margin-top:6px;padding:7px 14px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Save Notifications</button>
-    <div id="notif-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d;margin-bottom:6px;margin-top:10px">
-      <input type="checkbox" id="setting-notif-sound" checked style="accent-color:#8b7a9e"> Sound
-    </label>
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#5d4e6d">
-      <input type="checkbox" id="setting-notif-pushbullet" style="accent-color:#8b7a9e"> Fallback to Pushbullet
-    </label>
-  </div>
-
-  <!-- Sensor Server -->
-  <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Sensor Server (Optional)</div>
-    <input id="setting-sensor-url" type="text" placeholder="http://<phone-ip>:8099" style="width:100%;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box">
-    <button onclick="saveSensorUrl()" style="width:100%;margin-top:8px;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Save Sensor URL</button>
-  </div>
-
-  <!-- Pair Token (light bridge auth) -->
-  <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Pair Token</div>
-    <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Shared secret for device pairing and server access.</div>
-    <input id="setting-pair-token" type="text" placeholder="Empty = no auth (open)" style="width:100%;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace">
-    <button onclick="savePairToken()" style="width:100%;margin-top:8px;padding:8px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Save Pair Token</button>
-    <div id="pair-token-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
-  </div>
-
-  <!-- Pairing -->
-  <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Pairing</div>
-    <div style="font-size:12px;color:#5d4e6d;margin-bottom:8px">Enter your device's 8-character token:</div>
-    <div style="display:flex;gap:8px;align-items:center">
-      <input id="setting-pair-token" type="text" maxlength="8" placeholder="XXXXXXXX"
-        style="flex:1;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace;text-transform:uppercase">
-      <button onclick="submitPairToken()" style="padding:8px 12px;border:none;border-radius:10px;background:rgba(139,122,158,0.2);color:#5d4e6d;font-size:12px;font-weight:500;cursor:pointer">Pair</button>
+    <!-- Instagram Username -->
+    <div style="margin-bottom:10px">
+      <div style="font-size:11px;color:rgba(93,78,109,0.6);margin-bottom:4px">Your Instagram username</div>
+      <input id="instaPairUsername" type="text" placeholder="@username" style="width:100%;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:13px;color:#5d4e6d;outline:none;box-sizing:border-box">
     </div>
-    <div id="pair-status" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
-  </div>
 
-  <!-- About / Docs -->
-  <div style="margin-bottom:16px">
-    <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">About</div>
-    <a href="https://github.com/labhrasd/Lilly_Workspace" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8b7a9e;text-decoration:none;padding:6px 0;border-bottom:1px solid rgba(184,169,201,0.15)">📖 Setup Guide (README)</a>
-    <a href="https://droolingwithsanity.ca" target="_blank" rel="noopener" style="display:block;font-size:12px;color:#8b7a9e;text-decoration:none;padding:6px 0">🌐 droolingwithsanity.ca</a>
-    <div id="aboutVersion" style="font-size:10px;color:rgba(93,78,109,0.4);margin-top:6px">Lilly AI · 9 Avatars · Termux + Docker</div>
-  </div>
+    <!-- Send Code Button -->
+    <button id="instaSendCodeBtn" onclick="instaSendPairCode()" disabled style="width:100%;padding:10px;border:none;border-radius:12px;background:linear-gradient(140deg,#8b7a9e,#a892b8);color:#fff;font-size:13px;font-weight:600;cursor:pointer;opacity:0.5;transition:opacity 0.15s">Send code via DM</button>
+    <div id="instaPairStatus" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
 
-  <!-- Danger zone -->
-  <div style="border-top:1px solid rgba(184,169,201,0.2);padding-top:12px;margin-top:4px">
-    <button onclick="clearAllData()" style="width:100%;padding:8px;border:1px solid rgba(232,90,110,0.3);border-radius:10px;background:rgba(232,90,110,0.08);color:#c44;font-size:12px;font-weight:500;cursor:pointer">Clear All Local Data</button>
+    <!-- Code Verification (shown after code sent) -->
+    <div id="instaCodeVerify" style="display:none;margin-top:14px;border-top:1px solid rgba(184,169,201,0.2);padding-top:12px">
+      <div style="font-size:11px;font-weight:600;color:rgba(93,78,109,0.6);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Enter the code from the DM</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input id="instaPairCodeInput" type="text" maxlength="6" placeholder="000000" style="flex:1;padding:8px 12px;border-radius:10px;border:1px solid rgba(184,169,201,0.3);background:rgba(255,255,255,0.5);font-size:18px;font-weight:700;letter-spacing:4px;color:#5d4e6d;outline:none;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace;text-align:center">
+        <button onclick="instaVerifyPairCode()" style="padding:8px 14px;border:none;border-radius:10px;background:rgba(76,175,80,0.2);color:#2e7d32;font-size:12px;font-weight:600;cursor:pointer">Verify</button>
+      </div>
+      <div id="instaVerifyStatus" style="font-size:11px;margin-top:6px;color:rgba(93,78,109,0.5)"></div>
+    </div>
   </div>
 </div>
 
@@ -26272,12 +28071,7 @@ pre{position:relative;overflow-x:auto}
           <span class="icon">⚡</span> GPU
         </button>
         <span class="cw-mode-sep"></span>
-        <button id="cwModeAuto"  class="cw-control-btn cw-mode-btn active" onclick="setVisionMode('auto')" title="Auto — Lilly picks the mode from the scene">🔄 AUTO</button>
-        <button id="cwModeWalk"  class="cw-control-btn cw-mode-btn" onclick="setVisionMode('walking')" title="Walking mode — people, bikes, curbs, nearby traffic">🚶 WALK</button>
-        <button id="cwModeDrive" class="cw-control-btn cw-mode-btn" onclick="setVisionMode('driving')" title="Driving mode — traffic lights, signs, cars, distance + speed">🚗 DRIVE</button>
-        <button id="cwModeStop"  class="cw-control-btn cw-mode-btn" onclick="setVisionMode('stationary')" title="Stationary mode — people + animals around you">🚥 STILL</button>
-        <span class="cw-mode-sep"></span>
-        <button id="cwTeslaBtn" class="cw-control-btn" onclick="setTeslaVisual()" title="Tesla-style white/black silhouettes + lane lines — high-contrast object view">⚪ TESLA</button>
+        <button id="cwModeAuto"  class="cw-control-btn cw-mode-btn active" onclick="setVisionMode('auto')" title="Auto — Lilly picks the mode from phone sensors + approaching objects">🔄 AUTO</button>
       </div>
     </div>
     <div class="cw-window-controls">
@@ -28845,8 +30639,7 @@ async function submitBlink2FA() {
 // Add Enter key listener for 2FA input
 document.addEventListener('DOMContentLoaded', () => {
   _initAlertSettings();
-  _initVisionMode();  // restore persisted mode + set button active state
-  _initTeslaVisual(); // restore persisted Tesla-style silhouette view
+  _initVisionMode();  // auto mode only — derived from sensors / approaching objects
   const input = document.getElementById('cwBlink2faInput');
   if (input) {
     input.addEventListener('keydown', (e) => {
@@ -29081,7 +30874,11 @@ let _visionModeResolved = 'auto';      // server-resolved effective mode
 let _visionDeviceSpeed = null;         // km/h from phone GPS
 let _visionOverlay = {};               // {mode, counts, tier1, total}
 let _visionDrawSeq = 0;                // bumped when boxes change (dirty check)
-let _teslaVisual = false;              // Tesla-style white/black silhouettes + lane lines
+let _visionAlerts = [];                // drive-safety alerts {type,level,text,tts,ttc_s}
+let _visionAlertKey = '';              // dedupe key (types+levels+ttc) for redraw
+let _visionAlertCoooldown = {};        // {type:level -> ms} voice refire gate
+let _cwSpeakInFlight = false;          // single-stream guard for alert speech
+let _visionAlertQueued = null;         // newest alert while speech is busy
 
 const _MODE_META = {
   auto:       { icon: '🔄', name: 'AUTO' },
@@ -29104,7 +30901,7 @@ function setVisionMode(mode){
   if(!mode || !['auto','stationary','walking','driving'].includes(mode)) mode = 'auto';
   _visionMode = mode;
   try{ localStorage.setItem('lillyVisionMode', mode); }catch(e){}
-  for(const [id,m] of Object.entries({cwModeAuto:'auto', cwModeWalk:'walking', cwModeDrive:'driving', cwModeStop:'stationary'})){
+  for(const [id,m] of Object.entries({cwModeAuto:'auto'})){
     const b = document.getElementById(id);
     if(b) b.classList.toggle('active', m === mode);
   }
@@ -29113,34 +30910,10 @@ function setVisionMode(mode){
   addChatMessage('system', 'Vision mode: ' + (_MODE_META[mode] || _MODE_META.auto).icon + ' ' + (_MODE_META[mode] || _MODE_META.auto).name);
 }
 function _initVisionMode(){
-  try{
-    const m = localStorage.getItem('lillyVisionMode');
-    if(m) setVisionMode(m);
-  }catch(e){}
-}
-
-// ── Tesla-style silhouette view (white/black contrast + lane lines) ──
-function setTeslaVisual(){
-  _teslaVisual = !_teslaVisual;
-  try{ localStorage.setItem('lillyTeslaVisual', _teslaVisual ? '1' : ''); }catch(e){}
-  const b = document.getElementById('cwTeslaBtn');
-  if(b) b.classList.toggle('active', _teslaVisual);
-  const feed = document.getElementById('cwWebcam');
-  if(feed) feed.classList.toggle('tesla', _teslaVisual);
-  addChatMessage('system', _teslaVisual
-    ? '⚪ Tesla view on — white/black silhouettes + lane lines'
-    : '▢ Tesla view off — colored YOLO boxes');
-}
-function _initTeslaVisual(){
-  try{
-    if(localStorage.getItem('lillyTeslaVisual') === '1'){
-      _teslaVisual = true;
-      const b = document.getElementById('cwTeslaBtn');
-      if(b) b.classList.add('active');
-      const feed = document.getElementById('cwWebcam');
-      if(feed) feed.classList.add('tesla');
-    }
-  }catch(e){}
+  // Mode is auto-detected from phone sensors (GPS speed) + approaching
+  // objects in the view — no manual walking/driving toggle anymore.
+  try{ localStorage.removeItem('lillyVisionMode'); }catch(e){}
+  setVisionMode('auto');
 }
 
 // ── Single object: one-pass box outline + compact chip ────────────
@@ -29198,182 +30971,103 @@ function _drawVisionHud(ctx, vw, vh){
   }catch(e){}
 }
 
-// ── Tesla-style renderer: white/black silhouettes + lane lines ────
-function _teslaRRect(ctx, x, y, w, h, r){
-  if(r > w/2) r = w/2; if(r > h/2) r = h/2;
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
-// vanishing-point lane lines + road body (subtle animated flow)
-function _drawTeslaWorld(ctx, vw, vh){
-  const vx = vw * 0.5, vy = vh * 0.36;
-  ctx.save();
-  ctx.lineCap = 'round';
-  const dashOn = (Math.floor(Date.now() / 60)) % 6 < 4;
-  ctx.strokeStyle = 'rgba(242,244,247,.28)';
-  ctx.lineWidth = Math.max(1, vh * 0.0045);
-  for(const cx of [vw * 0.08, vw * 0.92]){
-    ctx.beginPath(); ctx.moveTo(cx, vh);
-    ctx.quadraticCurveTo(cx * 0.5 + vw * 0.5, vh * 0.62, vx, vy);
-    ctx.stroke();
-  }
-  ctx.setLineDash([vh * 0.05, vh * 0.06]);
-  ctx.lineDashOffset = -(Date.now() / 24 % (vh * 0.11));
-  ctx.strokeStyle = 'rgba(242,244,247,' + (dashOn ? '.75' : '.5') + ')';
-  ctx.lineWidth = Math.max(1, vh * 0.003);
-  ctx.beginPath(); ctx.moveTo(vx, vy); ctx.lineTo(vx, vh); ctx.stroke();
-  ctx.setLineDash([]); ctx.lineDashOffset = 0;
-  if((_visionModeResolved || _visionMode) === 'driving'){
-    ctx.strokeStyle = 'rgba(242,244,247,.14)';
-    ctx.lineWidth = Math.max(1, vh * 0.0025);
-    ctx.setLineDash([vh * 0.03, vh * 0.09]);
-    ctx.beginPath(); ctx.moveTo(vw * 0.38, vh * 0.30); ctx.lineTo(vw, vh * 0.52); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(vw * 0.62, vh * 0.30); ctx.lineTo(0, vh * 0.52); ctx.stroke();
-    ctx.setLineDash([]);
-  }
-  ctx.restore();
-}
-// shape primitives (Tesla-esque: dark glass/tyres on white body)
-function _teslaCar(ctx, x, y, w, h, c){
-  ctx.fillStyle = c; _teslaRRect(ctx, x, y, w, h * 0.62, Math.min(6, h * 0.16)); ctx.fill();
-  ctx.fillStyle = 'rgba(20,24,28,.9)'; _teslaRRect(ctx, x + w * 0.14, y + h * 0.16, w * 0.72, h * 0.34, Math.min(5, h * 0.10)); ctx.fill();
-  ctx.fillStyle = c; ctx.fillRect(x, y + h * 0.62, w, h * 0.02);
-  ctx.fillStyle = 'rgba(15,18,22,.95)';
-  ctx.fillRect(x + w * 0.06, y + h * 0.66, w * 0.18, h * 0.30); ctx.fillRect(x + w * 0.76, y + h * 0.66, w * 0.18, h * 0.30);
-}
-function _teslaTruck(ctx, x, y, w, h, c){
-  ctx.fillStyle = c; _teslaRRect(ctx, x, y + h * 0.18, w * 0.62, h * 0.46, 4); ctx.fill();
-  _teslaRRect(ctx, x + w * 0.66, y, w * 0.34, h * 0.60, 4); ctx.fill();
-  ctx.fillStyle = 'rgba(20,24,28,.9)'; _teslaRRect(ctx, x + w * 0.72, y + h * 0.10, w * 0.20, h * 0.26, 3); ctx.fill();
-  ctx.fillStyle = 'rgba(15,18,22,.95)';
-  ctx.fillRect(x + w * 0.04, y + h * 0.66, w * 0.16, h * 0.30); ctx.fillRect(x + w * 0.30, y + h * 0.66, w * 0.14, h * 0.30);
-  ctx.fillRect(x + w * 0.70, y + h * 0.66, w * 0.18, h * 0.30);
-}
-function _teslaPerson(ctx, x, y, w, h, c){
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.arc(x + w * 0.5, y + h * 0.20, Math.min(w * 0.3, h * 0.09), 0, 7); ctx.fill();          // head
-  _teslaRRect(ctx, x + w * 0.14, y + h * 0.34, w * 0.72, h * 0.50, Math.min(7, h * 0.12)); ctx.fill();          // torso
-  ctx.fillStyle = 'rgba(15,18,22,.85)';
-  ctx.fillRect(x + w * 0.20, y + h * 0.86, w * 0.16, h * 0.14); ctx.fillRect(x + w * 0.64, y + h * 0.86, w * 0.16, h * 0.14); // legs
-}
-function _teslaMoto(ctx, x, y, w, h, c){
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.arc(x + w * 0.20, y + h * 0.78, h * 0.20, 0, 7); ctx.fill();
-  ctx.fillStyle = 'rgba(15,18,22,.95)'; ctx.beginPath(); ctx.arc(x + w * 0.20, y + h * 0.78, h * 0.10, 0, 7); ctx.fill();
-  ctx.fillStyle = c;
-  ctx.fillRect(x + w * 0.18, y + h * 0.62, w * 0.66, h * 0.10);
-  ctx.beginPath(); ctx.moveTo(x + w * 0.40, y + h * 0.66); ctx.lineTo(x + w * 0.62, y + h * 0.66); ctx.lineTo(x + w * 0.62, y + h * 0.22); ctx.closePath(); ctx.fill();
-  _teslaRRect(ctx, x + w * 0.55, y + h * 0.14, w * 0.30, h * 0.12, 4); ctx.fill();
-  ctx.beginPath(); ctx.arc(x + w * 0.92, y + h * 0.78, h * 0.18, 0, 7); ctx.fill(); ctx.fill();
-  ctx.fillStyle = 'rgba(15,18,22,.95)'; ctx.beginPath(); ctx.arc(x + w * 0.92, y + h * 0.78, h * 0.085, 0, 7); ctx.fill();
-}
-function _teslaBike(ctx, x, y, w, h, c){
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.arc(x + w * 0.16, y + h * 0.80, h * 0.16, 0, 7); ctx.fill();
-  ctx.beginPath(); ctx.arc(x + w * 0.86, y + h * 0.80, h * 0.16, 0, 7); ctx.fill();
-  ctx.fillStyle = 'rgba(15,18,22,.95)';
-  ctx.beginPath(); ctx.arc(x + w * 0.16, y + h * 0.80, h * 0.07, 0, 7); ctx.fill();
-  ctx.beginPath(); ctx.arc(x + w * 0.86, y + h * 0.80, h * 0.07, 0, 7); ctx.fill();
-  ctx.fillStyle = c; ctx.lineWidth = h * 0.05; ctx.lineCap = 'round';
-  ctx.beginPath(); ctx.moveTo(x + w * 0.20, y + h * 0.78); ctx.lineTo(x + w * 0.48, y + h * 0.20); ctx.lineTo(x + w * 0.80, y + h * 0.78); ctx.stroke();
-  _teslaRRect(ctx, x + w * 0.40, y + h * 0.10, w * 0.24, h * 0.12, 4); ctx.fill();
-}
-function _teslaLight(ctx, x, y, w, h, c){
-  ctx.fillStyle = 'rgba(18,22,28,.92)'; _teslaRRect(ctx, x, y + h * 0.18, w, h * 0.64, 5); ctx.fill();
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.arc(x + w / 2, y + h * 0.12, Math.min(w, h) * 0.16, 0, 7); ctx.fill();
-  const cols = ['#5c646f', (_visionModeResolved || _visionMode) === 'driving' ? '#5ea2ff' : '#5c646f', '#5c646f'];
-  for(let i = 0; i < 3; i++){ ctx.fillStyle = cols[i]; ctx.beginPath(); ctx.arc(x + w / 2, y + h * (0.30 + i * 0.20), Math.min(w, h) * 0.13, 0, 7); ctx.fill(); }
-}
-function _teslaSign(ctx, x, y, w, h, c){
-  ctx.fillStyle = c;
-  ctx.beginPath();
-  const cx = x + w / 2, cy = y + h / 2, R = Math.min(w, h) * 0.46;
-  for(let i = 0; i < 8; i++){
-    const a = Math.PI / 8 + i * Math.PI / 4;
-    const px = cx + Math.cos(a) * R, py = cy + Math.sin(a) * R;
-    if(i) ctx.lineTo(px, py); else ctx.moveTo(px, py);
-  }
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = 'rgba(10,13,17,.85)'; ctx.beginPath(); ctx.arc(cx, cy, h * 0.12, 0, 7); ctx.fill();
-  ctx.fillStyle = 'rgba(10,13,17,.9)'; ctx.fillRect(x + w * 0.46, y + h * 0.55, w * 0.08, h * 0.45);
-}
-function _teslaCone(ctx, x, y, w, h, c){
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.moveTo(x + w * 0.5, y); ctx.lineTo(x + w, y + h); ctx.lineTo(x, y + h); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = 'rgba(15,18,22,.95)'; ctx.fillRect(x + w * 0.08, y + h * 0.78, w * 0.84, h * 0.10);
-}
-function _teslaBollard(ctx, x, y, w, h, c){
-  ctx.fillStyle = c; _teslaRRect(ctx, x + w * 0.25, y, w * 0.5, h, 4); ctx.fill();
-  ctx.fillStyle = 'rgba(10,13,17,.9)'; _teslaRRect(ctx, x + w * 0.25, y + h * 0.82, w * 0.5, h * 0.18, 2); ctx.fill();
-}
-function _teslaAnimal(ctx, x, y, w, h, c){
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.ellipse(x + w * 0.5, y + h * 0.52, w * 0.42, h * 0.36, 0, 0, 7); ctx.fill();
-  ctx.beginPath(); ctx.arc(x + w * 0.26, y + h * 0.22, w * 0.16, 0, 7); ctx.fill();
-  ctx.fillStyle = 'rgba(10,13,17,.85)';
-  ctx.beginPath(); ctx.moveTo(x + w * 0.14, y + h * 0.10); ctx.lineTo(x + w * 0.22, y); ctx.lineTo(x + w * 0.30, y + h * 0.16); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = c;
-  ctx.beginPath(); ctx.moveTo(x + w * 0.86, y + h * 0.40); ctx.quadraticCurveTo(x + w * 1.02, y + h * 0.50, x + w * 0.90, y + h * 0.70); ctx.quadraticCurveTo(x + w * 0.86, y + h * 0.54, x + w * 0.80, y + h * 0.48); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = 'rgba(15,18,22,.85)';
-  ctx.fillRect(x + w * 0.30, y + h * 0.82, w * 0.10, h * 0.18); ctx.fillRect(x + w * 0.52, y + h * 0.82, w * 0.10, h * 0.18);
-}
-// one silhouette — ground shadow, shape by class, label chip (tier ≤ 2)
-function _drawTeslaEntity(ctx, det, vw, vh){
-  const x1 = (det.x1 || 0) * vw, y1 = (det.y1 || 0) * vh;
-  const x2 = (det.x2 || 0) * vw, y2 = (det.y2 || 0) * vh;
-  const w = x2 - x1, h = y2 - y1;
-  if(w < 4 || h < 4) return;
-  const tier = det.tier || det.priority || 3;
-  const crit = tier === 1;
-  const bg = tier >= 3;
-  const color = crit ? '#ffb454' : '#f2f4f7';
-  ctx.fillStyle = bg ? 'rgba(0,0,0,.3)' : 'rgba(0,0,0,.5)';
-  ctx.beginPath(); ctx.ellipse((x1 + x2) / 2, y2, w * 0.42, Math.max(2, h * 0.03), 0, 0, 7); ctx.fill();
-  ctx.save();
-  ctx.globalAlpha = bg ? 0.45 : 1;
-  const lab = String(det.label || 'object').toLowerCase();
-  if(/person|man|woman|pedestrian|human body/.test(lab)) _teslaPerson(ctx, x1, y1, w, h, color);
-  else if(lab.includes('truck')) _teslaTruck(ctx, x1, y1, w, h, color);
-  else if(/motorcycle|motorbike/.test(lab)) _teslaMoto(ctx, x1, y1, w, h, color);
-  else if(/bicycle|bike/.test(lab)) _teslaBike(ctx, x1, y1, w, h, color);
-  else if(/car|bus|van|suv|pickup|minivan|vehicle|land vehicle/.test(lab)) _teslaCar(ctx, x1, y1, w, h, color);
-  else if(/traffic light|signal/.test(lab)) _teslaLight(ctx, x1, y1, w, h, color);
-  else if(lab.includes('sign')) _teslaSign(ctx, x1, y1, w, h, color);
-  else if(lab.includes('cone')) _teslaCone(ctx, x1, y1, w, h, color);
-  else if(/bollard|post/.test(lab)) _teslaBollard(ctx, x1, y1, w, h, color);
-  else if(/dog|cat/.test(lab)) _teslaAnimal(ctx, x1, y1, w, h, color);
-  else { ctx.fillStyle = color; _teslaRRect(ctx, x1, y1, w, h, Math.min(6, h * 0.18)); ctx.fill(); }
-  ctx.restore();
-  if(!bg){
-    let label = det.label || 'object';
-    if(det.make && det.model) label = det.make + ' ' + det.model;
-    else if(det.make) label = det.make;
-    let txt = label;
-    if(det.distance_m != null) txt += ' · ' + Math.round(det.distance_m) + 'm';
-    ctx.font = '600 10px system-ui, -apple-system, sans-serif';
-    const tw = Math.min(ctx.measureText(txt).width + 8, 170);
-    let cy0 = y1 - 15;
-    if(cy0 < 2) cy0 = y2 + 2;
-    ctx.fillStyle = 'rgba(0,0,0,.55)'; _teslaRRect(ctx, x1, cy0, tw, 13, 4); ctx.fill();
-    ctx.fillStyle = crit ? '#ffd9a0' : '#aeb9c7';
-    ctx.fillText(txt, x1 + 4, cy0 + 10);
-  }
-}
-function _drawTeslaHud(ctx, vw, vh, list){
+// ── Drive gauges: speedometer + alert banner + forward-collision bar ──
+// Deterministic HUD layered above the boxes. Only drawn when driving is
+// resolved (scene + GPS) or the phone reports ground speed — otherwise
+// a single dim "GPS OFF" chip so the driver knows why speed is missing.
+function _drawVisionGauges(ctx, vw, vh){
   try{
     const meta = _MODE_META[_visionModeResolved] || _MODE_META.auto;
-    const crit = (list || []).filter(d => (d.tier || 3) === 1).length;
-    let txt = meta.icon + ' ' + meta.name + ' · ⚪ TESLA';
-    if(crit) txt += ' · ⚠ ' + crit;
-    ctx.font = 'bold 11px system-ui, -apple-system, sans-serif';
-    const tw = ctx.measureText(txt).width + 16;
-    ctx.fillStyle = 'rgba(0,0,0,.55)'; _teslaRRect(ctx, 6, 6, tw, 20, 5); ctx.fill();
-    ctx.fillStyle = meta.name === 'DRIVE' ? '#ffb454' : '#f2f4f7';
-    ctx.fillText(txt, 14, 20);
+    const spd = _visionDeviceSpeed;
+    const driving = meta.name === 'DRIVE' || (spd != null && spd >= 1);
+
+    // ── Speedometer (bottom-right) ──
+    const R = Math.min(34, vh * 0.09);
+    const cx = vw - R - 10, cy = vh - R - 12;
+    if(driving){
+      const MAX = 120;
+      const a0 = Math.PI * 0.75, a1 = Math.PI * 2.25;           // 270° sweep
+      const s = spd != null ? Math.max(0, Math.min(MAX, spd)) : 0;
+      const f = s / MAX;
+      ctx.lineWidth = 5; ctx.lineCap = 'round';
+      ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+      ctx.beginPath(); ctx.arc(cx, cy, R, a0, a1); ctx.stroke();
+      const col = s < 60 ? '#2EE6A8' : (s < 95 ? '#FFB020' : '#FF3B4E');
+      ctx.strokeStyle = col;
+      ctx.beginPath(); ctx.arc(cx, cy, R, a0, a0 + (a1 - a0) * f); ctx.stroke();
+      // needle
+      const na = a0 + (a1 - a0) * f;
+      ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(na) * (R + 6), cy + Math.sin(na) * (R + 6));
+      ctx.stroke();
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 18px system-ui, -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(String(Math.round(s)), cx, cy + 2);
+      ctx.font = 'bold 8px system-ui, -apple-system, sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      ctx.fillText('km/h', cx, cy + 13);
+      ctx.textAlign = 'left';
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.40)';
+      ctx.font = 'bold 10px system-ui, -apple-system, sans-serif';
+      const gtxt = 'GPS OFF — speed unavailable';
+      const tw = ctx.measureText(gtxt).width + 12;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(cx - tw, cy - 8, tw, 16);
+      ctx.fillStyle = 'rgba(255,255,255,0.65)';
+      ctx.fillText(gtxt, cx - tw + 6, cy + 4);
+    }
+
+    // ── Alert banner (top-center: first level-1 else level-2) ──
+    const urg = Array.isArray(_visionAlerts) && _visionAlerts.length
+      ? (_visionAlerts.find(a => a.level === 1) || _visionAlerts.find(a => a.level === 2))
+      : null;
+    if(urg){
+      const lvl = urg.level || 2;
+      const blink = lvl === 1 && (Math.floor(performance.now() / 420) % 2 === 0);
+      const label = String(urg.text || urg.type || 'ALERT').toUpperCase();
+      ctx.font = 'bold 15px system-ui, -apple-system, sans-serif';
+      const tw = ctx.measureText(label).width + 22;
+      const bx = vw / 2 - tw / 2, by = 30;
+      ctx.fillStyle = lvl === 1 ? 'rgba(211,47,47,0.88)' : 'rgba(230,150,20,0.88)';
+      if(blink) ctx.globalAlpha = 0.55;
+      ctx.fillRect(bx, by, tw, 26);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 1.5;
+      ctx.strokeRect(bx, by, tw, 26);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.textAlign = 'center';
+      ctx.fillText(label, vw / 2, by + 18);
+      ctx.textAlign = 'left';
+      if(urg.ttc_s != null && urg.ettc_s === undefined){
+        ctx.font = 'bold 9px system-ui, -apple-system, sans-serif';
+        ctx.fillStyle = '#FFFFFF';
+        ctx.textAlign = 'center';
+        ctx.fillText(Math.round(urg.ttc_s * 10) / 10 + 's', vw / 2, by + 37);
+        ctx.textAlign = 'left';
+      }
+    }
+
+    // ── Too-close bar (bottom, level-1 forward collision) ──
+    const fcw = Array.isArray(_visionAlerts) && _visionAlerts.find(
+      a => a.type === 'FORWARD_COLLISION' && a.level === 1
+    );
+    if(fcw){
+      const bh = 30;                                   // bar height
+      const frac = fcw.ttc_s != null
+        ? Math.max(0.25, Math.min(1, 1 - fcw.ttc_s / 4))
+        : 0.8;
+      ctx.fillStyle = 'rgba(211,47,47,0.92)';
+      ctx.fillRect(0, vh - bh, vw * frac, bh);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.font = 'bold 12px system-ui, -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('⚠ ' + String(fcw.text || 'TOO CLOSE').toUpperCase(), vw / 2, vh - bh + 19);
+      ctx.textAlign = 'left';
+    }
   }catch(e){}
 }
 
@@ -29386,18 +31080,13 @@ function _drawVisionOverlay(ctx, detections, vw, vh){
     : [];
   list.sort((a, b) => (a.tier || 3) - (b.tier || 3));
   ctx.save();
-  if(_teslaVisual){
-    _drawTeslaWorld(ctx, vw, vh);
-    for(const det of list) _drawTeslaEntity(ctx, det, vw, vh);
-    _drawTeslaHud(ctx, vw, vh, list);
-  } else {
-    for(const det of list){
+  for(const det of list){
       const t = det.tier || det.priority || 3;
       if(t > 2) continue;                     // background/situational: skip for speed
       _drawVisionBox(ctx, det, vw, vh);
     }
-    if(list.length) _drawVisionHud(ctx, vw, vh);
-  }
+    if(list.length) _drawVisionHud(ctx, vw, vh);   // mode + speed + critical count chip
+    _drawVisionGauges(ctx, vw, vh);                // speedometer + alert banner + FCW bar
   ctx.restore();
 }
 
@@ -29406,6 +31095,41 @@ function _drawVisionOverlay(ctx, detections, vw, vh){
 function _drawPoiDetection(ctx, x1, y1, x2, y2, label, confidence, vw, vh){
   const det = { x1: x1 / vw, y1: y1 / vh, x2: x2 / vw, y2: y2 / vh, label, confidence };
   _drawVisionBox(ctx, det, vw, vh);
+}
+
+// ── Drive alert voice: single-stream Piper speech, deduped ────────
+// The vision server cooldown-gates per alert type; the client mirrors it
+// (type:level) so Pip-pip reads of the same event never stack, and a new
+// alert replaces any queue instead of piling up.
+async function _cwSpeakOne(top){
+  _cwSpeakInFlight = true;
+  try{
+    const r = await fetch('/api/tts/char', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: top.tts, char: 'puppy'})
+    });
+    const d = await r.json();
+    if(d && d.audio_id) playAudio(d.audio_id);
+  }catch(e){}
+  _cwSpeakInFlight = false;
+  if(_visionAlertQueued){
+    const nxt = _visionAlertQueued;
+    _visionAlertQueued = null;
+    _cwSpeakOne(nxt);
+  }
+}
+
+async function _cwSpeakAlerts(alerts){
+  if(!_cwWebcamActive || !Array.isArray(alerts) || !alerts.length) return;
+  const top = alerts.find(a => a.level === 1) || alerts.find(a => a.level === 2);
+  if(!top || !top.tts) return;
+  const key = top.type + ':' + (top.level || 0);
+  const last = _visionAlertCoooldown[key] || 0;
+  if(Date.now() < last) return;
+  _visionAlertCoooldown[key] = Date.now() + (top.level === 1 ? 9000 : 22000);
+  if(_cwSpeakInFlight){ _visionAlertQueued = top; return; }
+  _cwSpeakOne(top);
 }
 
 function _playYoloAlert() {
@@ -29566,6 +31290,16 @@ async function _cwStartWebcam(){
           if(d.mode) _visionModeResolved = d.mode;
           if(d.overlay) _visionOverlay = d.overlay;
           if(d.device_speed_kph != null) _visionDeviceSpeed = d.device_speed_kph;
+          // Drive-safety alerts → overlay banner + voice (deduped client-side)
+          if(Array.isArray(d.alerts)){
+            const akey = d.alerts.map(a => a.type + ':' + (a.level || 0) + (a.ttc_s ? ':' + a.ttc_s : '')).join('|');
+            if(akey !== _visionAlertKey){
+              _visionAlertKey = akey;
+              _visionAlerts = d.alerts;
+              _visionDrawSeq++;
+              _cwSpeakAlerts(d.alerts);
+            }
+          }
           // signature: box count + first few coords (cheap)
           const s = _cwDetections.slice(0, 8).map(x => (x.x1|0) + ',' + (x.y1|0) + ',' + (x.label||'')).join('|');
           if(s !== _cwDetSig){ _cwDetSig = s; _visionDrawSeq++; }
@@ -29612,7 +31346,7 @@ async function _cwStartWebcam(){
           }
           if(_gpuInitialized){
             // WebGL handles rendering — just update YOLO overlay on 2D canvas
-if(overlay && octx && (_yoloBoxesEnabled || _teslaVisual)){
+if(overlay && octx && _yoloBoxesEnabled){
               overlay.width = vw; overlay.height = vh;
               _drawVisionOverlay(octx, _cwDetections, vw, vh);
             }
@@ -30726,7 +32460,6 @@ function toggleCwMenu(){
   const groups = [
     {label:'View', items:[
       ['⛶ Fullscreen + landscape', ()=>fsCameraWindow()],
-      ['⚪ Tesla view', ()=>setTeslaVisual()],
       ['▢ Detection boxes', ()=>toggleYoloBoxes()],
       ['👤 Faces on/off', ()=>toggleFaceRecognition()],
       ['👁 IDs (who + evidence)', ()=>{ if(!_cwFacesOpen) toggleFacesPanel(); }],
@@ -31880,6 +33613,69 @@ document.getElementById('clearBtn').onclick=async()=>{
    if (open) closeHamburgerMenu();
  }
 
+ /* ─── Instagram Pairing ─── */
+ let _instaSelectedAvatar=null;
+ function selectInstaAvatar(btn){
+   document.querySelectorAll('.insta-avatar-btn').forEach(b=>{b.style.borderColor='rgba(184,169,201,0.2)';b.style.background='rgba(255,255,255,0.5)';});
+   btn.style.borderColor='#8b7a9e';btn.style.background='rgba(139,122,158,0.15)';
+   _instaSelectedAvatar=btn.getAttribute('data-avatar');
+   const sendBtn=document.getElementById('instaSendCodeBtn');
+   if(sendBtn){sendBtn.disabled=false;sendBtn.style.opacity='1';}
+ }
+ async function instaSendPairCode(){
+   const username=(document.getElementById('instaPairUsername').value||'').trim().replace(/^@/,'');
+   const status=document.getElementById('instaPairStatus');
+   const sendBtn=document.getElementById('instaSendCodeBtn');
+   if(!_instaSelectedAvatar){status.textContent='Pick an avatar first';status.style.color='rgba(232,90,110,0.8)';return;}
+   if(!username){status.textContent='Enter your Instagram username';status.style.color='rgba(232,90,110,0.8)';return;}
+   sendBtn.disabled=true;sendBtn.style.opacity='0.5';
+   status.textContent='Sending DM...';status.style.color='rgba(93,78,109,0.5)';
+   try{
+     const r=await fetch('/api/insta/pair/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({avatar:_instaSelectedAvatar,username})});
+     const d=await r.json();
+     if(d.ok){
+       status.textContent='Code sent to @'+username+' via '+_instaSelectedAvatar+'!';
+       status.style.color='rgba(76,175,80,0.8)';
+       document.getElementById('instaCodeVerify').style.display='block';
+       document.getElementById('instaPairCodeInput').focus();
+     }else{
+       status.textContent='Failed: '+(d.error||'unknown error');
+       status.style.color='rgba(232,90,110,0.8)';
+       sendBtn.disabled=false;sendBtn.style.opacity='1';
+     }
+   }catch(e){
+     status.textContent='Network error';status.style.color='rgba(232,90,110,0.8)';
+     sendBtn.disabled=false;sendBtn.style.opacity='1';
+   }
+ }
+ async function instaVerifyPairCode(){
+   const code=(document.getElementById('instaPairCodeInput').value||'').trim();
+   const status=document.getElementById('instaVerifyStatus');
+   const username=(document.getElementById('instaPairUsername').value||'').trim().replace(/^@/,'');
+   if(!code||code.length!==6){status.textContent='Enter 6-digit code';status.style.color='rgba(232,90,110,0.8)';return;}
+   status.textContent='Verifying...';status.style.color='rgba(93,78,109,0.5)';
+   try{
+     const r=await fetch('/api/insta/pair/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,username,avatar:_instaSelectedAvatar})});
+     const d=await r.json();
+     if(d.ok){
+       status.textContent='Paired! '+(_instaSelectedAvatar||'')+' confirms you.';
+       status.style.color='rgba(76,175,80,0.8)';
+       localStorage.setItem('lilly_insta_user',username);
+       localStorage.setItem('lilly_insta_paired','true');
+     }else{
+       status.textContent='Invalid code: '+(d.error||'try again');
+       status.style.color='rgba(232,90,110,0.8)';
+     }
+   }catch(e){
+     status.textContent='Network error';status.style.color='rgba(232,90,110,0.8)';
+   }
+ }
+ function loadSettings(){
+   const username=document.getElementById('instaPairUsername');
+   const saved=localStorage.getItem('lilly_insta_user');
+   if(username&&saved) username.value=saved;
+ }
+
  /* ─── Hamburger Dropdown Menu ─── */
  function toggleHamburgerMenu(){
    const menu=document.getElementById('hamburgerMenu');
@@ -32240,30 +34036,6 @@ document.getElementById('clearBtn').onclick=async()=>{
    }
  });
 
- async function loadSettings(){
-  try {
-    const r=await fetch('/api/settings',{credentials:'include'});
-    if (!r.ok) return;
-    const d=await r.json();
-    const pbKey=document.getElementById('setting-pushbullet-key');
-    const sensorUrl=document.getElementById('setting-sensor-url');
-    const pairToken=document.getElementById('setting-pair-token');
-    if (pbKey && d.pushbullet_api_key) pbKey.value=d.pushbullet_api_key;
-    if (sensorUrl && d.sensor_server_url) sensorUrl.value=d.sensor_server_url;
-    if (pairToken && d.lilly_pair_token) pairToken.value=d.lilly_pair_token;
-    const c1=document.getElementById('setting-notif-proactive');
-    const c2=document.getElementById('setting-notif-sound');
-    const c3=document.getElementById('setting-notif-pushbullet');
-    const cp=document.getElementById('setting-notif-paused');
-    const cc=document.getElementById('setting-notif-cap');
-    if (c1) c1.checked=d.proactive_notifications!==false;
-    if (c2) c2.checked=d.notification_sound!==false;
-    if (c3) c3.checked=d.pushbullet_fallback===true;
-    if (cp) cp.checked=!!d.notif_paused;
-    if (cc) cc.value=d.notif_daily_cap;
-  } catch(e){}
-}
-
 async function loadApkOptions(){
   const area=document.getElementById('apk-dl-area');
   const status=document.getElementById('apk-dl-status');
@@ -32400,7 +34172,7 @@ async function clearAllData(){
 }
 
 async function submitPairToken(){
-  const el = document.getElementById('setting-pair-token');
+  const el = document.getElementById('setting-pair-token-input');
   const status = document.getElementById('pair-status');
   const code = (el ? el.value : '').trim().toUpperCase();
   if (code.length !== 8){
@@ -34000,6 +35772,39 @@ window.CameraBridge = {
 </body>
 </html>"""
 
+# ── Cookie Consent Banner ─────────────────────────────────────
+COOKIE_CONSENT_HTML = """
+<div id="cookieConsent" style="display:none;position:fixed;bottom:0;left:0;right:0;z-index:9999;
+  background:rgba(18,18,26,0.95);backdrop-filter:blur(20px);border-top:1px solid rgba(139,122,158,0.3);
+  padding:16px 24px;font-family:system-ui,-apple-system,sans-serif;color:#c0b8d0">
+  <div style="max-width:800px;margin:0 auto;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+    <div style="flex:1;min-width:280px">
+      <p style="font-size:13px;line-height:1.6;margin:0">
+        We use cookies and session data to keep you signed in, improve your experience, and remember your preferences.
+        Your data is stored locally and is <strong style="color:#a78bfa">never sold or shared</strong>.
+        <a href="/terms" style="color:#818cf8;text-decoration:underline">Privacy & Terms</a>
+      </p>
+    </div>
+    <div style="display:flex;gap:8px;flex-shrink:0">
+      <button onclick="declineCookies()" style="padding:8px 16px;border:1px solid rgba(139,122,158,0.4);
+        border-radius:8px;background:transparent;color:#a09ab0;font-size:13px;cursor:pointer">Decline</button>
+      <button onclick="acceptCookies()" style="padding:8px 16px;border:none;border-radius:8px;
+        background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;font-size:13px;font-weight:600;cursor:pointer">Accept</button>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  if(localStorage.getItem('lilly_cookie_consent'))return;
+  document.getElementById('cookieConsent').style.display='block';
+})();
+function acceptCookies(){localStorage.setItem('lilly_cookie_consent','accepted');document.getElementById('cookieConsent').style.display='none'}
+function declineCookies(){localStorage.setItem('lilly_cookie_consent','declined');document.getElementById('cookieConsent').style.display='none'}
+</script>"""
+
+# Inject cookie banner into HTML_PAGE before </body>
+HTML_PAGE = HTML_PAGE.replace("</body>", COOKIE_CONSENT_HTML + "\n</body>")
+
 
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
@@ -34282,6 +36087,32 @@ async def serve_lilly_static(filename: str):
     return Response(
         content=content,
         media_type=mime_type,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/static/admin_toast.css")
+async def serve_admin_toast_css():
+    """Serve the admin toast progress bar CSS."""
+    css_file = WORKSPACE / "admin_toast.css"
+    if not css_file.exists():
+        return Response("Not Found", status_code=404)
+    return Response(
+        content=css_file.read_bytes(),
+        media_type="text/css",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
+
+
+@app.get("/static/admin_toast.js")
+async def serve_admin_toast_js():
+    """Serve the admin toast progress bar JavaScript."""
+    js_file = WORKSPACE / "admin_toast.js"
+    if not js_file.exists():
+        return Response("Not Found", status_code=404)
+    return Response(
+        content=js_file.read_bytes(),
+        media_type="application/javascript",
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
