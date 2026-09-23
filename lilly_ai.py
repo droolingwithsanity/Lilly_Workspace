@@ -25879,6 +25879,44 @@ async def text_command(cmd: TextCommand, request: Request):
     return response
 
 
+@app.post("/api/switch_avatar")
+async def switch_avatar(request: Request):
+    """Switch the current avatar."""
+    global current_avatar
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    avatar = body.get("avatar", "").strip().lower()
+    if not avatar:
+        return JSONResponse({"error": "avatar required"}, status_code=400)
+
+    # Resolve avatar key (handles emoji, display name, etc.)
+    avatar_key = resolve_persona_key(avatar)
+
+    if avatar_key not in HIVE_PERSONAS:
+        return JSONResponse(
+            {
+                "error": f"unknown avatar '{avatar}'. Pick from: {', '.join(HIVE_PERSONAS.keys())}"
+            },
+            status_code=400,
+        )
+
+    old_avatar = current_avatar
+    current_avatar = avatar_key
+
+    # Persist to localStorage via response (frontend handles this)
+    return {
+        "ok": True,
+        "avatar": avatar_key,
+        "name": HIVE_PERSONAS[avatar_key]["name"],
+        "emoji": HIVE_PERSONAS[avatar_key]["emoji"],
+        "role": HIVE_PERSONAS[avatar_key]["role"],
+        "previous": old_avatar,
+    }
+
+
 @app.post("/api/cmd_stream")
 async def text_command_stream(cmd: TextCommand, request: Request):
     """Stream chat responses token-by-token using Server-Sent Events (SSE).
